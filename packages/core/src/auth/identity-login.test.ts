@@ -24,6 +24,7 @@ const EMAIL = 'ada@example.test';
 const HOOK_REASON_TEXT = 'ada@example.test is on a deny list';
 
 const meta: SessionMeta = {
+  requestId: '00000000-0000-4000-8000-000000000001',
   ip: '203.0.113.7',
   userAgent: 'test-agent',
   previousSecretHash: 'c'.repeat(64),
@@ -1413,5 +1414,39 @@ describe('completeIdentityLogin: denial attribution', () => {
       await completeIdentityLogin({ ...h.deps, onDenied }, ctx, provider(), identity(), meta),
     ).toMatchObject({ ok: true });
     expect(onDenied).not.toHaveBeenCalled();
+  });
+});
+
+describe('completeIdentityLogin: login audit', () => {
+  it.each([false, true])('builds one safe audit event with createUser=%s', async (createUser) => {
+    const h = harness({ lookups: [createUser ? lookup({ invited: true }) : knownLookup()] });
+    expect(await login(h)).toMatchObject({ ok: true });
+    expect(h.plans()).toHaveLength(1);
+    const plan = firstPlan(h);
+    expect(plan.audit).toEqual({
+      id: expect.any(String),
+      occurredAt: NOW,
+      action: 'session.login',
+      actor: { type: 'user', id: plan.userId },
+      target: { type: 'session', id: plan.session.id },
+      projectId: null,
+      tokenSelector: null,
+      sourceIp: meta.ip,
+      payloadJson: expect.any(String),
+    });
+    expect(JSON.parse(plan.audit.payloadJson)).toEqual({
+      op_id: plan.audit.id,
+      request_id: meta.requestId,
+    });
+  });
+
+  it('builds a new audit event when a refused commit is retried', async () => {
+    const h = harness({ lookups: [lookup({ invited: true })], commits: ['refused', 'created'] });
+    expect(await login(h)).toMatchObject({ ok: true });
+    const [first, second] = h.plans() as [LoginPlan, LoginPlan];
+    expect(first.audit.id).not.toBe(second.audit.id);
+    expect(first.audit.actor.id).toBe(first.userId);
+    expect(second.audit.actor.id).toBe(second.userId);
+    expect(second.audit.target.id).toBe(second.session.id);
   });
 });

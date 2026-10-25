@@ -6,6 +6,7 @@ import { validatePlatformPorts } from '@package-broker/core/platform/port-config
 import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { BuildInfo } from '../../build-artifacts.js';
+import { queueConsumerScript } from './queue-consumer.js';
 import {
   CREATE_SETTLE_MS,
   CloudflareApi,
@@ -15,6 +16,7 @@ import {
   failCommand,
   object,
   type CommandResult,
+  type CommandCheck,
   type PlanEntry,
 } from './api.js';
 import {
@@ -36,6 +38,8 @@ import {
   type ResourceKind,
 } from './inventory.js';
 
+const QUEUE_ACCOUNT_LIMIT = 10_000;
+
 export interface RequiredResources {
   r2: boolean;
   queues: boolean;
@@ -44,7 +48,7 @@ export interface RequiredResources {
 export interface CapabilityEvidence {
   queues?: { supported: boolean; remaining: number };
   r2?: { supported: boolean };
-  analytics?: { supported: boolean };
+  analytics?: { supported: boolean; source?: 'analytics_engine_sql' | 'subscriptions' };
 }
 export interface RemoteResource {
   kind: ResourceKind;
@@ -63,9 +67,7 @@ export interface WorkerState {
     text: string | null;
   }[];
 }
-/** T830 must verify these semantics against the real account before enabling writes.
- * No default AE capability endpoint, quota field or server idempotency is invented.
- */
+/** Service evidence is read-only; creation reconciliation must have documented guarantees. */
 export interface ProviderContract {
   capabilities(
     api: CloudflareApi,
@@ -75,10 +77,90 @@ export interface ProviderContract {
   pendingCreation(resource: RemoteResource, operation: Operation, now: number): boolean;
   exactNameUnique(kind: ResourceKind): boolean;
 }
-export const unverifiedProviderContract: ProviderContract = {
-  capabilities: async () => ({}),
+export const cloudflareProviderContract: ProviderContract = {
+  async capabilities(api, required, identity) {
+    const evidence: CapabilityEvidence = {};
+    const probe = async (
+      check: 'queues' | 'r2' | 'analytics_engine',
+      read: () => Promise<void>,
+    ): Promise<boolean> => {
+      try {
+        await read();
+        return true;
+      } catch (error) {
+        if (
+          check !== 'analytics_engine' &&
+          error instanceof CloudflareError &&
+          (error.status === 403 || (check === 'queues' && error.providerCode === 10253))
+        )
+          return false;
+        throw new CloudflareError('capability_unknown', 1, false, 'provision', null, check);
+      }
+    };
+    if (required.queues) {
+      let count = 0;
+      const supported = await probe('queues', async () => {
+        count = (await api.list('/queues')).length;
+      });
+      // https://developers.cloudflare.com/queues/platform/limits/
+      evidence.queues = {
+        supported,
+        remaining: supported ? Math.max(0, QUEUE_ACCOUNT_LIMIT - count) : 0,
+      };
+    }
+    if (required.r2)
+      evidence.r2 = {
+        supported: await probe('r2', async () => {
+          await api.list('/r2/buckets', 'buckets', {
+            'cf-r2-jurisdiction': identity.jurisdiction,
+          });
+        }),
+      };
+    if (required.analytics) {
+      let paid: boolean | null = null;
+      try {
+        const subscriptions = await api.snapshot('/subscriptions');
+        // WORKERS_PAID is documented at /tenant/reference/subscriptions/.
+        paid = subscriptions.some((subscription) => {
+          const plan = object(subscription.rate_plan);
+          return (
+            typeof plan.id === 'string' &&
+            plan.id.toUpperCase() === 'WORKERS_PAID' &&
+            plan.scope === 'account' &&
+            (subscription.state === 'Paid' || subscription.state === 'Provisioned')
+          );
+        });
+      } catch {
+        // Billing permission is optional; unreadable or incomplete subscriptions are no veto.
+      }
+      if (paid !== null) evidence.analytics = { supported: paid, source: 'subscriptions' };
+      else {
+        try {
+          await api.analyticsEngineTables();
+        } catch (error) {
+          const unknown = new CloudflareError(
+            'capability_unknown',
+            1,
+            false,
+            'provision',
+            null,
+            'analytics_engine',
+            null,
+            'analytics_engine_sql',
+          );
+          if (error instanceof CloudflareError && (error.status === 401 || error.status === 403))
+            unknown.message =
+              'Analytics Engine SQL access was denied. Verify the token has Account Analytics Read permission for the selected account, then rerun. Billing permission is optional.';
+          throw unknown;
+        }
+        evidence.analytics = { supported: true, source: 'analytics_engine_sql' };
+      }
+    }
+    return evidence;
+  },
+  // No bounded creation-visibility guarantee is documented. Journal timing alone is not ownership.
   pendingCreation: () => false,
-  exactNameUnique: () => false,
+  exactNameUnique: (kind) => ['d1', 'r2', 'queue', 'worker'].includes(kind),
 };
 export interface ProvisionOptions {
   workerName: string;
@@ -116,8 +198,10 @@ interface Specification {
 }
 const kindPath = (kind: ResourceKind): string =>
   kind === 'd1' ? '/d1/database' : kind === 'r2' ? '/r2/buckets' : '/queues';
-const jurisdictionQuery = (spec: Specification): string =>
-  spec.kind === 'r2' ? `?jurisdiction=${spec.jurisdiction}` : '';
+const jurisdictionHeaders = (spec: Specification): Record<string, string> | undefined =>
+  spec.kind === 'r2' && spec.jurisdiction !== null
+    ? { 'cf-r2-jurisdiction': spec.jurisdiction }
+    : undefined;
 function specsFor(identity: InstallIdentity, required: RequiredResources): Specification[] {
   const base = identity.script_name;
   return [
@@ -226,6 +310,8 @@ async function selectedBuild(
       (typeof info.gitSha !== 'string' || !/^[a-f0-9]{40,64}$/.test(info.gitSha))
     )
       throw new Error();
+    if (info.dirty !== undefined && info.dirty !== null && typeof info.dirty !== 'boolean')
+      throw new Error();
     return {
       required: {
         r2: selected?.blob.adapter === 'r2',
@@ -240,6 +326,7 @@ async function selectedBuild(
         plugins: plugins as Record<string, string>,
         lockfileSha256: info.lockfileSha256 as string | null,
         gitSha: info.gitSha as string | null,
+        ...(info.dirty === undefined ? {} : { dirty: info.dirty as boolean | null }),
       },
     };
   } catch (error) {
@@ -382,8 +469,9 @@ async function allResources(
       lists.set(
         spec.kind,
         await api.list(
-          `${kindPath(spec.kind)}${jurisdictionQuery(spec)}`,
+          kindPath(spec.kind),
           spec.kind === 'r2' ? 'buckets' : undefined,
+          jurisdictionHeaders(spec),
         ),
       );
     const matches = lists
@@ -397,7 +485,10 @@ async function allResources(
         spec.kind,
         (
           await api.request(
-            `${kindPath(spec.kind)}/${encodeURIComponent(listed.id)}${jurisdictionQuery(spec)}`,
+            `${kindPath(spec.kind)}/${encodeURIComponent(listed.id)}`,
+            'GET',
+            undefined,
+            jurisdictionHeaders(spec),
           )
         ).result,
       );
@@ -413,7 +504,7 @@ async function allResources(
           consumers.some(
             (consumer) =>
               consumer.type !== 'worker' ||
-              consumer.script_name !== script ||
+              queueConsumerScript(consumer) !== script ||
               (spec.key === 'jobs' &&
                 consumer.dead_letter_queue !== undefined &&
                 consumer.dead_letter_queue !== null &&
@@ -435,7 +526,7 @@ async function preflight(
   missingQueues: number,
   contract: ProviderContract,
   identity: InstallIdentity,
-  checks: { name: string; status: string }[],
+  checks: CommandCheck[],
 ): Promise<void> {
   // Optional identification has no bearing on authoritative service checks.
   let planStatus = 'readable_unverified';
@@ -484,6 +575,12 @@ async function preflight(
         null,
         'analytics_engine',
       );
+    if (evidence.analytics.source)
+      checks.push({
+        name: 'analytics_engine',
+        status: evidence.analytics.supported ? 'supported' : 'unsupported',
+        source: evidence.analytics.source,
+      });
     if (!evidence.analytics.supported)
       throw new CloudflareError(
         'analytics_engine_unavailable',
@@ -518,13 +615,15 @@ async function confirmedGone(
   spec: Specification,
   id: string,
 ): Promise<boolean> {
-  const paths =
-    spec.kind === 'r2'
-      ? ['eu', 'default'].map((j) => `/r2/buckets/${encodeURIComponent(id)}?jurisdiction=${j}`)
-      : [`${kindPath(spec.kind)}/${encodeURIComponent(id)}`];
-  for (const path of paths) {
+  const paths = spec.kind === 'r2' ? ['eu', 'default'] : [null];
+  for (const jurisdiction of paths) {
     try {
-      await api.request(path);
+      await api.request(
+        `${kindPath(spec.kind)}/${encodeURIComponent(id)}`,
+        'GET',
+        undefined,
+        jurisdiction === null ? undefined : { 'cf-r2-jurisdiction': jurisdiction },
+      );
       return false;
     } catch (error) {
       if (!(error instanceof CloudflareError && error.status === 404)) return false;
@@ -587,13 +686,18 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
     const build = await selectedBuild(outDir);
     output.build_info = build.info;
     const now = o.now ?? Date.now;
+    // After confirmation: inventory + capacity, then absence + read-back for each of two queues.
+    // Each scan can take 100 pages at the client's one-request-per-second rate.
+    const provisionBudgetMs =
+      600_000 + (build.required.queues ? 6 * Math.ceil(QUEUE_ACCOUNT_LIMIT / 100) * 1000 : 0);
     const api = new CloudflareApi({
       ...auth,
       ...(o.fetch === undefined ? {} : { fetch: o.fetch }),
       now,
       ...(o.sleep === undefined ? {} : { sleep: o.sleep }),
     });
-    const contract = o.contract ?? unverifiedProviderContract;
+    api.restartDeadline(provisionBudgetMs);
+    const contract = o.contract ?? cloudflareProviderContract;
     if (o.transaction) o.transaction.assertStore(store);
     else if (!o.dryRun) release = await store.lock(now());
     inventory = (await store.read()) ?? emptyInventory(identity, now());
@@ -701,7 +805,7 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
           ) &&
           consumers.length === 1 &&
           consumers[0]!.type === 'worker' &&
-          consumers[0]!.script_name === identity.script_name &&
+          queueConsumerScript(consumers[0]!) === identity.script_name &&
           consumers[0]!.dead_letter_queue === remote.name
         );
       };
@@ -836,7 +940,7 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
         if ((await (o.prompt ?? defaultPrompt)('Type yes to create these resources: ')) !== 'yes')
           throw new CloudflareError('confirmation_declined', 2);
       }
-      api.restartDeadline();
+      api.restartDeadline(provisionBudgetMs);
       const signature = JSON.stringify({
         resources: [...state.resources.entries()],
         worker: state.worker,
@@ -934,16 +1038,28 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       try {
         const body =
           spec.kind === 'queue'
-            ? { queue_name: spec.name }
+            ? {
+                queue_name: spec.name,
+                ...(identity.jurisdiction === 'default'
+                  ? {}
+                  : { jurisdiction: identity.jurisdiction }),
+              }
             : {
                 name: spec.name,
-                ...(spec.kind === 'd1' ? { jurisdiction: spec.jurisdiction } : {}),
-                ...(identity.location_hint === null ? {} : { location: identity.location_hint }),
+                ...(spec.kind === 'd1' && spec.jurisdiction !== 'default'
+                  ? { jurisdiction: spec.jurisdiction }
+                  : {}),
+                ...(identity.location_hint === null
+                  ? {}
+                  : spec.kind === 'd1'
+                    ? { primary_location_hint: identity.location_hint }
+                    : { locationHint: identity.location_hint }),
               };
         const response = await api.request(
-          `${kindPath(spec.kind)}${jurisdictionQuery(spec)}`,
+          kindPath(spec.kind),
           'POST',
           body,
+          jurisdictionHeaders(spec),
         );
         posted = true;
         const created = parseRemote(spec.kind, response.result);
@@ -1068,7 +1184,10 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       }
     if (o.domain) output.worker_url = `https://${o.domain}`;
     output.status = o.dryRun ? 'planned' : 'ok';
-    output.checks.push({ name: 'provider_semantics', status: 'UNVERIFIED_until_T830' });
+    output.checks.push({
+      name: 'provider_semantics',
+      status: contract === cloudflareProviderContract ? 'documented' : 'custom',
+    });
     setOutputs();
     await release?.();
     release = undefined;

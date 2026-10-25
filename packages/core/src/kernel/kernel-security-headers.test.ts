@@ -78,7 +78,9 @@ const surfaces = [
   ['self denial', '/_pb/profile', 401],
   ['404', '/missing', 404],
   ['error', '/_pb/error', 500],
-  ['UI', '/_pb/ui', 200],
+  ['UI', '/_pb/ui/', 200],
+  ['UI redirect', '/_pb/ui', 303],
+  ['UI manifest', '/_pb/ui/manifest.json', 404],
 ] as const;
 
 describe('kernel security headers', () => {
@@ -179,7 +181,7 @@ describe('kernel security headers', () => {
   it('removes route HSTS on an http configured origin', async () => {
     const response = await (
       await app({ publicOrigin: 'http://public.test' })
-    ).fetch(new Request(`${HTTPS}/_pb/ui`));
+    ).fetch(new Request(`${HTTPS}/_pb/ui/`));
     expect(response.headers.has('strict-transport-security')).toBe(false);
   });
 
@@ -243,7 +245,7 @@ describe('kernel security headers', () => {
   });
 
   it('preserves UI CSP and cache policy', async () => {
-    const response = await (await app()).fetch(new Request(`${HTTPS}/_pb/ui`));
+    const response = await (await app()).fetch(new Request(`${HTTPS}/_pb/ui/`));
     expect(response.headers.get('content-security-policy')).toBe(UI_CSP);
     expect(response.headers.get('cache-control')).toBe('no-cache');
   });

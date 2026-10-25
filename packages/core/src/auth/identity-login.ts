@@ -1,3 +1,4 @@
+import { auditEvent } from '../audit/actions.js';
 import { SESSION_ABSOLUTE_MS, newSessionSecrets } from './session.js';
 import type { SessionMeta, SessionService } from './session.js';
 import type { IdentityReauthDeps } from './identity-reauth.js';
@@ -311,7 +312,24 @@ async function attempt(
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_MS).toISOString();
   const sessionId = deps.ids.ulid();
+  const eventId = deps.ids.ulid();
+  const audit = auditEvent({
+    id: eventId,
+    now: nowIso,
+    action: 'session.login',
+    actor: { type: 'user', id: userId },
+    target: { type: 'session', id: sessionId },
+    projectId: null,
+    context: {
+      opId: eventId,
+      requestId: meta.requestId,
+      sourceIp: meta.ip,
+      tokenSelector: null,
+    },
+  });
+  if (!audit.ok) throw new TypeError('invalid session login audit event');
   const plan: LoginPlan = {
+    audit: audit.event,
     userId,
     createUser,
     email: candidate.email,

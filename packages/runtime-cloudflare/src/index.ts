@@ -1,7 +1,8 @@
+import { clientIpOf } from '@package-broker/core/auth/session';
+import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
-import { createProjectGrantReader } from '@package-broker/db-sqlite/repositories/project-grant-read';
 import {
   assertMcpRateLimit,
   createMcpLimiter,
@@ -16,24 +17,13 @@ import {
   VULNERABILITY_REASON_CODES,
 } from '@package-broker/core/runtime/vulnerability';
 import { createVulnerabilityRepository } from '@package-broker/db-sqlite/repositories/vulnerability';
-import { createAccessServices } from '@package-broker/db-sqlite/repositories/access-services';
-import { createApiModule } from '@package-broker/core/api/module';
-import type { AuditReader } from '@package-broker/core/api/routes/audit';
-import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
-import { createSourceService } from '@package-broker/core/sources/source-service';
+import {
+  createAccessServices,
+  type AccessAssembly,
+} from '@package-broker/db-sqlite/repositories/access-services';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { reservedFirstSegments } from '@package-broker/core/authz/project-path';
-import { createGrantRepository } from '@package-broker/db-sqlite/repositories/grant';
-import { createIdempotencyRepository } from '@package-broker/db-sqlite/repositories/idempotency';
-import { createAuditQueryRepository } from '@package-broker/db-sqlite/repositories/audit-query';
-import { createPackageAdminReader } from '@package-broker/db-sqlite/repositories/package-admin-read';
-import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
-import { createProjectSourceReader } from '@package-broker/db-sqlite/repositories/project-source-read';
-import { createRegisteredNameRepository } from '@package-broker/db-sqlite/repositories/registered-name';
-import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
-import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
-import type { RouteDefinition } from '@package-broker/core/plugin';
 import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { sourceCredentialOrigins } from '@package-broker/core/sources/credential-origins';
 import {
   createProviderRegistry,
   type ProviderContext,
@@ -75,7 +65,7 @@ import { createAuditSealRepository } from '@package-broker/db-sqlite/repositorie
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
 import type { AuthModule } from '@package-broker/core/auth/module';
-import type { SessionService } from '@package-broker/core/auth/session';
+import { type SessionService } from '@package-broker/core/auth/session';
 import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
 import type { ProjectAdministration } from '@package-broker/core/authz/project-administration';
 import type { ProjectLister } from '@package-broker/core/authz/project-list';
@@ -129,7 +119,7 @@ import {
   parseCredentialMaterial,
   type CredentialKind,
 } from '@package-broker/core/sources/credentials';
-import { GITHUB_API, GITHUB_CODELOAD } from '@package-broker/core/ingest/composer/packagist-proxy';
+import { GITHUB_API } from '@package-broker/core/ingest/composer/packagist-proxy';
 import {
   type UpstreamCredential,
   createPolicyFetch,
@@ -193,18 +183,7 @@ import type {
   SourceProviderContext,
 } from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
-import { createPackageManageService } from '@package-broker/core/catalogue/package-manage-service';
-import { createImportCredentialService } from '@package-broker/core/import/credentials';
-import { createImportRunService } from '@package-broker/core/import/run-service';
-import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-fence';
-import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
-import { createImportCredentialRepository } from '@package-broker/db-sqlite/repositories/import-credential';
-import { createImportRunStore } from '@package-broker/db-sqlite/repositories/import-run';
-import {
-  createBlobStore,
-  createBlobUploadAdmission,
-  type BlobStore,
-} from '@package-broker/core/platform/blob';
+import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
 import { completionSpan } from '@package-broker/core/platform/completion-span';
 import {
   createObservability,
@@ -441,6 +420,7 @@ async function buildAuth(
   collectRegistration: () => Registration,
   tokens: TokenWiring,
 ): Promise<{
+  assembly: AccessAssembly;
   auth: AuthModule;
   registration: Registration;
   providerAnchors: ProviderAnchorReader;
@@ -477,6 +457,7 @@ async function buildAuth(
     tokens,
   });
   return {
+    assembly: built,
     auth: built.module,
     registration,
     providerAnchors: built.providerAnchors,
@@ -515,41 +496,11 @@ function buildCatalogue(
   });
 }
 
-function credentialOrigins(
+export function credentialOrigins(
   source: SourceRecord,
   policy: Parameters<typeof parseSourceConfig>[4]['policy'],
 ): readonly string[] | null {
-  if (source.type === 'vcs') {
-    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
-      runtime: 'cloudflare',
-      policy,
-      hasCredential: source.credentialId !== null,
-    });
-    if (!parsed.ok || !('provider' in parsed.config)) return null;
-    switch (parsed.config.provider) {
-      case 'github':
-        return [GITHUB_API, GITHUB_CODELOAD];
-      case 'git':
-        return [new URL(parsed.config.repository).origin];
-      case 'ssh':
-        return [];
-    }
-  }
-  if (source.type === 'packagist_proxy') return [GITHUB_API, GITHUB_CODELOAD];
-  if (source.type !== 'npm_registry' && source.type !== 'composer_repository') return null;
-  if (source.type === 'composer_repository') {
-    const parsed = parseSourceConfig(source.type, source.ecosystem, source.url, source.configJson, {
-      runtime: 'cloudflare',
-      policy,
-      hasCredential: source.credentialId !== null,
-    });
-    if (!parsed.ok || !('distHosts' in parsed.config) || source.url === null) return null;
-    return [
-      new URL(source.url).origin,
-      ...parsed.config.distHosts.map((host) => `https://${host}`),
-    ];
-  }
-  return source.url === null || !URL.canParse(source.url) ? null : [new URL(source.url).origin];
+  return sourceCredentialOrigins(source, { runtime: 'cloudflare', policy });
 }
 
 function openSourceCredential(
@@ -598,218 +549,6 @@ function resolveRegistry(
   } catch (error) {
     if (error instanceof RegistryConfigError) {
       throw new KernelConfigError(error.problems.map((problem) => `registry: ${problem}`));
-    }
-    throw error;
-  }
-}
-
-function clientIp(request: Request): string | null {
-  const candidate =
-    request.headers.get('cf-connecting-ip')?.trim() ||
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    null;
-  return candidate !== null && /^[0-9a-fA-F:.]{2,45}$/.test(candidate) ? candidate : null;
-}
-
-function auditReader(executor: SqlExecutor): AuditReader {
-  const audit = createAuditQueryRepository(executor);
-  const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
-    if (ctx.org === null) throw new TypeError('route requires an organization context');
-    return ctx.org;
-  };
-  return {
-    list: (ctx, query) =>
-      audit.list(organization(ctx), {
-        limit: query.limit,
-        ...(query.projectId === null ? {} : { projectId: query.projectId }),
-        ...(query.actor === undefined ? {} : { actor: query.actor }),
-        ...(query.action === undefined ? {} : { action: query.action }),
-        ...(query.after === undefined ? {} : { afterId: query.after }),
-      }),
-    async head(ctx) {
-      const head = await audit.head(organization(ctx));
-      return {
-        seq: head?.seq ?? 0,
-        hash: head?.hash ?? AUDIT_GENESIS_HASH,
-        pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: head?.lastVerifiedAt ?? null,
-      };
-    },
-  };
-}
-
-function buildApiRoutes(input: {
-  readonly executor: SqlExecutor;
-  readonly keyring: Keyring;
-  readonly services: WorkerAccessServices;
-  readonly packages: WorkerCatalogueServices;
-  readonly vulnerability: ReturnType<typeof createVulnerabilityRuntime>;
-  readonly policy: OutboundPolicy;
-  readonly registration: Registration;
-  readonly coreRoutes: readonly RouteDefinition[];
-  readonly anchors: readonly ConfiguredProviderAnchor[];
-  readonly lifetime: TokenLifetimePolicy;
-  readonly log: KernelLog;
-  readonly blob: BlobStore | undefined;
-}): readonly RouteDefinition[] {
-  const { executor, services, packages, lifetime, log, blob } = input;
-  const { anchors } = input;
-  const common = { ids: { ulid }, clock: systemClock, clientIp };
-  const organizations = createOrganizationRepository(executor);
-  const projects = createProjectRepository(executor, {
-    reservedSlugs: reservedFirstSegments([...input.registration.routes, ...input.coreRoutes]),
-    providerAnchors: anchors,
-  });
-  const idempotency = createIdempotencyRepository(executor);
-  const sources = createSourceRepository(executor);
-  const credentialRepository = createCredentialRepository(executor);
-  const registeredNames = createRegisteredNameRepository(executor);
-  const credentialStore = createCredentialStore({
-    repository: credentialRepository,
-    cipher: createSecretCipher(input.keyring, 'credential-encryption'),
-    ids: { ulid },
-    clock: systemClock,
-  });
-  const sourceService = createSourceService({
-    sources,
-    organizations,
-    registeredNames,
-    credentials: credentialStore,
-    credentialRepository,
-    catalogue: packages.reader,
-    policy: input.policy,
-    providerAnchors: anchors,
-    ids: { ulid },
-    log,
-  });
-  if (blob === undefined) {
-    log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
-  }
-  try {
-    return createApiModule({
-      organization: {
-        ...common,
-        organizations,
-        users: createUserRepository(executor),
-        administration: services.administration,
-        lifetime,
-      },
-      projects: {
-        ...common,
-        lister: services.projectList,
-        service: services.projects,
-        projects,
-        idempotency,
-      },
-      access: {
-        ...common,
-        administration: services.administration,
-        grants: createGrantRepository(executor, {
-          providerAnchors: anchors,
-          holderInput: () => ({ kind: 'fresh', providers: anchors }),
-        }),
-      },
-      projectAccess: {
-        ...common,
-        projectAdministration: services.projectGrants,
-        reader: createProjectGrantReader(executor),
-        roles: {
-          get: async (ctx, id) =>
-            (await services.administration.listRoles(ctx)).find((role) => role.id === id) ?? null,
-        },
-      },
-      tokens: {
-        ...common,
-        tokens: {
-          personal: services.personalTokens,
-          service: services.serviceTokens,
-          revoke: services.tokenRevoke,
-        },
-        reader: services.tokenList,
-        idempotency,
-        sessions: services.sessions,
-        organizations,
-        lifetime,
-      },
-      servicePrincipals: {
-        ...common,
-        servicePrincipals: services.servicePrincipals,
-        principals: createServicePrincipalRepository(executor),
-      },
-      sources: {
-        ...common,
-        service: sourceService,
-        sources,
-        projectSources: createProjectSourceReader(executor),
-        projects,
-        sessions: services.sessions,
-      },
-      sourceNames: {
-        ...common,
-        service: sourceService,
-        sources,
-        registeredNames,
-        visibility: packages.visibility,
-        projectSources: createProjectSourceReader(executor),
-        projects,
-      },
-      sourceAttachments: {
-        ...common,
-        sources,
-        visibility: packages.visibility,
-        projectSources: createProjectSourceReader(executor),
-        projects,
-      },
-      packages: {
-        ...createPackageAdminReader(executor),
-        readStatuses: input.vulnerability.readStatuses,
-      },
-      audit: auditReader(executor),
-      packageManage: {
-        ...common,
-        service: createPackageManageService({
-          reader: createPackageAdminReader(executor),
-          store: createVisibilityStore(executor, { providerAnchors: anchors }),
-          sessions: services.sessions,
-          clock: systemClock,
-          ids: { ulid },
-          log,
-        }),
-        sessions: services.sessions,
-        idempotency,
-      },
-      ...(blob === undefined
-        ? {}
-        : {
-            imports: {
-              ...common,
-              service: createImportRunService({
-                store: createImportRunStore({
-                  executor,
-                  blobs: blob,
-                  providerAnchors: anchors,
-                }),
-                ids: { ulid },
-                clock: systemClock,
-              }),
-              credentials: createImportCredentialService({
-                store: createImportCredentialRepository(executor, {
-                  blobs: blob,
-                  providerAnchors: anchors,
-                }),
-                credentials: credentialStore,
-                runtime: 'cloudflare',
-                ids: { ulid },
-                auditStatement: auditPendingStatement,
-              }),
-              auditStatement: auditPendingStatement,
-              tokenFence: importWriteTokenFence,
-            },
-          }),
-    }).routes;
-  } catch (error) {
-    if (error instanceof TypeError && error.message.startsWith('API module requires dependency')) {
-      throw new KernelConfigError([error.message]);
     }
     throw error;
   }
@@ -955,6 +694,7 @@ function buildRegistryModule(input: {
   const writer = createCatalogueWriter(executor);
   const sessions = createIngestSessions(executor);
   const registryReads = createRegistryReads(executor);
+  const registrySources = createSourceRepository(executor);
   const blobAccess = createBlobAccessRepository(executor);
   const recorder = createAccessRecorder({
     touch: (ctx, ids) => blobAccess.touch(ctx, ids),
@@ -1035,7 +775,7 @@ function buildRegistryModule(input: {
       epoch: createCacheEpochRepository(executor),
       representationClock: createRepresentationClock(executor),
       upstreamState: createUpstreamStateRepository(executor),
-      sources: createSourceRepository(executor),
+      sources: registrySources,
       covers: registryReads.covers,
       versionById: registryReads.versionById,
     },
@@ -1050,6 +790,7 @@ function buildRegistryModule(input: {
       },
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential,
+      credentialUnavailable: (ctx, id) => registrySources.markCredentialUnavailable(ctx, id),
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,
@@ -2107,10 +1848,12 @@ export function createWorker(
     const apiRoutes =
       built === undefined || packages === null
         ? []
-        : buildApiRoutes({
+        : createApiRoutes({
+            clientIp: clientIpOf,
             executor: executor as SqlExecutor,
             keyring: built.keyring,
-            services: built.access,
+            runtime: 'cloudflare',
+            access: built.assembly,
             packages,
             vulnerability: vulnerability(),
             policy:
@@ -2120,9 +1863,6 @@ export function createWorker(
                 runtime: 'cloudflare',
                 selfOrigins: [publicOriginOf(env?.PB_PUBLIC_URL)],
               }),
-            registration,
-            coreRoutes: auth?.coreRoutes ?? [],
-            anchors: built.anchors,
             lifetime,
             log,
             blob: services?.platformServices.blob,
@@ -2142,7 +1882,7 @@ export function createWorker(
       });
       return (assets = pending);
     };
-    const ui = createUiRoutes(
+    const uiRoutes = createUiRoutes(
       {
         manifest: async () => (await uiAssets())?.manifest() ?? null,
         read: async (name) => (await uiAssets())?.read(name) ?? null,
@@ -2156,10 +1896,6 @@ export function createWorker(
       },
       { publicOrigin: env?.PB_PUBLIC_URL ?? 'http://localhost', log },
     );
-    const uiRoutes = ui.map((route) => ({
-      ...route,
-      path: route.path.replace('/assets/:file', '/:file'),
-    }));
     try {
       const coreRoutes = [
         ...(auth?.coreRoutes ?? []),
@@ -2361,19 +2097,7 @@ export function createWorker(
         try {
           const setup = rewriteSetupRequest(request);
           if (setup !== null) return await application.kernel.fetch(setup, ctx);
-          const url = new URL(request.url);
-          if (url.pathname === '/_pb/ui') {
-            const response = await application.kernel.fetch(request, ctx);
-            if (response.status !== 200) return response;
-            url.pathname = '/_pb/ui/';
-            return new Response(null, {
-              status: 303,
-              headers: { location: url.pathname + url.search, 'cache-control': 'no-store' },
-            });
-          }
-          if (url.pathname !== '/_pb/ui/') return await application.kernel.fetch(request, ctx);
-          url.pathname = '/_pb/ui';
-          return await application.kernel.fetch(new Request(url, request), ctx);
+          return await application.kernel.fetch(request, ctx);
         } catch (error) {
           return withoutBodyForHead(request, errorResponse(error, requestId, log));
         }

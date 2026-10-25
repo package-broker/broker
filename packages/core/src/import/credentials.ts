@@ -45,6 +45,18 @@ export interface ImportCredentialStore {
     externalRef: string,
     now: string,
   ): Promise<{ readonly target: CredentialTarget | null; readonly allowed: boolean }>;
+  /**
+   * Organization-scoped read of a run's stored manifest and the external refs of its imported
+   * sources (matching import_ref, entity_type=source, action=create, not rolled back) that hold a
+   * credential. Absent and foreign runs return null; a run without a stored manifest has none;
+   * a stored manifest missing from the blob store is 'unavailable'.
+   */
+  bindings(
+    ctx: OrgContext,
+    runId: string,
+  ): Promise<
+    { readonly manifest: string | null; readonly bound: readonly string[] } | 'unavailable' | null
+  >;
   setCredential(
     ctx: OrgContext,
     fence: MutationFence | TokenMutationFence,
@@ -78,7 +90,18 @@ export interface ImportCredentialInput {
   readonly idempotency?: Statement;
 }
 
+export interface ImportCredentialBinding {
+  readonly sourceRef: string;
+  readonly bound: boolean;
+}
+
+export type ImportCredentialStatusResult =
+  | { readonly ok: true; readonly value: readonly ImportCredentialBinding[] }
+  | { readonly ok: false; readonly error: 'not_found' | 'unavailable' };
+
 export interface ImportCredentialService {
+  /** Binding state of every credential-bearing source in the run's manifest; no credential data. */
+  credentialStatus(ctx: OrgContext, runId: string): Promise<ImportCredentialStatusResult>;
   acceptImportCredential(
     ctx: OrgContext,
     fence: MutationFence | TokenMutationFence,
@@ -96,6 +119,29 @@ export function createImportCredentialService(deps: {
   readonly auditStatement: (ctx: OrgContext, event: AuditEvent) => Statement;
 }): ImportCredentialService {
   return {
+    async credentialStatus(ctx, runId) {
+      const stored = await deps.store.bindings(ctx, runId);
+      if (stored === null) return { ok: false, error: 'not_found' };
+      if (stored === 'unavailable') return { ok: false, error: 'unavailable' };
+      if (stored.manifest === null) return { ok: true, value: [] };
+      let manifest: unknown;
+      try {
+        manifest = JSON.parse(stored.manifest);
+      } catch {
+        return { ok: false, error: 'unavailable' };
+      }
+      const parsed = parseManifest(manifest);
+      if (!parsed.ok) return { ok: false, error: 'unavailable' };
+      const bound = new Set(stored.bound);
+      return {
+        ok: true,
+        value: parsed.data.items.flatMap((item) =>
+          item.type === 'source' && item.credential_ref !== null
+            ? [{ sourceRef: item.external_ref, bound: bound.has(item.external_ref) }]
+            : [],
+        ),
+      };
+    },
     async acceptImportCredential(ctx, fence, input) {
       const kind = fenceKind(fence);
       if (kind !== 'session' && kind !== 'token')

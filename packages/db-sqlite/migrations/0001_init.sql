@@ -967,3 +967,28 @@ CREATE INDEX version_package_id ON version (package_id, id);
 -- ---------------------------------------------------------------------------
 
 INSERT INTO migration_lock (id) VALUES (1);
+
+CREATE TRIGGER package_ecosystem_matches_source_update
+BEFORE UPDATE OF source_id, ecosystem ON package
+WHEN (SELECT ecosystem FROM source WHERE id = NEW.source_id) IS NOT NEW.ecosystem
+BEGIN
+  SELECT RAISE(ABORT, 'package ecosystem does not match source ecosystem');
+END;
+
+UPDATE package SET ecosystem = ecosystem
+WHERE ecosystem IS NOT (SELECT s.ecosystem FROM source AS s WHERE s.id = package.source_id);
+
+CREATE TRIGGER package_ecosystem_matches_source_insert
+BEFORE INSERT ON package
+WHEN (SELECT ecosystem FROM source WHERE id = NEW.source_id) IS NOT NEW.ecosystem
+BEGIN
+  SELECT RAISE(ABORT, 'package ecosystem does not match source ecosystem');
+END;
+
+CREATE TRIGGER source_ecosystem_locked_with_packages
+BEFORE UPDATE OF ecosystem ON source
+WHEN NEW.ecosystem IS NOT OLD.ecosystem
+  AND EXISTS (SELECT 1 FROM package WHERE source_id = OLD.id)
+BEGIN
+  SELECT RAISE(ABORT, 'source ecosystem cannot change while the source holds packages');
+END;

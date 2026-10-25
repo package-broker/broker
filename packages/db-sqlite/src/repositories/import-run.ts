@@ -29,6 +29,11 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
+import {
+  createIdempotencyRepository,
+  idempotencyInsertStatement,
+  liveIdempotencyCollision,
+} from './idempotency.js';
 import { importWriteAuthority } from './import-authority.js';
 
 const CLOCK = sql`unixepoch('now', 'subsec')`;
@@ -88,6 +93,7 @@ export function createImportRunStore(options: {
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }): ImportRunStore {
   const { executor, blobs } = options;
+  const idempotency = createIdempotencyRepository(executor);
   const anchors = [...options.providerAnchors];
   function session(fence: CreateFence): MutationFence {
     if (fenceKind(fence) !== 'session')
@@ -274,6 +280,22 @@ export function createImportRunStore(options: {
     async list(ctx, input) {
       return (await executor.all<Row>(listImportRunsStatement(ctx, input))).map(runOf);
     },
+    async credentialWindows(ctx, runIds) {
+      if (runIds.length > 100) throw new TypeError('too many import run ids');
+      if (runIds.length === 0) return new Map();
+      const rows = await executor.all<{ id: string; until: string | null }>(
+        compile(
+          db
+            .selectFrom('import_run')
+            .select(['id', 'credential_window_until as until'])
+            .where(
+              sql<SqlBool>`org_id = ${ctx.orgId} and id in (select value from json_each(${JSON.stringify(runIds)}))`,
+            ),
+        ),
+      );
+      return new Map(rows.map((row) => [row.id, row.until]));
+    },
+    findIdempotency: (ctx, principalKey, key, now) => idempotency.find(ctx, principalKey, key, now),
     async inspect(ctx, fence, operation, runId) {
       const allowed = authority(ctx, fence, operation);
       const reauth = fresh(ctx, fence);
@@ -362,11 +384,15 @@ export function createImportRunStore(options: {
             }),
           ),
           input.audit,
-          ...(input.idempotency === undefined ? [] : [input.idempotency]),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
         ],
         {
           authority: probe(allowed),
-          conflict: probe(manifest),
+          conflict: probe(
+            sql<SqlBool>`(${manifest} and not ${liveIdempotencyCollision(ctx, input.idempotency)})`,
+          ),
           collision: compile(
             db.selectNoFrom(sql<number>`exists ${target(ctx, input.id)}`.as('collision')),
           ),

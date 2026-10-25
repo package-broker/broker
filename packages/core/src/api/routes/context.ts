@@ -1,3 +1,4 @@
+import { isIpLiteral } from '../../audit/actions.js';
 import {
   accessContextOf,
   authenticatedActorOf,
@@ -35,11 +36,12 @@ export function hasOrganizationAdminAuthority(ctx: RequestContext): boolean {
 export function auditCall(ctx: RequestContext, deps: ApiRouteDeps): ApiCall {
   const access = accessContextOf(ctx);
   if (access === null) throw new TypeError('route requires an access context');
+  const sourceIp = deps.clientIp(ctx.request);
   return {
     audit: {
       opId: deps.ids.ulid(),
       requestId: ctx.requestId,
-      sourceIp: deps.clientIp(ctx.request),
+      sourceIp: isIpLiteral(sourceIp) ? sourceIp : null,
       tokenSelector: access.rateKey.stage === 'authenticated' ? access.rateKey.tokenSelector : null,
     },
   };

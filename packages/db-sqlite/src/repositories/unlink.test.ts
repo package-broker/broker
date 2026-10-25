@@ -1,4 +1,4 @@
-import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
+import { auditEvent, type AuditAction, type AuditEvent } from '@package-broker/core/audit/actions';
 import { ulid } from '@package-broker/core/ids';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -99,6 +99,7 @@ function unlinkIdentity(
     ctx,
     fence,
     request,
+    { unlink: audit('identity.unlink'), block: audit('identity.block') },
   );
 }
 
@@ -737,3 +738,114 @@ function mutationAudit(action: AuditAction, targetId: string | null) {
   if (!result.ok) throw new Error('Invalid test audit event');
   return result.event;
 }
+
+const auditContext = {
+  opId: '01K7R5V0000000000000000001',
+  requestId: '01K7R5V0000000000000000002',
+  sourceIp: '192.0.2.67',
+  tokenSelector: null,
+};
+
+function audit(action: AuditEvent['action'] = 'identity.unblock'): AuditEvent {
+  const result = auditEvent({
+    id: ulid(),
+    now: NOW,
+    action,
+    actor: { type: 'user', id: ACTOR },
+    context: auditContext,
+    target: { type: 'identity_block', id: null },
+    projectId: null,
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+async function auditRows() {
+  return rows(
+    'SELECT action, actor_type, actor_id, target_type, target_id, project_id, payload_json FROM audit_pending WHERE org_id = ? ORDER BY action',
+    org.orgId,
+  );
+}
+
+describe('unlink audit batch', () => {
+  it('stores one unlink and one newly placed block event', async () => {
+    expect(await unlinkIdentity(executor, org, fenceOf(ACTOR, ACTOR_SESSION), input())).toBe(
+      'unlinked',
+    );
+    expect(await auditRows()).toEqual(
+      ['identity.block', 'identity.unlink'].map((action) =>
+        expect.objectContaining({
+          action,
+          actor_type: 'user',
+          actor_id: ACTOR,
+          target_type: 'identity_block',
+          target_id: null,
+          project_id: null,
+        }),
+      ),
+    );
+    for (const row of await auditRows()) {
+      expect(JSON.parse(String(row['payload_json']))).toEqual({
+        op_id: auditContext.opId,
+        request_id: auditContext.requestId,
+      });
+    }
+    for (const value of [OIDC, ANCHOR, input().subject]) {
+      for (const row of await auditRows()) expect(String(row['payload_json'])).not.toContain(value);
+    }
+  });
+  it('stores no events when authority is refused', async () => {
+    await executor.batch([
+      stmt(
+        "UPDATE user_account SET status = 'suspended' WHERE org_id = ? AND id = ?",
+        org.orgId,
+        ACTOR,
+      ),
+    ]);
+    expect(await unlinkIdentity(executor, org, fenceOf(ACTOR, ACTOR_SESSION), input())).toBe(
+      'authority',
+    );
+    expect(await auditRows()).toEqual([]);
+  });
+  it('stores no events for an absent identity', async () => {
+    expect(
+      await unlinkIdentity(
+        executor,
+        org,
+        fenceOf(ACTOR, ACTOR_SESSION),
+        input({ identityId: 'absent' }),
+      ),
+    ).toBe('conflict');
+    expect(await auditRows()).toEqual([]);
+  });
+  it('does not audit block placement when the block already exists', async () => {
+    await executor.batch([
+      stmt(
+        'INSERT INTO identity_block (org_id, provider, issuer, subject, blocked_at, blocked_by_user_id) VALUES (?, ?, ?, ?, ?, ?)',
+        org.orgId,
+        OIDC,
+        ANCHOR,
+        input().subject,
+        NOW,
+        ACTOR,
+      ),
+    ]);
+    expect(await unlinkIdentity(executor, org, fenceOf(ACTOR, ACTOR_SESSION), input())).toBe(
+      'unlinked',
+    );
+    expect((await auditRows()).map((row) => row['action'])).toEqual(['identity.unlink']);
+  });
+});
+
+describe('unlink audit refusal', () => {
+  it('stores no events when the last holder guard refuses the batch', async () => {
+    expect(
+      await unlinkIdentity(
+        executor,
+        org,
+        fenceOf(ACTOR, ACTOR_SESSION),
+        input({ identityId: ACTOR_IDENTITY, userId: ACTOR, subject: 'sub-actor' }),
+      ),
+    ).toBe('last_holder');
+    expect(await auditRows()).toEqual([]);
+  });
+});

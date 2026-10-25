@@ -73,6 +73,7 @@ async function fixture(
     liveAuthority?: boolean;
   } = {},
 ) {
+  let window: string | null = null;
   let run: ImportRun = {
     id: ID,
     orgId: orgContext('org-1').orgId,
@@ -104,6 +105,10 @@ async function fixture(
     cancelRun: write(),
     acceptRun: write(),
     requestRollback: write(),
+    credentialWindows: vi.fn(
+      async (_org, ids: readonly string[]) => new Map(ids.map((id) => [id, window])),
+    ),
+    findIdempotency: vi.fn<ImportRunStore['findIdempotency']>(async () => null),
   };
   const service = createImportRunService({ store, clock, ids: { ulid: () => ID } });
   const credentialTarget: CredentialTarget = {
@@ -126,6 +131,14 @@ async function fixture(
       target = { ...target, source: { ...target.source!, credentialId: ID } };
       return { ok: true as const, results: [] };
     }),
+    bindings: vi.fn(async () =>
+      options.hidden === undefined
+        ? {
+            manifest: target.manifest,
+            bound: target.source?.credentialId == null ? [] : ['source'],
+          }
+        : null,
+    ),
   };
   const prepare = vi.fn<CredentialStore['prepare']>(async (_org, input) => {
     prepared = new TextDecoder().decode(input.plaintext);
@@ -257,6 +270,9 @@ async function fixture(
     auditStatement,
     logged,
     storedMaterial: () => storedMaterial,
+    setWindow: (value: string | null) => {
+      window = value;
+    },
     setRun: (patch: Partial<ImportRun>) => {
       run = { ...run, ...patch };
     },
@@ -426,6 +442,140 @@ describe('import run routes', () => {
     const call = vi.mocked(f.store.createRun).mock.calls[0]!;
     expect(call[0]).toEqual(orgContext('org-1'));
     expect(fenceKind(call[1])).toBe('token');
+  });
+
+  it('refuses a malformed Idempotency-Key before creating', async () => {
+    const f = await fixture();
+    const text = await error(
+      await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'bad key' } }),
+      400,
+      'invalid_request',
+    );
+    expect(JSON.parse(text)).toMatchObject({
+      error: { details: [{ path: '/headers/idempotency-key', code: 'invalid' }] },
+    });
+    expect(f.store.createRun).not.toHaveBeenCalled();
+  });
+
+  it('stores the created run summary under the Idempotency-Key in the creation write', async () => {
+    const f = await fixture();
+    const response = await f.request('POST', ROOT, {
+      body: manifest,
+      headers: { 'idempotency-key': 'create-1' },
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { id: string; planHash: string; state: string };
+    expect(response.headers.get('idempotent-replayed')).toBeNull();
+    const write = vi.mocked(f.store.createRun).mock.calls[0]![2];
+    expect(write.idempotency).toMatchObject({
+      principalKey: `user:${USER}`,
+      key: 'create-1',
+      route: ROOT,
+      status: 201,
+      createdAt: write.now,
+    });
+    expect(write.idempotency!.responseJson).toBe(
+      JSON.stringify({ id: body.id, state: body.state }),
+    );
+  });
+
+  it('replays the stored creation when the write loses to the same key and body', async () => {
+    const f = await fixture();
+    await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'create-1' } });
+    const stored = vi.mocked(f.store.createRun).mock.calls[0]![2].idempotency!;
+    vi.mocked(f.store.createRun).mockResolvedValue({ ok: false, reason: 'conflict' });
+    vi.mocked(f.store.findIdempotency).mockResolvedValue(stored);
+    const response = await f.request('POST', ROOT, {
+      body: manifest,
+      headers: { 'idempotency-key': 'create-1' },
+    });
+    expect(response.status).toBe(201);
+    expect(response.headers.get('idempotent-replayed')).toBe('true');
+    expect(await response.text()).toBe(
+      JSON.stringify({ id: ID, planHash: HASH, state: 'planned' }),
+    );
+    expect(f.store.findIdempotency).toHaveBeenCalledWith(
+      orgContext('org-1'),
+      `user:${USER}`,
+      'create-1',
+      clock.now().toISOString(),
+    );
+  });
+
+  it.each([
+    ['malformed JSON', '{'],
+    ['a non-object', '"text"'],
+    ['a non-planned state', JSON.stringify({ id: ID, state: 'applied' })],
+    ['a malformed id', JSON.stringify({ id: 'not-a-ulid', state: 'planned' })],
+  ])('answers conflict when the stored response is %s', async (_name, responseJson) => {
+    const f = await fixture();
+    await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'create-1' } });
+    const stored = vi.mocked(f.store.createRun).mock.calls[0]![2].idempotency!;
+    vi.mocked(f.store.createRun).mockResolvedValue({ ok: false, reason: 'conflict' });
+    vi.mocked(f.store.findIdempotency).mockResolvedValue({ ...stored, responseJson });
+    await error(
+      await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'create-1' } }),
+      409,
+      'conflict',
+    );
+  });
+
+  it('answers conflict when the replayed run is no longer visible', async () => {
+    const f = await fixture();
+    await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'create-1' } });
+    const stored = vi.mocked(f.store.createRun).mock.calls[0]![2].idempotency!;
+    vi.mocked(f.store.createRun).mockResolvedValue({ ok: false, reason: 'conflict' });
+    vi.mocked(f.store.findIdempotency).mockResolvedValue(stored);
+    vi.mocked(f.store.get).mockResolvedValue(null);
+    await error(
+      await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'create-1' } }),
+      409,
+      'conflict',
+    );
+  });
+
+  it('refuses the same Idempotency-Key with a different body', async () => {
+    const f = await fixture();
+    await f.request('POST', ROOT, { body: manifest, headers: { 'idempotency-key': 'create-1' } });
+    const stored = vi.mocked(f.store.createRun).mock.calls[0]![2].idempotency!;
+    vi.mocked(f.store.createRun).mockResolvedValue({ ok: false, reason: 'conflict' });
+    vi.mocked(f.store.findIdempotency).mockResolvedValue(stored);
+    await error(
+      await f.request('POST', ROOT, {
+        body: { ...manifest, source_system: 'other' },
+        headers: { 'idempotency-key': 'create-1' },
+      }),
+      409,
+      'idempotency_mismatch',
+    );
+  });
+
+  it('returns the credential window and binding status without credential data', async () => {
+    const f = await fixture();
+    f.setWindow('2026-10-21T11:00:00.000Z');
+    const before = await f.request('GET', `${ROOT}/${ID}`);
+    expect(before.status).toBe(200);
+    const text = await before.text();
+    expect(JSON.parse(text)).toMatchObject({
+      id: ID,
+      credentialWindowUntil: '2026-10-21T11:00:00.000Z',
+      credentials: [{ sourceRef: 'source', bound: false }],
+    });
+    expect(text).not.toContain('REGISTRY_TOKEN');
+    expect(
+      (await f.request('PUT', `${ROOT}/${ID}/credentials/source`, { body: upload })).status,
+    ).toBe(204);
+    const after = await f.request('GET', `${ROOT}/${ID}`);
+    const afterText = await after.text();
+    expect(JSON.parse(afterText)).toMatchObject({
+      credentials: [{ sourceRef: 'source', bound: true }],
+    });
+    expect(afterText).not.toContain(SENTINEL);
+    const list = (await (await f.request('GET', ROOT)).json()) as { items: unknown[] };
+    expect(list.items).toEqual([
+      expect.objectContaining({ id: ID, credentialWindowUntil: '2026-10-21T11:00:00.000Z' }),
+    ]);
+    expect(list.items[0]).not.toHaveProperty('credentials');
   });
 
   it('rejects an over-limit raw manifest before parsing', async () => {

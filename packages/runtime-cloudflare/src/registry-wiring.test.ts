@@ -472,6 +472,7 @@ const NPM_PACKAGE_PATHS = [
   '/:project/npm/:a/:b/:c/:d',
 ];
 
+// Management routes, dependencies and jobs are covered by api-mount.test.ts.
 const REGISTRY_ASSEMBLY: readonly RegistryAssemblyEntry[] = Object.freeze([
   {
     dependency: 'composer routes over the catalogue reader, on-demand fill and dist service',
@@ -500,12 +501,6 @@ const REGISTRY_ASSEMBLY: readonly RegistryAssemblyEntry[] = Object.freeze([
     routes: [],
     jobs: [],
     ownerPacket: 'T432c',
-  },
-  {
-    dependency: 'management API mount',
-    routes: [],
-    jobs: [],
-    ownerPacket: 'T531',
   },
 ]);
 
@@ -675,6 +670,72 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     expect((await get()).status).toBe(200);
   });
 
+  it('answers an undecryptable credential with 503 and Retry-After, and a paused source with 404', async () => {
+    const { seen } = stubUpstream();
+    const { fetch, cookie, executor, orgId, seed, events } = await boot();
+    const store = createCredentialStore({
+      repository: createCredentialRepository(executor),
+      cipher: createSecretCipher(
+        createKeyring(readMasterKeys({ current: KEY, previous: undefined })),
+        'credential-encryption',
+      ),
+      ids: { ulid },
+      clock: systemClock,
+    });
+    const credentialId = await store.put(orgContext(orgId), {
+      kind: 'npm_token',
+      projectId: null,
+      plaintext: new TextEncoder().encode(JSON.stringify({ token: NPM_TOKEN })),
+    });
+    await seed('UPDATE credential SET nonce = zeroblob(12) WHERE id = ?', [credentialId]);
+    await seed(
+      `INSERT INTO source (id, org_id, project_id, name, ecosystem, type, url, config_json, credential_id, removal_policy)
+       VALUES ('NR4', ?, NULL, 'NR4', 'npm', 'npm_registry', 'https://npm.acme.test', '{"scopes":["@cred"]}', ?, 'flag')`,
+      [orgId, credentialId],
+    );
+    await seed(
+      "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, 'NR4', 'npm', '@cred/*')",
+      [ulid(), orgId],
+    );
+    await seed(
+      "INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, 'P4', 'NR4', 60)",
+      [orgId],
+    );
+    const get = () => fetch(request('/p4/npm/@cred%2Fx', { headers: { cookie } }));
+    for (let i = 0; i < 2; i += 1) {
+      const response = await get();
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('60');
+      const body = await response.text();
+      expect(body).not.toContain('npm.acme.test');
+      expect(body).not.toContain(credentialId);
+    }
+    expect(seen).toEqual([]);
+    expect(
+      await executor.all({
+        sql: 'SELECT last_error, status, consecutive_failures FROM source WHERE org_id = ? AND id = ?',
+        params: [orgId, 'NR4'],
+      }),
+    ).toEqual([
+      { last_error: 'credential_unavailable', status: 'active', consecutive_failures: 0 },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: 'source.unavailable',
+        reason_code: 'credential_unavailable',
+        source_id: 'NR4',
+      }),
+    );
+    expect(JSON.stringify(events)).not.toContain('npm.acme.test');
+    expect(JSON.stringify(events)).not.toContain(NPM_TOKEN);
+    const hidden = await fetch(request('/p1/npm/@cred%2Fx', { headers: { cookie } }));
+    expect(hidden.status).toBe(404);
+    expect(hidden.headers.get('retry-after')).toBeNull();
+    await seed("UPDATE source SET status = 'paused' WHERE id = 'NR4'", []);
+    expect((await get()).status).toBe(404);
+    expect(seen).toEqual([]);
+  });
+
   it('fails startup on an invalid registry config without touching the database or upstream', async () => {
     const { stub } = stubUpstream();
     const prepare = vi.fn(() => {
@@ -725,6 +786,28 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     expect(new TextDecoder().decode(await ok.arrayBuffer())).toBe('zip bytes');
     expect((await get(`/p1/dist/acme/other/${V1}.1.zip`)).status).toBe(404);
     expect((await get(`/p2/dist/acme/lib/${V1}.1.zip`)).status).toBe(404);
+  });
+
+  it('answers an archive of an unbindable source with 503 and Retry-After, and of a paused one with 404', async () => {
+    const { seen } = stubUpstream();
+    const { fetch, cookie, orgId, seed } = await boot();
+    const path = `/p1/dist/acme/lib/${VERSION_PREFIX}2.1.zip`;
+    await seed(
+      "UPDATE version SET metadata_json = json_set(metadata_json, '$.dist.url', ?), dist_type = 'zip' WHERE org_id = ? AND id = ?",
+      ['https://composer.acme.test/dist/lib-2.zip', orgId, `${VERSION_PREFIX}2`],
+    );
+    await seed(`UPDATE source SET config_json = '{"bogus":true}' WHERE org_id = ? AND id = 'S1'`, [
+      orgId,
+    ]);
+    const response = await fetch(request(path, { headers: { cookie } }));
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('60');
+    expect(await response.text()).not.toContain('composer.acme.test');
+    await seed("UPDATE source SET status = 'paused' WHERE org_id = ? AND id = 'S1'", [orgId]);
+    const paused = await fetch(request(path, { headers: { cookie } }));
+    expect(paused.status).toBe(404);
+    expect(paused.headers.get('retry-after')).toBeNull();
+    expect(seen).toEqual([]);
   });
 
   it('hands the Workers waitUntil to the kernel so a deferred revalidation outlives the response', async () => {
@@ -927,10 +1010,83 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     },
   );
 
+  it.each([
+    ['over the blob store cap', 'store'],
+    ['declared over the policy fetch cap', 'declared'],
+  ] as const)(
+    'refuses a Composer dist %s with 502, quarantines the version and stores nothing',
+    async (_label, mode) => {
+      const { fetch, cookie, orgId, events, seed, bucket, executor } = await boot();
+      const version = `${VERSION_PREFIX}2`;
+      await seed(
+        "UPDATE source SET type = 'packagist_proxy', url = 'https://repo.packagist.org' WHERE org_id = ? AND id = 'S1'",
+        [orgId],
+      );
+      await seed(
+        "UPDATE version SET metadata_json = json_set(metadata_json, '$.dist.url', ?), dist_type = 'zip' WHERE org_id = ? AND id = ?",
+        ['https://codeload.github.com/acme/lib/legacy.zip/r2', orgId, version],
+      );
+      const archives: string[] = [];
+      const normal = globalThis.fetch;
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new Request(input, init).url;
+        if (!url.startsWith('https://codeload.github.com/')) return normal(input, init);
+        archives.push(url);
+        return mode === 'store'
+          ? new Response(new Uint8Array(1024 * 1024 + 1).fill(7))
+          : new Response(new TextEncoder().encode('zip bytes'), {
+              headers: { 'content-length': String(64 * 1024 * 1024 + 1) },
+            });
+      });
+      const keys = [...bucket.objects.keys()];
+      const blobs = async () =>
+        executor.all<{ id: string }>({
+          sql: 'SELECT id FROM blob WHERE org_id = ? ORDER BY id',
+          params: [orgId],
+        });
+      const blobsBefore = await blobs();
+      const before = events.length;
+      const path = `/p1/dist/acme/lib/${version}.1.zip`;
+
+      const response = await fetch(request(path, { headers: { cookie } }));
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({ error: { code: 'bad_gateway' } });
+      expect(archives.length).toBeGreaterThan(0);
+      expect(
+        await executor.all({
+          sql: 'SELECT status, blob_id FROM version WHERE org_id = ? AND id = ?',
+          params: [orgId, version],
+        }),
+      ).toEqual([{ status: 'quarantined', blob_id: null }]);
+      expect(await blobs()).toEqual(blobsBefore);
+      expect([...bucket.objects.keys()]).toEqual(keys);
+      const quarantined = events
+        .slice(before)
+        .map((entry) =>
+          typeof entry === 'string'
+            ? (JSON.parse(entry) as Record<string, unknown>)
+            : (entry as Record<string, unknown>),
+        )
+        .filter((entry) => entry['event'] === 'dist.quarantined');
+      expect(quarantined).toEqual([
+        expect.objectContaining({
+          level: 'warn',
+          reason_code: 'archive_too_large',
+          source_id: 'S1',
+          package_key: 'acme/lib',
+        }),
+      ]);
+
+      const fetched = archives.length;
+      expect((await fetch(request(path, { headers: { cookie } }))).status).not.toBe(200);
+      expect(archives).toHaveLength(fetched);
+    },
+  );
+
   it('refuses sources that point at loopback, link-local and the broker itself without fetching', async () => {
     const { stub } = stubUpstream();
     const hosts = ['https://127.0.0.1', 'https://169.254.169.254', PUBLIC_URL];
-    const { fetch, cookie } = await boot({
+    const { fetch, cookie, events } = await boot({
       sources: hosts.map((url, index) => ({
         id: `NG${index}`,
         ecosystem: 'npm',
@@ -941,8 +1097,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       })),
     });
     for (let index = 0; index < hosts.length; index += 1) {
+      const before = events.length;
       const response = await fetch(request(`/p4/npm/@g${index}%2Fx`, { headers: { cookie } }));
-      expect(response.status, hosts[index]).toBe(404);
+      expect(response.status, hosts[index]).toBe(503);
+      expect(response.headers.get('retry-after'), hosts[index]).toBe('60');
+      const host = new URL(hosts[index]!).host;
+      expect(await response.text(), hosts[index]).not.toContain(host);
+      const emitted = events.slice(before);
+      expect(JSON.stringify(emitted), hosts[index]).not.toContain(host);
+      expect(emitted, hosts[index]).toContainEqual(
+        expect.objectContaining({
+          event: 'source.unavailable',
+          reason_code: 'policy_denied',
+          source_id: `NG${String(index)}`,
+        }),
+      );
     }
     const reached = stub.mock.calls.filter(([input]) => {
       const host = new Request(input).url;

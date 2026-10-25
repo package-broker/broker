@@ -174,6 +174,75 @@ describe('Node management API personal access token lifecycle', () => {
     }
   }
 
+  it('stages a write-only Packagist bearer credential before enabling token mode', async () => {
+    const base = await start();
+    const { cookie, csrf } = await login(base);
+    const send = (route: string, method: string, body?: unknown) =>
+      fetch(`${base}${route}`, {
+        method,
+        headers: { 'content-type': 'application/json', origin: base, cookie, 'x-csrf-token': csrf },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+
+    const created = await send('/_pb/sources', 'POST', {
+      name: 'Packagist',
+      ecosystem: 'composer',
+      type: 'packagist_proxy',
+      url: 'https://repo.packagist.org',
+      config: { githubToken: false },
+    });
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+    const target = `/_pb/sources/${id}`;
+    const storedConfig = async () => {
+      const opened = openBetterSqliteExecutor(path);
+      try {
+        const organization = await createOrganizationBootstrap(opened.executor).findSingleton();
+        const rows = await opened.executor.all<{ config_json: string }>({
+          sql: 'SELECT config_json FROM source WHERE org_id = ? AND id = ?',
+          params: [organization!.id, id],
+        });
+        return JSON.parse(rows[0]!.config_json) as unknown;
+      } finally {
+        await opened.close();
+      }
+    };
+    const enable = () => send(target, 'PATCH', { config: { githubToken: true } });
+    const missing = await enable();
+    expect(missing.status).toBe(400);
+    const secret = 'github-token-T972-sentinel';
+    const credential = (kind: string, material: unknown) =>
+      send(`${target}/credential`, 'PUT', { kind, material: JSON.stringify(material) });
+    const wrong = await credential('http_basic', { username: 'user', password: secret });
+    expect(wrong.status).toBe(400);
+    expect(await wrong.text()).not.toContain(secret);
+    const afterRejectedCredential = await send('/_pb/sources', 'GET');
+    expect(afterRejectedCredential.status).toBe(200);
+    const unchanged = (await afterRejectedCredential.json()) as {
+      items: { id: string; hasCredential: boolean }[];
+    };
+    expect(unchanged.items.find((item) => item.id === id)).toMatchObject({
+      hasCredential: false,
+    });
+    const saved = await credential('bearer', { token: secret });
+    expect(saved.status).toBe(204);
+    expect(await saved.text()).toBe('');
+    expect(await storedConfig()).toEqual({ githubToken: false });
+    expect((await enable()).status).toBe(204);
+    expect(await storedConfig()).toEqual({ githubToken: true });
+    expect((await credential('bearer', { token: `${secret}-rotated` })).status).toBe(204);
+    const listed = await send('/_pb/sources', 'GET');
+    expect(listed.status).toBe(200);
+    const text = await listed.text();
+    expect(text).not.toContain(secret);
+    const { items } = JSON.parse(text) as { items: { id: string; hasCredential: boolean }[] };
+    expect(items.find((item) => item.id === id)).toMatchObject({ hasCredential: true });
+    expect((await send(target, 'PATCH', { config: { githubToken: false } })).status).toBe(204);
+    expect(await storedConfig()).toEqual({ githubToken: false });
+    expect((await enable()).status).toBe(204);
+    expect(await storedConfig()).toEqual({ githubToken: true });
+  });
+
   it('issues a token, uses it on a management route, revokes it and then gets 401', async () => {
     const base = await start();
     const { cookie, csrf } = await login(base);
@@ -197,7 +266,12 @@ describe('Node management API personal access token lifecycle', () => {
     const used = await fetch(`${base}/_pb/projects`, { headers: bearer });
     expect(used.status).toBe(200);
 
-    expect(await pendingActions()).toEqual(['token.issue']);
+    expect(await pendingActions()).toEqual([
+      'setup.complete',
+      'session.login',
+      'session.reauth',
+      'token.issue',
+    ]);
 
     const revoked = await fetch(`${base}/_pb/me/tokens/${id}`, {
       method: 'DELETE',
@@ -207,7 +281,13 @@ describe('Node management API personal access token lifecycle', () => {
 
     const after = await fetch(`${base}/_pb/projects`, { headers: bearer });
     expect(after.status).toBe(401);
-    expect(await pendingActions()).toEqual(['token.issue', 'token.revoke']);
+    expect(await pendingActions()).toEqual([
+      'setup.complete',
+      'session.login',
+      'session.reauth',
+      'token.issue',
+      'token.revoke',
+    ]);
   });
   it('reorders the real attachment set while a project-owned source stays unattached', async () => {
     const base = await start();

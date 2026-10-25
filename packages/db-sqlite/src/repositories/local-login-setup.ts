@@ -3,6 +3,7 @@ import type { CredentialRecord } from '@package-broker/core/db/credentials';
 import type { LocalLoginSetupWriter } from '@package-broker/core/db/local-login';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { adminEligibility, compile, db, newOpId, opGuard, type Guard } from '../kysely.js';
+import { auditPendingStatement } from './audit-pending.js';
 import { createCredentialRepository } from './credential.js';
 import { revokePreviousStatement, sessionInsertStatement } from './session.js';
 
@@ -187,6 +188,24 @@ export function createLocalLoginSetupWriter(executor: SqlExecutor): LocalLoginSe
       }
       const opId = newOpId();
       const guard = opGuard(ctx, 'local_login', { userId: input.userId }, opId);
+      const when = compile(
+        db.selectNoFrom((eb) =>
+          eb
+            .and([
+              guard,
+              eb.exists(
+                eb
+                  .selectFrom('session')
+                  .select(sql.lit(1).as('one'))
+                  .where('session.org_id', '=', ctx.orgId)
+                  .where('session.user_id', '=', input.userId)
+                  .where('session.id', '=', input.session.id)
+                  .where('session.secret_hash', '=', input.session.secretHash),
+              ),
+            ])
+            .as('allowed'),
+        ),
+      );
       const statements: Statement[] = [
         compile(
           db
@@ -214,6 +233,10 @@ export function createLocalLoginSetupWriter(executor: SqlExecutor): LocalLoginSe
             .where((eb) => adminEligibility(ctx, eb.ref('local_login.user_id'))),
         ),
         sessionInsertStatement(ctx, input.session, [guard]),
+        auditPendingStatement(ctx, input.audit, {
+          sql: `(${when.sql}) = 1`,
+          params: when.params,
+        }),
       ];
       if (input.previousSecretHash !== null) {
         statements.push(

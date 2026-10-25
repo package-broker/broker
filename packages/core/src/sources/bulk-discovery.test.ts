@@ -768,6 +768,7 @@ describe('bulk discovery', () => {
         type: 'vcs',
         url: null,
       }),
+      call,
     );
     const input = vi.mocked(service.create).mock.calls[0]?.[3];
     expect(JSON.parse(input?.configJson ?? '{}')).toEqual({

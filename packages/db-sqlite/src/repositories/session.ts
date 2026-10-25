@@ -1,4 +1,5 @@
-import { sql, type Compilable } from 'kysely';
+import { expressionBuilder, sql, type Compilable } from 'kysely';
+import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type {
   OrgContext,
   ScalarStatement,
@@ -11,7 +12,8 @@ import type {
   SessionCutoffs,
   SessionRepository,
 } from '@package-broker/core/db/sessions';
-import { compile, db, type Guard } from '../kysely.js';
+import { auditPendingStatement } from './audit-pending.js';
+import { compile, db, type Database, type Guard } from '../kysely.js';
 
 const MAX_USER_AGENT = 512;
 const MAX_IP = 64;
@@ -284,6 +286,7 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
     async markReauthenticatedByIdentity(
       ctx: OrgContext,
       input: {
+        readonly audit: AuditEvent;
         readonly sessionId: string;
         readonly identityId: string | null;
         readonly authTime: string;
@@ -293,25 +296,24 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
       timestamp('now', input.now);
       timestamp('authTime', input.authTime);
       if (input.authTime > input.now) return false;
-      const rows = await run<IdRow>(
-        executor,
-        db
-          .updateTable('session')
-          .set({ reauth_at: input.authTime })
-          .where('org_id', '=', ctx.orgId)
-          .where('id', '=', input.sessionId)
-          .where('revoked_at', 'is', null)
-          .where(sql<boolean>`unixepoch(expires_at, 'subsec') > unixepoch(${input.now}, 'subsec')`)
-          .where('identity_id', 'is', input.identityId)
-          .where((eb) =>
-            eb.or([
-              eb('reauth_at', 'is', null),
-              sql<boolean>`unixepoch(reauth_at, 'subsec') < unixepoch(${input.authTime}, 'subsec')`,
-            ]),
-          )
-          .returning('id'),
-      );
-      return rows.length > 0;
+      const when = sql<boolean>`session.org_id = ${ctx.orgId}
+        AND session.id = ${input.sessionId}
+        AND session.revoked_at IS NULL
+        AND unixepoch(session.expires_at, 'subsec') > unixepoch(${input.now}, 'subsec')
+        AND session.identity_id IS ${input.identityId}
+        AND (session.reauth_at IS NULL
+          OR unixepoch(session.reauth_at, 'subsec') < unixepoch(${input.authTime}, 'subsec'))`;
+      const eligible = compile(db.selectFrom('session').select('id').where(when));
+      const results = await executor.batch([
+        auditPendingStatement(ctx, input.audit, {
+          sql: `EXISTS (${eligible.sql})`,
+          params: eligible.params,
+        }),
+        compile(
+          db.updateTable('session').set({ reauth_at: input.authTime }).where(when).returning('id'),
+        ),
+      ]);
+      return (results[1]?.rows.length ?? 0) > 0;
     },
 
     async revoke(ctx: OrgContext, id: string, now: string): Promise<boolean> {
@@ -329,19 +331,33 @@ export function createSessionRepository(executor: SqlExecutor): SessionRepositor
       return rows.length > 0;
     },
 
-    async revokeBySecretHash(ctx: OrgContext, secretHash: string, now: string): Promise<boolean> {
+    async revokeBySecretHash(
+      ctx: OrgContext,
+      secretHash: string,
+      now: string,
+      audit?: AuditEvent,
+    ): Promise<boolean> {
       secretHashOf(secretHash);
       timestamp('now', now);
-      const rows = await run<IdRow>(
-        executor,
-        db
-          .updateTable('session')
-          .set({ revoked_at: now })
-          .where('org_id', '=', ctx.orgId)
-          .where('secret_hash', '=', secretHash)
-          .where('revoked_at', 'is', null)
-          .returning('id'),
-      );
+      const eb = expressionBuilder<Database, 'session'>();
+      const when = eb.and([
+        eb('session.org_id', '=', ctx.orgId),
+        eb('session.secret_hash', '=', secretHash),
+        eb('session.revoked_at', 'is', null),
+      ]);
+      const update = db.updateTable('session').set({ revoked_at: now }).where(when).returning('id');
+      if (audit !== undefined) {
+        const eligible = compile(db.selectFrom('session').select('id').where(when));
+        const results = await executor.batch([
+          auditPendingStatement(ctx, audit, {
+            sql: `EXISTS (${eligible.sql})`,
+            params: eligible.params,
+          }),
+          compile(update),
+        ]);
+        return (results[1]?.rows.length ?? 0) > 0;
+      }
+      const rows = await run<IdRow>(executor, update);
       return rows.length > 0;
     },
 

@@ -42,6 +42,63 @@ it('pages the full numeric and cursor listings and refuses ambiguous completion'
     code: 'capability_unknown',
   });
 });
+it('follows D1 page/count/total_count metadata without total_pages', async () => {
+  const h = harness((url) => {
+    const page = Number(new URL(url).searchParams.get('page'));
+    return json([{ id: page }], { count: 1, page, per_page: 100, total_count: 2 });
+  });
+  expect(await h.api.list('/d1/database')).toEqual([{ id: 1 }, { id: 2 }]);
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+  expect(String(vi.mocked(h.fetch).mock.calls[1]?.[0])).toContain('page=2&per_page=100');
+});
+
+it('reads Worker versions from result.items with the real page/per_page metadata', async () => {
+  const h = harness(() =>
+    json(
+      { items: [{ id: 'version-1' }] },
+      {
+        page: 1,
+        per_page: 10,
+        count: 1,
+        total_count: 1,
+      },
+    ),
+  );
+  expect(await h.api.list('/workers/scripts/broker/versions', 'items')).toEqual([
+    { id: 'version-1' },
+  ]);
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it('follows all result.items pages when Worker versions omit total_pages', async () => {
+  const h = harness((url) => {
+    const page = Number(new URL(url).searchParams.get('page'));
+    return json(
+      { items: [{ id: `version-${page}` }] },
+      {
+        page,
+        per_page: 1,
+        count: 1,
+        total_count: 2,
+      },
+    );
+  });
+  expect(await h.api.list('/workers/scripts/broker/versions', 'items')).toEqual([
+    { id: 'version-1' },
+    { id: 'version-2' },
+  ]);
+});
+it.each([
+  { count: 1, page: 1, total_count: 2 },
+  { count: 1, per_page: 100, total_count: 2 },
+  { count: 1, page: 1, per_page: 0, total_count: 2 },
+  { count: 1, page: 1, per_page: '100', total_count: 2 },
+  { count: 0, page: 1, per_page: 100, total_count: 2 },
+])('refuses incomplete D1 pagination metadata: %j', async (info) => {
+  const h = harness(() => json([{ id: 1 }], info));
+  await expect(h.api.list('/d1/database')).rejects.toMatchObject({ code: 'capability_unknown' });
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+
 it('bounds safe read retries, honors Retry-After and never retries a POST', async () => {
   let calls = 0;
   const h = harness(() =>
@@ -234,6 +291,53 @@ it('refuses a POST when the scheduler sleep overshoots the command deadline', as
   expect(transport).toHaveBeenCalledTimes(1);
 });
 
+it('bounds and cancels a nonterminating JSON Queues error body', async () => {
+  const cancel = vi.fn();
+  const h = harness(
+    () =>
+      new Response(new ReadableStream({ cancel }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+  );
+  await expect(h.api.list('/queues')).rejects.toMatchObject({
+    code: 'provider_failure',
+    status: 400,
+    retryable: false,
+  });
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+
+it('keeps an unrecognized Queues rate limit retryable without exposing its error body', async () => {
+  const h = harness(
+    () =>
+      new Response(
+        JSON.stringify({
+          success: false,
+          errors: [{ code: 10250, message: 'TOKEN_SENTINEL person@example.com' }],
+        }),
+        { status: 429, headers: { 'content-type': 'application/json' } },
+      ),
+  );
+  const error: unknown = await h.api.list('/queues').catch((error: unknown) => error);
+  expect(error).toMatchObject({ code: 'provider_failure', status: 429, retryable: true });
+  expect(String(error)).not.toMatch(/SENTINEL|person@example.com/);
+  expect(h.fetch).toHaveBeenCalledTimes(5);
+});
+
+it('preserves read retries for unsuccessful envelopes without a documented plan rejection', async () => {
+  const h = harness(
+    () => new Response(JSON.stringify({ success: false, errors: null, result: null })),
+  );
+  await expect(h.api.request('/workers/scripts')).rejects.toMatchObject({
+    code: 'provider_failure',
+    status: null,
+    retryable: true,
+  });
+  expect(h.fetch).toHaveBeenCalledTimes(5);
+});
+
 it.each([
   [50_500, 'deadline_exceeded'],
   [51_000, null],
@@ -355,6 +459,26 @@ it('refuses a snapshot whose result is not an array', async () => {
     code: 'provider_failure',
   });
 });
+
+it('accepts null snapshot metadata without weakening paginated completion checks', async () => {
+  const h = harness(() => json([], null));
+  expect(await h.api.snapshot('/workers/scripts')).toEqual([]);
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+  await expect(harness(() => json([], null)).api.list('/queues')).rejects.toMatchObject({
+    code: 'capability_unknown',
+  });
+});
+
+it.each([false, 'invalid', []].map((info) => ({ info })))(
+  'rejects malformed pagination metadata: $info',
+  async ({ info }) => {
+    await expect(
+      harness(() => json([], info)).api.snapshot('/workers/scripts'),
+    ).rejects.toMatchObject({
+      code: 'provider_failure',
+    });
+  },
+);
 
 it('never lets caller headers replace the authorization header', async () => {
   const h = harness(() => json({}));

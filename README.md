@@ -99,6 +99,23 @@ Cloudflare's client IP handling is unchanged.
 
 ## Operating sources
 
+### GitHub token source request ceiling
+
+Token sources list tags in pages of 100, with at most 500 pages per sync. A full
+500th page fails with the stable `invalid_response` code rather than publishing
+an incomplete tag list. This means fewer than 50,000 tags can be listed in a
+successful sync. Configured branches are looked up individually, with four
+requests in flight at a time; workers stop taking new branches after a failure.
+
+For N selected winning refs, manifest sizes take `ceil(N / 100)` GraphQL requests.
+Text reads take up to N further requests in the worst case (1 MiB manifests),
+with smaller manifests batched under an 8 MiB escaped response budget. Add one
+repository metadata request for describing the package, one discovery request
+(`contents/composer.json` when no package name is configured, otherwise another
+repository metadata request), and the tag and configured branch requests. Large
+tag histories can therefore consume thousands of API requests per sync; GitHub
+rate limits pause the sync with a bounded retry time.
+
 ### Accepting a refused source removal
 
 A source sync refuses to remove packages when the removal would exceed the share guard (25% of the

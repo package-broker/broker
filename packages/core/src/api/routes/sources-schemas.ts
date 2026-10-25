@@ -71,7 +71,11 @@ const source = z.strictObject({
   removalPolicy,
   pollIntervalSeconds: z.number().int(),
   lastSuccessAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  lastPolledAt: z.string().nullable(),
+  nextPollAt: z.string().nullable(),
   hasCredential: z.boolean(),
+  githubAuthentication: z.enum(['app', 'token']).optional(),
   lastRemovalRefusal: z
     .strictObject({
       at: z.string(),
@@ -196,6 +200,20 @@ function scopeSpecs(boundary: 'organization' | 'project') {
         params: sourceParams,
         body: credentialBody,
         responses: { 204: null },
+      },
+    },
+    {
+      method: 'POST',
+      path: `${path}/:source/sync`,
+      boundary,
+      permission: `${scope}:sources:write`,
+      service: 'SourceError',
+      api: {
+        operationId: `sync${name}Source`,
+        summary: 'Request a source sync',
+        tags: ['sources'],
+        params: sourceParams,
+        responses: { 202: null, 409: null },
       },
     },
   ] as const satisfies readonly ApiRouteSpec[];

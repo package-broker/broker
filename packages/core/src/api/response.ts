@@ -17,6 +17,7 @@ export const API_ERROR_CODES = {
   reauth_required: { status: 403, message: 'Reauthentication required' },
   not_found: { status: 404, message: 'Not found' },
   conflict: { status: 409, message: 'Conflict' },
+  source_paused: { status: 409, message: 'Source is paused' },
   duplicate: { status: 409, message: 'Already exists' },
   last_holder: { status: 409, message: 'Last holder cannot be removed' },
   idempotency_mismatch: { status: 409, message: 'Idempotency key does not match' },
@@ -43,6 +44,7 @@ type ServiceErrorMapping = {
 
 export const SERVICE_ERROR_TABLE = {
   SourceError: {
+    source_paused: { status: 409, code: 'source_paused' },
     forbidden: { status: 403, code: 'forbidden' },
     not_found: { status: 404, code: 'not_found' },
     invalid_config: { status: 400, code: 'invalid_request' },

@@ -1,3 +1,9 @@
+import { createLocalLoginService } from '@package-broker/core/auth/local-login';
+import { hashPassword } from '@package-broker/core/auth/password';
+import { encodeTotpEnvelope, totpCode } from '@package-broker/core/auth/totp';
+import { fixedClock, ulid } from '@package-broker/core/ids';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { auditEvent, type AuditEvent } from '@package-broker/core/audit/actions';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,6 +131,7 @@ async function snapshotOf(email = 'admin@example.test'): Promise<LocalLoginSnaps
 }
 
 interface Input {
+  readonly audit: AuditEvent;
   readonly snapshot: LocalLoginSnapshot;
   readonly step: number;
   readonly rehash: string | null;
@@ -135,7 +142,26 @@ interface Input {
 }
 
 function loginInput(snapshot: LocalLoginSnapshot, overrides: Partial<Input> = {}): Input {
+  const id = ulid();
+  const audit = auditEvent({
+    id,
+    now: NOW,
+    action: overrides.reauthSessionId ? 'session.reauth' : 'session.login',
+    actor: { type: 'user', id: snapshot.userId },
+    target: {
+      type: 'session',
+      id: overrides.reauthSessionId ?? overrides.session?.id ?? '01J0SESSIONNEW0000000000A1',
+    },
+    context: {
+      opId: id,
+      requestId: '01J00000000000000000000001',
+      sourceIp: '203.0.113.7',
+      tokenSelector: null,
+    },
+  });
+  if (!audit.ok) throw new Error('invalid test audit');
   return {
+    audit: audit.event,
     snapshot,
     step: STEP,
     rehash: null,
@@ -803,5 +829,194 @@ describe('replacePasswordHash', () => {
         idleSince: PAST,
       }),
     ).not.toBeNull();
+  });
+});
+
+async function auditRows(): Promise<readonly Record<string, unknown>[]> {
+  return executor.all(insert('SELECT * FROM audit_pending WHERE org_id = ?', a.orgId));
+}
+
+describe('transactional local authentication audit', () => {
+  it('writes no audit when the session insert refuses despite a successful operation guard', async () => {
+    const input = loginInput(await snapshotOf());
+    const refusing = createLocalLoginSuccessWriter({
+      driver: executor.driver,
+      all: executor.all.bind(executor),
+      batch: (statements) =>
+        executor
+          .batch([
+            ...statements.slice(0, 1),
+            insert(
+              "UPDATE user_account SET status = 'suspended' WHERE org_id = ? AND id = ?",
+              a.orgId,
+              ADMIN,
+            ),
+            ...statements.slice(1),
+          ])
+          .then((results) => [results[0]!, ...results.slice(2)]),
+    });
+    expect(await refusing.succeed(a, input)).toBe(false);
+    expect(await loginRow()).toMatchObject({
+      totp_last_step: STEP,
+      last_op_id: expect.stringMatching(MINTED_OP),
+    });
+    expect(await sessionCount()).toBe(0);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it.each(['login', 'reauth'] as const)(
+    'stores exactly one %s event with the session mutation',
+    async (flow) => {
+      const id = '01J0SESSIONNEW0000000000A1';
+      if (flow === 'reauth') await seedSession(id);
+      const snapshot = await snapshotOf();
+      const input = flow === 'login' ? loginInput(snapshot) : reauthInput(snapshot, id);
+      expect(await writer.succeed(a, input)).toBe(true);
+      expect(await sessionRow(id)).toMatchObject(
+        flow === 'login' ? { user_id: ADMIN } : { reauth_at: NOW },
+      );
+      const rows = await auditRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        id: input.audit.id,
+        action: `session.${flow}`,
+        actor_type: 'user',
+        actor_id: ADMIN,
+        target_type: 'session',
+        target_id: id,
+        source_ip: '203.0.113.7',
+        token_selector: null,
+      });
+      expect(JSON.parse(String(rows[0]?.payload_json))).toEqual({
+        op_id: input.audit.id,
+        request_id: '01J00000000000000000000001',
+      });
+    },
+  );
+
+  it.each(['login', 'reauth'] as const)(
+    'rolls back the %s mutation when a statement after the audit fails',
+    async (flow) => {
+      const id = '01J0SESSIONNEW0000000000A1';
+      if (flow === 'reauth') await seedSession(id);
+      const before = await loginRow();
+      const snapshot = await snapshotOf();
+      const input = flow === 'login' ? loginInput(snapshot) : reauthInput(snapshot, id);
+      let injected = false;
+      const failing = createLocalLoginSuccessWriter({
+        driver: executor.driver,
+        all: executor.all.bind(executor),
+        batch: (statements) => {
+          const index = statements.findIndex((statement) =>
+            statement.sql.includes('INSERT INTO audit_pending'),
+          );
+          expect(index).toBeGreaterThanOrEqual(0);
+          injected = true;
+          return executor.batch([
+            ...statements.slice(0, index + 1),
+            insert('INSERT INTO no_such_table VALUES (1)'),
+            ...statements.slice(index + 1),
+          ]);
+        },
+      });
+      await expect(failing.succeed(a, input)).rejects.toThrow();
+      expect(injected).toBe(true);
+      expect(await loginRow()).toEqual(before);
+      expect(await auditRows()).toEqual([]);
+      if (flow === 'login') expect(await sessionRow(id)).toBeUndefined();
+      else expect((await sessionRow(id))?.reauth_at).toBeNull();
+    },
+  );
+
+  it.each(['login', 'reauth'] as const)('writes no audit for a refused %s guard', async (flow) => {
+    const id = '01J0SESSIONNEW0000000000A1';
+    if (flow === 'reauth') await seedSession(id);
+    const snapshot = await snapshotOf();
+    await exec(
+      insert('UPDATE local_login SET credential_rev = credential_rev + 1 WHERE user_id = ?', ADMIN),
+    );
+    expect(
+      await writer.succeed(a, flow === 'login' ? loginInput(snapshot) : reauthInput(snapshot, id)),
+    ).toBe(false);
+    expect(await auditRows()).toEqual([]);
+    if (flow === 'login') expect(await sessionRow(id)).toBeUndefined();
+    else expect((await sessionRow(id))?.reauth_at).toBeNull();
+  });
+});
+
+describe('local login audit through the service and database', () => {
+  const email = 'audit-sentinel@example.test';
+  const password = 'password-sentinel-for-audit';
+
+  async function serviceLogin(mode: 'success' | 'wrong password' | 'locked') {
+    const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
+    const secret = new Uint8Array(20).fill(9);
+    const code = await totpCode(secret, Math.floor(Date.parse(NOW) / 30_000));
+    const passwordHash = await hashPassword(password, keyring);
+    await exec(
+      insert('UPDATE user_account SET email = ? WHERE id = ?', email, ADMIN),
+      insert(
+        'UPDATE access_grant SET subject_value = ? WHERE subject_value = ?',
+        email,
+        'admin@example.test',
+      ),
+      insert(
+        'UPDATE local_login SET password_hash = ?, totp_last_step = NULL, locked_until = ? WHERE user_id = ?',
+        passwordHash,
+        mode === 'locked' ? LOCK_UNTIL : null,
+        ADMIN,
+      ),
+    );
+    const service = createLocalLoginService({
+      reader: createLocalLoginReader(executor),
+      writer,
+      credentials: {
+        seal: () => Promise.reject(new Error('unexpected seal')),
+        prepare: () => Promise.reject(new Error('unexpected prepare')),
+        resealBatch: () => Promise.reject(new Error('unexpected reseal')),
+        put: () => Promise.reject(new Error('unexpected put')),
+        read: () => Promise.resolve(encodeTotpEnvelope(ADMIN, secret)),
+      },
+      sessionCookies: { setCookies: () => [] },
+      sessions: createSessionRepository(executor),
+      keyring,
+      clock: fixedClock(NOW),
+      ids: { ulid },
+    });
+    const result = await service.login(
+      a,
+      { email, password: mode === 'wrong password' ? 'wrong-password-sentinel' : password, code },
+      {
+        requestId: '01J00000000000000000000001',
+        ip: '203.0.113.7',
+        userAgent: 'audit-agent-sentinel',
+        previousSecretHash: null,
+      },
+    );
+    return { result, code };
+  }
+
+  it('stores only correlation payload fields and excludes credential sentinels from the entire row', async () => {
+    const { result, code } = await serviceLogin('success');
+    expect(result.ok).toBe(true);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'session.login', actor_id: ADMIN });
+    const payload = JSON.parse(String(rows[0]?.payload_json));
+    expect(payload).toEqual({ op_id: rows[0]?.id, request_id: '01J00000000000000000000001' });
+    for (const sentinel of [email, password, code, 'audit-agent-sentinel'])
+      expect(JSON.stringify(rows)).not.toContain(sentinel);
+  });
+
+  it('leaves no audit row for a wrong password', async () => {
+    expect((await serviceLogin('wrong password')).result).toEqual({ ok: false });
+    expect(await auditRows()).toEqual([]);
+    expect(await sessionCount()).toBe(0);
+  });
+
+  it('leaves no audit row for a locked account', async () => {
+    expect((await serviceLogin('locked')).result).toEqual({ ok: false });
+    expect(await auditRows()).toEqual([]);
+    expect(await sessionCount()).toBe(0);
   });
 });

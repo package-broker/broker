@@ -6,9 +6,11 @@ import { envelopeResponse } from '@package-broker/core/kernel/errors';
 import { smoke } from './smoke.js';
 import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
-import { CloudflareApi } from './api.js';
+import { CloudflareApi, object } from './api.js';
 import {
   deploy,
+  cloudflareDeployContract,
+  cloudflareAssetHash,
   validateDeploymentArtifact,
   withCandidatePreview,
   rollbackDeployment,
@@ -25,10 +27,23 @@ import {
   type ManagedSettings,
 } from './inventory.js';
 
+const providerFixtures = JSON.parse(
+  await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+);
 const ACCOUNT = 'a'.repeat(32),
   KEY = 'MASTER_SENTINEL',
   PREVIOUS = 'PREVIOUS_SENTINEL',
   TOKEN = 'API_SENTINEL';
+const CREATED = '66666666-6666-4666-8666-666666666666';
+const documented = JSON.parse(
+  await readFile(new URL('./fixtures/deploy-responses.json', import.meta.url), 'utf8'),
+);
+const realConsumer = JSON.parse(
+  await readFile(new URL('./fixtures/queue-consumer.json', import.meta.url), 'utf8'),
+);
+const realWorkerSettings = JSON.parse(
+  await readFile(new URL('./fixtures/worker-settings.json', import.meta.url), 'utf8'),
+);
 const OLD = '11111111-1111-4111-8111-111111111111',
   CANDIDATE = '22222222-2222-4222-8222-222222222222',
   NEWEST = '33333333-3333-4333-8333-333333333333',
@@ -195,8 +210,8 @@ function harness() {
     domain: null as Record<string, unknown> | null,
     installed: ['PB_MASTER_KEY', 'PB_MASTER_KEY_PREVIOUS'],
     versions: new Map<string, Record<string, unknown>>([
-      [OLD, { id: OLD, metadata: { annotations: {} }, resources: { bindings: [] } }],
-      [NEWEST, { id: NEWEST, metadata: { annotations: {} }, resources: { bindings: [] } }],
+      [OLD, { id: OLD, annotations: {}, resources: { bindings: [] } }],
+      [NEWEST, { id: NEWEST, annotations: {}, resources: { bindings: [] } }],
     ]),
     calls: [] as { path: string; method: string; body: unknown; auth: string | null }[],
     uploadLost: false,
@@ -239,8 +254,11 @@ function harness() {
       );
     if (path === '/d1/database/' + DB)
       return ok({ uuid: DB, id: DB, name: `${script}-db`, jurisdiction: 'eu' });
-    if (path === `/r2/buckets/${script}-blobs`)
+    if (path === `/r2/buckets/${script}-blobs`) {
+      expect(new Headers(init?.headers).get('cf-r2-jurisdiction')).toBe('eu');
+      expect(url.searchParams.has('jurisdiction')).toBe(false);
       return ok({ name: `${script}-blobs`, jurisdiction: 'eu' });
+    }
     if (path === '/queues/' + JOBS) return ok({ queue_id: JOBS, queue_name: `${script}-jobs` });
     if (path === '/queues/' + DLQ) return ok({ queue_id: DLQ, queue_name: `${script}-jobs-dlq` });
     if (path === `/queues/${DLQ}/consumers`) return snap([]);
@@ -275,15 +293,19 @@ function harness() {
     if (path === '/workers/subdomain') return ok({ subdomain: h.subdomain });
     if (path === base + '/deployments') {
       if (method === 'GET')
-        return ok({
-          active: h.active.id ? h.active : null,
-          deployments: [
-            {
-              id: 'newest-upload-is-not-active',
-              versions: [{ version_id: NEWEST, percentage: 100 }],
+        return new Response(
+          JSON.stringify({
+            ...documented.deployments,
+            result: {
+              deployments: h.active.id
+                ? [
+                    h.active,
+                    { id: 'older-deployment', versions: [{ version_id: NEWEST, percentage: 100 }] },
+                  ]
+                : [],
             },
-          ],
-        });
+          }),
+        );
       if (h.activationReject) return new Response(TOKEN, { status: 403 });
       if (!h.activationAbsent) h.active = { id: 'candidate-active', versions: body.versions };
       if (h.activationLost) throw new Error(TOKEN);
@@ -302,7 +324,7 @@ function harness() {
       });
     }
     if (path === base + '/secrets')
-      return ok(h.installed.map((name) => ({ name, type: 'secret_text' })));
+      return snap(h.installed.map((name) => ({ name, type: 'secret_text' })));
     if (path === base + '/subdomain') {
       if (method !== 'GET') {
         if (h.cleanupFail && body.previews_enabled === false)
@@ -334,6 +356,30 @@ function harness() {
       });
     }
     if (path === '/workers/assets/upload') return ok({ jwt: 'COMPLETION_SENTINEL' });
+    if (path === base && method === 'PUT') {
+      expect(h.exists).toBe(false);
+      const metadata = JSON.parse(String((body as FormData).get('metadata')));
+      h.exists = true;
+      h.installed = metadata.bindings
+        .filter((b: Record<string, unknown>) => b.type === 'secret_text')
+        .map((b: Record<string, string>) => b.name);
+      h.active = { id: 'created-deployment', versions: [{ version_id: CREATED, percentage: 100 }] };
+      h.versions.set(CREATED, {
+        id: CREATED,
+        annotations: metadata.annotations,
+        resources: {
+          bindings: metadata.bindings.map((b: Record<string, unknown>) =>
+            b.type === 'secret_text' ? { type: b.type, name: b.name } : b,
+          ),
+          assets: { config: metadata.assets.config },
+          script_runtime: {
+            compatibility_date: '2026-10-01',
+            compatibility_flags: ['nodejs_compat'],
+          },
+        },
+      });
+      return ok({ ...documented.scriptCreated.result, id: script });
+    }
     if (path === base + '/versions' && method === 'POST') {
       const candidate = [CANDIDATE, NEWEST, THIRD][uploads++]!;
       expect(body).toBeInstanceOf(FormData);
@@ -348,20 +394,30 @@ function harness() {
       if (!h.uploadAbsent)
         h.versions.set(candidate, {
           id: candidate,
-          metadata: { annotations: h.metadata!.annotations },
+          annotations: h.metadata!.annotations,
           resources: {
             bindings: h.secretErased
               ? bindings.filter((b) => b.name !== 'PB_MASTER_KEY')
               : bindings,
             assets: { config: (h.metadata!.assets as { config: unknown }).config },
+            script_runtime: {
+              compatibility_date: '2026-10-01',
+              compatibility_flags: ['nodejs_compat'],
+            },
           },
         });
       if (h.drift)
         h.active = { id: 'other-deploy', versions: [{ version_id: NEWEST, percentage: 100 }] };
       if (h.uploadLost) throw new Error(`${KEY} ${TOKEN}`);
-      return ok({ id: candidate });
+      return ok({ ...documented.versionUploaded.result, id: candidate });
     }
-    if (path === base + '/versions') return ok({ items: [...h.versions.values()] });
+    if (path === base + '/versions') {
+      const items = [...h.versions.values()];
+      return ok(
+        { items },
+        { page: 1, per_page: 10, count: items.length, total_count: items.length },
+      );
+    }
     if (path.startsWith(base + '/versions/'))
       return ok(h.versions.get(path.split('/').at(-1)!) ?? {});
     throw new Error(`Unexpected request ${method} ${path}`);
@@ -389,6 +445,1005 @@ function options(h: ReturnType<typeof harness>, extra: Partial<DeployOptions> = 
   };
 }
 const mutations = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.method !== 'GET');
+
+it.each([
+  ['', 'no-extension', 'e3b0c44298fc1c149afbf4c8996fb924'],
+  ['68656c6c6f', 'hello.txt', '129d0bf9c674d4cc340cf5f8feeb9f36'],
+  ['68656c6c6f', 'nested/hello.html', '5deeda9d2277e0ed541bfc03adafb3cf'],
+  ['0080ff2a', 'app.1234.js', '2bc926e0a131a6279c79f1e99279a6c8'],
+])('hashes documented asset vector %s / %s', (hex, name, expected) => {
+  expect(cloudflareAssetHash(Buffer.from(hex, 'hex'), name)).toBe(expected);
+});
+function firstInstall() {
+  const h = harness();
+  h.exists = false;
+  h.active = { id: null, versions: [] };
+  h.installed = [];
+  h.endpoints = { enabled: false, previews_enabled: false };
+  const o = options(h, { secret: ['PB_MASTER_KEY'] });
+  delete o.contract;
+  delete o.domain;
+  return { h, o };
+}
+it('uses the production contract by default: adopts the created version and enables workers.dev', async () => {
+  const { h, o } = firstInstall();
+  expect(cloudflareDeployContract).toMatchObject({
+    versionsCreateScript: false,
+    secretInheritance: true,
+  });
+  expect(cloudflareDeployContract.preview).toBeUndefined();
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.output).toMatchObject({ version_id: CREATED, previous_version_id: null });
+  const writes = mutations(h);
+  const create = writes.findIndex((c) => c.path === base && c.method === 'PUT');
+  const version = writes.findIndex((c) => c.path === base + '/versions' && c.method === 'POST');
+  const deployment = writes.findIndex(
+    (c) => c.path === base + '/deployments' && c.method === 'POST',
+  );
+  expect(create).toBeGreaterThan(-1);
+  expect(version).toBe(-1);
+  expect(deployment).toBeGreaterThan(create);
+  expect(writes[deployment]!.body).toEqual({
+    strategy: 'percentage',
+    versions: [{ version_id: CREATED, percentage: 100 }],
+  });
+  for (const call of [writes[create]!]) {
+    const form = call.body as FormData;
+    expect(await (form.get('worker.js') as Blob).text()).toContain('export default');
+    expect(JSON.parse(String(form.get('metadata')))).toMatchObject({
+      main_module: 'worker.js',
+      compatibility_date: '2026-10-01',
+      compatibility_flags: ['nodejs_compat'],
+      bindings: expect.arrayContaining([{ type: 'assets', name: 'ASSETS' }]),
+      assets: { jwt: 'COMPLETION_SENTINEL' },
+    });
+  }
+  const attempt = (await store.read())!.deployment!.attempt;
+  expect(h.versions.get(CREATED)!.annotations).toEqual({
+    'workers/tag': `pb-${attempt.operation_id}-create`,
+    'workers/message': `pb-artifact-sha256:${attempt.artifact_sha256}`,
+  });
+  expect(attempt.previous_distribution).toEqual([]);
+  expect(attempt.previous_deployment_id).toBeNull();
+  expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+  expect(result.output.checks).toContainEqual({
+    name: 'endpoint_policy',
+    status: 'verified',
+    enabled: true,
+    previews_enabled: false,
+  });
+  const enable = h.calls.findIndex(
+    (c) =>
+      c.path === base + '/subdomain' &&
+      c.method === 'POST' &&
+      (c.body as { enabled: boolean }).enabled,
+  );
+  expect(enable).toBeGreaterThan(create);
+  expect(h.calls.slice(enable + 1)).toContainEqual(
+    expect.objectContaining({
+      path: base + '/subdomain',
+      method: 'GET',
+    }),
+  );
+});
+function realConsumerReadback(h: ReturnType<typeof harness>, o: DeployOptions) {
+  const send = o.fetch!;
+  o.fetch = (async (input, init) => {
+    const response = await send(input, init);
+    if (
+      (init?.method ?? 'GET') !== 'GET' ||
+      !new URL(String(input)).pathname.endsWith(`/queues/${JOBS}/consumers`)
+    )
+      return response;
+    return snap(
+      h.consumer
+        ? [
+            {
+              ...realConsumer,
+              script: h.consumer.script_name,
+              dead_letter_queue: h.consumer.dead_letter_queue,
+              settings: {
+                ...realConsumer.settings,
+                batch_size: h.consumer.batch_size,
+                max_wait_time_ms: h.consumer.max_wait_time_ms,
+                max_retries: h.consumer.max_retries,
+                max_concurrency: h.consumer.max_concurrency,
+              },
+            },
+          ]
+        : [],
+    );
+  }) as typeof fetch;
+}
+it('R8 reconciles the real consumer shape after a sent create without replaying it', async () => {
+  const { h, o } = firstInstall();
+  const send = o.fetch!;
+  let loseConsumer = true;
+  o.fetch = (async (input, init) => {
+    const response = await send(input, init);
+    if (loseConsumer && init?.method === 'POST' && String(input).endsWith('/consumers')) {
+      loseConsumer = false;
+      throw new Error('consumer acknowledgement lost');
+    }
+    return response;
+  }) as typeof fetch;
+  realConsumerReadback(h, o);
+  const failed = await deploy(o);
+  expect(failed.exitCode).not.toBe(0);
+  expect(failed.output.checks).toContainEqual({
+    name: 'configuration_restoration',
+    status: 'incomplete_attachments_retained',
+  });
+  expect(failed.output.checks).not.toContainEqual({
+    name: 'configuration_restoration',
+    status: 'failed_or_unknown',
+  });
+  expect((await store.read())!.deployment!.attempt.changes).toContainEqual(
+    expect.objectContaining({ kind: 'consumer', restoration: 'retained_first_install' }),
+  );
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(
+    h.calls.filter((c) => c.path === `/queues/${JOBS}/consumers` && c.method === 'POST'),
+  ).toHaveLength(1);
+  expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+  expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+});
+it('R8 restores prior consumer limits with the real read-back shape', async () => {
+  const h = harness();
+  const o = options(h);
+  realConsumerReadback(h, o);
+  expect((await deploy(o)).exitCode).toBe(0);
+  const j = (await store.read())!;
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  j.deployment!.attempt.prior_settings.schedules = [];
+  j.deployment!.attempt.intended_settings.schedules = [];
+  j.deployment!.attempt.intended_settings.consumer!.batch_size = 2;
+  h.consumer!.batch_size = 2;
+  h.schedules = [];
+  await store.write(j);
+  await writeFile(join(out, 'worker.js'), 'export default {fetch(){return new Response("retry")}}');
+  h.configFail = true;
+  const result = await deploy(o);
+  expect(result.exitCode).not.toBe(0);
+  expect(h.consumer!.batch_size).toBe(2);
+  expect((await store.read())!.deployment!.attempt.changes).toContainEqual(
+    expect.objectContaining({ kind: 'consumer', restoration: 'restored' }),
+  );
+  expect(result.output.checks).not.toContainEqual({
+    name: 'configuration_restoration',
+    status: 'failed_or_unknown',
+  });
+});
+it.each(['valid', 'consumer-drift', 'deployment-drift'] as const)(
+  'R8 recovers the old failed journal only from matching consumer and deployment evidence: %s',
+  async (evidence) => {
+    const { h, o } = firstInstall();
+    realConsumerReadback(h, o);
+    h.configFail = true;
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    const failed = (await store.read())!;
+    const a = failed.deployment!.attempt;
+    expect(a.phase).toBe('failed');
+    // The old reader could not verify any setting once this consumer existed.
+    for (const change of a.changes) if (change.kind !== 'endpoints') change.restoration = 'unknown';
+    h.configFail = false;
+    if (evidence === 'consumer-drift') h.consumer!.max_retries += 1;
+    if (evidence === 'deployment-drift') h.active.id = 'foreign-deployment';
+    await store.write(failed);
+    const before = await readFile(store.path, 'utf8');
+    const count = mutations(h).length;
+    const planned = await deploy({ ...o, dryRun: true });
+    expect(await readFile(store.path, 'utf8')).toBe(before);
+    expect(mutations(h)).toHaveLength(count);
+    if (evidence === 'valid') {
+      expect(planned.output.error).toBeNull();
+      expect((await deploy(o)).exitCode).toBe(0);
+      expect(
+        h.calls.filter((c) => c.path === `/queues/${JOBS}/consumers` && c.method === 'POST'),
+      ).toHaveLength(1);
+    } else {
+      expect(planned.output.error?.code).toBe('configuration_conflict');
+      expect((await deploy(o)).output.error?.code).toBe('configuration_conflict');
+      expect(mutations(h)).toHaveLength(count);
+    }
+  },
+);
+it.each([
+  'script',
+  'dead_letter_queue',
+  'batch_size',
+  'max_wait_time_ms',
+  'max_retries',
+  'max_concurrency',
+  'retry_delay',
+])('R8 refuses a genuinely different real consumer %s after configuration', async (field) => {
+  const { h, o } = firstInstall();
+  realConsumerReadback(h, o);
+  const send = o.fetch!;
+  o.fetch = (async (input, init) => {
+    const response = await send(input, init);
+    if (
+      !h.consumer ||
+      (init?.method ?? 'GET') !== 'GET' ||
+      !new URL(String(input)).pathname.endsWith(`/queues/${JOBS}/consumers`)
+    )
+      return response;
+    const consumers = object(await response.json()).result as Record<string, unknown>[];
+    const consumer = consumers[0]!;
+    if (field === 'script' || field === 'dead_letter_queue') consumer[field] = TOKEN;
+    else {
+      const settings = object(consumer.settings);
+      settings[field] = Number(settings[field]) + 1;
+    }
+    return snap(consumers);
+  }) as typeof fetch;
+  const result = await deploy(o);
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(result.output.checks).toContainEqual({
+    name: 'queue_consumer',
+    status: 'configuration_conflict',
+  });
+  expect(JSON.stringify(result.output)).not.toContain(TOKEN);
+  expect(h.calls.filter((c) => c.path === base + '/deployments' && c.method === 'POST')).toEqual(
+    [],
+  );
+  expect(h.endpoints.enabled).toBe(false);
+});
+it('plans the real first install without provider writes or inventory changes', async () => {
+  const { h, o } = firstInstall();
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy({ ...o, dryRun: true });
+  expect(result.output.error).toBeNull();
+  expect(result.output.status).toBe('planned');
+  expect(mutations(h)).toEqual([]);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+it.each(['pending', 'complete'] as const)(
+  'reconciles a %s script-create receipt using result.items without another version',
+  async (state) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      if (new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT')
+        throw new Error('create acknowledgement lost');
+      return response;
+    }) as typeof fetch;
+    expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+    expect((await store.read())!.deployment!.attempt.script_creation?.state).toBe('pending');
+    if (state === 'complete') {
+      const j = (await store.read())!;
+      j.deployment!.attempt.script_creation = {
+        state,
+        deployment_id: 'created-deployment',
+        version_id: CREATED,
+      };
+      await store.write(j);
+    }
+    expect(h.endpoints).toEqual({ enabled: false, previews_enabled: false });
+    const result = await deploy(o);
+    expect(result.output.error).toBeNull();
+    expect(result.output.version_id).toBe(CREATED);
+    const attempt = (await store.read())!.deployment!.attempt;
+    expect(attempt).toMatchObject({
+      phase: 'active',
+      version_id: CREATED,
+      previous_version_id: null,
+      previous_distribution: [],
+      script_creation: { state: 'complete', version_id: CREATED },
+    });
+    expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+    expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toEqual([]);
+    expect(h.calls.some((c) => c.path === base + '/versions' && c.method === 'GET')).toBe(true);
+    expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+  },
+);
+function providerReadback(
+  h: ReturnType<typeof harness>,
+  o: DeployOptions,
+  listing: 'worker_id' | 'name_only' = 'name_only',
+) {
+  const inner = o.fetch!;
+  o.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.endsWith('/workers/scripts')) {
+      const response = await inner(input, init);
+      const envelope = object(await response.json());
+      envelope.result = (envelope.result as Record<string, unknown>[]).map((w) =>
+        listing === 'name_only'
+          ? { ...providerFixtures.workerNameOnly.result[0], ...w }
+          : { ...w, worker_id: providerFixtures.workerWithId.result[0]!.worker_id },
+      );
+      return Response.json(envelope);
+    }
+    if (path.includes('/workers/workers/')) {
+      expect(path).toContain(
+        `/workers/workers/${listing === 'name_only' ? script : providerFixtures.workerWithId.result[0]!.worker_id}/versions/`,
+      );
+      const v = h.versions.get(path.split('/').at(-1)!)!;
+      const resources = v.resources as Record<string, unknown>;
+      return snap({
+        id: v.id,
+        annotations: v.annotations,
+        bindings: resources.bindings,
+        compatibility_date: '2026-10-01',
+        compatibility_flags: ['nodejs_compat'],
+        assets: {
+          config: {
+            run_worker_first: ['/*'],
+            html_handling: 'none',
+            not_found_handling: 'none',
+            base_path: '/',
+          },
+        },
+      });
+    }
+    const response = await inner(input, init);
+    if (path.endsWith(base + '/settings') || path.includes(base + '/versions/')) {
+      const envelope = object(await response.json());
+      const result = object(envelope.result);
+      const target = path.endsWith('/settings') ? result : object(result.resources);
+      target.bindings = (target.bindings as Record<string, unknown>[]).map((b) => {
+        if (b.type !== 'd1') return b;
+        const { id, ...binding } = b;
+        return { ...binding, database_id: id };
+      });
+      if (path.endsWith('/settings')) {
+        target.compatibility_date = '2026-10-01';
+        target.compatibility_flags = ['nodejs_compat'];
+      } else {
+        delete target.assets;
+        target.script_runtime = {
+          compatibility_date: '2026-10-01',
+          compatibility_flags: ['nodejs_compat'],
+        };
+      }
+      return new Response(JSON.stringify(envelope));
+    }
+    return response;
+  }) as typeof fetch;
+}
+function realSettingsReadback(h: ReturnType<typeof harness>, o: DeployOptions) {
+  providerReadback(h, o);
+  realConsumerReadback(h, o);
+  const send = o.fetch!;
+  o.fetch = (async (input, init) => {
+    const response = await send(input, init);
+    if (!String(input).endsWith(base + '/settings')) return response;
+    const result = object(object(await response.json()).result);
+    const bindings = (result.bindings as Record<string, unknown>[]).map((b) =>
+      b.type === 'd1' ? { ...b, id: b.database_id } : b,
+    );
+    return snap({
+      ...realWorkerSettings,
+      ...result,
+      bindings: h.consumer ? bindings.reverse() : bindings,
+      annotations: h.consumer ? { 'workers/tag': TOKEN } : realWorkerSettings.annotations,
+    });
+  }) as typeof fetch;
+}
+it.each([false, true])(
+  'R9 reconciles real worker settings with defaults appearing=%s',
+  async (defaultsAppear) => {
+    const { h, o } = firstInstall();
+    const send = o.fetch!;
+    let loseCreate = true;
+    o.fetch = (async (input, init) => {
+      const response = await send(input, init);
+      if (loseCreate && init?.method === 'PUT' && String(input).endsWith(base)) {
+        loseCreate = false;
+        throw new Error('create acknowledgement lost');
+      }
+      return response;
+    }) as typeof fetch;
+    realSettingsReadback(h, o);
+    expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+    if (defaultsAppear) {
+      const read = o.fetch!;
+      let settingsReads = 0;
+      o.fetch = (async (input, init) => {
+        const response = await read(input, init);
+        if (!String(input).endsWith(base + '/settings') || settingsReads++ !== 0) return response;
+        const result = object(object(await response.json()).result);
+        for (const key of [
+          'placement',
+          'usage_model',
+          'tail_consumers',
+          'logpush',
+          'observability',
+        ])
+          delete result[key];
+        return snap(result);
+      }) as typeof fetch;
+    }
+    const result = await deploy(o);
+    expect(result.output.error).toBeNull();
+    expect(result.output.checks).not.toContainEqual(
+      expect.objectContaining({ name: 'configuration_restoration' }),
+    );
+    expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+    expect((await store.read())!.deployment!.attempt.phase).toBe('active');
+    expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+    expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toEqual([]);
+    expect(
+      h.calls.filter((c) => c.path.endsWith('/consumers') && c.method === 'POST'),
+    ).toHaveLength(1);
+    expect(JSON.stringify(result.output)).not.toContain(TOKEN);
+  },
+);
+it.each([
+  ['compatibility_date', 'worker_settings:compatibility_date'],
+  ['compatibility_flags', 'worker_settings:compatibility_flags'],
+  ['tags', 'worker_settings:tags'],
+  ['DB:id', 'worker_settings:binding:DB:id'],
+  ['JOBS:queue_name', 'worker_settings:binding:JOBS:queue_name'],
+  ['STORAGE:bucket_name', 'worker_settings:r2:bucket_name'],
+  ['STORAGE:jurisdiction', 'worker_settings:r2:jurisdiction'],
+  ['ANALYTICS:dataset', 'worker_settings:analytics_engine:dataset'],
+  ['PB_PUBLIC_URL:text', 'worker_settings:binding:PB_PUBLIC_URL:text'],
+  ['DEPLOYMENT_ID:text', 'worker_settings:binding:DEPLOYMENT_ID:text'],
+  ['ASSETS:type', 'worker_settings:binding:ASSETS:type'],
+  ['PB_MASTER_KEY:presence', 'worker_settings:binding:PB_MASTER_KEY:presence'],
+  ['observability', 'worker_settings:observability:logs:invocation_logs'],
+])(
+  'R9 refuses concurrent real settings drift with a safe field name: %s',
+  async (field, diagnostic) => {
+    const { h, o } = firstInstall();
+    const send = o.fetch!;
+    let loseCreate = true;
+    o.fetch = (async (input, init) => {
+      const response = await send(input, init);
+      if (loseCreate && init?.method === 'PUT' && String(input).endsWith(base)) {
+        loseCreate = false;
+        throw new Error('create acknowledgement lost');
+      }
+      return response;
+    }) as typeof fetch;
+    realSettingsReadback(h, o);
+    expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+    const read = o.fetch!;
+    let settingsReads = 0;
+    o.fetch = (async (input, init) => {
+      const response = await read(input, init);
+      if (!String(input).endsWith(base + '/settings') || settingsReads++ === 0) return response;
+      const result = object(object(await response.json()).result);
+      const bindings = result.bindings as Record<string, unknown>[];
+      const [name, key] = field.split(':');
+      const binding = bindings.find((b) => b.name === name);
+      if (key === 'presence') result.bindings = bindings.filter((b) => b !== binding);
+      else if (key) binding![key] = TOKEN;
+      else if (field === 'tags') result.tags = [...(result.tags as string[]), TOKEN];
+      else if (field === 'observability')
+        object(object(result.observability).logs).invocation_logs = true;
+      else result[field] = field === 'compatibility_date' ? TOKEN : [TOKEN];
+      return snap(result);
+    }) as typeof fetch;
+    const result = await deploy(o);
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: diagnostic,
+      status: 'configuration_conflict',
+    });
+    expect(JSON.stringify(result.output)).not.toContain(TOKEN);
+    expect(h.calls.filter((c) => c.path === base + '/deployments' && c.method === 'POST')).toEqual(
+      [],
+    );
+    expect(h.endpoints.enabled).toBe(false);
+  },
+);
+it('R9 retries the retained first-install attachments with real settings without replaying them', async () => {
+  const { h, o } = firstInstall();
+  realSettingsReadback(h, o);
+  h.configFail = true;
+  const failed = await deploy(o);
+  expect(failed.output.checks).toContainEqual({
+    name: 'configuration_restoration',
+    status: 'incomplete_attachments_retained',
+  });
+  h.configFail = false;
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.output.checks).not.toContainEqual(
+    expect.objectContaining({ name: 'configuration_restoration' }),
+  );
+  expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+  expect(h.calls.filter((c) => c.path.endsWith('/consumers') && c.method === 'POST')).toHaveLength(
+    1,
+  );
+});
+it('resolves a distinct Worker ID for real settings and authoritative version evidence', async () => {
+  const { h, o } = firstInstall();
+  providerReadback(h, o, 'worker_id');
+  const inner = o.fetch!;
+  let loseCreate = true;
+  o.fetch = (async (input, init) => {
+    const response = await inner(input, init);
+    if (loseCreate && new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT') {
+      loseCreate = false;
+      throw new Error('create acknowledgement lost');
+    }
+    return response;
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  expect(h.endpoints).toEqual({ enabled: false, previews_enabled: false });
+  const result = await deploy(o);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'reconcile' });
+  expect(result.output.error).toBeNull();
+  expect(result.output.version_id).toBe(CREATED);
+  expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+  expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+  expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toEqual([]);
+  expect(h.consumer).toMatchObject({
+    script_name: script,
+    dead_letter_queue: `${script}-jobs-dlq`,
+  });
+});
+it.each(['eu', 'default', 'missing'] as const)(
+  'requires authoritative EU jurisdiction when legacy reads omit it: %s',
+  async (jurisdiction) => {
+    const { h, o } = firstInstall();
+    providerReadback(h, o);
+    const inner = o.fetch!;
+    let fullReads = 0;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      const path = new URL(String(input)).pathname;
+      const full = path.includes('/workers/workers/');
+      if (!full && !path.endsWith(base + '/settings') && !path.includes(base + '/versions/'))
+        return response;
+      const envelope = object(await response.json());
+      const result = object(envelope.result);
+      const target = full || path.endsWith('/settings') ? result : object(result.resources);
+      for (const b of (target.bindings as Record<string, unknown>[]).filter(
+        (b) => b.type === 'r2_bucket',
+      )) {
+        if (full && jurisdiction !== 'missing') b.jurisdiction = jurisdiction;
+        else delete b.jurisdiction;
+      }
+      if (full) fullReads++;
+      return new Response(JSON.stringify(envelope));
+    }) as typeof fetch;
+    const result = await deploy(o);
+    expect(fullReads).toBeGreaterThan(0);
+    if (jurisdiction === 'eu') {
+      expect(result.output.error).toBeNull();
+      expect(h.endpoints.enabled).toBe(true);
+    } else {
+      expect(result.output.error?.code).toBe('configuration_conflict');
+      expect(result.output.checks).toContainEqual({
+        name: 'r2:jurisdiction',
+        status: 'configuration_conflict',
+      });
+      expect(h.endpoints.enabled).toBe(false);
+    }
+  },
+);
+it.each(['id', 'assets', 'annotations'] as const)(
+  'rejects different authoritative version evidence: %s',
+  async (field) => {
+    const { h, o } = firstInstall();
+    providerReadback(h, o);
+    const inner = o.fetch!;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      if (!String(input).includes('/workers/workers/')) return response;
+      const envelope = object(await response.json());
+      const result = object(envelope.result);
+      if (field === 'id') result.id = CANDIDATE;
+      if (field === 'assets') result.assets = { config: { run_worker_first: false } };
+      if (field === 'annotations') result.annotations = { 'workers/tag': TOKEN };
+      return new Response(JSON.stringify(envelope));
+    }) as typeof fetch;
+    const result = await deploy(o);
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name:
+        field === 'id'
+          ? 'version_id'
+          : field === 'assets'
+            ? 'assets:run_worker_first'
+            : 'version_annotations',
+      status: 'configuration_conflict',
+    });
+    expect(JSON.stringify(result.output)).not.toContain(TOKEN);
+    expect(h.endpoints.enabled).toBe(false);
+  },
+);
+it.each([
+  ['queue', 'JOBS', 'queue_name', 'worker_settings:binding:JOBS:queue_name'],
+  ['d1', 'DB', 'id', 'worker_settings:binding:DB:id'],
+  ['r2_bucket', 'STORAGE', 'jurisdiction', 'worker_settings:r2:jurisdiction'],
+  ['plain_text', 'PB_PUBLIC_URL', 'text', 'binding:plain_text:PB_PUBLIC_URL:text'],
+  ['plain_text', 'DEPLOYMENT_ID', 'text', 'worker_settings:binding:DEPLOYMENT_ID:text'],
+  ['assets', 'ASSETS', 'name', 'binding:assets:ASSETS:presence'],
+] as const)(
+  'reports only the safe differing binding field: %s:%s:%s',
+  async (type, name, field, diagnostic) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      if (new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT') {
+        const resources = h.versions.get(CREATED)!.resources as {
+          bindings: Record<string, unknown>[];
+        };
+        resources.bindings.find((b) => b.type === type && b.name === name)![field] = TOKEN;
+      }
+      return response;
+    }) as typeof fetch;
+    const result = await deploy(o);
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: diagnostic,
+      status: 'configuration_conflict',
+    });
+    expect(JSON.stringify(result.output)).not.toContain(TOKEN);
+    expect(h.endpoints.enabled).toBe(false);
+  },
+);
+it.each(['compatibility_date', 'compatibility_flags', 'assets', 'queue_consumer'] as const)(
+  'reports the safe configuration field for %s',
+  async (field) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      if (new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT') {
+        const resources = h.versions.get(CREATED)!.resources as Record<string, unknown>;
+        if (field === 'assets') resources.assets = { config: { run_worker_first: false } };
+        else if (field !== 'queue_consumer')
+          resources.script_runtime = {
+            compatibility_date: '2026-10-01',
+            compatibility_flags: ['nodejs_compat'],
+            [field]: TOKEN,
+          };
+      }
+      if (
+        field === 'queue_consumer' &&
+        init?.method === 'POST' &&
+        String(input).endsWith('/consumers')
+      )
+        h.consumer!.script_name = TOKEN;
+      return response;
+    }) as typeof fetch;
+    const result = await deploy(o);
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: field === 'assets' ? 'assets:run_worker_first' : field,
+      status: 'configuration_conflict',
+    });
+    expect(JSON.stringify(result.output)).not.toContain(TOKEN);
+  },
+);
+it('reconciles a version upload already sent by an earlier CLI after script creation', async () => {
+  const { h, o } = firstInstall();
+  expect((await deploy(o)).output.error).toBeNull();
+  const j = (await store.read())!;
+  const a = j.deployment!.attempt;
+  a.phase = 'upload_pending';
+  a.version_id = null;
+  a.activated_at = null;
+  await store.write(j);
+  h.active = {
+    id: a.script_creation!.deployment_id!,
+    versions: [{ version_id: CREATED, percentage: 100 }],
+  };
+  h.versions.set(CANDIDATE, {
+    ...h.versions.get(CREATED)!,
+    id: CANDIDATE,
+    annotations: {
+      'workers/tag': `pb-${a.operation_id}`,
+      'workers/message': `pb-artifact-sha256:${a.artifact_sha256}`,
+    },
+  });
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.output.version_id).toBe(CANDIDATE);
+  expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toEqual([]);
+  expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+});
+it.each(['tag', 'artifact', 'duplicate', 'incomplete'] as const)(
+  'does not adopt an ambiguous or unverifiable created version: %s',
+  async (failure) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith(base) && init?.method === 'PUT') {
+        const annotations = h.versions.get(CREATED)!.annotations as Record<string, string>;
+        if (failure === 'tag') annotations['workers/tag'] = 'foreign-operation';
+        if (failure === 'artifact')
+          annotations['workers/message'] = `pb-artifact-sha256:${'f'.repeat(64)}`;
+        if (failure === 'duplicate')
+          h.versions.set(THIRD, { ...h.versions.get(CREATED)!, id: THIRD });
+      }
+      if (failure === 'incomplete' && path.endsWith(base + '/versions'))
+        return snap({ items: [...h.versions.values()] });
+      return response;
+    }) as typeof fetch;
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+    expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toEqual([]);
+    expect(h.endpoints).toEqual({ enabled: false, previews_enabled: false });
+  },
+);
+it.each(['refused', 'not applied'] as const)(
+  'fails when workers.dev enable is %s',
+  async (failure) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) => {
+      if (
+        new URL(String(input)).pathname.endsWith(base + '/subdomain') &&
+        init?.method === 'POST' &&
+        JSON.parse(String(init.body)).enabled
+      )
+        return failure === 'refused' ? new Response('', { status: 403 }) : ok(h.endpoints);
+      return inner(input, init);
+    }) as typeof fetch;
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    expect(h.calls.filter((c) => c.path === base + '/deployments' && c.method === 'POST')).toEqual(
+      [],
+    );
+    expect(h.endpoints).toEqual({ enabled: false, previews_enabled: false });
+  },
+);
+it('uploads documented asset buckets with the session bearer and redeems only the completion JWT', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  let uploads = 0;
+  o.fetch = (async (input, init) => {
+    const response = await inner(input, init);
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/assets-upload-session')) {
+      const hashes = Object.values(h.sessionManifest).map((v) => v.hash);
+      return new Response(
+        JSON.stringify({
+          ...documented.assetSession,
+          result: {
+            ...documented.assetSession.result,
+            buckets: [[hashes[0]], hashes.slice(1)],
+          },
+        }),
+      );
+    }
+    if (url.pathname.endsWith('/assets/upload')) {
+      expect(url.search).toBe('?base64=true');
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer SESSION_SENTINEL');
+      return new Response(
+        JSON.stringify(++uploads === 1 ? documented.assetBatch : documented.assetComplete),
+        { status: uploads === 1 ? 200 : 201 },
+      );
+    }
+    return response;
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error).toBeNull();
+  expect(uploads).toBe(2);
+  const assets = (await validateDeploymentArtifact(out)).assets;
+  const forms = h.calls
+    .filter((c) => c.path === '/workers/assets/upload')
+    .map((c) => c.body as FormData);
+  for (const asset of assets) {
+    const hash = cloudflareAssetHash(asset.content, asset.name);
+    expect(h.sessionManifest['/' + asset.name]).toEqual({ hash, size: asset.content.length });
+    const part = forms.map((f) => f.get(hash)).find(Boolean) as Blob;
+    expect(Buffer.from(await part.text(), 'base64')).toEqual(asset.content);
+  }
+});
+it('preserves manifest content types on asset upload parts', async () => {
+  const { h, o } = firstInstall();
+  expect((await deploy(o)).output.error).toBeNull();
+  const form = h.calls.find((c) => c.path === '/workers/assets/upload')!.body as FormData;
+  for (const [name, expected] of [
+    ['manifest.json', 'application/json'],
+    ['index.html', 'text/html'],
+    ['app.1234.js', 'text/javascript'],
+  ]) {
+    const asset = (await validateDeploymentArtifact(out)).assets.find((f) => f.name === name)!;
+    expect((form.get(cloudflareAssetHash(asset.content, name!)) as Blob).type).toBe(expected);
+  }
+});
+it('refuses malformed intermediate upload tokens before sending the remaining bucket', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  o.fetch = (async (input, init) => {
+    const response = await inner(input, init);
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/assets-upload-session')) {
+      const hashes = Object.values(h.sessionManifest).map((v) => v.hash);
+      return ok({ jwt: 'SESSION_SENTINEL', buckets: [[hashes[0]], hashes.slice(1)] });
+    }
+    return url.pathname.endsWith('/assets/upload') ? ok({ jwt: 123 }) : response;
+  }) as typeof fetch;
+  expect((await deploy(o)).exitCode).not.toBe(0);
+  expect(h.calls.filter((c) => c.path === '/workers/assets/upload')).toHaveLength(1);
+});
+it('does not repeat a create whose outcome is still absent after a lost response', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  let creates = 0;
+  o.fetch = (async (input, init) => {
+    if (new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT') {
+      creates++;
+      throw new Error(TOKEN);
+    }
+    return inner(input, init);
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  expect((await deploy(o)).exitCode).not.toBe(0);
+  expect(creates).toBe(1);
+});
+it('keeps a definite create refusal retryable without issuing a version upload', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  o.fetch = (async (input, init) =>
+    new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT'
+      ? new Response('', { status: 403 })
+      : inner(input, init)) as typeof fetch;
+  expect((await deploy(o)).exitCode).not.toBe(0);
+  expect((await store.read())!.deployment!.attempt).not.toHaveProperty('script_creation');
+  expect(h.calls.some((c) => c.path === base + '/versions' && c.method === 'POST')).toBe(false);
+  o.fetch = inner;
+  expect((await deploy(o)).output.error).toBeNull();
+});
+it('rejects a changed creation version rather than taking over its deployment', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  o.fetch = (async (input, init) => {
+    const response = await inner(input, init);
+    if (new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT') {
+      h.active = { id: 'foreign-deployment', versions: [{ version_id: NEWEST, percentage: 100 }] };
+      throw new Error(TOKEN);
+    }
+    return response;
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  expect((await deploy(o)).output.error?.code).toBe('configuration_conflict');
+  expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+  expect(h.calls.some((c) => c.path === base + '/versions' && c.method === 'POST')).toBe(false);
+});
+it('uses the session completion JWT without uploading when documented buckets are empty', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  o.fetch = (async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/assets-upload-session')
+      ? new Response(JSON.stringify(documented.assetsCached))
+      : inner(input, init)) as typeof fetch;
+  expect((await deploy(o)).output.error).toBeNull();
+  expect(h.calls.some((c) => c.path === '/workers/assets/upload')).toBe(false);
+});
+it.each([
+  { jwt: '', buckets: [] },
+  { jwt: 'SESSION_SENTINEL' },
+  { jwt: 'SESSION_SENTINEL', buckets: [null] },
+  { jwt: 'SESSION_SENTINEL', buckets: [['unknown-hash']] },
+])('refuses malformed asset sessions before script creation: %j', async (result) => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  o.fetch = (async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/assets-upload-session')
+      ? ok(result)
+      : inner(input, init)) as typeof fetch;
+  expect((await deploy(o)).exitCode).not.toBe(0);
+  expect(h.calls.some((c) => c.path === base && c.method === 'PUT')).toBe(false);
+});
+it.each([{}, { jwt: '' }, { jwt: 123 }])(
+  'refuses an asset upload without a valid final completion token: %j',
+  async (result) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) =>
+      new URL(String(input)).pathname.endsWith('/assets/upload')
+        ? ok(result)
+        : inner(input, init)) as typeof fetch;
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    expect(h.calls.some((c) => c.path === base && c.method === 'PUT')).toBe(false);
+  },
+);
+it('does not re-create a script after losing the create acknowledgement', async () => {
+  const { h, o } = firstInstall();
+  const inner = h.fetch;
+  let lost = false;
+  o.fetch = (async (input, init) => {
+    const response = await inner(input, init);
+    if (!lost && new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT') {
+      lost = true;
+      throw new Error(TOKEN);
+    }
+    return response;
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  expect(h.endpoints).toEqual({ enabled: false, previews_enabled: false });
+  const rerun = await deploy(o);
+  expect(rerun.output.error).toBeNull();
+  expect(rerun.output.previous_version_id).toBeNull();
+  expect(h.calls.filter((c) => c.path === base && c.method === 'PUT')).toHaveLength(1);
+});
+it('refuses changed secrets after losing the script create acknowledgement', async () => {
+  const { h, o } = firstInstall();
+  o.secret = ['PB_MASTER_KEY', 'PB_IDP_TEST_CLIENT_SECRET'];
+  const inner = h.fetch;
+  o.fetch = (async (input, init) => {
+    const response = await inner(input, init);
+    if (new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT')
+      throw new Error(TOKEN);
+    return response;
+  }) as typeof fetch;
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  expect((await store.read())!.deployment!.attempt).toMatchObject({
+    phase: 'preparing_upload',
+    script_creation: { state: 'pending' },
+  });
+  const count = mutations(h).length;
+  o.env = { ...o.env, PB_IDP_TEST_CLIENT_SECRET: 'CHANGED_IDP_SENTINEL' };
+  const rerun = await deploy(o);
+  expect(rerun.exitCode).not.toBe(0);
+  expect(rerun.output.status).not.toBe('ok');
+  expect(rerun.output.error?.code).toBe('configuration_conflict');
+  expect(rerun.output.checks).toContainEqual({
+    name: 'bindings:secret_text',
+    status: 'configuration_conflict',
+  });
+  expect(mutations(h)).toHaveLength(count);
+  expect(h.endpoints).toEqual({ enabled: false, previews_enabled: false });
+  expect(JSON.stringify(rerun.output)).not.toContain('CHANGED_IDP_SENTINEL');
+});
+it.each([{}, { id: 'different-script' }])(
+  'refuses unexpected script create acknowledgements: %j',
+  async (result) => {
+    const { h, o } = firstInstall();
+    const inner = h.fetch;
+    o.fetch = (async (input, init) => {
+      const response = await inner(input, init);
+      return new URL(String(input)).pathname.endsWith(base) && init?.method === 'PUT'
+        ? ok(result)
+        : response;
+    }) as typeof fetch;
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    expect(h.calls.some((c) => c.path === base + '/versions' && c.method === 'POST')).toBe(false);
+  },
+);
+it('does not require inheritance when the first install has no installed secrets', async () => {
+  const { o } = firstInstall();
+  o.contract = { ...cloudflareDeployContract, secretInheritance: false };
+  expect((await deploy(o)).output.error).toBeNull();
+});
+it('the production contract refuses a gradual rollout before writes when preview is unavailable', async () => {
+  const h = harness();
+  const o = options(h, { rollout: 25 });
+  delete o.contract;
+  delete o.domain;
+  expect((await deploy(o)).output.error?.code).toBe('capability_unknown');
+  expect(mutations(h)).toEqual([]);
+});
+it('the production contract retains installed secret bindings for an existing Worker', async () => {
+  const h = harness();
+  const o = options(h);
+  delete o.contract;
+  delete o.domain;
+  expect((await deploy(o)).output.error).toBeNull();
+  expect(h.calls.some((c) => c.path === base && c.method === 'PUT')).toBe(false);
+  expect(h.metadata!.keep_bindings).toEqual(['secret_text']);
+});
+it.each([{}, { active: null }, { deployments: null }, { deployments: [{}] }])(
+  'refuses undocumented deployment shapes before writes: %j',
+  async (result) => {
+    const h = harness();
+    const inner = h.fetch;
+    const o = options(h);
+    o.fetch = (async (input, init) =>
+      new URL(String(input)).pathname.endsWith('/deployments')
+        ? ok(result)
+        : inner(input, init)) as typeof fetch;
+    expect((await deploy(o)).exitCode).not.toBe(0);
+    expect(mutations(h)).toEqual([]);
+  },
+);
 
 it('consumes T811 bytes and descriptor, hashes independently and excludes absolute relocation paths', async () => {
   const a = await validateDeploymentArtifact(out);
@@ -534,18 +1589,26 @@ it('dry run sends only reads and writes no journal, lock, asset session, secret 
   expect(mutations(h)).toEqual([]);
   expect(await readFile(store.path)).toEqual(before);
 });
-it('reads the Worker scripts collection as a documented snapshot', async () => {
+it('reads Worker scripts, installed secrets and domains as documented snapshots', async () => {
   const h = harness();
   const urls: string[] = [];
   const inner = h.fetch;
   h.fetch = (async (input: unknown, init?: RequestInit) => {
     urls.push(String(input));
-    return inner(input as never, init);
+    const response = await inner(input as never, init);
+    if (new URL(String(input)).pathname.endsWith('/workers/domains')) {
+      const body = (await response.json()) as Record<string, unknown>;
+      delete body.result_info;
+      return Response.json(body);
+    }
+    return response;
   }) as typeof fetch;
   expect((await deploy(options(h, { dryRun: true }))).exitCode).toBe(0);
-  const reads = urls.filter((u) => new URL(u).pathname.endsWith('/workers/scripts'));
-  expect(reads.length).toBeGreaterThan(0);
-  expect(reads.every((u) => !u.includes('?'))).toBe(true);
+  for (const path of ['/workers/scripts', `${base}/secrets`, '/workers/domains']) {
+    const reads = urls.filter((u) => new URL(u).pathname.endsWith(path));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((u) => !u.includes('?'))).toBe(true);
+  }
 });
 it('refuses a Worker scripts snapshot that advertises more pages', async () => {
   const h = harness();
@@ -817,7 +1880,7 @@ it('refuses a maintenance shell as a prior release', async () => {
   const h = harness();
   h.versions.set(OLD, {
     id: OLD,
-    metadata: { annotations: { 'pb-maintenance-shell': 'true' } },
+    annotations: { 'pb-maintenance-shell': 'true' },
     resources: { bindings: [] },
   });
   const r = await deploy(options(h));
@@ -2313,6 +3376,29 @@ function lifecycleHarness() {
   return h;
 }
 
+it('smokes the adopted script-create version with its create annotation and enabled workers.dev', async () => {
+  const h = lifecycleHarness();
+  const o = options(h, { secret: ['PB_MASTER_KEY'] });
+  delete o.contract;
+  delete o.domain;
+  const deployed = await deploy(o);
+  expect(deployed.output.error).toBeNull();
+  expect(deployed.output.version_id).toBe(CREATED);
+  const checked = await smoke({
+    workerName: 'broker',
+    projectRoot: project,
+    env: o.env,
+    fetch: h.fetch,
+    now: h.now,
+    sleep: h.sleep,
+  });
+  expect(checked.output.error).toBeNull();
+  expect(checked.exitCode).toBe(0);
+  expect((await store.read())!.deployment!.attempt.phase).toBe('verified');
+  expect(h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST')).toEqual([]);
+  expect(h.endpoints).toEqual({ enabled: true, previews_enabled: false });
+});
+
 it.each([false, true])(
   'chains three real deploy/smoke cycles into teardown with foreign version=%s',
   async (foreign) => {
@@ -2509,5 +3595,90 @@ it.each(['versions', 'plainValues'] as const)(
     expect(result.output.error?.message).toContain('Deployment history capacity reached');
     expect(mutations(h)).toHaveLength(count);
     expect((await store.read())!.deployment!.history).toEqual(j.deployment!.history);
+  },
+);
+
+it.each(['default', 'worker_id'] as const)(
+  'looks up versions with the %s provider listing',
+  async (listing) => {
+    const { h, o } = firstInstall();
+    if (listing === 'default') providerReadback(h, o);
+    else providerReadback(h, o, listing);
+    const inner = o.fetch!;
+    const fullPaths: string[] = [];
+    let loseCreate = true;
+    o.fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.includes('/workers/workers/')) fullPaths.push(path);
+      const response = await inner(input, init);
+      if (loseCreate && path.endsWith(base) && init?.method === 'PUT') {
+        loseCreate = false;
+        throw new Error('create acknowledgement lost');
+      }
+      return response;
+    }) as typeof fetch;
+    expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+    const result = await deploy(o);
+    expect(result.output.error).toBeNull();
+    expect(result.output.version_id).toBe(CREATED);
+    expect(fullPaths.length).toBeGreaterThan(0);
+    const lookup =
+      listing === 'default' ? script : providerFixtures.workerWithId.result[0]!.worker_id;
+    for (const path of fullPaths) expect(path).toContain(`/workers/workers/${lookup}/versions/`);
+  },
+);
+
+it('refuses an unsafe Worker identity for version lookup', async () => {
+  const { h, o } = firstInstall();
+  providerReadback(h, o);
+  const inner = o.fetch!;
+  let fullReads = 0;
+  o.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.includes('/workers/workers/')) fullReads++;
+    const response = await inner(input, init);
+    if (!path.endsWith('/workers/scripts')) return response;
+    const envelope = object(await response.json());
+    for (const worker of envelope.result as Record<string, unknown>[]) {
+      worker.worker_id = '../foreign';
+    }
+    return Response.json(envelope);
+  }) as typeof fetch;
+  const result = await deploy(o);
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(result.output.checks).toContainEqual({
+    name: 'worker:identity',
+    status: 'configuration_conflict',
+  });
+  expect(fullReads).toBe(0);
+  expect(h.endpoints.enabled).toBe(false);
+});
+
+it.each([true, false, null, undefined])(
+  'preserves supported dirty provenance (%s) in deployment receipts',
+  async (dirty) => {
+    const file = join(out, 'build-info.json');
+    const info = JSON.parse(await readFile(file, 'utf8'));
+    info.dirty = dirty;
+    info.gitSha = 'd'.repeat(40);
+    await writeFile(file, JSON.stringify(info));
+    const h = harness();
+    expect((await deploy(options(h))).exitCode).toBe(0);
+    expect((await store.read())!.deployment!.attempt.build_info).toEqual(info);
+  },
+);
+
+it.each(['SENTINEL', 1, {}, []])(
+  'rejects invalid dirty provenance (%j) before provider requests',
+  async (dirty) => {
+    const file = join(out, 'build-info.json');
+    const info = JSON.parse(await readFile(file, 'utf8'));
+    info.dirty = dirty;
+    await writeFile(file, JSON.stringify(info));
+    const h = harness();
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('invalid_input');
+    expect(h.calls).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain('SENTINEL');
   },
 );

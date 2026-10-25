@@ -96,6 +96,7 @@ export interface NewSource {
       }
     | null;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
+  readonly audit: AuditEvent;
 }
 
 export interface SourceChanges {
@@ -136,6 +137,8 @@ export interface SourceUpdate extends SourceTarget {
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
   readonly preparedCredential?: { readonly id: string; readonly statement: Statement };
+  /** Staged in order with the update: `source.update`, `source.credential_set`, or both. */
+  readonly audit: readonly [AuditEvent, ...AuditEvent[]];
 }
 
 interface PollValidators {
@@ -158,6 +161,14 @@ export type PollOutcome =
  * re-read. `conflict` also covers a failure that could not be classified.
  */
 export interface SourceRepository {
+  syncNow(
+    ctx: OrgContext,
+    fence: MutationFence,
+    input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
+  ): Promise<
+    'requested' | 'source_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
+  >;
+
   acceptRemoval(
     ctx: OrgContext,
     fence: MutationFence,
@@ -223,7 +234,7 @@ export interface SourceRepository {
   resume(
     ctx: OrgContext,
     fence: MutationFence,
-    input: SourceTarget,
+    input: SourceTarget & { readonly audit: AuditEvent },
   ): Promise<
     | 'resumed'
     | 'activation_requires_registered_names'
@@ -264,6 +275,13 @@ export interface SourceRepository {
    * it still equals `expectedNextPollAt`, so a finished sync that already wrote the real value wins.
    */
   deferPoll(ctx: OrgContext, id: string, expectedNextPollAt: string): Promise<boolean>;
+  /**
+   * Sets `last_error = 'credential_unavailable'` on one organization source only while it holds
+   * null or a transient code (`CREDENTIAL_UNAVAILABLE_REPLACES`), so repeated callers change the row
+   * at most once per state change and specific codes are kept. Leaves status, failure counters and
+   * poll timers alone.
+   */
+  markCredentialUnavailable(ctx: OrgContext, id: string): Promise<void>;
   /** `stale` when the job guard no longer holds; nothing is written then. */
   pollState(
     ctx: OrgContext,

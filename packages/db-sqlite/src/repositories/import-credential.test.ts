@@ -161,6 +161,7 @@ describe.each(['sqlite', 'd1'])('import credentials (%s)', (driver) => {
   let beforeBatch: (() => Promise<void>) | undefined;
   let indeterminate: boolean;
   let blobCalls: { org: OrgContext; key: string }[];
+  let blobMissing: boolean;
   beforeEach(async () => {
     now = new Date().toISOString();
     const until = new Date(Date.now() + 3600000).toISOString();
@@ -189,6 +190,7 @@ describe.each(['sqlite', 'd1'])('import credentials (%s)', (driver) => {
     reads = [];
     batches = [];
     blobCalls = [];
+    blobMissing = false;
     beforeBatch = undefined;
     indeterminate = false;
     const recording: SqlExecutor = {
@@ -211,6 +213,7 @@ describe.each(['sqlite', 'd1'])('import credentials (%s)', (driver) => {
       blobs: {
         async get(org, key) {
           blobCalls.push({ org, key });
+          if (blobMissing) return null;
           return {
             info: {
               generation: '',
@@ -547,5 +550,33 @@ describe.each(['sqlite', 'd1'])('import credentials (%s)', (driver) => {
       reason: 'indeterminate',
     });
     expect(reads).toEqual([]);
+  });
+  it('reports bound imported sources and the stored manifest of an own run only', async () => {
+    expect(await store.bindings(ctx, 'run')).toEqual({ manifest: '{}', bound: [] });
+    expect(blobCalls).toEqual([{ org: ctx, key: sha }]);
+    expect((await store.setCredential(ctx, fence, input)).ok).toBe(true);
+    expect(await store.bindings(ctx, 'run')).toEqual({ manifest: '{}', bound: ['external'] });
+    await executor.batch([stmt("UPDATE import_ref SET rolled_back_at = ? WHERE id = 'ref'", now)]);
+    expect(await store.bindings(ctx, 'run')).toEqual({ manifest: '{}', bound: [] });
+  });
+  it('reports a stored manifest missing from the blob store as unavailable', async () => {
+    blobMissing = true;
+    expect(await store.bindings(ctx, 'run')).toBe('unavailable');
+  });
+  it('hides absent and foreign runs from binding status without reading a manifest', async () => {
+    expect(await store.bindings(ctx, 'foreign')).toBeNull();
+    expect(await store.bindings(ctx, 'absent')).toBeNull();
+    expect(await store.bindings(foreign, 'run')).toBeNull();
+    expect(blobCalls).toEqual([]);
+  });
+  it('reports a run without a stored manifest without reading a blob', async () => {
+    await executor.batch([
+      stmt(
+        "INSERT INTO import_run (id, org_id, source_system) VALUES ('bare', ?, 'test')",
+        ctx.orgId,
+      ),
+    ]);
+    expect(await store.bindings(ctx, 'bare')).toEqual({ manifest: null, bound: [] });
+    expect(blobCalls).toEqual([]);
   });
 });

@@ -10,8 +10,8 @@ import { CsrfError, assertSameOrigin } from './csrf.js';
 import type { LoginOutcome } from './identity-login.js';
 import { clearLoginState, openLoginState, safeReturnTo, sealLoginState } from './login-state.js';
 import type { LoginState } from './login-state.js';
-import { sessionMetaOf } from './session.js';
-import type { AuthenticatedSession, SessionMeta, SessionService } from './session.js';
+import { authCallMetaOf, sessionMetaOf } from './session.js';
+import type { AuthCallMeta, AuthenticatedSession, SessionMeta, SessionService } from './session.js';
 import type { OrgContext } from '../db/port.js';
 import type { SessionRepository } from '../db/sessions.js';
 import type { Clock } from '../ids.js';
@@ -52,6 +52,7 @@ export interface SsoRouteDeps {
     provider: IdentityProvider,
     identity: VerifiedIdentity,
     state: LoginState,
+    meta: AuthCallMeta,
   ) => Promise<ReauthOutcome>;
   readonly stateCipher: SecretCipher;
   readonly clock: Clock;
@@ -316,7 +317,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       orgOf(rc),
       provider,
       identity,
-      await sessionMetaOf(rc.request, deps.clientIp),
+      await sessionMetaOf(rc.request, rc.requestId, deps.clientIp),
     );
     if (!outcome.ok) {
       const reason: unknown = outcome.reason;
@@ -494,7 +495,14 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     if (state.purpose === 'login' || session === null) {
       return completeLogin(rc, provider, verified.identity, state.returnTo, cleared);
     }
-    const outcome: unknown = await deps.reauth(org, session, provider, verified.identity, state);
+    const outcome: unknown = await deps.reauth(
+      org,
+      session,
+      provider,
+      verified.identity,
+      state,
+      authCallMetaOf(rc.request, rc.requestId, deps.clientIp),
+    );
     if (!isRecord(outcome) || outcome['ok'] !== true) {
       const reason = isRecord(outcome)
         ? knownReason(outcome['reason'], REAUTH_REFUSALS, 'reauth_refused')
@@ -538,7 +546,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       throw error;
     }
     const org = orgOf(rc);
-    const session = await sessions.authenticate(org, rc.request);
+    const session = await sessions.authenticate(org, rc.request, { touch: false });
     if (session === null) {
       return withCookies(
         envelopeResponse(401, 'unauthorized', 'Unauthorized', rc.requestId),
@@ -551,7 +559,11 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       if (error instanceof CsrfError) return logoutRefused(rc, error);
       throw error;
     }
-    const cookies = await sessions.logout(org, rc.request);
+    const cookies = await sessions.logout(
+      org,
+      rc.request,
+      authCallMetaOf(rc.request, rc.requestId, deps.clientIp),
+    );
     return withCookies(
       new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } }),
       cookies,

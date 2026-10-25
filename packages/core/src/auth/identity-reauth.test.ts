@@ -6,6 +6,7 @@ import type {
   ReauthRefusal,
   ReauthResult,
 } from './identity-reauth.js';
+import type { AuditEvent } from '../audit/actions.js';
 import { SESSION_IDLE_MS } from './session.js';
 import type { AuthenticatedSession } from './session.js';
 import { orgContext } from '../db/port.js';
@@ -110,7 +111,10 @@ function run(
   identity: VerifiedIdentity,
   loginState: ReauthLoginState = loginStateOf(),
 ): Promise<ReauthResult> {
-  return reauthenticate(deps, ctx, session, provider, identity, loginState);
+  return reauthenticate(deps, ctx, session, provider, identity, loginState, {
+    requestId: '01JA0000000000000000000001',
+    ip: null,
+  });
 }
 
 function resolving(plugin: string, handler: ResolveHandler): ResolveHook {
@@ -118,6 +122,7 @@ function resolving(plugin: string, handler: ResolveHandler): ResolveHook {
 }
 
 interface MarkInput {
+  readonly audit: AuditEvent;
   readonly sessionId: string;
   readonly identityId: string | null;
   readonly authTime: string;
@@ -194,6 +199,68 @@ function setup(options: Setup = {}) {
 }
 
 describe('reauthenticateWithIdentity', () => {
+  it('passes a session.reauth audit with caller metadata to the repository', async () => {
+    const fixture = setup();
+    const identity = verified();
+    const provider = providerOf();
+    expect(
+      await reauthenticate(fixture.deps, CTX, sessionOf(), provider, identity, loginStateOf(), {
+        requestId: '01JA0000000000000000000001',
+        ip: '203.0.113.7',
+      }),
+    ).toEqual({ ok: true });
+    expect(fixture.mark).toHaveBeenCalledWith(
+      CTX,
+      expect.objectContaining({
+        audit: expect.objectContaining({
+          action: 'session.reauth',
+          occurredAt: NOW.toISOString(),
+          actor: { type: 'user', id: USER_ID },
+          target: { type: 'session', id: SESSION_ID },
+          tokenSelector: null,
+          sourceIp: '203.0.113.7',
+        }),
+      }),
+    );
+    const audit = fixture.mark.mock.calls[0]![1].audit;
+    expect(JSON.parse(audit.payloadJson)).toEqual({
+      op_id: expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/),
+      request_id: '01JA0000000000000000000001',
+    });
+    for (const privateValue of [
+      identity.subject,
+      provider.trustAnchor.slice('oidc:'.length),
+      identity.email,
+    ]) {
+      expect(audit.payloadJson).not.toContain(privateValue);
+    }
+  });
+
+  it.each(['1.2', ':::'])('records null for a non-literal client IP %s', async (ip) => {
+    const fixture = setup();
+    await expect(
+      reauthenticate(fixture.deps, CTX, sessionOf(), providerOf(), verified(), loginStateOf(), {
+        requestId: '01JA0000000000000000000001',
+        ip,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(fixture.mark).toHaveBeenCalledExactlyOnceWith(
+      CTX,
+      expect.objectContaining({ audit: expect.objectContaining({ sourceIp: null }) }),
+    );
+  });
+
+  it('rejects invalid audit metadata before marking without echoing request data', async () => {
+    const fixture = setup();
+    await expect(
+      reauthenticate(fixture.deps, CTX, sessionOf(), providerOf(), verified(), loginStateOf(), {
+        requestId: 'private-request-data',
+        ip: null,
+      }),
+    ).rejects.toThrow(new TypeError('Invalid session reauthentication audit event'));
+    expect(fixture.mark).not.toHaveBeenCalled();
+  });
+
   it('requires the user repository binding read capability', () => {
     expectTypeOf<Omit<IdentityReauthDeps, 'users'>>().not.toExtend<IdentityReauthDeps>();
     expectTypeOf<IdentityReauthDeps['users']>().toExtend<Pick<UserRepository, 'lookupForLogin'>>();
@@ -378,6 +445,7 @@ describe('reauthenticateWithIdentity', () => {
       expect(fixture.getIdentity).toHaveBeenCalledWith(CTX, IDENTITY_ID);
       expect(fixture.mark).toHaveBeenCalledTimes(1);
       expect(fixture.mark).toHaveBeenCalledWith(CTX, {
+        audit: expect.objectContaining({ action: 'session.reauth' }),
         sessionId: SESSION_ID,
         identityId: IDENTITY_ID,
         authTime: iso(-120_000),

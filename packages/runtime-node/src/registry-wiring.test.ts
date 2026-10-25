@@ -1,6 +1,6 @@
 import { createLocalLoginSeed } from './testing/local-login.js';
 import { createHash } from 'node:crypto';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -535,6 +535,114 @@ describe('node registry wiring', () => {
     });
   });
 
+  describe('over-cap archive', () => {
+    const BLOB_CAP = 1_048_576;
+    const POLICY_CAP = 64 * 1024 * 1024;
+
+    async function storedFiles(): Promise<string[]> {
+      const entries = await readdir(join(directory, 'blobs'), {
+        recursive: true,
+        withFileTypes: true,
+      }).catch(() => []);
+      return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+    }
+
+    it.each([
+      ['over the blob store cap', 'store'],
+      ['declared over the policy fetch cap', 'declared'],
+    ] as const)(
+      'refuses a Composer dist %s with 502, quarantines the version and stores nothing',
+      async (_label, mode) => {
+        const remote = upstream();
+        const archives: string[] = [];
+        const transport: FetchLike = async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          if (url.hostname !== 'codeload.github.com') return remote.transport(input, init);
+          archives.push(url.href);
+          return mode === 'store'
+            ? new Response(new Uint8Array(BLOB_CAP + 1).fill(7), {
+                headers: { 'content-type': 'application/zip' },
+              })
+            : new Response(ZIP, {
+                headers: {
+                  'content-type': 'application/zip',
+                  'content-length': String(POLICY_CAP + 1),
+                },
+              });
+        };
+        await boot(transport, { level: 'info' });
+        const metadata = await get('/alpha/p2/acme/lib.json');
+        const body = (await metadata.json()) as {
+          packages: Record<string, { dist: { url: string } }[]>;
+        };
+        const path = brokerPath(body.packages['acme/lib']![0]!.dist.url);
+        const before = logged.length;
+
+        const response = await get(path);
+        expect(response.status).toBe(502);
+        expect(await response.json()).toMatchObject({ error: { code: 'bad_gateway' } });
+        expect(
+          await sql<{ status: string; blob_id: string | null }>(
+            'SELECT status, blob_id FROM version WHERE org_id = ?',
+            [orgId],
+          ),
+        ).toEqual([{ status: 'quarantined', blob_id: null }]);
+        expect(await sql('SELECT id FROM blob WHERE org_id = ?', [orgId])).toEqual([]);
+        expect(await storedFiles()).toEqual([]);
+        const events = logged
+          .slice(before)
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .filter((entry) => entry['event'] === 'dist.quarantined');
+        expect(events).toEqual([
+          expect.objectContaining({
+            level: 'warn',
+            reason_code: 'archive_too_large',
+            source_id: sources.composer,
+            package_key: 'acme/lib',
+          }),
+        ]);
+
+        const fetched = archives.length;
+        expect((await get(path)).status).not.toBe(200);
+        expect(archives).toHaveLength(fetched);
+      },
+    );
+  });
+
+  describe('upstream error with an over-cap declared length', () => {
+    it.each([404, 503])(
+      'keeps the version active and logs no quarantine when upstream answers %s',
+      async (status) => {
+        const remote = upstream();
+        const transport: FetchLike = async (input, init) => {
+          const url = new URL(new Request(input, init).url);
+          if (url.hostname !== 'codeload.github.com') return remote.transport(input, init);
+          return new Response('error page', {
+            status,
+            headers: { 'content-length': String(64 * 1024 * 1024 + 1) },
+          });
+        };
+        await boot(transport, { level: 'info' });
+        const metadata = await get('/alpha/p2/acme/lib.json');
+        const body = (await metadata.json()) as {
+          packages: Record<string, { dist: { url: string } }[]>;
+        };
+        const before = logged.length;
+        const response = await get(brokerPath(body.packages['acme/lib']![0]!.dist.url));
+        expect(response.status).not.toBe(200);
+        expect(
+          await sql<{ status: string }>('SELECT status FROM version WHERE org_id = ?', [orgId]),
+        ).toEqual([{ status: 'active' }]);
+        expect(
+          logged
+            .slice(before)
+            .map((line) => JSON.parse(line) as Record<string, unknown>)
+            .filter((entry) => entry['event'] === 'dist.quarantined'),
+        ).toEqual([]);
+      },
+    );
+  });
+
   describe('credentialed sources', () => {
     async function scopedSource(credentialId: string | null): Promise<void> {
       const scoped = ulid();
@@ -587,9 +695,39 @@ describe('node registry wiring', () => {
       await boot(remote.transport);
 
       const response = await get('/alpha/npm/@acme%2Fwidget');
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('60');
       expect(await response.text()).not.toContain('tok-registry-secret-1');
       expect(remote.urls.some((url) => url.startsWith('https://npm.acme.test/'))).toBe(false);
+      expect(logged.join('\n')).not.toContain('tok-registry-secret-1');
+    });
+
+    it('records credential_unavailable once on the source and logs the reason code', async () => {
+      const remote = upstream();
+      await scopedSource(await sealed(OTHER_KEY));
+      await boot(remote.transport);
+      const state = () =>
+        sql<{ last_error: string | null; status: string; consecutive_failures: number }>(
+          "SELECT last_error, status, consecutive_failures FROM source WHERE org_id = ? AND name = 'acme-npm'",
+          [orgId],
+        );
+      const before = (await state())[0]!;
+      await sql('CREATE TEMP TABLE last_error_writes (n INTEGER)');
+      await sql(
+        'CREATE TEMP TRIGGER count_last_error AFTER UPDATE OF last_error ON source BEGIN INSERT INTO last_error_writes VALUES (1); END',
+      );
+      for (let i = 0; i < 4; i += 1)
+        expect((await get('/alpha/npm/@acme%2Fwidget')).status).toBe(503);
+      expect(await sql('SELECT count(*) AS n FROM last_error_writes')).toEqual([{ n: 1 }]);
+      expect(await state()).toEqual([{ ...before, last_error: 'credential_unavailable' }]);
+      const events = logged.map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: 'source.unavailable',
+          reason_code: 'credential_unavailable',
+        }),
+      );
+      expect(logged.join('\n')).not.toContain('npm.acme.test');
       expect(logged.join('\n')).not.toContain('tok-registry-secret-1');
     });
 

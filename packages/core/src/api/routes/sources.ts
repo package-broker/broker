@@ -176,18 +176,28 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
     orgPause,
     orgResume,
     orgCredential,
+    orgSync,
     projectList,
     projectCreate,
     projectUpdate,
     projectPause,
     projectResume,
     projectCredential,
+    projectSync,
   ] = SOURCE_API_SPECS;
   const groups = [
-    [orgList, orgCreate, orgUpdate, orgPause, orgResume, orgCredential],
-    [projectList, projectCreate, projectUpdate, projectPause, projectResume, projectCredential],
+    [orgList, orgCreate, orgUpdate, orgPause, orgResume, orgCredential, orgSync],
+    [
+      projectList,
+      projectCreate,
+      projectUpdate,
+      projectPause,
+      projectResume,
+      projectCredential,
+      projectSync,
+    ],
   ] as const;
-  const routes = groups.flatMap(([list, create, update, pause, resume, credential]) => {
+  const routes = groups.flatMap(([list, create, update, pause, resume, credential, sync]) => {
     return [
       apiRoute(list, async ({ ctx, query }) => {
         const org = ctx.org;
@@ -234,15 +244,21 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
       }),
       apiRoute(create, async ({ ctx, body }) => {
         const c = writeContext(ctx, deps);
-        const result = await deps.service.create(c.org, c.actor, c.fence, {
-          name: body.name,
-          ecosystem: body.ecosystem,
-          type: body.type,
-          ...changes(body),
-          projectId: ctx.projectId,
-          url: body.url ?? null,
-          configJson: JSON.stringify(body.config ?? {}),
-        });
+        const result = await deps.service.create(
+          c.org,
+          c.actor,
+          c.fence,
+          {
+            name: body.name,
+            ecosystem: body.ecosystem,
+            type: body.type,
+            ...changes(body),
+            projectId: ctx.projectId,
+            url: body.url ?? null,
+            configJson: JSON.stringify(body.config ?? {}),
+          },
+          c.call,
+        );
         return result.ok ? { status: 201, body: { id: result.value.id } } : failure(result);
       }),
       apiRoute(update, async ({ ctx, params, body }) => {
@@ -255,6 +271,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
           c.fence,
           params.source,
           changes(body),
+          c.call,
         );
         return result.ok ? { status: 204 } : failure(result);
       }),
@@ -269,8 +286,15 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
         const denied = await mutationPreflight(ctx, params.source);
         if (denied !== null) return denied;
         const c = writeContext(ctx, deps);
-        const result = await deps.service.resume(c.org, c.actor, c.fence, params.source);
+        const result = await deps.service.resume(c.org, c.actor, c.fence, params.source, c.call);
         return result.ok ? { status: 204 } : failure(result);
+      }),
+      apiRoute(sync, async ({ ctx, params }) => {
+        const denied = await mutationPreflight(ctx, params.source);
+        if (denied !== null) return denied;
+        const c = writeContext(ctx, deps);
+        const result = await deps.service.syncNow(c.org, c.actor, c.fence, params.source, c.call);
+        return result.ok ? { status: 202 } : failure(result);
       }),
       apiRoute(credential, async ({ ctx, params, body }) => {
         const denied = await mutationPreflight(ctx, params.source);
@@ -294,9 +318,14 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
             details: [{ path: '/body/material', code: 'invalid' }],
           };
         }
-        const result = await deps.service.update(c.org, c.actor, c.fence, params.source, {
-          credential: { kind: body.kind, plaintext: body.material },
-        });
+        const result = await deps.service.update(
+          c.org,
+          c.actor,
+          c.fence,
+          params.source,
+          { credential: { kind: body.kind, plaintext: body.material } },
+          c.call,
+        );
         return result.ok ? { status: 204 } : failure(result);
       }),
     ];

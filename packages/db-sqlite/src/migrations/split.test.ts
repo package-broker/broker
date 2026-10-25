@@ -76,18 +76,18 @@ test.each(forbidden)('rejects %s with its index', (_, statement) => {
   }
 });
 
-test.each([
-  ['CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1', 0],
-  ['CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1', 0],
-])('rejects %s at index %i', (statement, index) => {
-  try {
-    splitStatements(statement);
-    expect.unreachable('splitStatements should have thrown');
-  } catch (error) {
-    expect(error).toBeInstanceOf(MigrationSyntaxError);
-    expect((error as MigrationSyntaxError).statementIndex).toBe(index);
-  }
-});
+test.each([['CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1', 0]])(
+  'rejects %s at index %i',
+  (statement, index) => {
+    try {
+      splitStatements(statement);
+      expect.unreachable('splitStatements should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(MigrationSyntaxError);
+      expect((error as MigrationSyntaxError).statementIndex).toBe(index);
+    }
+  },
+);
 
 test('accepts exactly 100 000 UTF-8 bytes', () => {
   const statement = 'a'.repeat(100_000);
@@ -150,4 +150,59 @@ test.each([
   'PRAGMA writable_schema = ON',
 ])('rejects migration PRAGMA %s', (statement) => {
   expect(() => splitStatements(statement)).toThrow(MigrationSyntaxError);
+});
+
+test('keeps a complete trigger and its body semicolons in one statement', () => {
+  const trigger = 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; SELECT 2; END';
+  expect(splitStatements(`${trigger}; SELECT 3;`)).toEqual([trigger, 'SELECT 3']);
+});
+
+test.each([
+  'CREATE TRIGGER tr AFTER UPDATE OF begin, end ON t BEGIN SELECT 1; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t WHEN begin BEGIN SELECT 1; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW WHEN begin = 1 BEGIN SELECT 1; END',
+  'CREATE TRIGGER tr AFTER INSERT ON begin BEGIN SELECT 1; END',
+  'CREATE TRIGGER tr AFTER INSERT ON main.begin WHEN t.begin + begin > 0 BEGIN SELECT 1; END',
+  'CREATE TRIGGER tr AFTER INSERT ON "begin" WHEN (begin OR end) BEGIN SELECT 1; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t WHEN CASE WHEN begin THEN end ELSE 0 END BEGIN SELECT 1; END',
+])('recognises the trigger body after header identifiers: %s', (trigger) => {
+  expect(splitStatements(`${trigger}; SELECT 2;`)).toEqual([trigger, 'SELECT 2']);
+});
+
+test('ignores END and semicolons in trigger strings, identifiers and comments', () => {
+  const trigger = `CREATE /* header */ TRIGGER tr AFTER INSERT ON t BEGIN
+    SELECT 'END; it''s text', "END;", [END;]; -- END;
+    /* END; */ SELECT 2;
+  END`;
+  const statements = splitStatements(`${trigger}; SELECT 3;`);
+  expect(statements).toHaveLength(2);
+  expect(statements[0]).toContain(`SELECT 'END; it''s text', "END;", [END;];`);
+  expect(statements[0]).toContain('SELECT 2;');
+  expect(statements[1]).toBe('SELECT 3');
+});
+
+test('keeps CASE END inside a trigger body', () => {
+  const trigger =
+    'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN 1 THEN 2 END; SELECT 3; END';
+  expect(splitStatements(trigger)).toEqual([trigger]);
+});
+
+test.each([
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1;',
+  "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 'END;'; /* END */",
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN 1 THEN 2 END;',
+])('rejects an unterminated trigger with its statement index: %s', (trigger) => {
+  expect(() => splitStatements(`SELECT 1; ${trigger}`)).toThrow(
+    expect.objectContaining({ name: 'MigrationSyntaxError', statementIndex: 1 }),
+  );
+});
+
+test('applies the byte cap to the whole trigger body', () => {
+  const trigger = `CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT '${'€'.repeat(33_334)}'; END;`;
+  expect(() => splitStatements(trigger)).toThrow(/statement 0 exceeds 100000 bytes/);
+});
+
+test('does not close a trigger on an unquoted END column', () => {
+  const trigger = 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; SELECT 2; END';
+  expect(splitStatements(trigger)).toEqual([trigger]);
 });

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readFile, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { createOtlpExporter } from '@package-broker/core/platform/otlp';
 import { parseUiManifest } from '@package-broker/core/platform/ui-manifest';
 import {
@@ -9,6 +9,8 @@ import {
 } from '@package-broker/core/platform/port-config';
 import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
+import { normalizeQueueConsumer } from './queue-consumer.js';
+import { d1BindingId, workerSettingsDifferences } from './worker-settings.js';
 import {
   CloudflareApi,
   CloudflareError,
@@ -47,8 +49,11 @@ const safeId = (v: unknown): v is string =>
 const invalid = (): never => {
   throw new CloudflareError('invalid_input', 2, false, 'deploy');
 };
-const conflict = (): never => {
-  throw new CloudflareError('configuration_conflict', 8, false, 'deploy');
+const conflict = (field: string, ...fields: string[]): never => {
+  throw new CloudflareError('configuration_conflict', 8, false, 'deploy', null, null, null, null, [
+    field,
+    ...fields,
+  ]);
 };
 const unknown = (): never => {
   throw new CloudflareError('outcome_unknown', 6, false, 'deploy');
@@ -201,11 +206,13 @@ export async function validateDeploymentArtifact(out: string) {
     const manifestBytes = await read('assets/manifest.json');
     const ui = parseUiManifest(manifestBytes.toString('utf8'));
     if (Object.hasOwn(ui.files, 'manifest.json')) return invalid();
-    const assets = [{ name: 'manifest.json', content: manifestBytes }];
+    const assets = [
+      { name: 'manifest.json', content: manifestBytes, contentType: 'application/json' },
+    ];
     for (const name of Object.keys(ui.files).sort()) {
       const content = await read(`assets/${name}`);
       if (content.length !== ui.files[name]!.bytes) return invalid();
-      assets.push({ name, content });
+      assets.push({ name, content, contentType: ui.files[name]!.contentType });
     }
     // Asset staging hashes bytes, including non-UTF8 files.
     const byteHash = (b: Buffer) => createHash('sha256').update(b).digest('hex');
@@ -227,11 +234,10 @@ export async function validateDeploymentArtifact(out: string) {
   }
 }
 
-/** All wire schemas below are fixture contracts, UNVERIFIED until T830.
- * In particular, no guessed native asset hash or secret inheritance is enabled by default.
- */
+/** Provider facilities must be explicitly supported before deploy enables them. */
 export interface DeployProviderContract {
   versionsCreateScript: boolean;
+  createScript?: (api: CloudflareApi, script: string, form: FormData) => Promise<void>;
   domainZone?: (api: CloudflareApi, hostname: string) => Promise<string>;
   secretInheritance: boolean;
   assetHash?: (bytes: Buffer, name: string) => string;
@@ -245,6 +251,23 @@ export const unverifiedDeployContract: DeployProviderContract = {
   versionsCreateScript: false,
   secretInheritance: false,
 };
+/** Cloudflare's direct-upload example hashes base64 bytes plus the extension without its dot. */
+export function cloudflareAssetHash(bytes: Buffer, name: string): string {
+  return createHash('sha256')
+    .update(bytes.toString('base64') + extname(name).substring(1))
+    .digest('hex')
+    .slice(0, 32);
+}
+export const cloudflareDeployContract: DeployProviderContract = {
+  versionsCreateScript: false,
+  secretInheritance: true,
+  assetHash: cloudflareAssetHash,
+  createScript: async (api, script, form) => {
+    const result = object((await api.request(`/workers/scripts/${script}`, 'PUT', form)).result);
+    if (result.id !== script) return unknown();
+  },
+};
+
 export interface DeployOptions {
   workerName: string;
   configPath?: string;
@@ -275,13 +298,14 @@ interface ActiveDeployment {
   id: string | null;
   versions: Distribution[];
 }
-async function active(api: CloudflareApi, base: string): Promise<ActiveDeployment> {
+export async function active(api: CloudflareApi, base: string): Promise<ActiveDeployment> {
   const raw = object((await api.request(`${base}/deployments`)).result);
-  // The adapter requires an explicit active deployment, never the first/newest version.
-  if (raw.active === null) return { id: null, versions: [] };
-  const d = object(raw.active);
+  // Cloudflare documents deployments[0] as the deployment actively serving traffic.
+  if (!Array.isArray(raw.deployments)) return conflict('deployment');
+  if (!raw.deployments.length) return { id: null, versions: [] };
+  const d = object(raw.deployments[0]);
   if (!safeId(d.id) || !Array.isArray(d.versions) || d.versions.length < 1 || d.versions.length > 2)
-    return conflict();
+    return conflict('deployment');
   const versions = d.versions.map((v) => {
     const x = object(v);
     if (
@@ -291,14 +315,14 @@ async function active(api: CloudflareApi, base: string): Promise<ActiveDeploymen
       x.percentage <= 0 ||
       x.percentage > 100
     )
-      return conflict();
+      return conflict('deployment');
     return { version_id: x.version_id, percentage: x.percentage };
   });
   if (
     versions.reduce((n, v) => n + v.percentage, 0) !== 100 ||
     new Set(versions.map((v) => v.version_id)).size !== versions.length
   )
-    return conflict();
+    return conflict('deployment');
   return { id: d.id, versions: versions.sort((a, b) => a.version_id.localeCompare(b.version_id)) };
 }
 function distribution(a: DeploymentAttempt): Distribution[] {
@@ -338,6 +362,100 @@ function secretNames(o: DeployOptions): string[] {
     return invalid();
   return names.sort();
 }
+function bindingField(b: Record<string, unknown>, field: string): string {
+  const type = ['d1', 'plain_text', 'r2_bucket', 'queue', 'analytics_engine', 'assets'].includes(
+    String(b.type),
+  )
+    ? String(b.type)
+    : 'unknown';
+  const name =
+    typeof b.name === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(b.name) ? b.name : 'unknown';
+  return `binding:${type}:${name}:${field}`;
+}
+function normalizedBinding(b: Record<string, unknown>): Record<string, unknown> {
+  if (b.type === 'd1') {
+    if (b.database_id !== undefined && b.id !== undefined && b.database_id !== b.id)
+      return conflict('binding:d1:DB:id');
+    const normalized: Record<string, unknown> = { ...b, id: d1BindingId(b) };
+    delete normalized.database_id;
+    return normalized;
+  }
+  if (b.type === 'r2_bucket' && b.jurisdiction === undefined)
+    return { ...b, jurisdiction: 'default' };
+  return b;
+}
+function bindingDifferences(
+  actual: Record<string, unknown>[],
+  expected: Record<string, unknown>[],
+): string[] {
+  const fields: string[] = [];
+  for (const b of expected) {
+    const matches = actual.filter((x) => x.name === b.name);
+    if (matches.length !== 1) {
+      fields.push(bindingField(b, 'presence'));
+      continue;
+    }
+    const x = normalizedBinding(matches[0]!);
+    for (const key of Object.keys(b)) if (!equal(x[key], b[key])) fields.push(bindingField(b, key));
+    if (Object.keys(x).some((key) => !Object.hasOwn(b, key)))
+      fields.push(bindingField(b, 'configuration'));
+  }
+  if (actual.some((x) => !expected.some((b) => b.name === x.name)))
+    fields.push('bindings:unexpected');
+  return fields;
+}
+function verifyAssets(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return conflict('assets:config');
+  const config = value as Record<string, unknown>;
+  for (const [key, expected] of Object.entries(ASSET_CONFIG)) {
+    const actual = key === 'run_worker_first' && equal(config[key], ['/*']) ? true : config[key];
+    if (!equal(actual, expected)) return conflict(`assets:${key}`);
+  }
+  if (config.base_path !== undefined && config.base_path !== '/')
+    return conflict('assets:base_path');
+  if (Object.keys(config).some((k) => !Object.hasOwn(ASSET_CONFIG, k) && k !== 'base_path'))
+    return conflict('assets:config');
+}
+async function fullVersion(api: CloudflareApi, base: string, id: string) {
+  const script = base.split('/').at(-1);
+  const workers = (await api.snapshot('/workers/scripts')).filter((w) => w.id === script);
+  if (workers.length !== 1) return conflict('worker:identity');
+  // The live scripts listing may carry no worker_id; /workers/workers/{id} also accepts the name.
+  const listed = workers[0]!.worker_id;
+  const workerId = typeof listed === 'string' && listed !== '' ? listed : script;
+  if (!safeId(workerId)) return conflict('worker:identity');
+  const path = `/workers/workers/${workerId}`;
+  const v = object((await api.request(`${path}/versions/${id}`)).result);
+  if (v.id !== id) return conflict('version_id');
+  return v;
+}
+async function completeR2Bindings(
+  api: CloudflareApi,
+  base: string,
+  raw: Record<string, unknown>[],
+  j: Inventory,
+) {
+  if (
+    j.identity.jurisdiction === 'default' ||
+    !raw.some((b) => b.type === 'r2_bucket' && b.jurisdiction === undefined)
+  )
+    return raw;
+  // An omitted jurisdiction is not evidence of an EU binding. Read the exact active version.
+  const current = await active(api, base);
+  if (current.versions.length !== 1 || current.versions[0]!.percentage !== 100)
+    return conflict('r2:jurisdiction');
+  const full = await fullVersion(api, base, current.versions[0]!.version_id);
+  if (!Array.isArray(full.bindings)) return conflict('r2:jurisdiction');
+  return raw.map((b) => {
+    if (b.type !== 'r2_bucket' || b.jurisdiction !== undefined) return b;
+    const matches = (full.bindings as unknown[])
+      .map(object)
+      .filter((x) => x.type === b.type && x.name === b.name && x.bucket_name === b.bucket_name);
+    if (matches.length !== 1 || matches[0]!.jurisdiction !== j.identity.jurisdiction)
+      return conflict('r2:jurisdiction');
+    return { ...b, jurisdiction: matches[0]!.jurisdiction };
+  });
+}
 async function ownedWorkerSettings(
   api: CloudflareApi,
   base: string,
@@ -351,23 +469,36 @@ async function ownedWorkerSettings(
     !Array.isArray(s.bindings)
   )
     throw new CloudflareError('ownership_conflict', 8, false, 'deploy');
-  for (const b of s.bindings.map(object)) {
-    if (b.type === 'secret_text' && (Object.hasOwn(b, 'text') || Object.hasOwn(b, 'value')))
-      return conflict();
-    if (b.type === 'd1' && (b.name !== 'DB' || b.id !== j.resources.d1?.id)) return conflict();
+  s.bindings = await completeR2Bindings(api, base, s.bindings.map(object), j);
+  for (const raw of s.bindings as Record<string, unknown>[]) {
     if (
-      b.type === 'r2_bucket' &&
-      (b.bucket_name !== j.resources.r2?.name || b.jurisdiction !== j.identity.jurisdiction)
+      raw.type === 'd1' &&
+      raw.database_id !== undefined &&
+      raw.id !== undefined &&
+      raw.database_id !== raw.id
     )
-      return conflict();
-    if (b.type === 'queue' && b.queue_name !== j.resources.jobs?.name) return conflict();
+      return conflict('worker_settings:binding:DB:id');
+    const b = normalizedBinding(raw);
+    if (b.type === 'secret_text' && (Object.hasOwn(b, 'text') || Object.hasOwn(b, 'value')))
+      return conflict('worker_settings:bindings:secret_text');
+    if (b.type === 'd1') {
+      if (b.name !== 'DB') return conflict('worker_settings:binding:DB:presence');
+      if (b.id !== j.resources.d1?.id) return conflict('worker_settings:binding:DB:id');
+    }
+    if (b.type === 'r2_bucket') {
+      if (b.bucket_name !== j.resources.r2?.name) return conflict('worker_settings:r2:bucket_name');
+      if (b.jurisdiction !== j.identity.jurisdiction)
+        return conflict('worker_settings:r2:jurisdiction');
+    }
+    if (b.type === 'queue' && b.queue_name !== j.resources.jobs?.name)
+      return conflict('worker_settings:binding:JOBS:queue_name');
     if (b.type === 'analytics_engine' && b.dataset !== j.resources.analytics?.name)
-      return conflict();
+      return conflict('worker_settings:analytics_engine:dataset');
     if (
       b.name === 'DEPLOYMENT_ID' &&
       (b.type !== 'plain_text' || b.text !== j.identity.deployment_id)
     )
-      return conflict();
+      return conflict('worker_settings:binding:DEPLOYMENT_ID:text');
   }
   return s;
 }
@@ -392,7 +523,10 @@ async function liveResources(
     const remote = object(
       (
         await api.request(
-          `${path}/${r.id}${key === 'r2' ? `?jurisdiction=${j.identity.jurisdiction}` : ''}`,
+          `${path}/${r.id}`,
+          'GET',
+          undefined,
+          key === 'r2' ? { 'cf-r2-jurisdiction': j.identity.jurisdiction } : undefined,
         )
       ).result,
     );
@@ -400,11 +534,53 @@ async function liveResources(
       (key === 'r2' ? remote.name : (remote.uuid ?? remote.id ?? remote.queue_id)) !== r.id ||
       (key === 'jobs' || key === 'dlq' ? remote.queue_name : remote.name) !== r.name
     )
-      return conflict();
+      return conflict(`${key}:identity`);
     if ((key === 'r2' || key === 'd1') && remote.jurisdiction !== j.identity.jurisdiction)
       throw new CloudflareError('jurisdiction_conflict', 8);
   }
 }
+export async function deploymentDomain(
+  api: CloudflareApi,
+  script: string,
+  domain: string | undefined,
+): Promise<ManagedDomain | null> {
+  let foundDomain: ManagedDomain | null = null;
+  const domains = await api.snapshot('/workers/domains');
+  for (const d of domains) {
+    if (d.hostname === domain || d.service === script) {
+      if (
+        foundDomain ||
+        d.service !== script ||
+        d.hostname !== domain ||
+        d.environment !== 'production' ||
+        !safeId(d.id) ||
+        typeof d.zone_id !== 'string' ||
+        !/^[a-f0-9]{32}$/.test(d.zone_id)
+      )
+        return conflict('domain');
+      foundDomain = {
+        id: d.id,
+        zone_id: d.zone_id,
+        hostname: hostname(String(d.hostname)),
+        service: d.service,
+        environment: 'production',
+      };
+    }
+  }
+  return foundDomain;
+}
+
+export async function workersDevOrigin(api: CloudflareApi, script: string): Promise<string> {
+  const registration = await api.request('/workers/subdomain').catch((error: unknown) => {
+    if (error instanceof CloudflareError && error.status === 404) return { result: {} };
+    throw error;
+  });
+  const sub = object(registration.result).subdomain;
+  if (typeof sub !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(sub))
+    throw new CloudflareError('workers_dev_subdomain_missing', 2, false, 'deploy');
+  return `https://${script}.${sub}.workers.dev`;
+}
+
 async function readSettings(
   api: CloudflareApi,
   base: string,
@@ -425,43 +601,27 @@ async function readSettings(
       schedule.schedules.some((s) => object(s).cron !== '* * * * *') ||
       schedule.schedules.length > 1
     )
-      return conflict();
+      return conflict('schedules');
     schedules = schedule.schedules.map((s) => String(object(s).cron));
   }
   let consumer: ManagedSettings['consumer'] = null;
   if (j.resources.jobs?.id) {
     const consumers = await api.snapshot(`/queues/${j.resources.jobs.id}/consumers`);
-    if (consumers.length > 1) return conflict();
+    if (consumers.length > 1) return conflict('queue_consumer');
     if (
       j.resources.dlq?.id &&
       (await api.snapshot(`/queues/${j.resources.dlq.id}/consumers`)).length
     )
-      return conflict();
+      return conflict('queue_consumer');
     if (consumers[0]) {
-      const c = consumers[0],
-        settings = object(c.settings);
+      const c = normalizeQueueConsumer(consumers[0]);
       if (
-        c.type !== 'worker' ||
+        !c ||
         c.script_name !== j.identity.script_name ||
-        c.dead_letter_queue !== j.resources.dlq?.name ||
-        !safeId(c.consumer_id) ||
-        !['batch_size', 'max_wait_time_ms', 'max_retries', 'max_concurrency'].every(
-          (k) =>
-            typeof settings[k] === 'number' &&
-            Number.isSafeInteger(settings[k]) &&
-            (settings[k] as number) >= 0,
-        )
+        c.dead_letter_queue !== j.resources.dlq?.name
       )
-        return conflict();
-      consumer = {
-        consumer_id: c.consumer_id,
-        script_name: c.script_name,
-        batch_size: settings.batch_size as number,
-        max_wait_time_ms: settings.max_wait_time_ms as number,
-        max_retries: settings.max_retries as number,
-        max_concurrency: settings.max_concurrency as number,
-        dead_letter_queue: String(c.dead_letter_queue),
-      };
+        return conflict('queue_consumer');
+      consumer = c;
     }
   }
   const foundRoutes: ManagedRoute[] = [];
@@ -480,7 +640,7 @@ async function readSettings(
             );
           })
         )
-          return conflict();
+          return conflict('routes');
       }
       if (
         r.script === j.identity.script_name ||
@@ -492,34 +652,12 @@ async function readSettings(
           typeof r.pattern !== 'string' ||
           !/^[a-zA-Z0-9*./:-]{1,256}$/.test(r.pattern)
         )
-          return conflict();
+          return conflict('routes');
         foundRoutes.push({ id: r.id, zone_id: zone, pattern: r.pattern, script: r.script });
       }
     }
   }
-  let foundDomain: ManagedDomain | null = null;
-  const domains = await api.list('/workers/domains');
-  for (const d of domains) {
-    if (d.hostname === domain || d.service === j.identity.script_name) {
-      if (
-        foundDomain ||
-        d.service !== j.identity.script_name ||
-        d.hostname !== domain ||
-        d.environment !== 'production' ||
-        !safeId(d.id) ||
-        typeof d.zone_id !== 'string' ||
-        !/^[a-f0-9]{32}$/.test(d.zone_id)
-      )
-        return conflict();
-      foundDomain = {
-        id: d.id,
-        zone_id: d.zone_id,
-        hostname: hostname(String(d.hostname)),
-        service: d.service,
-        environment: 'production',
-      };
-    }
-  }
+  const foundDomain = await deploymentDomain(api, j.identity.script_name, domain);
   return {
     endpoints: policy,
     schedules,
@@ -533,14 +671,14 @@ async function zoneRoutes(api: CloudflareApi, zone: string): Promise<Record<stri
   const all: Record<string, unknown>[] = [];
   for (let page = 1; page <= 10000; page++) {
     const r = await api.requestZone(zone, `/workers/routes?page=${page}&per_page=100`);
-    if (!Array.isArray(r.result)) return conflict();
+    if (!Array.isArray(r.result)) return conflict('routes');
     all.push(...r.result.map(object));
     if (r.result_info?.total_pages === page || r.result_info?.total_count === all.length)
       return all;
     if (typeof r.result_info?.total_pages !== 'number' || r.result_info.total_pages < page)
-      return conflict();
+      return conflict('routes');
   }
-  return conflict();
+  return conflict('routes');
 }
 function bindings(j: Inventory, ports: PlatformPortConfig | null, url: string) {
   const b: Record<string, unknown>[] = [
@@ -575,20 +713,27 @@ async function uploadAssets(
   artifact: Awaited<ReturnType<typeof validateDeploymentArtifact>>,
   hash: NonNullable<DeployProviderContract['assetHash']>,
 ): Promise<string> {
-  const byHash = new Map<string, Buffer>();
+  const byHash = new Map<string, { content: Buffer; contentType: string }>();
   const manifest: Record<string, { hash: string; size: number }> = {};
   for (const f of artifact.assets) {
     const h = hash(f.content, f.name);
     if (!/^[a-f0-9]{32,64}$/.test(h)) throw new CloudflareError('capability_unknown');
-    if (byHash.has(h) && !byHash.get(h)!.equals(f.content))
+    if (
+      byHash.has(h) &&
+      (!byHash.get(h)!.content.equals(f.content) || byHash.get(h)!.contentType !== f.contentType)
+    )
       throw new CloudflareError('capability_unknown');
-    byHash.set(h, f.content);
+    byHash.set(h, f);
     manifest[`/${f.name}`] = { hash: h, size: f.content.length };
   }
   const session = object(
     (await api.request(`${base}/assets-upload-session`, 'POST', { manifest })).result,
   );
-  if (typeof session.jwt !== 'string' || !Array.isArray(session.buckets))
+  if (
+    typeof session.jwt !== 'string' ||
+    !/^[A-Za-z0-9_.-]+$/.test(session.jwt) ||
+    !Array.isArray(session.buckets)
+  )
     throw new CloudflareError('provider_failure');
   let completion = session.jwt;
   const requested = new Set<string>();
@@ -602,18 +747,80 @@ async function uploadAssets(
       requested.add(h);
       form.set(
         h,
-        new Blob([byHash.get(h)!.toString('base64')], { type: 'application/octet-stream' }),
+        new Blob([byHash.get(h)!.content.toString('base64')], { type: byHash.get(h)!.contentType }),
         h,
       );
     }
     const result = object((await api.uploadAssets(form, session.jwt)).result);
-    if (typeof result.jwt === 'string') completion = result.jwt;
-    else if (requested.size === session.buckets.flat().length)
+    if (result.jwt !== undefined) {
+      if (typeof result.jwt !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(result.jwt))
+        throw new CloudflareError('provider_failure');
+      completion = result.jwt;
+    } else if (requested.size === session.buckets.flat().length)
       throw new CloudflareError('provider_failure');
   }
   if (session.buckets.length > 0 && completion === session.jwt)
     throw new CloudflareError('provider_failure');
   return completion;
+}
+function versionAnnotations(a: DeploymentAttempt, creation = false) {
+  return {
+    'workers/tag': `pb-${a.operation_id}${creation ? '-create' : ''}`,
+    'workers/message': `pb-artifact-sha256:${a.artifact_sha256}`,
+  };
+}
+export function versionAnnotationsMatch(
+  annotations: Record<string, unknown>,
+  a: DeploymentAttempt,
+  creation = a.script_creation?.state === 'complete' &&
+    a.script_creation.version_id === a.version_id,
+): boolean {
+  const expected = versionAnnotations(a, creation);
+  return (
+    (annotations['workers/tag'] === expected['workers/tag'] &&
+      annotations['workers/message'] === expected['workers/message']) ||
+    (!creation &&
+      annotations['pb-operation'] === a.operation_id &&
+      annotations['pb-artifact-sha256'] === a.artifact_sha256)
+  );
+}
+function beforeCandidate(a: DeploymentAttempt): ActiveDeployment {
+  const created = a.script_creation;
+  return created?.state === 'complete'
+    ? {
+        id: created.deployment_id,
+        versions: [{ version_id: created.version_id!, percentage: 100 }],
+      }
+    : { id: a.previous_deployment_id, versions: a.previous_distribution };
+}
+async function reconcileScriptCreation(
+  api: CloudflareApi,
+  store: InventoryStore,
+  j: Inventory,
+  requiredSecrets: string[],
+  expectedBindings: Record<string, unknown>[],
+) {
+  const a = j.deployment!.attempt;
+  const base = `/workers/scripts/${j.identity.script_name}`;
+  await enforceEndpoints(api, store, j, restrictivePolicy(a));
+  const versions = await api.list(`${base}/versions`, 'items');
+  const matches = versions.filter((v) => versionAnnotationsMatch(object(v.annotations), a, true));
+  if (matches.length !== 1 || !uuid(matches[0]!.id)) return unknown();
+  const id = matches[0]!.id;
+  const created = await active(api, base);
+  if (!created.id || created.versions.length !== 1 || created.versions[0]!.percentage !== 100)
+    return unknown();
+  if (created.versions[0]!.version_id !== id) return conflict('deployment:version_id');
+  await version(api, base, id, a, requiredSecrets, expectedBindings, true);
+  a.script_creation = {
+    state: 'complete',
+    deployment_id: created.id,
+    version_id: id,
+  };
+  a.version_id = id;
+  a.phase = 'uploaded';
+  recordDeploymentHistory(j.deployment!, { versionId: id });
+  await save(store, j, api.now);
 }
 async function save(store: InventoryStore, j: Inventory, now: () => number): Promise<void> {
   j.revision++;
@@ -657,7 +864,7 @@ export async function withCandidatePreview<T>(
   await reconcileCandidatePreview(api, store, j);
   const base = `/workers/scripts/${j.identity.script_name}`;
   await ownedWorkerSettings(api, base, j);
-  if (!equal((await active(api, base)).versions, distribution(a))) return conflict();
+  if (!equal((await active(api, base)).versions, distribution(a))) return conflict('preview');
   a.preview = 'enable_pending';
   await save(store, j, api.now);
   try {
@@ -671,7 +878,7 @@ export async function withCandidatePreview<T>(
         previews_enabled: true,
       })
     )
-      return conflict();
+      return conflict('preview');
     a.preview = 'enabled';
     await save(store, j, api.now);
     const p = await contract.preview(api, j.identity.script_name, a.version_id);
@@ -680,7 +887,7 @@ export async function withCandidatePreview<T>(
       !p.bindings_verified ||
       origin(p.url) !== a.candidate_probe_url
     )
-      return conflict();
+      return conflict('preview');
     return await probe(origin(p.url));
   } finally {
     await reconcileCandidatePreview(api, store, j);
@@ -747,7 +954,7 @@ async function applyEndpointPolicy(
     await save(store, j, api.now);
     try {
       await api.request(`${base}/subdomain`, 'POST', policy);
-      if (!equal(await endpoints(api, base), policy)) return conflict();
+      if (!equal(await endpoints(api, base), policy)) return conflict('endpoint_policy');
       change.state = 'applied';
     } catch (error) {
       change.state = 'unknown';
@@ -814,13 +1021,28 @@ function matchesManaged(
   );
 }
 /** Settings a failed or rolled-back attempt left behind: prior values, plus retained first-install attachments. */
-function restoredSnapshot(a: DeploymentAttempt): ManagedSettings | null {
+function restoredSnapshot(
+  a: DeploymentAttempt,
+  observed?: ManagedSettings,
+): ManagedSettings | null {
   const snapshot = structuredClone(a.prior_settings);
   for (const change of a.changes) {
     if (change.kind === 'endpoints') continue;
     if (change.restoration === 'retained_first_install')
       Object.assign(snapshot, { [change.kind]: a.intended_settings[change.kind] });
-    else if (change.restoration !== 'restored') return null;
+    else if (change.restoration !== 'restored') {
+      if (!observed) return null;
+      const part = (s: ManagedSettings) => (withoutIds(s) as Record<string, unknown>)[change.kind];
+      const prior = a.prior_settings[change.kind];
+      if (equal(part(observed), part(a.prior_settings))) continue;
+      // A formerly unreadable first-install attachment needs exact read-back evidence.
+      if (
+        (prior === null || (Array.isArray(prior) && prior.length === 0)) &&
+        equal(part(observed), part(a.intended_settings))
+      )
+        Object.assign(snapshot, { [change.kind]: a.intended_settings[change.kind] });
+      else return null;
+    }
   }
   return snapshot;
 }
@@ -897,32 +1119,57 @@ async function version(
   a: DeploymentAttempt,
   requiredSecrets: string[],
   expectedBindings: Record<string, unknown>[],
+  creation?: boolean,
 ): Promise<void> {
   const v = object((await api.request(`${base}/versions/${id}`)).result);
-  const metadata = object(v.metadata),
-    annotations = object(metadata.annotations);
+  const annotations = object(v.annotations);
   const resources = object(v.resources);
-  if (
-    v.id !== id ||
-    annotations['pb-operation'] !== a.operation_id ||
-    annotations['pb-artifact-sha256'] !== a.artifact_sha256 ||
-    !Array.isArray(resources.bindings)
-  )
-    return conflict();
-  const names = resources.bindings
-    .filter((b) => object(b).type === 'secret_text')
-    .map((b) => object(b).name);
+  if (v.id !== id) return conflict('version_id');
+  if (!versionAnnotationsMatch(annotations, a, creation)) return conflict('version_annotations');
+  if (!Array.isArray(resources.bindings)) return conflict('bindings');
+  const secrets = resources.bindings.map(object).filter((b) => b.type === 'secret_text');
+  if (secrets.some((b) => Object.hasOwn(b, 'text') || Object.hasOwn(b, 'value')))
+    return conflict('bindings:secret_text');
+  const names = secrets.map((b) => b.name);
   if (requiredSecrets.some((n) => !names.includes(n)) || new Set(names).size !== names.length)
-    return conflict();
+    return conflict('bindings:secret_text');
   const actualBindings = resources.bindings.map(object).filter((b) => b.type !== 'secret_text');
+  let assets = resources.assets;
+  let runtime = resources.script_runtime;
   if (
-    !equal(
-      actualBindings.sort((a, b) => String(a.name).localeCompare(String(b.name))),
-      [...expectedBindings].sort((a, b) => String(a.name).localeCompare(String(b.name))),
-    ) ||
-    !equal(object(resources.assets).config, ASSET_CONFIG)
-  )
-    return conflict();
+    assets === undefined ||
+    actualBindings.some((b) => b.type === 'r2_bucket' && b.jurisdiction === undefined)
+  ) {
+    // The legacy version response does not document assets; the Version API does.
+    const full = await fullVersion(api, base, id);
+    if (!versionAnnotationsMatch(object(full.annotations), a, creation))
+      return conflict('version_annotations');
+    if (assets === undefined) assets = full.assets;
+    for (const b of actualBindings) {
+      if (b.type !== 'r2_bucket' || b.jurisdiction !== undefined) continue;
+      if (!Array.isArray(full.bindings)) return conflict('r2:jurisdiction');
+      const matches = full.bindings
+        .map(object)
+        .filter((x) => x.type === b.type && x.name === b.name && x.bucket_name === b.bucket_name);
+      if (matches.length !== 1) return conflict('r2:jurisdiction');
+      b.jurisdiction = matches[0]!.jurisdiction;
+    }
+    runtime ??= {
+      compatibility_date: full.compatibility_date,
+      compatibility_flags: full.compatibility_flags,
+    };
+  }
+  const differences = bindingDifferences(actualBindings, expectedBindings);
+  if (differences.length) return conflict(differences[0]!, ...differences.slice(1));
+  const config =
+    runtime && typeof runtime === 'object' && !Array.isArray(runtime)
+      ? (runtime as Record<string, unknown>)
+      : {};
+  for (const [key, value] of Object.entries(COMPATIBILITY))
+    if (!equal(config[key], value)) return conflict(key);
+  if (!assets || typeof assets !== 'object' || Array.isArray(assets))
+    return conflict('assets:config');
+  verifyAssets((assets as Record<string, unknown>).config);
 }
 async function finalizeActivation(
   api: CloudflareApi,
@@ -938,12 +1185,14 @@ async function finalizeActivation(
   await ownedWorkerSettings(api, base, j);
   await liveResources(api, j, ports);
   const live = (await settings()) as ManagedSettings;
-  if (!equal({ ...live, endpoints: intended.endpoints }, withoutIds(intended))) return conflict();
+  if (!equal({ ...live, endpoints: intended.endpoints }, withoutIds(intended)))
+    return conflict('managed_settings');
   // A recovery guard may have narrowed endpoints; anything wider than intended is concurrent drift.
   const widened =
     (live.endpoints.enabled && !intended.endpoints.enabled) || live.endpoints.previews_enabled;
   await enforceEndpoints(api, store, j, intended.endpoints);
-  if (widened || !equal(await settings(), withoutIds(intended))) return conflict();
+  if (widened || !equal(await settings(), withoutIds(intended)))
+    return conflict('managed_settings');
   a.phase = 'active';
   a.activated_at = new Date(api.now()).toISOString();
   j.resources.worker = {
@@ -1080,7 +1329,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
     )
       return invalid();
     const ledgerHash = digest(canonical(journal.migrations.ledger));
-    const contract = o.contract ?? unverifiedDeployContract;
+    const contract = o.contract ?? cloudflareDeployContract;
     api = new CloudflareApi({
       ...auth,
       ...(o.fetch ? { fetch: o.fetch } : {}),
@@ -1090,7 +1339,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
     const base = `/workers/scripts/${identity.script_name}`;
     const workers = await api.snapshot('/workers/scripts');
     const matches = workers.filter((w) => w.id === identity.script_name);
-    if (matches.length > 1) return conflict();
+    if (matches.length > 1) return conflict('worker:identity');
     const exists = matches.length === 1;
     creatingWorker = !exists;
     if (exists) {
@@ -1109,52 +1358,35 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         return succeed();
       }
       await reconcileCandidatePreview(api, store, journal);
-      return conflict(); // Re-read the complete configuration on a fresh run after interrupted cleanup.
+      return conflict('preview_cleanup'); // Re-read the complete configuration on a fresh run after interrupted cleanup.
     }
     const workerSettings = exists ? await ownedWorkerSettings(api, base, journal) : null;
-    if (
-      workerSettings &&
-      (!Array.isArray(workerSettings.tags) ||
-        !workerSettings.tags.includes('pb-install-v1') ||
-        !workerSettings.tags.includes(`pb-owner-${identity.owner_digest}`) ||
-        !Array.isArray(workerSettings.bindings))
-    )
-      return conflict();
     if (workerSettings) {
-      const currentBindings = (workerSettings.bindings as unknown[]).map(object);
-      for (const b of currentBindings) {
+      for (const raw of (workerSettings.bindings as unknown[]).map(object)) {
+        const b = normalizedBinding(raw);
         if (b.type === 'secret_text') {
-          if (Object.hasOwn(b, 'text') || Object.hasOwn(b, 'value')) return conflict();
+          if (Object.hasOwn(b, 'text') || Object.hasOwn(b, 'value'))
+            return conflict('bindings:secret_text');
           continue;
         }
         if (b.name === 'DB' && (b.type !== 'd1' || b.id !== journal.resources.d1!.id))
-          return conflict();
+          return conflict('binding:d1:DB:id');
         if (
           b.name === 'DEPLOYMENT_ID' &&
           (b.type !== 'plain_text' || b.text !== identity.deployment_id)
         )
-          return conflict();
-        if (
-          b.type === 'r2_bucket' &&
-          (b.name !== artifact.ports?.blob.binding ||
-            b.bucket_name !== journal.resources.r2?.name ||
-            b.jurisdiction !== identity.jurisdiction)
-        )
-          return conflict();
-        if (
-          b.type === 'queue' &&
-          (b.name !== artifact.ports?.jobs.binding || b.queue_name !== journal.resources.jobs?.name)
-        )
-          return conflict();
+          return conflict('binding:plain_text:DEPLOYMENT_ID:text');
+        if (b.type === 'r2_bucket' && b.name !== artifact.ports?.blob.binding)
+          return conflict('r2:binding');
+        if (b.type === 'queue' && b.name !== artifact.ports?.jobs.binding)
+          return conflict('queue:binding');
         if (
           b.type === 'analytics_engine' &&
-          (b.name !== artifact.ports?.observability.analyticsBinding ||
-            b.dataset !== journal.resources.analytics?.name)
+          b.name !== artifact.ports?.observability.analyticsBinding
         )
-          return conflict();
+          return conflict('analytics_engine:binding');
       }
     }
-    const workerSignature = workerSettings && canonical(workerSettings);
     await liveResources(api, journal, artifact.ports);
     let current = exists ? await active(api, base) : { id: null, versions: [] };
     const recordedVerified =
@@ -1167,28 +1399,20 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       journal.deployment?.attempt.phase !== 'activation_pending' &&
       !(recordedVerified && equal(current.versions, distribution(recordedVerified)))
     )
-      return conflict();
+      return conflict('deployment');
     if (!current.versions.length && rollout !== 100) return invalid();
     if (current.versions.length === 1) {
       const prior = object(
         (await api.request(`${base}/versions/${current.versions[0]!.version_id}`)).result,
       );
-      if (prior.id !== current.versions[0]!.version_id) return conflict();
-      const annotations = object(object(prior.metadata).annotations);
+      if (prior.id !== current.versions[0]!.version_id) return conflict('version_id');
+      const annotations = object(prior.annotations);
       if (annotations['pb-maintenance-shell'] === 'true')
         throw new CloudflareError('capability_unknown', 1, false, 'deploy');
     }
-    if (!url) {
-      const registration = await api.request('/workers/subdomain').catch((error: unknown) => {
-        if (error instanceof CloudflareError && error.status === 404) return { result: {} };
-        throw error;
-      });
-      const sub = object(registration.result).subdomain;
-      if (typeof sub !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(sub))
-        throw new CloudflareError('workers_dev_subdomain_missing', 2, false, 'deploy');
-      url = `https://${identity.script_name}.${sub}.workers.dev`;
-    }
-    if (!exists && !contract.versionsCreateScript) throw new CloudflareError('capability_unknown');
+    if (!url) url = await workersDevOrigin(api, identity.script_name);
+    if (!exists && !contract.versionsCreateScript && !contract.createScript)
+      throw new CloudflareError('capability_unknown');
     if (!contract.assetHash) throw new CloudflareError('capability_unknown');
     if (rollout < 100 && !contract.preview) throw new CloudflareError('capability_unknown');
     const custom = !!(o.domain || requestedRoutes.length || o.publicUrl);
@@ -1212,7 +1436,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       exists,
       managedZones,
     );
-    const installed = exists ? await api.list(`${base}/secrets`) : [];
+    const installed = exists ? await api.snapshot(`${base}/secrets`) : [];
     if (
       installed.some(
         (s) =>
@@ -1221,7 +1445,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
           !/^[A-Z][A-Z0-9_]{0,127}$/.test(s.name),
       )
     )
-      return conflict();
+      return conflict('bindings:secret_text');
     const installedNames = installed.map((s) => s.name as string).sort();
     if (
       installedNames.length !== new Set(installedNames).size ||
@@ -1312,7 +1536,10 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         : (priorJournal?.last_verified ?? null);
     const livePlain =
       workerSettings &&
-      (workerSettings.bindings as unknown[]).map(object).filter((b) => b.type !== 'secret_text');
+      (workerSettings.bindings as unknown[])
+        .map(object)
+        .map(normalizedBinding)
+        .filter((b) => b.type !== 'secret_text');
     const plainMatch =
       livePlain !== null &&
       livePlain !== undefined &&
@@ -1331,6 +1558,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
     ) {
       outputAttempt(output, verified);
       output.plan.push({ stage: 'deploy', action: 'unchanged' });
+      output.checks.push({ name: 'endpoint_policy', status: 'verified', ...policy });
       output.status = o.dryRun ? 'planned' : 'ok';
       return succeed();
     }
@@ -1345,34 +1573,39 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       ].includes(priorAttempt.phase);
     if (
       resuming &&
-      priorAttempt.phase !== 'preparing_upload' &&
+      (priorAttempt.phase !== 'preparing_upload' || priorAttempt.script_creation !== undefined) &&
       updates.some((b) => b.name !== 'PB_MASTER_KEY' && b.name !== 'PB_MASTER_KEY_PREVIOUS')
     )
-      return conflict();
-    if (
-      resuming &&
-      (priorAttempt.artifact_sha256 !== artifact.artifactHash ||
-        priorAttempt.settings_sha256 !== settingsHash ||
-        priorAttempt.requested_rollout !== rollout)
-    )
-      return conflict();
+      return conflict('bindings:secret_text');
+    if (resuming) {
+      if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
+        return conflict('artifact_sha256');
+      if (priorAttempt.settings_sha256 !== settingsHash) return conflict('settings_sha256');
+      if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
+    }
     if (!resuming) {
-      if (current.versions.length > 1) return conflict();
+      if (current.versions.length > 1) return conflict('deployment');
       let managed = priorAttempt?.intended_settings ?? verified?.intended_settings;
       if (priorAttempt?.phase === 'failed' || priorAttempt?.phase === 'rolled_back')
-        managed = restoredSnapshot(priorAttempt) ?? conflict();
+        managed =
+          restoredSnapshot(
+            priorAttempt,
+            priorAttempt.phase === 'failed' && equal(current, beforeCandidate(priorAttempt))
+              ? live
+              : undefined,
+          ) ?? conflict('managed_settings');
       if (
         live.routes.some(
           (r) => !intended.routes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
         )
       )
-        return conflict();
+        return conflict('routes');
       // Never take over pre-existing attachments without a previous managed receipt.
       if (
         (live.consumer || live.schedules.length || live.routes.length || live.domain) &&
         (!managed || !matchesManaged(live, managed))
       )
-        return conflict();
+        return conflict('managed_settings');
     }
     if (priorJournal) {
       const pendingHistory = structuredClone(priorJournal);
@@ -1388,7 +1621,10 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
     output.previous_version_id = resuming
       ? priorAttempt.previous_version_id
       : (current.versions[0]?.version_id ?? null);
-    output.checks.push({ name: 'provider_semantics', status: 'UNVERIFIED_until_T830' });
+    output.checks.push({
+      name: 'provider_semantics',
+      status: contract === cloudflareDeployContract ? 'documented' : 'injected',
+    });
     output.plan.push({ stage: 'deploy', action: resuming ? 'reconcile' : 'upload_activate' });
     if (o.dryRun) {
       output.status = 'planned';
@@ -1441,74 +1677,94 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         plainBinding: { name: endpointEnv, text: telemetryEndpoint! },
       });
     outputAttempt(output, a);
+    if (
+      a.script_creation?.state === 'pending' ||
+      (a.script_creation?.state === 'complete' && a.phase === 'preparing_upload')
+    ) {
+      uploadSent = true;
+      await reconcileScriptCreation(api, store, journal, allNames, plainBindings);
+    }
     if (a.phase === 'preparing_upload' || a.phase === 'upload_pending') {
       if (a.phase === 'upload_pending') {
         if (exists) await enforceEndpoints(api, store, journal, restrictivePolicy(a));
         const versions = await api.list(`${base}/versions`, 'items');
         const matches = versions.filter((v) => {
-          const m = object(v.metadata);
-          const n = object(m.annotations);
-          return (
-            n['pb-operation'] === a.operation_id && n['pb-artifact-sha256'] === a.artifact_sha256
-          );
+          const n = object(v.annotations);
+          return versionAnnotationsMatch(n, a);
         });
         if (matches.length !== 1 || !uuid(matches[0]!.id)) return unknown();
         a.version_id = matches[0]!.id;
         recordDeploymentHistory(journal.deployment!, { versionId: a.version_id });
         await version(api, base, a.version_id, a, allNames, plainBindings);
       } else {
-        if (
-          !equal(await activeOrAbsent(api, base, exists), {
-            id: a.previous_deployment_id,
-            versions: a.previous_distribution,
-          })
-        )
-          return conflict();
+        if (!equal(await activeOrAbsent(api, base, exists), beforeCandidate(a)))
+          return conflict('deployment');
         if (exists) await enforceEndpoints(api, store, journal, restrictivePolicy(a));
         const token = await uploadAssets(api, base, artifact, contract.assetHash);
-        const form = new FormData();
-        form.set(
-          'metadata',
-          JSON.stringify({
-            ...COMPATIBILITY,
-            main_module: 'worker.js',
-            bindings: [...plainBindings, ...updates],
-            ...(installedNames.length ? { keep_bindings: ['secret_text'] } : {}),
-            assets: { jwt: token, config: ASSET_CONFIG },
-            tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`],
-            annotations: {
-              'pb-operation': a.operation_id,
-              'pb-artifact-sha256': a.artifact_sha256,
-            },
-            observability: { enabled: true, logs: { invocation_logs: false } },
-          }),
-        );
-        form.set(
-          'worker.js',
-          new Blob([new Uint8Array(artifact.module)], { type: 'application/javascript+module' }),
-          'worker.js',
-        );
-        a.phase = 'upload_pending';
-        await save(store, journal, now);
-        uploadSent = true;
-        let response;
-        try {
-          response = await api.request(`${base}/versions`, 'POST', form);
-        } catch (error) {
-          if (knownNotApplied(error)) {
-            if (wasNotSent(error)) uploadSent = false;
-            a.phase = 'preparing_upload';
-            await save(store, journal, now);
+        const makeForm = (creation = false) => {
+          const form = new FormData();
+          form.set(
+            'metadata',
+            JSON.stringify({
+              ...COMPATIBILITY,
+              main_module: 'worker.js',
+              bindings: [...plainBindings, ...updates],
+              ...(installedNames.length ? { keep_bindings: ['secret_text'] } : {}),
+              assets: { jwt: token, config: ASSET_CONFIG },
+              tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`],
+              annotations: {
+                ...versionAnnotations(a, creation),
+              },
+              observability: { enabled: true, logs: { invocation_logs: false } },
+            }),
+          );
+          form.set(
+            'worker.js',
+            new Blob([new Uint8Array(artifact.module)], { type: 'application/javascript+module' }),
+            'worker.js',
+          );
+          return form;
+        };
+        if (!exists && !contract.versionsCreateScript) {
+          if (!contract.createScript || a.script_creation) return unknown();
+          a.script_creation = { state: 'pending', deployment_id: null, version_id: null };
+          await save(store, journal, now);
+          uploadSent = true;
+          try {
+            await contract.createScript(api, identity.script_name, makeForm(true));
+          } catch (error) {
+            if (knownNotApplied(error)) {
+              delete a.script_creation;
+              uploadSent = false;
+              await save(store, journal, now);
+            }
+            throw error;
           }
-          throw error;
+          await reconcileScriptCreation(api, store, journal, allNames, plainBindings);
+        } else {
+          const form = makeForm();
+          a.phase = 'upload_pending';
+          await save(store, journal, now);
+          uploadSent = true;
+          let response;
+          try {
+            response = await api.request(`${base}/versions`, 'POST', form);
+          } catch (error) {
+            if (knownNotApplied(error)) {
+              if (wasNotSent(error)) uploadSent = false;
+              a.phase = 'preparing_upload';
+              await save(store, journal, now);
+            }
+            throw error;
+          }
+          if (!exists) await enforceEndpoints(api, store, journal, restrictivePolicy(a));
+          const uploaded = object(response.result);
+          if (!uuid(uploaded.id)) return unknown();
+          a.version_id = uploaded.id;
+          recordDeploymentHistory(journal.deployment!, { versionId: a.version_id });
+          await save(store, journal, now);
+          await version(api, base, a.version_id, a, allNames, plainBindings);
         }
-        if (!exists) await enforceEndpoints(api, store, journal, restrictivePolicy(a));
-        const uploaded = object(response.result);
-        if (!uuid(uploaded.id)) return unknown();
-        a.version_id = uploaded.id;
-        recordDeploymentHistory(journal.deployment!, { versionId: a.version_id });
-        await save(store, journal, now);
-        await version(api, base, a.version_id, a, allNames, plainBindings);
       }
       a.phase = 'uploaded';
       await save(store, journal, now);
@@ -1518,14 +1774,15 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
     await version(api, base, a.version_id, a, allNames, plainBindings);
     if (rollout < 100) {
       const preview = await contract.preview!(api, identity.script_name, a.version_id);
-      if (preview.version_id !== a.version_id || !preview.bindings_verified) return conflict();
+      if (preview.version_id !== a.version_id || !preview.bindings_verified)
+        return conflict('preview');
       const probeUrl = origin(preview.url);
       if (
         !probeUrl.endsWith('.workers.dev') ||
         probeUrl === url ||
         !new URL(probeUrl).hostname.startsWith(`${a.version_id}-`)
       )
-        return conflict();
+        return conflict('preview');
       a.candidate_probe_url = probeUrl;
       await save(store, journal, now);
     }
@@ -1533,6 +1790,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       const observed = await active(api, base);
       if (equal(observed.versions, distribution(a))) {
         await finalizeActivation(api, store, journal, artifact.ports);
+        output.checks.push({ name: 'endpoint_policy', status: 'verified', ...policy });
         outputAttempt(output, a);
         return succeed();
       }
@@ -1556,7 +1814,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         !equal(part(expected), part(a.intended_settings)) &&
         !(kind === 'endpoints' && equal(expected.endpoints, restrictivePolicy(a)))
       )
-        return conflict();
+        return conflict(kind === 'consumer' ? 'queue_consumer' : kind);
     }
     for (const kind of ['consumer', 'schedules', 'routes', 'domain'] as const) {
       const before = await readSettings(
@@ -1570,7 +1828,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       );
       const part = (v: ManagedSettings) => (withoutIds(v) as Record<string, unknown>)[kind];
       if (!equal(part(before), part(expected)) && !equal(part(before), part(a.intended_settings)))
-        return conflict();
+        return conflict(kind === 'consumer' ? 'queue_consumer' : kind);
       if (!equal(part(before), part(a.intended_settings))) {
         const change = {
           kind,
@@ -1598,15 +1856,15 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         true,
         managedZones,
       );
-      if (!equal(part(observed), part(a.intended_settings))) return conflict();
+      if (!equal(part(observed), part(a.intended_settings)))
+        return conflict(kind === 'consumer' ? 'queue_consumer' : kind);
       expected = { ...expected, [kind]: observed[kind] };
       a.intended_settings = { ...a.intended_settings, [kind]: observed[kind] };
-      if (!equal(withoutIds(observed), withoutIds(expected))) return conflict();
+      if (!equal(withoutIds(observed), withoutIds(expected))) return conflict('managed_settings');
       await save(store, journal, now);
     }
     current = await active(api, base);
-    if (!equal(current, { id: a.previous_deployment_id, versions: a.previous_distribution }))
-      return conflict();
+    if (!equal(current, beforeCandidate(a))) return conflict('deployment');
     if (
       !equal(
         withoutIds(
@@ -1615,12 +1873,15 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         withoutIds(expected),
       )
     )
-      return conflict();
-    if (
-      exists &&
-      canonical(object((await api.request(`${base}/settings`)).result)) !== workerSignature
-    )
-      return conflict();
+      return conflict('managed_settings');
+    if (workerSettings) {
+      const differences = workerSettingsDifferences(
+        await ownedWorkerSettings(api, base, journal),
+        workerSettings,
+        [...plainBindings.map((b) => String(b.name)), ...allNames],
+      );
+      if (differences.length) return conflict(differences[0]!, ...differences.slice(1));
+    }
     await liveResources(api, journal, artifact.ports);
     await enforceEndpoints(api, store, journal, policy);
     if (
@@ -1631,8 +1892,8 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         withoutIds(a.intended_settings),
       )
     )
-      return conflict();
-    if (!equal(await active(api, base), current)) return conflict();
+      return conflict('managed_settings');
+    if (!equal(await active(api, base), current)) return conflict('deployment');
     a.phase = 'activation_pending';
     await save(store, journal, now);
     let activationFailure: unknown;
@@ -1652,11 +1913,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
     }
     const activated = await active(api, base);
     if (!equal(activated.versions, distribution(a))) {
-      if (
-        refused &&
-        equal(activated, { id: a.previous_deployment_id, versions: a.previous_distribution })
-      )
-        throw activationFailure;
+      if (refused && equal(activated, beforeCandidate(a))) throw activationFailure;
       a.phase = 'activation_pending';
       await save(store, journal, now);
       return unknown();
@@ -1666,13 +1923,15 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       await save(store, journal, now);
     }
     await finalizeActivation(api, store, journal, artifact.ports);
+    output.checks.push({ name: 'endpoint_policy', status: 'verified', ...policy });
     outputAttempt(output, a);
     return succeed();
   } catch (error) {
     let failure = error;
     if (
       uploadSent &&
-      journal?.deployment?.attempt.phase === 'upload_pending' &&
+      (journal?.deployment?.attempt.phase === 'upload_pending' ||
+        journal?.deployment?.attempt.script_creation?.state === 'pending') &&
       (!(error instanceof CloudflareError) ||
         (error.code === 'provider_failure' &&
           (error.status === null || [408, 409, 429].includes(error.status) || error.status >= 500)))
@@ -1688,9 +1947,7 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         if (a.phase === 'configuring') {
           await ownedWorkerSettings(api, base, journal);
           const observed = await active(api, base);
-          if (
-            !equal(observed, { id: a.previous_deployment_id, versions: a.previous_distribution })
-          ) {
+          if (!equal(observed, beforeCandidate(a))) {
             output.checks.push({ name: 'configuration_restoration', status: 'conflict' });
             throw new CloudflareError('configuration_conflict', 8, false, 'restore');
           }
@@ -1728,6 +1985,9 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
                 'deploy',
                 failure.status,
                 failure.check,
+                failure.providerCode,
+                failure.source,
+                failure.fields,
               )
             : new CloudflareError('provider_failure', 1, false, 'deploy'),
       ),
@@ -1753,7 +2013,8 @@ async function activeOrAbsent(
 ): Promise<ActiveDeployment> {
   if (exists) return active(api, base);
   const script = base.split('/').at(-1);
-  if ((await api.snapshot('/workers/scripts')).some((w) => w.id === script)) return conflict();
+  if ((await api.snapshot('/workers/scripts')).some((w) => w.id === script))
+    return conflict('deployment');
   return { id: null, versions: [] };
 }
 export async function runCloudflareDeploy(o: DeployOptions): Promise<number> {
@@ -1812,7 +2073,7 @@ async function rollbackOwned(
   const live = await active(api, base);
   const recovering = a.phase === 'rollback_pending';
   if (!equal(live.versions, distribution(a)) && !(recovering && equal(live.versions, prior)))
-    return conflict();
+    return conflict('deployment');
   if ((await secureEndpoints(api, store, journal)) === 'ownership_conflict')
     throw new CloudflareError('ownership_conflict', 8, false, 'rollback');
   let rollbackFailure: unknown;

@@ -2,10 +2,16 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { deflateSync } from 'node:zlib';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { crc32, deflateSync } from 'node:zlib';
 import { startLocal, until, LocalUnavailable, fixtureDestination } from './local.js';
 import type { LocalBroker, Runtime } from './local.js';
 import type { ScenarioResult } from './runner.js';
+import { composerAvailable as checkComposer, redactComposerOutput } from './composer-output.js';
 
 const SECRET = 'step7-fixture-webhook-secret';
 const PRIVATE_KEY = generateKeyPairSync('rsa', {
@@ -14,8 +20,35 @@ const PRIVATE_KEY = generateKeyPairSync('rsa', {
   publicKeyEncoding: { type: 'spki', format: 'pem' },
 }).privateKey;
 const INSTALLATION_TOKEN = 'ghs_step7FixtureInstallationToken';
+const PERSONAL_TOKEN = 'github_pat_fixturePersonalAccessToken';
 const PASSWORD = 'step7-fixture-password';
 const ZIP = new Uint8Array([0x50, 0x4b, 3, 4, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+function tokenArchive(): Uint8Array {
+  const name = Buffer.from('acme-token/composer.json');
+  const content = Buffer.from('{"name":"acme/token","type":"library"}');
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt32LE(crc32(content), 14);
+  local.writeUInt32LE(content.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(name.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  local.copy(central, 8, 6, 30);
+  const directory = Buffer.concat([central, name]);
+  const file = Buffer.concat([local, name, content]);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(file.length, 16);
+  return new Uint8Array(Buffer.concat([file, directory, end]));
+}
+const TOKEN_ZIP = tokenArchive();
 const TGZ = new Uint8Array([0x1f, 0x8b, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 const PUBLISHED = '2026-01-01T00:00:00.000Z';
 const hash = (bytes: Uint8Array, algorithm = 'sha256') =>
@@ -165,7 +198,11 @@ function gitRemote() {
 }
 
 export function createRegistryFixture() {
-  const state = { versions: ['1.0.0'], corrupt: false };
+  const state = {
+    versions: ['1.0.0'],
+    corrupt: false,
+    satisPackages: ['satis/first', 'satis/second'],
+  };
   const calls: string[] = [];
   const git = gitRemote();
   const commits = new Map<string, string>();
@@ -211,6 +248,46 @@ export function createRegistryFixture() {
           { status: 201 },
         );
       }
+      if (url.pathname === '/graphql') {
+        assert.equal(request.headers.get('authorization'), `Bearer ${PERSONAL_TOKEN}`);
+        const { query, variables } = (await request.json()) as {
+          query: string;
+          variables: unknown;
+        };
+        assert.deepEqual(variables, { owner: 'acme', name: 'token' });
+        const expressions = [...query.matchAll(/object\(expression: "([^"]+)"\)/g)];
+        assert(expressions.length > 0, 'MissingGraphqlExpressions');
+        for (const expression of expressions)
+          assert.equal(expression[1], `${'b'.repeat(40)}:composer.json`);
+        return Response.json({
+          data: {
+            repository: Object.fromEntries(
+              [...query.matchAll(/(a[0-9]+): object/g)].map((match) => [
+                match[1],
+                {
+                  byteSize: 64,
+                  ...(query.includes('byteSize text')
+                    ? { text: JSON.stringify({ name: 'acme/token', type: 'library' }) }
+                    : {}),
+                },
+              ]),
+            ),
+          },
+        });
+      }
+      if (url.pathname.startsWith('/repos/acme/token')) {
+        assert.equal(request.headers.get('authorization'), `Bearer ${PERSONAL_TOKEN}`);
+        if (url.pathname.endsWith('/tags'))
+          return Response.json([{ name: '1.0.0', commit: { sha: 'b'.repeat(40) } }]);
+        if (url.pathname.endsWith('/contents/composer.json'))
+          return Response.json({ name: 'acme/token', type: 'library' });
+        if (url.pathname.includes('/zipball/'))
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'https://codeload.github.com/acme/token/legacy.zip/ref?token=x' },
+          });
+        return Response.json({ archived: false, default_branch: 'main', full_name: 'acme/token' });
+      }
       assert.equal(request.headers.get('authorization'), `Bearer ${INSTALLATION_TOKEN}`);
       if (url.pathname === '/repos/acme/mirror/contents/composer.json')
         return Response.json({ name: 'acme/mirror' });
@@ -239,7 +316,19 @@ export function createRegistryFixture() {
       );
     }
     if (url.hostname === 'codeload.github.com') {
+      if (url.pathname.startsWith('/acme/token/')) {
+        assert(!request.headers.has('authorization'), 'TokenReachedArchiveRedirect');
+        assert.equal(url.search, '?token=x', 'ArchiveRedirectQueryMissing');
+        return new Response(TOKEN_ZIP);
+      }
       return new Response(state.corrupt ? ZIP.map((byte) => byte ^ 0xff) : ZIP);
+    }
+    if (url.hostname === 'repo.packagist.org' && url.pathname === '/satis/packages.json') {
+      return Response.json({
+        packages: Object.fromEntries(
+          state.satisPackages.map((name) => [name, { '1.0.0': member(name, '1.0.0') }]),
+        ),
+      });
     }
     if (url.hostname === 'repo.packagist.org') {
       return Response.json(
@@ -352,6 +441,11 @@ async function status(response: Response, expected: number, label: string): Prom
   return response;
 }
 
+function cause(error: unknown): string {
+  const message = (error instanceof Error ? error.message : '').split('\n')[0]!.slice(0, 200);
+  return /^[\w:./,@ -]+$/.test(message) ? ` (${message})` : ` (${error?.constructor?.name})`;
+}
+
 async function session(broker: LocalBroker) {
   let cookie = '';
   let csrf = '';
@@ -432,6 +526,7 @@ export async function registryScenario(
   options: { removeWebhook?: boolean } = {},
 ): Promise<ScenarioResult> {
   let stage = 'startup';
+  let composerFailure = '';
   let broker: LocalBroker | undefined;
   let fixture: Awaited<ReturnType<typeof startRegistryFixture>> | undefined;
   try {
@@ -461,6 +556,17 @@ export async function registryScenario(
           provider: 'github',
           repository: 'acme/mirror',
           installationId: 123,
+          refs: { tags: true, branches: [] },
+        },
+      },
+      {
+        name: 'token',
+        ecosystem: 'composer',
+        source_type: 'vcs',
+        url: null,
+        config: {
+          provider: 'github',
+          repository: 'acme/token',
           refs: { tags: true, branches: [] },
         },
       },
@@ -496,6 +602,7 @@ export async function registryScenario(
         'PUT',
       );
     await attach('alpha', 'mirror', 0);
+    await attach('alpha', 'token', 10);
     await attach('alpha', 'packagist', 100);
     await attach('alpha', 'npmjs', 200);
     await attach('beta', 'packagist', 0);
@@ -514,7 +621,16 @@ export async function registryScenario(
     );
     await api(`/_pb/sources/${source}/names`, { pattern: 'acme/mirror' }, 201);
     await api(`/_pb/sources/${source}/enable`, undefined);
-    for (const item of items.filter((item) => item.name !== 'mirror'))
+    const tokenSource = items.find((item) => item.name === 'token')!.id;
+    await api(
+      `/_pb/sources/${tokenSource}/credential`,
+      { kind: 'bearer', material: JSON.stringify({ token: PERSONAL_TOKEN }) },
+      204,
+      'PUT',
+    );
+    await api(`/_pb/sources/${tokenSource}/names`, { pattern: 'acme/token' }, 201);
+    await api(`/_pb/sources/${tokenSource}/enable`, undefined);
+    for (const item of items.filter((item) => item.name !== 'mirror' && item.name !== 'token'))
       await api(`/_pb/sources/${item.id}/resume`, undefined);
     const issued = await api(
       '/_pb/me/tokens',
@@ -582,6 +698,61 @@ export async function registryScenario(
       assert(value.error.message && value.error.requestId, 'MissingErrorEnvelope');
       return { code: value.error.code, message: value.error.message };
     };
+    stage = 'composer-source-repoll';
+    const satis = await api(
+      '/_pb/sources',
+      {
+        name: 'satis',
+        ecosystem: 'composer',
+        type: 'composer_repository',
+        url: 'https://repo.packagist.org/satis/packages.json',
+        config: { selection: { packages: ['satis/first'] } },
+      },
+      201,
+    );
+    const { id: satisId } = (await satis.json()) as { id: string };
+    await api(`/_pb/sources/${satisId}/names`, { pattern: 'satis/*' }, 201);
+    await api(`/_pb/projects/alpha/sources/${satisId}/attachment`, {}, 204, 'PUT');
+    const waitForPackage = async (name: string) => {
+      await local.pollTick(orgId);
+      await until(async () => {
+        const response = await admin.request(`/_pb/projects/alpha/packages`, undefined, 'GET');
+        assert.equal(response.status, 200);
+        const page = (await response.json()) as { items: { name: string }[] };
+        return page.items.some((item) => item.name === name);
+      }, `composer-source-repoll:${name}`);
+    };
+    await api(`/_pb/sources/${satisId}/enable`, undefined);
+    await waitForPackage('satis/first');
+    await api(
+      `/_pb/sources/${satisId}`,
+      {
+        config: { selection: { packages: ['satis/first', 'satis/second', 'satis/third'] } },
+      },
+      204,
+      'PATCH',
+    );
+    await api(`/_pb/sources/${satisId}/sync`, undefined, 409);
+    await api(`/_pb/sources/${satisId}/enable`, undefined);
+    await waitForPackage('satis/second');
+    // The upstream adds a selected package while the source remains active.
+    remote.state.satisPackages.push('satis/third');
+    await api(`/_pb/sources/${satisId}/sync`, undefined, 202);
+    await waitForPackage('satis/third');
+    const sourceList = await admin.request('/_pb/sources', undefined, 'GET');
+    const sourcePage = (await sourceList.json()) as {
+      items: { id: string; pollIntervalSeconds: number }[];
+    };
+    assert.equal(sourcePage.items.find((item) => item.id === satisId)?.pollIntervalSeconds, 86400);
+
+    await until(async () => {
+      const pending = await rows<{ state: string }>(
+        // eslint-disable-next-line no-restricted-syntax -- Scoped infrastructure observation; seeding uses session APIs.
+        "SELECT state FROM job WHERE org_id = ? AND type IN ('core:source-poll:v1', 'core:source-sync:v1') AND state NOT IN ('succeeded', 'failed', 'dead')",
+      );
+      return pending.length === 0;
+    }, 'source-jobs-settled');
+
     stage = 'authorization';
     await envelope('/alpha/packages.json', 401, 'unauthorized', false);
     const hook = async (ref: string, valid = true) => {
@@ -629,25 +800,46 @@ export async function registryScenario(
       }),
       'WebhookJobMissing',
     );
-    const composer = async (name: string, wanted = '1.0.0') => {
+    const composer = async (
+      name: string,
+      wanted = '1.0.0',
+      timeoutMs = 30_000,
+      expected: Uint8Array = ZIP,
+    ) => {
       type Metadata = { packages: Record<string, { version: string; dist: { url: string } }[]> };
       let body: Metadata | undefined;
-      await until(async () => {
-        const response = await get(`/alpha/p2/${name}.json`);
-        if (response.status !== 200) return false;
-        body = (await response.json()) as Metadata;
-        return body.packages[name]?.some((version) => version.version === wanted) === true;
-      }, 'composer-metadata');
+      let observed = 'none';
+      try {
+        await until(
+          async () => {
+            const response = await get(`/alpha/p2/${name}.json`);
+            if (response.status !== 200) {
+              observed = `HTTP:${response.status}`;
+              return false;
+            }
+            body = (await response.json()) as Metadata;
+            const versions = body.packages[name]?.map((version) => version.version);
+            observed = `versions:${versions?.join(',') ?? 'missing'}`;
+            return versions?.includes(wanted) === true;
+          },
+          'composer-metadata',
+          timeoutMs,
+        );
+      } catch (error) {
+        throw new Error(`${(error as Error).message}:${name}:${wanted}:${observed}`, {
+          cause: error,
+        });
+      }
       const versions = body!.packages[name]!;
       const version = versions.find((version) => version.version === wanted)!;
       const dist = new URL(version.dist.url);
-      assert.equal(dist.origin, local.origin);
+      assert.equal(dist.origin, local.origin, `composer-dist-origin:${dist.origin}`);
       const archive = await status(await get(dist.pathname), 200, 'composer-archive');
-      assert.deepEqual(new Uint8Array(await archive.arrayBuffer()), ZIP);
+      assert.deepEqual(new Uint8Array(await archive.arrayBuffer()), expected);
       return { path: dist.pathname, versions: versions.map((version) => version.version).sort() };
     };
     stage = 'registry-reads';
-    assert.deepEqual((await composer('acme/mirror')).versions, ['1.0.0']);
+    assert.deepEqual((await composer('acme/mirror')).versions, ['1.0.0'], 'mirror-versions');
     for (const path of [
       '/app/installations/123/access_tokens',
       '/contents/composer.json',
@@ -656,13 +848,83 @@ export async function registryScenario(
       '/repos/acme/mirror/zipball/',
     ])
       assert(remote.count(path) > 0, 'GitHubProviderLegMissing');
+    stage = 'github-token-composer';
+    await api(`/_pb/sources/${tokenSource}/sync`, undefined, 202);
+    await local.pollTick(orgId);
+    await composer('acme/token', '1.0.0', 90_000, TOKEN_ZIP);
+    const composerAvailable = await checkComposer(() =>
+      promisify(execFile)('composer', ['--version'], { timeout: 10_000 }),
+    );
+    if (composerAvailable) {
+      const clientDirectory = await mkdtemp(join(tmpdir(), 'pb-github-token-'));
+      try {
+        await writeFile(
+          join(clientDirectory, 'composer.json'),
+          JSON.stringify({
+            repositories: [
+              { type: 'composer', url: `${local.origin}/alpha` },
+              { 'packagist.org': false },
+            ],
+            config: { 'secure-http': false },
+          }),
+        );
+        try {
+          await promisify(execFile)(
+            'composer',
+            [
+              'require',
+              'acme/token:1.0.0',
+              '--no-interaction',
+              '--no-plugins',
+              '--no-scripts',
+              '--prefer-dist',
+            ],
+            {
+              cwd: clientDirectory,
+              timeout: 60_000,
+              env: {
+                ...process.env,
+                COMPOSER_HOME: join(clientDirectory, '.composer'),
+                COMPOSER_CACHE_DIR: join(clientDirectory, '.cache'),
+                COMPOSER_AUTH: JSON.stringify({
+                  'http-basic': { [new URL(local.origin).host]: { username: token, password: '' } },
+                }),
+              },
+            },
+          );
+        } catch (error) {
+          const { stdout = '', stderr = '' } = error as { stdout?: string; stderr?: string };
+          composerFailure = redactComposerOutput(`${stderr}${stdout}`, [
+            token,
+            PERSONAL_TOKEN,
+            INSTALLATION_TOKEN,
+            PASSWORD,
+          ]).slice(-1500);
+          throw new Error('ComposerRequireFailed', { cause: error });
+        }
+        assert.equal(
+          JSON.parse(
+            await readFile(join(clientDirectory, 'vendor/acme/token/composer.json'), 'utf8'),
+          ).name,
+          'acme/token',
+        );
+      } finally {
+        await rm(clientDirectory, { recursive: true, force: true });
+      }
+    }
+    assert(remote.count('/repos/acme/token/tags') > 0, 'TokenTagsMissing');
+    assert(remote.count('/repos/acme/token/zipball/') > 0, 'TokenDistMissing');
     const proxy = await composer('acme/proxy');
     const packument = await status(await get('/alpha/npm/widget'), 200, 'npm-packument');
     const npm = (await packument.json()) as {
       versions: Record<string, { dist: { tarball: string; integrity: string } }>;
     };
     const dist = npm.versions['1.0.0']!.dist;
-    assert.equal(new URL(dist.tarball).origin, local.origin);
+    assert.equal(
+      new URL(dist.tarball).origin,
+      local.origin,
+      `npm-tarball-origin:${new URL(dist.tarball).origin}`,
+    );
     assert.equal(dist.integrity, `sha512-${createHash('sha512').update(TGZ).digest('base64')}`);
     const tarball = await status(await get(new URL(dist.tarball).pathname), 200, 'npm-tarball');
     assert.deepEqual(new Uint8Array(await tarball.arrayBuffer()), TGZ);
@@ -675,6 +937,18 @@ export async function registryScenario(
     assert(JSON.stringify(await betaMetadata.json()).includes('acme/proxy'), 'BetaPackageMissing');
     const betaArchive = await status(await get(betaPath, true, betaToken), 200, 'beta-archive');
     assert.deepEqual(new Uint8Array(await betaArchive.arrayBuffer()), ZIP);
+    await until(
+      async () => {
+        await local.tick();
+        const pending = await rows(
+          // eslint-disable-next-line no-restricted-syntax -- Scoped infrastructure observation of unsettled jobs.
+          "SELECT id FROM job WHERE org_id = ? AND (state = 'running' OR (state = 'queued' AND run_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
+        );
+        return pending.length === 0;
+      },
+      'jobs-settled',
+      60_000,
+    );
     const deniedCalls = remote.calls.length;
     const beta = await envelope(betaPath, 404, 'not_found');
     await envelope('/beta/p2/acme/proxy.json', 404, 'not_found');
@@ -691,7 +965,11 @@ export async function registryScenario(
     );
     assert.equal(beta.code, missing.code);
     assert.deepEqual(beta, absentProject);
-    assert.equal(remote.calls.length, deniedCalls);
+    assert.equal(
+      remote.calls.length,
+      deniedCalls,
+      `denied-upstream-calls:${remote.calls.length - deniedCalls}`,
+    );
     stage = 're-mirror';
     await local.loseBlob(orgId, hash(ZIP));
     const beforeRemirror = remote.count('/acme/proxy/legacy.zip/');
@@ -720,13 +998,33 @@ export async function registryScenario(
     stage = 'module-and-leak-evidence';
     await local.moduleEvidence();
     remote.assertHealthy();
-    const output = [local.logs(), ...captured].join('\n');
+    const auditRows = await rows<{ payload_json: string }>(
+      // eslint-disable-next-line no-restricted-syntax -- Organization-scoped redaction evidence.
+      'SELECT payload_json FROM audit_event WHERE org_id = ?',
+    );
+    const pendingRows = await rows<{ payload_json: string }>(
+      // eslint-disable-next-line no-restricted-syntax -- Organization-scoped redaction evidence.
+      'SELECT payload_json FROM audit_pending WHERE org_id = ?',
+    );
+    const sourceResponse = await status(
+      await admin.request('/_pb/sources', undefined, 'GET'),
+      200,
+      'token-source-redaction',
+    );
+    const output = [
+      local.logs(),
+      ...captured,
+      await sourceResponse.text(),
+      JSON.stringify(auditRows),
+      JSON.stringify(pendingRows),
+    ].join('\n');
     for (const secret of [
       PRIVATE_KEY,
       JSON.stringify(PRIVATE_KEY).slice(1, -1),
       PRIVATE_KEY.split('\n')[1]!,
       SECRET,
       INSTALLATION_TOKEN,
+      PERSONAL_TOKEN,
       PASSWORD,
       'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
       token,
@@ -738,7 +1036,7 @@ export async function registryScenario(
       assert(!secret || !output.includes(secret), 'SensitiveDataInOutput');
     return {
       status: 'PASS',
-      reason: `${runtime}: production bundle completed all registry legs and the two-pass re-mirror.`,
+      reason: `${runtime}: production bundle completed registry legs and the two-pass re-mirror. Composer require: ${composerAvailable ? 'PASS' : 'NOT RUN (composer unavailable)'}.`,
     };
   } catch (error) {
     return error instanceof LocalUnavailable
@@ -751,7 +1049,7 @@ export async function registryScenario(
             error.actual === 404 &&
             error.expected === 202
               ? `${runtime}: signed webhook returned HTTP 404.`
-              : `${runtime}: registry assembly scenario failed at ${stage}.`,
+              : `${runtime}: registry assembly scenario failed at ${stage}${cause(error)}.${composerFailure && ` Composer output: ${composerFailure}`}`,
         };
   } finally {
     try {
@@ -779,7 +1077,6 @@ export async function runRegistryAssembly(
     };
   return {
     status: 'PASS',
-    reason:
-      'Both production bundles passed; removing the Node webhook registration failed the scenario.',
+    reason: `${node.reason} ${worker.reason} Removing the Node webhook registration failed the scenario.`,
   };
 }

@@ -1,0 +1,13 @@
+{
+  "script": "package-broker-production",
+  "dead_letter_queue": "package-broker-production-jobs-dlq",
+  "settings": {
+    "batch_size": 1,
+    "max_retries": 4,
+    "max_wait_time_ms": 1000,
+    "max_concurrency": 2,
+    "retry_delay": 0
+  },
+  "consumer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "type": "worker"
+}

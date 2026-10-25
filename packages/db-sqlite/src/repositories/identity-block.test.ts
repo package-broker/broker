@@ -1,3 +1,6 @@
+import { DbError } from '@package-broker/core/db/errors';
+import { auditEvent, type AuditEvent } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mutationFence,
@@ -219,12 +222,12 @@ async function expectAllBlocks(): Promise<void> {
 describe('unblock', () => {
   it('serves as the core identity block store', async () => {
     const store: IdentityBlockStore = repository();
-    expect(await store.unblock(org, actorFence(), key())).toBe('unblocked');
+    expect(await store.unblock(org, actorFence(), key(), audit())).toBe('unblocked');
   });
 
   it('deletes exactly the one block row, and a second call is not_found', async () => {
     const before = await count('identity_block');
-    expect(await repository().unblock(org, actorFence(), key())).toBe('unblocked');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('unblocked');
     expect(await count('identity_block')).toBe(before - 1);
     expect(
       await count(
@@ -240,7 +243,7 @@ describe('unblock', () => {
     expect(await count('identity_block', 'subject = ?', 'sub-kept')).toBe(1);
     expect(await count('identity_block', 'issuer = ?', OLD_ANCHOR)).toBe(1);
 
-    expect(await repository().unblock(org, actorFence(), key())).toBe('not_found');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('not_found');
     expect(await count('identity_block')).toBe(before - 1);
   });
 
@@ -250,33 +253,35 @@ describe('unblock', () => {
       key({ provider: 'cf' }),
       key({ subject: 'sub-unknown' }),
     ]) {
-      expect(await repository().unblock(org, actorFence(), miss)).toBe('not_found');
+      expect(await repository().unblock(org, actorFence(), miss, audit())).toBe('not_found');
     }
     await expectAllBlocks();
   });
 
   it('treats another organization block as not_found and leaves it in place', async () => {
     await executor.batch([blockStatement(other, key({ subject: 'sub-only-b' }))]);
-    expect(await repository().unblock(org, actorFence(), key({ subject: 'sub-only-b' }))).toBe(
-      'not_found',
-    );
+    expect(
+      await repository().unblock(org, actorFence(), key({ subject: 'sub-only-b' }), audit()),
+    ).toBe('not_found');
     expect(
       await count('identity_block', 'org_id = ? AND subject = ?', other.orgId, 'sub-only-b'),
     ).toBe(1);
   });
 
   it('refuses the actor inside another organization context without touching either', async () => {
-    expect(await repository().unblock(other, actorFence(), key())).toBe('authority');
+    expect(await repository().unblock(other, actorFence(), key(), audit())).toBe('authority');
     await expectAllBlocks();
   });
 
   it('refuses a user without any organization role', async () => {
-    expect(await repository().unblock(org, fenceOf(PLAIN, PLAIN_SESSION), key())).toBe('authority');
+    expect(await repository().unblock(org, fenceOf(PLAIN, PLAIN_SESSION), key(), audit())).toBe(
+      'authority',
+    );
     await expectAllBlocks();
   });
 
   it('refuses a protected holder without org:users:write', async () => {
-    expect(await repository().unblock(org, fenceOf(READER, READER_SESSION), key())).toBe(
+    expect(await repository().unblock(org, fenceOf(READER, READER_SESSION), key(), audit())).toBe(
       'authority',
     );
     await expectAllBlocks();
@@ -286,20 +291,22 @@ describe('unblock', () => {
     await executor.batch([
       stmt('UPDATE role SET protects_last_holder = 0 WHERE id = ?', ADMIN_ROLE),
     ]);
-    expect(await repository().unblock(org, actorFence(), key())).toBe('authority');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('authority');
     await expectAllBlocks();
   });
 
   it('refuses an actor whose session is revoked, expired or belongs to someone else', async () => {
-    expect(await repository().unblock(org, fenceOf(ACTOR, PLAIN_SESSION), key())).toBe('authority');
+    expect(await repository().unblock(org, fenceOf(ACTOR, PLAIN_SESSION), key(), audit())).toBe(
+      'authority',
+    );
     await executor.batch([
       stmt('UPDATE session SET revoked_at = ? WHERE id = ?', NOW, ACTOR_SESSION),
     ]);
-    expect(await repository().unblock(org, actorFence(), key())).toBe('authority');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('authority');
     await executor.batch([
       stmt('UPDATE session SET revoked_at = NULL, expires_at = ? WHERE id = ?', OLD, ACTOR_SESSION),
     ]);
-    expect(await repository().unblock(org, actorFence(), key())).toBe('authority');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('authority');
     await expectAllBlocks();
   });
 
@@ -309,7 +316,7 @@ describe('unblock', () => {
       await executor.batch([
         stmt('UPDATE session SET reauth_at = ? WHERE id = ?', reauthAt, ACTOR_SESSION),
       ]);
-      expect(await repository().unblock(org, actorFence(), key())).toBe('authority');
+      expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('authority');
     }
     await expectAllBlocks();
   });
@@ -326,7 +333,7 @@ describe('unblock', () => {
         return executor.batch(batch);
       },
     };
-    expect(await repository(expiring).unblock(org, actorFence(), key())).toBe('authority');
+    expect(await repository(expiring).unblock(org, actorFence(), key(), audit())).toBe('authority');
     expect(
       await count(
         'identity_block',
@@ -344,7 +351,7 @@ describe('unblock', () => {
     await executor.batch([
       stmt("UPDATE user_account SET status = 'suspended' WHERE id = ?", ACTOR),
     ]);
-    expect(await repository().unblock(org, actorFence(), key())).toBe('authority');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('authority');
     await expectAllBlocks();
   });
 
@@ -354,7 +361,7 @@ describe('unblock', () => {
         "CREATE TRIGGER keep_block BEFORE DELETE ON identity_block WHEN OLD.subject = 'sub-blocked' BEGIN SELECT RAISE(IGNORE); END",
       ),
     ]);
-    await expect(repository().unblock(org, actorFence(), key())).rejects.toThrow(
+    await expect(repository().unblock(org, actorFence(), key(), audit())).rejects.toThrow(
       'identity unblock failed unclassified (unclassified)',
     );
     await expectAllBlocks();
@@ -380,7 +387,9 @@ describe('unblock', () => {
       key({ subject: 'a\u0000b' }),
       null as unknown as IdentityBlockKey,
     ]) {
-      await expect(repository(spy).unblock(org, actorFence(), bad)).rejects.toThrow(TypeError);
+      await expect(repository(spy).unblock(org, actorFence(), bad, audit())).rejects.toThrow(
+        TypeError,
+      );
     }
     expect(statements).toHaveLength(0);
     await expectAllBlocks();
@@ -394,11 +403,11 @@ describe('unblock', () => {
         return holders();
       },
     });
-    await expect(counted.unblock(org, actorFence(), key({ subject: '' }))).rejects.toThrow(
+    await expect(counted.unblock(org, actorFence(), key({ subject: '' }), audit())).rejects.toThrow(
       TypeError,
     );
     expect(resolved).toBe(0);
-    expect(await counted.unblock(org, actorFence(), key())).toBe('unblocked');
+    expect(await counted.unblock(org, actorFence(), key(), audit())).toBe('unblocked');
     expect(resolved).toBe(1);
   });
 
@@ -415,9 +424,9 @@ describe('unblock', () => {
         return executor.batch(batch);
       },
     };
-    expect(await repository(spy).unblock(org, actorFence(), key())).toBe('unblocked');
-    expect(await repository(spy).unblock(org, actorFence(), key())).toBe('not_found');
-    expect(await repository(spy).unblock(org, fenceOf(PLAIN, PLAIN_SESSION), key())).toBe(
+    expect(await repository(spy).unblock(org, actorFence(), key(), audit())).toBe('unblocked');
+    expect(await repository(spy).unblock(org, actorFence(), key(), audit())).toBe('not_found');
+    expect(await repository(spy).unblock(org, fenceOf(PLAIN, PLAIN_SESSION), key(), audit())).toBe(
       'authority',
     );
     expect(statements.length).toBeGreaterThan(0);
@@ -431,6 +440,17 @@ function loginPlan(overrides: Partial<LoginPlan> = {}): LoginPlan {
   const userId = overrides.userId ?? RETURNING_USER;
   const identityId = overrides.identityId ?? RETURNING_IDENTITY;
   return {
+    audit: {
+      id: ulid(),
+      occurredAt: NOW,
+      action: 'session.login',
+      actor: { type: 'user', id: userId },
+      target: { type: 'session', id: overrides.session?.id ?? RETURNING_SESSION },
+      tokenSelector: null,
+      sourceIp: null,
+      projectId: null,
+      payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+    },
     userId,
     createUser: true,
     autoJoin: true,
@@ -466,7 +486,7 @@ describe('login after unblock', () => {
     expect(await writer.commit(org, loginPlan())).toBe('refused');
     expect(await count('identity', 'subject = ?', 'sub-blocked')).toBe(0);
 
-    expect(await repository().unblock(org, actorFence(), key())).toBe('unblocked');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('unblocked');
 
     expect(await writer.commit(org, loginPlan())).toBe('created');
     expect(
@@ -479,9 +499,9 @@ describe('login after unblock', () => {
   });
 
   it('keeps refusing the subject when only the block under another issuer is lifted', async () => {
-    expect(await repository().unblock(org, actorFence(), key({ issuer: OLD_ANCHOR }))).toBe(
-      'unblocked',
-    );
+    expect(
+      await repository().unblock(org, actorFence(), key({ issuer: OLD_ANCHOR }), audit()),
+    ).toBe('unblocked');
     expect(await createLoginWriter(executor).commit(org, loginPlan())).toBe('refused');
     expect(await count('identity', 'subject = ?', 'sub-blocked')).toBe(0);
   });
@@ -495,8 +515,158 @@ describe('login after unblock', () => {
         ANCHOR,
       ),
     ]);
-    expect(await repository().unblock(org, actorFence(), key())).toBe('unblocked');
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('unblocked');
     expect(await createLoginWriter(executor).commit(other, loginPlan())).toBe('refused');
     expect(await count('identity', 'org_id = ?', other.orgId)).toBe(0);
+  });
+});
+
+const auditContext = {
+  opId: '01K7R5V0000000000000000001',
+  requestId: '01K7R5V0000000000000000002',
+  sourceIp: '192.0.2.67',
+  tokenSelector: null,
+};
+
+function audit(action: AuditEvent['action'] = 'identity.unblock'): AuditEvent {
+  const result = auditEvent({
+    id: ulid(),
+    now: NOW,
+    action,
+    actor: { type: 'user', id: ACTOR },
+    context: auditContext,
+    target: { type: 'identity_block', id: null },
+    projectId: null,
+  });
+  if (!result.ok) throw new Error('Invalid test audit event');
+  return result.event;
+}
+async function auditRows() {
+  return rows(
+    'SELECT action, actor_type, actor_id, target_type, target_id, project_id, payload_json FROM audit_pending WHERE org_id = ? ORDER BY action',
+    org.orgId,
+  );
+}
+
+describe('unblock audit batch', () => {
+  it('leaves no event or deletion when the batch is indeterminate before commit', async () => {
+    const unavailable: ScalarSqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: () => Promise.reject(new DbError('unknown', 'database unavailable')),
+    };
+    expect(await repository(unavailable).unblock(org, actorFence(), key(), audit())).toBe(
+      'indeterminate',
+    );
+    expect(await auditRows()).toEqual([]);
+    await expectAllBlocks();
+  });
+
+  it.each([
+    { boundary: 'audit insert', expiresBefore: /^INSERT INTO audit_pending/, refused: true },
+    { boundary: 'delete', expiresBefore: /^delete from "identity_block"/, refused: false },
+  ])(
+    'uses the audit decision when reauthentication expires before the $boundary',
+    async ({ expiresBefore, refused }) => {
+      const startedAt = Date.now();
+      const expiredAt = new Date(startedAt + 2_000).toISOString();
+      let now = new Date(startedAt).toISOString();
+      await executor.batch([
+        stmt(
+          'UPDATE session SET reauth_at = ? WHERE org_id = ? AND id = ?',
+          new Date(startedAt - REAUTH_WINDOW_MS + 1_000).toISOString(),
+          org.orgId,
+          ACTOR_SESSION,
+        ),
+      ]);
+      const atCurrentTime = (statement: ScalarStatement): ScalarStatement => ({
+        ...statement,
+        sql: statement.sql.replaceAll("'now'", `'${now}'`),
+      });
+      const expiring: ScalarSqlExecutor = {
+        driver: executor.driver,
+        all: <R>(statement: ScalarStatement) => executor.all<R>(atCurrentTime(statement)),
+        batch: (batch) =>
+          executor.batch(
+            batch.map((statement) => {
+              if (expiresBefore.test(statement.sql)) now = expiredAt;
+              return atCurrentTime(statement);
+            }),
+          ),
+      };
+
+      expect(await repository(expiring).unblock(org, actorFence(), key(), audit())).toBe(
+        refused ? 'authority' : 'unblocked',
+      );
+      expect(now).toBe(expiredAt);
+      expect(await auditRows()).toHaveLength(refused ? 0 : 1);
+      if (refused) await expectAllBlocks();
+      else {
+        expect(
+          await count(
+            'identity_block',
+            'org_id = ? AND provider = ? AND issuer = ? AND subject = ?',
+            org.orgId,
+            OIDC,
+            ANCHOR,
+            'sub-blocked',
+          ),
+        ).toBe(0);
+      }
+    },
+  );
+
+  it('stores one admin event with an anonymous target', async () => {
+    expect(await repository().unblock(org, actorFence(), key(), audit())).toBe('unblocked');
+    expect(await auditRows()).toEqual([
+      expect.objectContaining({
+        action: 'identity.unblock',
+        actor_type: 'user',
+        actor_id: ACTOR,
+        target_type: 'identity_block',
+        target_id: null,
+        project_id: null,
+      }),
+    ]);
+  });
+  it('stores no event when authority is refused', async () => {
+    expect(await repository().unblock(org, fenceOf(PLAIN, PLAIN_SESSION), key(), audit())).toBe(
+      'authority',
+    );
+    expect(await auditRows()).toEqual([]);
+  });
+  it('stores no event when the block is absent', async () => {
+    expect(
+      await repository().unblock(org, actorFence(), key({ subject: 'absent-sentinel' }), audit()),
+    ).toBe('not_found');
+    expect(await auditRows()).toEqual([]);
+  });
+  it('keeps provider, issuer and subject sentinels out of the stored payload', async () => {
+    const sentinel = key({
+      provider: 'provider-sentinel',
+      issuer: 'oidc:https://issuer-sentinel.example.test',
+      subject: 'subject-sentinel',
+    });
+    await executor.batch([blockStatement(org, sentinel)]);
+    expect(await repository().unblock(org, actorFence(), sentinel, audit())).toBe('unblocked');
+    const stored = await auditRows();
+    expect(stored).toHaveLength(1);
+    expect(JSON.parse(String(stored[0]!['payload_json']))).toEqual({
+      op_id: auditContext.opId,
+      request_id: auditContext.requestId,
+    });
+    for (const value of Object.values(sentinel))
+      expect(JSON.stringify(stored)).not.toContain(value);
+  });
+  it('rolls back the event when the delete postcondition fails', async () => {
+    await executor.batch([
+      stmt(
+        'CREATE TRIGGER keep_audit_block BEFORE DELETE ON identity_block BEGIN SELECT RAISE(IGNORE); END',
+      ),
+    ]);
+    await expect(repository().unblock(org, actorFence(), key(), audit())).rejects.toThrow(
+      'identity unblock failed unclassified (unclassified)',
+    );
+    expect(await auditRows()).toEqual([]);
   });
 });

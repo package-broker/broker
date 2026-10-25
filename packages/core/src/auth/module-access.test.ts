@@ -184,6 +184,14 @@ describe('auth module access wiring', () => {
         provider: 'oidc',
         subject: 'subject-1',
       },
+      {
+        audit: {
+          opId: '01K7R5V0000000000000000001',
+          requestId: '01K7R5V0000000000000000002',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      },
     );
     expect(result).toEqual({ ok: false, error: 'reauth_required' });
     expect(isReauthFresh).toHaveBeenCalledTimes(1);

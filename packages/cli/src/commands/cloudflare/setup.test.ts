@@ -14,7 +14,7 @@ import {
 } from '@package-broker/core/secrets/master-key';
 import { stageAssets } from '../../build-assets.js';
 import { commandEnvelope, failCommand, CloudflareError } from './api.js';
-import { deploy, validateDeploymentArtifact } from './deploy.js';
+import { cloudflareDeployContract, deploy, validateDeploymentArtifact } from './deploy.js';
 import {
   emptyInventory,
   installIdentity,
@@ -119,6 +119,26 @@ beforeEach(async () => {
     fetch: vi.fn(async (input) => {
       calls.push('read');
       const path = new URL(String(input)).pathname;
+      if (path.endsWith('/workers/subdomain'))
+        return new Response(JSON.stringify({ success: true, result: { subdomain: 'account' } }));
+      if (path.endsWith('/workers/domains'))
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: options.domain
+              ? [
+                  {
+                    id: 'domain-id',
+                    zone_id: 'b'.repeat(32),
+                    hostname: options.domain,
+                    service: identity.script_name,
+                    environment: 'production',
+                  },
+                ]
+              : [],
+            result_info: { total_pages: 1 },
+          }),
+        );
       const value = path.endsWith('/secrets')
         ? installed
           ? [{ name: 'PB_MASTER_KEY', type: 'secret_text' }]
@@ -230,6 +250,7 @@ afterEach(async () => {
 it('orders typed operations, durably delivers a T159 key and prints only a credential-free URL', async () => {
   const r = await setup(options, ops);
   expect(r.exitCode).toBe(0);
+  expect(vi.mocked(ops.deploy).mock.calls[0]![0].contract).toBe(cloudflareDeployContract);
   expect(calls.filter((c) => c !== 'read')).toEqual([
     'build',
     'artifact',
@@ -425,6 +446,145 @@ it('dry-run performs no generation, delivery, prompt, journal or mutable operati
   expect(await store.read()).toBeNull();
   await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
 });
+it('plans a first install with the real collection shapes and no KV permission', async () => {
+  const fixtures = JSON.parse(
+    await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+  ) as Record<string, unknown>;
+  const out = join(project, '.pb/cloudflare');
+  await mkdir(join(out, 'generated'), { recursive: true });
+  await writeFile(
+    join(out, 'generated/manifest.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      platform: 'cloudflare',
+      platformPorts: {
+        blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+        cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
+        jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
+        observability: {
+          adapter: 'workers',
+          analyticsBinding: 'ANALYTICS',
+          deploymentIdEnv: 'DEPLOYMENT_ID',
+        },
+      },
+      bindings: [],
+      plugins: [],
+    }),
+  );
+  await writeFile(
+    join(out, 'build-info.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      target: 'cloudflare',
+      core: '2.0.0',
+      plugins: {},
+      lockfileSha256: null,
+      gitSha: null,
+    }),
+  );
+  let time = Date.now();
+  options.now = () => time;
+  options.sleep = async (ms) => {
+    time += ms;
+  };
+  options.dryRun = true;
+  const reads: URL[] = [];
+  options.fetch = vi.fn(async (input, init) => {
+    const url = new URL(String(input));
+    expect(url.pathname).toContain(`/accounts/${ACCOUNT}/`);
+    const path = url.pathname.split(ACCOUNT)[1]!;
+    reads.push(url);
+    if (path === `/workers/scripts/${identity.script_name}/settings`)
+      return new Response(JSON.stringify({ success: false, result: null, errors: [] }), {
+        status: 404,
+      });
+    const bodies: Record<string, unknown> = {
+      '/d1/database': fixtures.d1Empty,
+      '/r2/buckets': fixtures.r2Empty,
+      '/queues': fixtures.queuesEmpty,
+      '/subscriptions': fixtures.forbidden,
+      '/analytics_engine/sql': fixtures.analyticsTablesEmpty,
+      '/workers/scripts': fixtures.workersEmpty,
+      '/workers/subdomain': { success: true, result: { subdomain: 'example' } },
+      '/storage/kv/namespaces': fixtures.forbidden,
+    };
+    if (path === '/analytics_engine/sql') {
+      expect(init?.method).toBe('POST');
+      expect(init?.body).toBe('SHOW TABLES');
+    } else expect(init?.method ?? 'GET').toBe('GET');
+    expect(bodies).toHaveProperty(path);
+    return new Response(JSON.stringify(bodies[path]), {
+      status: ['/subscriptions', '/storage/kv/namespaces'].includes(path) ? 403 : 200,
+    });
+  });
+  ops.provision = vi.fn(provision);
+  expect(await setup(options, ops)).toMatchObject({
+    exitCode: 0,
+    output: {
+      status: 'planned',
+      error: null,
+      plan: expect.arrayContaining([
+        expect.objectContaining({ action: 'create', kind: 'd1' }),
+        expect.objectContaining({ action: 'create', kind: 'r2' }),
+        expect.objectContaining({
+          action: 'create',
+          kind: 'queue',
+          name: `${identity.script_name}-jobs`,
+        }),
+        expect.objectContaining({
+          action: 'create',
+          kind: 'queue',
+          name: `${identity.script_name}-jobs-dlq`,
+        }),
+        expect.objectContaining({ action: 'create', kind: 'worker' }),
+      ]),
+      checks: expect.arrayContaining([
+        { name: 'analytics_engine', status: 'supported', source: 'analytics_engine_sql' },
+      ]),
+    },
+  });
+  const scriptReads = reads.filter((url) => url.pathname.endsWith('/workers/scripts'));
+  expect(scriptReads).toHaveLength(1);
+  expect(scriptReads[0]!.search).toBe('');
+  expect(reads.some((url) => url.pathname.includes('/storage/kv/'))).toBe(false);
+  expect(await store.read()).toBeNull();
+  expect(ops.deploy).not.toHaveBeenCalled();
+});
+
+it.each([undefined, null])(
+  'reads installed secrets as a snapshot with metadata %s',
+  async (result_info) => {
+    options.dryRun = true;
+    options.publicUrl = 'https://broker.example.test';
+    const reads: URL[] = [];
+    options.fetch = vi.fn(async (input) => {
+      const url = new URL(String(input));
+      reads.push(url);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          result: url.pathname.endsWith('/secrets')
+            ? [{ name: 'PB_MASTER_KEY', type: 'secret_text' }]
+            : [
+                {
+                  id: identity.script_name,
+                  tags: ['pb-install-v1', `pb-owner-${identity.owner_digest}`],
+                },
+              ],
+          result_info,
+        }),
+      );
+    });
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(reads).toHaveLength(2);
+    expect(reads.every((url) => url.search === '')).toBe(true);
+    expect(reads[1]!.pathname).toBe(
+      `/client/v4/accounts/${ACCOUNT}/workers/scripts/${identity.script_name}/secrets`,
+    );
+    expect(await store.read()).toBeNull();
+  },
+);
+
 it('build failure stops before any network or secret side effect', async () => {
   ops.build = vi.fn(async () => {
     throw new CloudflareError('invalid_input', 2, false, 'build');
@@ -746,7 +906,7 @@ it('an identical completed rerun retains selected non-master secrets without res
   expect(deployed).not.toHaveProperty('secrets');
 });
 
-it.each(['completed', 'upload_pending'])(
+it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
   'reuses the real deployment version on an identical %s rerun with selected secrets',
   async (checkpoint) => {
     const out = join(project, '.pb/cloudflare');
@@ -868,8 +1028,15 @@ it.each(['completed', 'upload_pending'])(
         ];
         candidate = {
           id: versionId,
-          metadata: { annotations: metadata.annotations },
-          resources: { bindings: candidateBindings, assets: { config: metadata.assets.config } },
+          annotations: metadata.annotations,
+          resources: {
+            bindings: candidateBindings,
+            assets: { config: metadata.assets.config },
+            script_runtime: {
+              compatibility_date: '2026-10-01',
+              compatibility_flags: ['nodejs_compat'],
+            },
+          },
         };
         if (loseUpload) {
           loseUpload = false;
@@ -885,7 +1052,7 @@ it.each(['completed', 'upload_pending'])(
           id: 'active-deployment',
           versions: [{ version_id: versionId, percentage: 100 }],
         };
-        return ok(method === 'GET' ? { active: active ? deployment : null } : deployment);
+        return ok(method === 'GET' ? { deployments: active ? [deployment] : [] } : deployment);
       }
       throw new Error(`Unexpected request ${method} ${path}`);
     });
@@ -909,15 +1076,28 @@ it.each(['completed', 'upload_pending'])(
       return result('smoke');
     });
     const first = await setup(options, ops);
-    expect(first.exitCode, JSON.stringify(first.output)).toBe(checkpoint === 'completed' ? 0 : 6);
+    expect(first.exitCode, JSON.stringify(first.output)).toBe(
+      checkpoint === 'upload_pending' ? 6 : 0,
+    );
     expect(uploads).toBe(1);
+    if (checkpoint === 'completed_deleted_files') {
+      delete options.masterKeyEnv;
+      options.keyFile = join(outside, 'deleted', 'master.key');
+      await rm(outside, { recursive: true });
+      vi.mocked(ops.admin).mockClear();
+    }
     const rerun = await setup(options, ops);
+    if (checkpoint === 'completed_deleted_files') {
+      expect(ops.admin).not.toHaveBeenCalled();
+      expect(vi.mocked(ops.deploy).mock.lastCall![0].env.PB_MASTER_KEY).toBeUndefined();
+      await expect(stat(outside)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
     expect(rerun.exitCode).toBe(0);
     expect(uploads).toBe(1);
     expect(rerun.output.version_id).toBe(versionId);
     expect(rerun.output.plan).toContainEqual({
       stage: 'deploy',
-      action: checkpoint === 'completed' ? 'unchanged' : 'reconcile',
+      action: checkpoint === 'upload_pending' ? 'reconcile' : 'unchanged',
     });
   },
 );
@@ -1532,7 +1712,7 @@ it.each([false, true])(
     const fetch = options.fetch!;
     options.fetch = vi.fn(async (input, init) =>
       new URL(String(input)).pathname.endsWith('/deployments')
-        ? new Response(JSON.stringify({ success: true, result: { active: null } }))
+        ? new Response(JSON.stringify({ success: true, result: { deployments: [] } }))
         : fetch(input, init),
     );
     expect((await setup(options, ops)).exitCode).toBe(2);
@@ -1574,3 +1754,117 @@ it('collects missing guided inputs through injected TTY prompts with identity de
     deploymentId: 'broker-production',
   });
 });
+
+async function expectPreflightRefusal(code: string, exitCode: number) {
+  const outcome = await setup(options, ops);
+  expect(outcome).toMatchObject({ exitCode, output: { error: { code } } });
+  expect(calls).not.toContain('provision');
+  for (const operation of [ops.migrate, ops.organization, ops.deploy, ops.admin])
+    expect(operation).not.toHaveBeenCalled();
+  expect(options.reveal).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+  await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(JSON.stringify(outcome)).not.toContain('PRIVATE_SENTINEL');
+}
+
+it('refuses partial rollout with an active version when the deploy contract has no preview', async () => {
+  exists = true;
+  options.rollout = 50;
+  options.reveal = vi.fn();
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/deployments')
+      ? new Response(
+          JSON.stringify({
+            success: true,
+            result: {
+              deployments: [
+                {
+                  id: 'active',
+                  versions: [
+                    { version_id: '22222222-2222-4222-8222-222222222222', percentage: 100 },
+                  ],
+                },
+              ],
+            },
+          }),
+        )
+      : fetch(input, init),
+  );
+  await expectPreflightRefusal('capability_unknown', 1);
+});
+
+it.each([undefined, '', 'a'.repeat(64), 'PRIVATE_SENTINEL', 'not.a.label'])(
+  'refuses unusable workers.dev registration before writes: %s',
+  async (subdomain) => {
+    options.reveal = vi.fn();
+    const fetch = options.fetch!;
+    options.fetch = vi.fn(async (input, init) =>
+      new URL(String(input)).pathname.endsWith('/workers/subdomain')
+        ? new Response(JSON.stringify({ success: true, result: { subdomain } }))
+        : fetch(input, init),
+    );
+    await expectPreflightRefusal('workers_dev_subdomain_missing', 2);
+  },
+);
+
+it('refuses custom domain creation when the deploy contract has no zone resolver', async () => {
+  options.domain = 'broker.example.test';
+  options.reveal = vi.fn();
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/workers/domains')
+      ? new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 1 } }))
+      : fetch(input, init),
+  );
+  await expectPreflightRefusal('capability_unknown', 1);
+});
+
+it('refuses an unregistered workers.dev account on a 404 before writes', async () => {
+  options.reveal = vi.fn();
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/workers/subdomain')
+      ? new Response(JSON.stringify({ success: false, errors: [] }), { status: 404 })
+      : fetch(input, init),
+  );
+  await expectPreflightRefusal('workers_dev_subdomain_missing', 2);
+});
+
+it('accepts the maximum workers.dev label length during preflight', async () => {
+  const fetch = options.fetch!;
+  options.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname.endsWith('/workers/subdomain')
+      ? new Response(JSON.stringify({ success: true, result: { subdomain: 'a'.repeat(63) } }))
+      : fetch(input, init),
+  );
+  expect((await setup(options, ops)).exitCode).toBe(0);
+});
+
+it.each(['foreign owner', 'invalid zone', 'duplicate attachment'])(
+  'refuses an unusable existing domain before writes: %s',
+  async (failure) => {
+    options.domain = 'broker.example.test';
+    options.reveal = vi.fn();
+    const domain = {
+      id: 'domain-id',
+      zone_id: failure === 'invalid zone' ? 'PRIVATE_SENTINEL' : 'b'.repeat(32),
+      hostname: options.domain,
+      service: failure === 'foreign owner' ? 'another-worker' : identity.script_name,
+      environment: 'production',
+    };
+    const fetch = options.fetch!;
+    options.fetch = vi.fn(async (input, init) =>
+      new URL(String(input)).pathname.endsWith('/workers/domains')
+        ? new Response(
+            JSON.stringify({
+              success: true,
+              result: failure === 'duplicate attachment' ? [domain, domain] : [domain],
+              result_info: { total_pages: 1 },
+            }),
+          )
+        : fetch(input, init),
+    );
+    await expectPreflightRefusal('configuration_conflict', 8);
+  },
+);

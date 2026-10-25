@@ -8,9 +8,10 @@ import {
 } from './cookies.js';
 import { assertCsrfToken, assertSameOrigin } from './csrf.js';
 import { randomToken, sha256Hex } from './primitives.js';
+import { auditEvent, isIpLiteral, type AuditEvent } from '../audit/actions.js';
 import type { OrgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
-import type { Clock } from '../ids.js';
+import { ulid, type Clock } from '../ids.js';
 import type { Principal } from '../plugin.js';
 
 export const SESSION_ABSOLUTE_MS = 43_200_000;
@@ -18,8 +19,12 @@ export const SESSION_IDLE_MS = 3_600_000;
 export const SESSION_TOUCH_MS = 300_000;
 export const REAUTH_WINDOW_MS = 600_000;
 
-export interface SessionMeta {
+export type AuthCallMeta = {
+  readonly requestId: string;
   readonly ip: string | null;
+};
+
+export interface SessionMeta extends AuthCallMeta {
   readonly userAgent: string | null;
   readonly previousSecretHash: string | null;
 }
@@ -37,14 +42,18 @@ export interface AuthenticatedSession {
 }
 
 export interface SessionService {
-  /** A failing `touch` rejects the whole call: the request fails closed. */
-  authenticate(ctx: OrgContext, request: Request): Promise<AuthenticatedSession | null>;
+  /** Touches by default; a failing `touch` rejects the whole call. */
+  authenticate(
+    ctx: OrgContext,
+    request: Request,
+    options?: { readonly touch: boolean },
+  ): Promise<AuthenticatedSession | null>;
   assertCsrf(request: Request, session: AuthenticatedSession): Promise<void>;
   isReauthFresh(session: AuthenticatedSession): boolean;
   setCookies(secrets: SessionSecrets, expiresAt: string): readonly string[];
   clearCookies(): readonly string[];
   /** Repository failures propagate; the route must still send `clearCookies()` when it catches one. */
-  logout(ctx: OrgContext, request: Request): Promise<readonly string[]>;
+  logout(ctx: OrgContext, request: Request, meta: AuthCallMeta): Promise<readonly string[]>;
 }
 
 const SESSION_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -52,7 +61,6 @@ const SESSION_FLAGS = { httpOnly: true, sameSite: 'Lax' } as const;
 const CSRF_FLAGS = { httpOnly: false, sameSite: 'Strict' } as const;
 const LOGIN_FLAGS = { httpOnly: true, sameSite: 'Lax' } as const;
 const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const IP_PATTERN = /^[0-9A-Fa-f:.]{1,64}$/;
 
 export async function newSessionSecrets(): Promise<SessionSecrets> {
   const secret = randomToken(32);
@@ -70,11 +78,20 @@ function nonEmpty(value: string | null): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
-function clientIp(request: Request): string | null {
+export function clientIpOf(request: Request): string | null {
   const candidate =
     nonEmpty(request.headers.get('cf-connecting-ip')) ??
     nonEmpty(request.headers.get('x-forwarded-for')?.split(',')[0] ?? null);
-  return candidate !== null && IP_PATTERN.test(candidate) ? candidate : null;
+  return candidate !== null && isIpLiteral(candidate) ? candidate : null;
+}
+
+export function authCallMetaOf(
+  request: Request,
+  requestId: string,
+  resolveClientIp: (request: Request) => string | null = clientIpOf,
+): AuthCallMeta {
+  const ip: unknown = resolveClientIp(request);
+  return { requestId, ip: isIpLiteral(ip) ? (ip as string) : null };
 }
 
 function timestampMs(value: string): number {
@@ -87,11 +104,12 @@ function timestampMs(value: string): number {
 
 export async function sessionMetaOf(
   request: Request,
-  resolveClientIp: (request: Request) => string | null = clientIp,
+  requestId: string,
+  resolveClientIp: (request: Request) => string | null = clientIpOf,
 ): Promise<SessionMeta> {
   const secret = sessionSecretOf(request);
   return {
-    ip: resolveClientIp(request),
+    ...authCallMetaOf(request, requestId, resolveClientIp),
     userAgent: nonEmpty(request.headers.get('user-agent')),
     previousSecretHash: secret === null ? null : await sha256Hex(secret),
   };
@@ -114,7 +132,7 @@ export function createSessionService(deps: {
   ];
 
   return {
-    async authenticate(ctx, request) {
+    async authenticate(ctx, request, options) {
       const secret = sessionSecretOf(request);
       if (secret === null) {
         return null;
@@ -128,7 +146,7 @@ export function createSessionService(deps: {
         return null;
       }
       const lastSign = timestampMs(session.lastSeenAt ?? session.createdAt);
-      if (now - lastSign > SESSION_TOUCH_MS) {
+      if (options?.touch !== false && now - lastSign > SESSION_TOUCH_MS) {
         await sessions.touch(
           ctx,
           session.id,
@@ -175,10 +193,43 @@ export function createSessionService(deps: {
 
     clearCookies,
 
-    async logout(ctx, request) {
+    async logout(ctx, request, meta) {
       const secret = sessionSecretOf(request);
       if (secret !== null) {
-        await sessions.revokeBySecretHash(ctx, await sha256Hex(secret), clock.now().toISOString());
+        const secretHash = await sha256Hex(secret);
+        const now = clock.now();
+        const session = await sessions.findActive(ctx, secretHash, {
+          now: now.toISOString(),
+          idleSince: new Date(now.getTime() - SESSION_IDLE_MS).toISOString(),
+        });
+        if (session === null) {
+          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString());
+        } else {
+          let event: AuditEvent | undefined;
+          try {
+            const id = ulid(now.getTime());
+            const audit = auditEvent({
+              id,
+              now: now.toISOString(),
+              action: 'session.logout',
+              actor: { type: 'user', id: session.userId },
+              target: { type: 'session', id: session.id },
+              context: {
+                opId: id,
+                requestId: meta.requestId,
+                sourceIp: isIpLiteral(meta.ip) ? meta.ip : null,
+                tokenSelector: null,
+              },
+            });
+            if (audit.ok) event = audit.event;
+          } catch {
+            // Audit construction must not prevent revocation.
+          }
+          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString(), event);
+          if (event === undefined) {
+            console.error('Session logout audit event unavailable');
+          }
+        }
       }
       return clearCookies();
     },

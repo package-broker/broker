@@ -1,6 +1,11 @@
 import type { ApiCall } from '../api/idempotency.js';
 import { redactValue } from '../audit/redact.js';
-import { auditEvent, type AuditAction } from '../audit/actions.js';
+import {
+  auditEvent,
+  type AuditAction,
+  type AuditEventInput,
+  type AuditValue,
+} from '../audit/actions.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 import type { ActorContext, AdminLog } from '../authz/administration.js';
 import type { MutationFence } from '../authz/fence.js';
@@ -40,7 +45,10 @@ export interface SourceCredentialInput {
   readonly plaintext: string | Uint8Array;
 }
 
-export type SourceCreateInput = Omit<NewSource, 'id' | 'credential' | 'providerAnchors'> & {
+export type SourceCreateInput = Omit<
+  NewSource,
+  'id' | 'credential' | 'providerAnchors' | 'audit'
+> & {
   readonly credential?: SourceCredentialInput | null;
   readonly credentialId?: string | null;
 };
@@ -60,6 +68,7 @@ export type SourceError =
   | 'has_packages'
   | 'has_history'
   | 'invalid_pattern'
+  | 'source_paused'
   | 'proxy_source'
   | 'pattern_taken'
   | 'invalid_name';
@@ -86,8 +95,12 @@ export type SourceDto = Pick<
   | 'removalPolicy'
   | 'pollIntervalSeconds'
   | 'lastSuccessAt'
+  | 'lastError'
+  | 'lastPolledAt'
+  | 'nextPollAt'
 > & {
   readonly hasCredential: boolean;
+  readonly githubAuthentication?: 'app' | 'token';
   readonly lastRemovalRefusal: RemovalRefusal | null;
   readonly removalAcceptanceArmed: boolean;
 };
@@ -95,6 +108,7 @@ export type SourceDto = Pick<
 export type SourceListDto = SourceDto & { readonly attachedProjectCount?: number };
 
 export interface SourceService {
+  syncNow(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   acceptRemoval(
     ...args: [...WriteArgs, id: string, call: ApiCall]
   ): Promise<SourceServiceResult<null>>;
@@ -119,13 +133,13 @@ export interface SourceService {
   >;
   pause(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   create(
-    ...args: [...WriteArgs, input: SourceCreateInput]
+    ...args: [...WriteArgs, input: SourceCreateInput, call: ApiCall]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
   update(
-    ...args: [...WriteArgs, id: string, input: SourceUpdateInput]
+    ...args: [...WriteArgs, id: string, input: SourceUpdateInput, call: ApiCall]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
   delete(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
-  resume(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
+  resume(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   enable(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   addRegisteredName(
     ...args: [
@@ -166,6 +180,7 @@ export interface SourceServiceDeps {
     | 'countAttachedProjects'
     | 'pause'
     | 'acceptRemoval'
+    | 'syncNow'
   >;
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly registeredNames: RegisteredNameRepository;
@@ -184,6 +199,24 @@ const invalid = (field: string, message: string): SourceServiceResult<never> => 
   error: 'invalid_config',
   problems: [{ field, message }],
 });
+
+function safeSourceError(code: string | null): string | null {
+  const codes = [
+    'network',
+    'timeout',
+    'http_error',
+    'unauthorized',
+    'rate_limited',
+    'not_found',
+    'invalid_response',
+    'mass_absence',
+    'too_large',
+    'policy_denied',
+    'credential_unavailable',
+    'internal',
+  ];
+  return code !== null && codes.includes(code) ? code : null;
+}
 
 function sourceDto(source: SourceRecord): SourceDto {
   let url: string | null = null;
@@ -214,7 +247,17 @@ function sourceDto(source: SourceRecord): SourceDto {
     removalPolicy: source.removalPolicy,
     pollIntervalSeconds: source.pollIntervalSeconds,
     lastSuccessAt: source.lastSuccessAt,
+    lastError: safeSourceError(source.lastError),
+    lastPolledAt: source.lastPolledAt,
+    nextPollAt: source.nextPollAt,
     hasCredential: source.credentialId !== null,
+    ...(source.type === 'vcs' && isGithubConfig(source.configJson)
+      ? {
+          githubAuthentication: Object.hasOwn(JSON.parse(source.configJson), 'installationId')
+            ? ('app' as const)
+            : ('token' as const),
+        }
+      : {}),
     lastRemovalRefusal: source.removalRefusal,
     removalAcceptanceArmed: source.removalAccepted,
   };
@@ -322,6 +365,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     credential: SourceCredentialInput | null | undefined,
     hasCredential: boolean,
     linkedKind?: string,
+    existingKind?: string,
   ) {
     if (input.configJson.length > 65536)
       return invalid('config', 'is longer than 65536 characters');
@@ -350,6 +394,21 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       }
     }
     const kind = linkedKind ?? credential?.kind;
+    const githubKind = kind ?? existingKind;
+    if (
+      input.type === 'packagist_proxy' &&
+      hasCredential &&
+      ((typeof config === 'object' &&
+        config !== null &&
+        'githubToken' in config &&
+        config.githubToken === true) ||
+        kind !== undefined) &&
+      githubKind !== 'bearer'
+    ) {
+      return linkedKind === undefined
+        ? invalid('credential', 'packagist_proxy requires bearer')
+        : fail('credential_scope_mismatch');
+    }
     const github =
       input.type === 'vcs' &&
       typeof config === 'object' &&
@@ -365,6 +424,32 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return linkedKind === undefined
         ? invalid('credential', 'invalid')
         : fail('credential_scope_mismatch');
+    }
+    if (
+      github &&
+      githubKind === 'bearer' &&
+      typeof config === 'object' &&
+      config !== null &&
+      'installationId' in config
+    ) {
+      return invalid('installationId', 'cannot be combined with a personal access token');
+    }
+    if (
+      github &&
+      githubKind !== undefined &&
+      githubKind !== 'github_app' &&
+      githubKind !== 'bearer'
+    ) {
+      return invalid('credential', 'github requires github_app or bearer');
+    }
+    if (
+      github &&
+      githubKind === 'github_app' &&
+      typeof config === 'object' &&
+      config !== null &&
+      !('installationId' in config)
+    ) {
+      return invalid('installationId', 'is required with a GitHub App credential');
     }
     if (url !== null && input.type === 'composer_repository' && kind === 'query') {
       try {
@@ -441,22 +526,6 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     return warnings === undefined ? { ok: true, value } : { ok: true, value, warnings };
   }
 
-  async function transition(
-    ctx: OrgContext,
-    who: SourceActor,
-    fence: MutationFence,
-    id: string,
-    action: 'delete' | 'resume',
-  ): Promise<SourceServiceResult<null>> {
-    if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
-      return fail('forbidden');
-    requireFence(who, fence);
-    if ((await owned(ctx, who, id)) === null) return fail('not_found');
-    const target = { id, providerAnchors: deps.providerAnchors };
-    const answer = await deps.sources[action](ctx, fence, target);
-    return answer === 'deleted' || answer === 'resumed' ? success(null) : fail(answer);
-  }
-
   function mutationAudit(
     call: ApiCall,
     who: SourceActor,
@@ -464,6 +533,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     type: string,
     id: string,
     projectId: string | null = null,
+    changes?: AuditEventInput['changes'],
   ) {
     const result = auditEvent({
       id: deps.ids.ulid(),
@@ -473,6 +543,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       context: call.audit,
       target: { type, id },
       projectId,
+      ...(changes === undefined ? {} : { changes }),
     });
     if (!result.ok) throw new TypeError('Invalid source audit event');
     return {
@@ -481,7 +552,93 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     };
   }
 
+  function createAudit(call: ApiCall, who: SourceActor, id: string, input: SourceCreateInput) {
+    const base: AuditEventInput = {
+      id: deps.ids.ulid(),
+      now: new Date().toISOString(),
+      action: 'source.create',
+      actor: { type: 'user', id: who.actor.userId },
+      context: call.audit,
+      target: { type: 'source', id },
+      projectId: input.projectId,
+    };
+    const fields = {
+      type: { new: input.type },
+      ecosystem: { new: input.ecosystem },
+      project_id: { new: input.projectId },
+    };
+    const named = auditEvent({ ...base, changes: { name: { new: input.name }, ...fields } });
+    if (named.ok) return named.event;
+    // The audit sanitizer refuses some valid source names (long, e-mail-like, token-like); the row omits them.
+    const unnamed = auditEvent({ ...base, changes: fields });
+    if (!unnamed.ok) throw new TypeError('Invalid source audit event');
+    return unnamed.event;
+  }
+
+  function updateAudits(
+    call: ApiCall,
+    who: SourceActor,
+    source: SourceRecord,
+    input: SourceUpdateInput,
+  ): SourceUpdate['audit'] {
+    const changes: NonNullable<AuditEventInput['changes']> = {};
+    const record = (field: string, value: AuditValue | undefined) => {
+      if (value !== undefined) changes[field] = { new: value };
+    };
+    record('removal_policy', input.removalPolicy);
+    record('poll_interval_seconds', input.pollIntervalSeconds);
+    record('retention_days_override', input.retentionDaysOverride);
+    record('default_visible_to_new_projects', input.defaultVisibleToNewProjects);
+    const { credential, ...fields } = input;
+    const updatesFields =
+      credential === null || Object.values(fields).some((value) => value !== undefined);
+    const rows = [
+      ...(updatesFields
+        ? [
+            mutationAudit(
+              call,
+              who,
+              'source.update',
+              'source',
+              source.id,
+              source.projectId,
+              Object.keys(changes).length === 0 ? undefined : changes,
+            ).audit,
+          ]
+        : []),
+      ...(credential == null
+        ? []
+        : [
+            mutationAudit(
+              call,
+              who,
+              'source.credential_set',
+              'source',
+              source.id,
+              source.projectId,
+              { credential_kind: { new: credential.kind } },
+            ).audit,
+          ]),
+    ];
+    const [first, ...others] = rows;
+    if (first === undefined) throw new TypeError('source update stages no audit row');
+    return [first, ...others];
+  }
+
   return {
+    async syncNow(ctx, who, fence, id, call) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await owned(ctx, who, id);
+      if (source === null) return fail('not_found');
+      const answer = await deps.sources.syncNow(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+        ...mutationAudit(call, who, 'source.sync_requested', 'source', id, source.projectId),
+      });
+      return answer === 'requested' ? success(null) : fail(answer);
+    },
     async acceptRemoval(ctx, who, fence, id, call) {
       if (!orgOnly(who) || who.kind !== 'org' || !who.actor.isOrganizationAdmin)
         return fail('forbidden');
@@ -625,7 +782,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
       return answer === 'paused' ? success(null) : fail(answer);
     },
-    async create(ctx, who, fence, input) {
+    async create(ctx, who, fence, input, call) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       requireFence(who, fence);
       const bounds = validateBounds(input);
@@ -668,16 +825,18 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
           plaintext.fill(0);
         }
       }
+      const audit = createAudit(call, who, id, input);
       const answer = await deps.sources.create(ctx, fence, {
         ...rest,
         ...validated.value,
         id,
         credential,
         providerAnchors: deps.providerAnchors,
+        audit,
       });
       return answer === 'created' ? success({ id }, validated.warnings) : fail(answer);
     },
-    async update(ctx, who, fence, id, input) {
+    async update(ctx, who, fence, id, input, call) {
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -689,10 +848,26 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       if (source === null) return fail('not_found');
       if (!Object.values(input).some((value) => value !== undefined))
         return invalid('changes', 'must name one or more updatable source fields');
+      const merged = { ...source, ...input };
+      let existingKind: string | undefined;
+      if (
+        ((source.type === 'packagist_proxy' &&
+          isPackagistTokenConfig(input.configJson ?? source.configJson)) ||
+          (merged.type === 'vcs' && isGithubConfig(merged.configJson))) &&
+        input.credential === undefined &&
+        source.credentialId !== null
+      ) {
+        const storedCredential = await deps.credentialRepository.get(ctx, source.credentialId);
+        if (storedCredential === null && source.type === 'packagist_proxy')
+          return fail('credential_scope_mismatch');
+        existingKind = storedCredential?.kind;
+      }
       const validated = validate(
-        { ...source, ...input },
+        merged,
         input.credential,
         input.credential === undefined ? source.credentialId !== null : input.credential !== null,
+        undefined,
+        existingKind,
       );
       if (!validated.ok) return validated;
       let preparedCredential: SourceUpdate['preparedCredential'];
@@ -716,6 +891,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       }
       const changes = { ...input };
       delete changes.credential;
+      const audit = updateAudits(call, who, source, input);
       const answer = await deps.sources.update(ctx, fence, {
         id,
         changes: {
@@ -726,13 +902,36 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         },
         ...(preparedCredential === undefined ? {} : { preparedCredential }),
         providerAnchors: deps.providerAnchors,
+        audit,
       });
       return answer === 'updated' || answer === 'paused_for_reactivation'
         ? success({ id }, validated.warnings)
         : fail(answer);
     },
-    delete: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'delete'),
-    resume: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'resume'),
+    async delete(ctx, who, fence, id) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      if ((await owned(ctx, who, id)) === null) return fail('not_found');
+      const answer = await deps.sources.delete(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+      });
+      return answer === 'deleted' ? success(null) : fail(answer);
+    },
+    async resume(ctx, who, fence, id, call) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await owned(ctx, who, id);
+      if (source === null) return fail('not_found');
+      const answer = await deps.sources.resume(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+        audit: mutationAudit(call, who, 'source.resume', 'source', id, source.projectId).audit,
+      });
+      return answer === 'resumed' ? success(null) : fail(answer);
+    },
     async enable(ctx, who, fence, id, call) {
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
@@ -810,4 +1009,32 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
     },
   };
+}
+
+function isPackagistTokenConfig(configJson: string): boolean {
+  try {
+    const config: unknown = JSON.parse(configJson);
+    return (
+      typeof config === 'object' &&
+      config !== null &&
+      'githubToken' in config &&
+      config.githubToken === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isGithubConfig(configJson: string): boolean {
+  try {
+    const config: unknown = JSON.parse(configJson);
+    return (
+      typeof config === 'object' &&
+      config !== null &&
+      'provider' in config &&
+      config.provider === 'github'
+    );
+  } catch {
+    return false;
+  }
 }

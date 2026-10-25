@@ -52,6 +52,13 @@ export const SOURCE_ERROR_CODES = [
   'internal',
 ] as const;
 
+const CREDENTIAL_REPLACEABLE_ERRORS = [
+  'network',
+  'timeout',
+  'http_error',
+  'rate_limited',
+] as const satisfies readonly SourceErrorCode[];
+
 const CHANGE_KEYS: ReadonlySet<string> = new Set([
   'url',
   'configJson',
@@ -424,6 +431,44 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
   }
 
   return {
+    async syncNow(ctx, fence, input) {
+      const current = await locate(ctx, fence, input.id, input.providerAnchors);
+      if (typeof current === 'string') return current;
+      if (current.status === 'paused') return 'source_paused';
+      const held = authority(ctx, fence, current.projectId, input.providerAnchors);
+      const owned = sourceOwnedBy(ctx, input.id, current.projectId);
+      const active = sql<SqlBool>`exists (select 1 from source
+        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')`;
+      const collision = liveIdempotencyCollision(ctx, input.idempotency);
+      const outcome = await runOrgFenced(
+        executor,
+        ctx,
+        fence,
+        assertGuard(allOf([held, owned]), ctx),
+        [
+          ...assertCheck(active),
+          compile(
+            db
+              .updateTable('source')
+              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })
+              .where('org_id', '=', ctx.orgId)
+              .where('id', '=', input.id)
+              .where('status', '!=', 'paused'),
+          ),
+          auditPendingStatement(ctx, input.audit),
+          ...(input.idempotency === undefined
+            ? []
+            : [idempotencyInsertStatement(ctx, input.idempotency)]),
+        ],
+        { authority: probe(held, true), conflict: probe(collision, false) },
+      );
+      if (outcome.ok) return 'requested';
+      if (outcome.reason === 'authority' || outcome.reason === 'indeterminate')
+        return failureResult(ctx, input.id, outcome.reason);
+      const after = await read(ctx, input.id);
+      if (after === null || after.projectId !== current.projectId) return 'not_found';
+      return after.status === 'paused' ? 'source_paused' : 'conflict';
+    },
     async acceptRemoval(ctx, fence, input) {
       const held = authority(ctx, fence, null, input.providerAnchors);
       const localAdmin = sql<SqlBool>`EXISTS (SELECT 1 FROM session
@@ -579,6 +624,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
             : []),
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
           insert,
+          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),
         ],
         probes,
       );
@@ -668,6 +714,9 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
           statusBefore,
           update,
+          ...input.audit.map((event) =>
+            auditPendingStatement(ctx, event, { sql: 'changes() > 0', params: [] }),
+          ),
         ],
         {
           authority: probe(authority(ctx, fence, current.projectId, input.providerAnchors), true),
@@ -677,7 +726,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         },
       );
       if (outcome.ok) {
-        const before = outcome.results[outcome.results.length - 2]?.rows[0];
+        const before = outcome.results[outcome.results.length - 2 - input.audit.length]?.rows[0];
         return touchesCoverage && before?.status !== 'paused'
           ? 'paused_for_reactivation'
           : 'updated';
@@ -712,7 +761,14 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         ctx,
         fence,
         assertGuard(allowed, ctx),
-        [update],
+        [
+          auditPendingStatement(ctx, input.audit, {
+            sql: `EXISTS (SELECT 1 FROM source WHERE org_id = ? AND id = ? AND status <> 'active'
+              AND type IN (${PROXY_TYPES.map(() => '?').join(', ')}))`,
+            params: [ctx.orgId, input.id, ...PROXY_TYPES],
+          }),
+          update,
+        ],
         {
           authority: probe(held, true),
         },
@@ -774,6 +830,25 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     async deferPoll(ctx, id, expectedNextPollAt) {
       const [result] = await executor.batch([deferPollStatement(ctx, id, expectedNextPollAt)]);
       return result?.changes === 1;
+    },
+
+    async markCredentialUnavailable(ctx, id) {
+      const code: SourceErrorCode = 'credential_unavailable';
+      await executor.batch([
+        compile(
+          db
+            .updateTable('source')
+            .set({ last_error: code })
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', id)
+            .where((eb) =>
+              eb.or([
+                eb('last_error', 'is', null),
+                eb('last_error', 'in', [...CREDENTIAL_REPLACEABLE_ERRORS]),
+              ]),
+            ),
+        ),
+      ]);
     },
 
     async pollState(ctx, guard, input) {

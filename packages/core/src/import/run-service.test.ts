@@ -24,6 +24,16 @@ const ctx = orgContext('org');
 const now = '2026-10-18T10:00:00.000Z';
 const audit = { sql: 'audit', params: [] };
 const idempotency = { sql: 'idempotency', params: [] };
+const record = {
+  principalKey: 'user:user',
+  key: 'key',
+  route: '/_pb/import-runs',
+  requestHash: 'c'.repeat(64),
+  status: 201,
+  responseJson: '{}',
+  createdAt: now,
+  expiresAt: '2026-10-19T10:00:00.000Z',
+};
 const fence = mutationFence({ userId: 'user', sessionId: 'session' } as AuthenticatedActor, {});
 const token = tokenMutationFence(
   {
@@ -48,6 +58,7 @@ function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
     ...overrides,
   };
   const access = { run: run as ImportRun | null, allowed: true, reauthFresh: true };
+  const windows = new Map<string, string | null>();
   const write = () =>
     vi.fn<ImportRunStore['approveRun']>().mockResolvedValue({ ok: true, results: [] });
   const store = {
@@ -65,9 +76,15 @@ function setup(overrides: Partial<ImportRun> = {}, clock = fixedClock(now)) {
     cancelRun: write(),
     acceptRun: write(),
     requestRollback: write(),
+    credentialWindows: vi
+      .fn<ImportRunStore['credentialWindows']>()
+      .mockImplementation(
+        async (_ctx, ids) => new Map(ids.map((id) => [id, windows.get(id) ?? null])),
+      ),
+    findIdempotency: vi.fn<ImportRunStore['findIdempotency']>().mockResolvedValue(null),
   };
   const service = createImportRunService({ store, ids: { ulid: () => 'new-run' }, clock });
-  return { service, store, access, run };
+  return { service, store, access, run, windows };
 }
 const methods = [
   'approveRun',
@@ -201,18 +218,36 @@ describe('import run service', () => {
         widening: [],
       });
       if (!manifest.ok) throw new Error('invalid fixture');
+      const hash = await planHash(manifest.data);
+      const build = vi.fn((response: object) => ({
+        ...record,
+        responseJson: JSON.stringify(response),
+      }));
       expect(
-        await service.createRun(ctx, creator, { manifest: manifest.data, now, audit, idempotency }),
+        await service.createRun(ctx, creator, {
+          manifest: manifest.data,
+          now,
+          audit,
+          idempotency: build,
+        }),
       ).toEqual({
         ok: true,
-        value: { id: 'new-run', planHash: await planHash(manifest.data), state: 'planned' },
+        value: { id: 'new-run', planHash: hash, state: 'planned' },
       });
       expect(store.createRun).toHaveBeenCalledTimes(1);
       expect(store.createRun).toHaveBeenCalledWith(
         ctx,
         creator,
-        expect.objectContaining({ audit, idempotency, planHash: await planHash(manifest.data) }),
+        expect.objectContaining({
+          audit,
+          idempotency: {
+            ...record,
+            responseJson: JSON.stringify({ id: 'new-run', planHash: hash, state: 'planned' }),
+          },
+          planHash: hash,
+        }),
       );
+      expect(build).toHaveBeenCalledWith({ id: 'new-run', planHash: hash, state: 'planned' });
     });
   }
   it('returns the plan hash and state persisted during creation', async () => {
@@ -232,6 +267,18 @@ describe('import run service', () => {
     });
     expect(access.run?.planHash).toEqual(expect.any(String));
     expect(access.run?.state).toBe('planned');
+  });
+  it('refuses an idempotency record created at another instant', async () => {
+    const { service, store } = setup();
+    await expect(
+      service.createRun(ctx, fence, {
+        manifest: { version: 1, source_system: 'test', items: [], widening: [] },
+        now,
+        audit,
+        idempotency: () => ({ ...record, createdAt: '2026-10-18T10:00:00.001Z' }),
+      }),
+    ).rejects.toThrow(TypeError);
+    expect(store.createRun).not.toHaveBeenCalled();
   });
   it('does not retry indeterminate creation', async () => {
     const { service, store } = setup();
@@ -461,9 +508,91 @@ describe('import run reads', () => {
         approvedByUserId: run.approvedByUserId,
         acceptedAt: run.acceptedAt,
         beforeImageExpiresAt: run.beforeImageExpiresAt,
+        credentialWindowUntil: null,
       },
     });
     expect(JSON.stringify(await service.list(ctx, {}))).not.toContain('PRIVATE');
+  });
+  it('reads the stored credential window for one run and for a list page', async () => {
+    const { service, store, windows } = setup({ approvedAt: now });
+    windows.set('run', '2026-10-18T11:00:00.000Z');
+    expect(await service.get(ctx, 'run')).toMatchObject({
+      ok: true,
+      value: { credentialWindowUntil: '2026-10-18T11:00:00.000Z' },
+    });
+    expect(await service.list(ctx, {})).toMatchObject({
+      ok: true,
+      value: { items: [{ id: 'run', credentialWindowUntil: '2026-10-18T11:00:00.000Z' }] },
+    });
+    expect(store.credentialWindows).toHaveBeenNthCalledWith(1, ctx, ['run']);
+    expect(store.credentialWindows).toHaveBeenNthCalledWith(2, ctx, ['run']);
+  });
+  it('reports a null window when the store has none', async () => {
+    const { service } = setup();
+    expect(await service.get(ctx, 'run')).toMatchObject({
+      ok: true,
+      value: { credentialWindowUntil: null },
+    });
+  });
+  it.each([
+    ['exactly at expiry', '2026-10-18T10:00:00.000Z'],
+    ['after expiry', '2026-10-18T09:59:59.999Z'],
+    ['malformed', 'not-a-time'],
+  ])('hides a window that is %s at the service clock', async (_name, until) => {
+    const { service, windows } = setup({ approvedAt: now });
+    windows.set('run', until);
+    expect(await service.get(ctx, 'run')).toMatchObject({
+      ok: true,
+      value: { credentialWindowUntil: null },
+    });
+    expect(await service.list(ctx, {})).toMatchObject({
+      ok: true,
+      value: { items: [{ credentialWindowUntil: null }] },
+    });
+  });
+  it('shows a window one millisecond before expiry', async () => {
+    const { service, windows } = setup({ approvedAt: now });
+    windows.set('run', '2026-10-18T10:00:00.001Z');
+    expect(await service.get(ctx, 'run')).toMatchObject({
+      ok: true,
+      value: { credentialWindowUntil: '2026-10-18T10:00:00.001Z' },
+    });
+  });
+  it.each(['cancelled', 'rolled_back'] as const)(
+    'hides an open window on a %s run',
+    async (state) => {
+      const { service, windows } = setup({ approvedAt: now, state });
+      windows.set('run', '2026-10-18T11:00:00.000Z');
+      expect(await service.get(ctx, 'run')).toMatchObject({
+        ok: true,
+        value: { credentialWindowUntil: null },
+      });
+    },
+  );
+  it.each(['planned', 'applying', 'failed', 'applied', 'verifying', 'verified'] as const)(
+    'shows an open window on an approved %s run',
+    async (state) => {
+      const { service, windows } = setup({ approvedAt: now, state });
+      windows.set('run', '2026-10-18T11:00:00.000Z');
+      expect(await service.get(ctx, 'run')).toMatchObject({
+        ok: true,
+        value: { credentialWindowUntil: '2026-10-18T11:00:00.000Z' },
+      });
+    },
+  );
+  it('hides a stored window on an unapproved run', async () => {
+    const { service, windows } = setup();
+    windows.set('run', '2026-10-18T11:00:00.000Z');
+    expect(await service.get(ctx, 'run')).toMatchObject({
+      ok: true,
+      value: { credentialWindowUntil: null },
+    });
+  });
+  it('reads idempotency records through the store', async () => {
+    const { service, store } = setup();
+    store.findIdempotency.mockResolvedValue(record);
+    expect(await service.findIdempotency(ctx, 'user:user', 'key', now)).toBe(record);
+    expect(store.findIdempotency).toHaveBeenCalledWith(ctx, 'user:user', 'key', now);
   });
   it('hides an absent run', async () => {
     const { service, access } = setup();

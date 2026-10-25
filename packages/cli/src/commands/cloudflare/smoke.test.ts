@@ -167,15 +167,14 @@ function harness() {
     if (path === `${base}/versions/${CANDIDATE}`)
       return ok({
         id: CANDIDATE,
-        metadata: {
-          annotations: {
-            'pb-operation': 'candidate-operation',
-            'pb-artifact-sha256': (h.badDigest ? 'f' : 'a').repeat(64),
-          },
+        annotations: {
+          'pb-operation': 'candidate-operation',
+          'pb-artifact-sha256': (h.badDigest ? 'f' : 'a').repeat(64),
         },
       });
     if (path === `${base}/deployments`) {
-      if (method === 'GET') return ok({ active: { id: 'live-deployment', versions: h.live } });
+      if (method === 'GET')
+        return ok({ deployments: [{ id: 'live-deployment', versions: h.live }] });
       if (h.rollback === 'refused') return new Response(API, { status: 403 });
       if (h.rollback !== 'unknown') h.live = body.versions;
       if (h.rollback !== 'ok') throw new Error(`${API} ${TOKEN}`);
@@ -816,6 +815,17 @@ it('checks the restored version canonical origin when rollback reverts PB_PUBLIC
   expect(rollbacks(h)).toHaveLength(1);
 });
 
+it.each([true, false, null])('prints revision, dirty=%s and artifact hash', async (dirty) => {
+  await change((a) => {
+    a.build_info = { ...a.build_info, gitSha: 'd'.repeat(40), dirty };
+  });
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  expect(await runCloudflareSmoke(options(harness(), { dryRun: true }))).toBe(0);
+  expect(log.mock.calls.flat()).toContain(`revision: ${'d'.repeat(40)}; dirty: ${dirty}`);
+  expect(log.mock.calls.flat()).toContain(`artifact_sha256: ${'a'.repeat(64)}`);
+});
+
 it('prints planned paths and the rollback result in human-readable mode', async () => {
   const h = harness();
   const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -1103,48 +1113,53 @@ it.each(['receipt', 'interrupted migration'] as const)(
   },
 );
 
-it('R3 verifies a restored queue consumer and detects settings drift without replay', async () => {
-  const j = (await store.read())!;
-  j.resources.jobs = {
-    ...j.resources.d1!,
-    id: '5'.repeat(32),
-    name: `${identity.script_name}-jobs`,
-  };
-  j.resources.dlq = {
-    ...j.resources.d1!,
-    id: '6'.repeat(32),
-    name: `${identity.script_name}-jobs-dlq`,
-  };
-  const a = j.deployment!.attempt;
-  const consumer = {
-    consumer_id: 'consumer-id',
-    script_name: identity.script_name,
-    dead_letter_queue: `${identity.script_name}-jobs-dlq`,
-    batch_size: 10,
-    max_wait_time_ms: 1000,
-    max_retries: 3,
-    max_concurrency: 1,
-  };
-  a.prior_settings.consumer = consumer;
-  a.intended_settings.consumer = consumer;
-  a.phase = 'rolled_back';
-  a.rollback = 'succeeded';
-  a.smoke = 'failed';
-  await store.write(j);
-  const h = harness();
-  h.live = [{ version_id: OLD, percentage: 100 }];
-  const { consumer_id, script_name, dead_letter_queue, ...settings } = consumer;
-  h.consumers = [{ consumer_id, type: 'worker', script_name, dead_letter_queue, settings }];
-  expect((await smoke(options(h))).exitCode).toBe(9);
-  const consumerReads = h.calls.filter((c) => c.url.includes('/consumers'));
-  expect(consumerReads.length).toBeGreaterThan(0);
-  expect(consumerReads.every((c) => !c.url.includes('?'))).toBe(true);
-  settings.max_retries = 9;
-  const result = await smoke(options(h));
-  expect(result.exitCode).toBe(10);
-  expect(result.output.rollback.status).toBe('failed');
-  expect(mutations(h)).toHaveLength(0);
-});
+it.each(['script_name', 'script'] as const)(
+  'R3 verifies a restored queue consumer and detects settings drift without replay (%s)',
+  async (scriptField) => {
+    const j = (await store.read())!;
+    j.resources.jobs = {
+      ...j.resources.d1!,
+      id: '5'.repeat(32),
+      name: `${identity.script_name}-jobs`,
+    };
+    j.resources.dlq = {
+      ...j.resources.d1!,
+      id: '6'.repeat(32),
+      name: `${identity.script_name}-jobs-dlq`,
+    };
+    const a = j.deployment!.attempt;
+    const consumer = {
+      consumer_id: 'consumer-id',
+      script_name: identity.script_name,
+      dead_letter_queue: `${identity.script_name}-jobs-dlq`,
+      batch_size: 10,
+      max_wait_time_ms: 1000,
+      max_retries: 3,
+      max_concurrency: 1,
+    };
+    a.prior_settings.consumer = consumer;
+    a.intended_settings.consumer = consumer;
+    a.phase = 'rolled_back';
+    a.rollback = 'succeeded';
+    a.smoke = 'failed';
+    await store.write(j);
+    const h = harness();
+    h.live = [{ version_id: OLD, percentage: 100 }];
+    const { consumer_id, script_name, dead_letter_queue, ...settings } = consumer;
+    h.consumers = [
+      { consumer_id, type: 'worker', [scriptField]: script_name, dead_letter_queue, settings },
+    ];
+    expect((await smoke(options(h))).exitCode).toBe(9);
+    const consumerReads = h.calls.filter((c) => c.url.includes('/consumers'));
+    expect(consumerReads.length).toBeGreaterThan(0);
+    expect(consumerReads.every((c) => !c.url.includes('?'))).toBe(true);
+    settings.max_retries = 9;
+    const result = await smoke(options(h));
+    expect(result.exitCode).toBe(10);
+    expect(result.output.rollback.status).toBe('failed');
+    expect(mutations(h)).toHaveLength(0);
+  },
+);
 
 it('round 2 P1 accepts the kernel npm unauthorized envelope without rollback', async () => {
   const h = harness();
@@ -1236,11 +1251,9 @@ it.each(['receipt and journal', 'interrupted journal'] as const)(
       String(input).endsWith(`/versions/${OTHER}`)
         ? ok({
             id: OTHER,
-            metadata: {
-              annotations: {
-                'pb-operation': 'candidate-operation',
-                'pb-artifact-sha256': 'a'.repeat(64),
-              },
+            annotations: {
+              'pb-operation': 'candidate-operation',
+              'pb-artifact-sha256': 'a'.repeat(64),
             },
           })
         : h.fetch(input, init);

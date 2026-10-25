@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { setAccessContext } from '../authz/access-context.js';
 import type { CatalogueReader, PackageVisibility, ResolvedPackage } from '../db/catalogue.js';
 import { orgContext } from '../db/port.js';
+import { createOnDemandFill } from '../ingest/on-demand.js';
+import { createPackageSyncJob } from '../ingest/package-sync-job.js';
 import { applyChunk, type ApplyDeps, type ApplyOutcome } from '../ingest/apply-description.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
 import { narrowPackageActor, setContextPackageActor } from '../internal/package-actor.js';
@@ -20,6 +22,14 @@ import type { RegistryJobsDeps } from './jobs.js';
 vi.mock('../catalogue/package-access.js', async (original) => {
   const actual = await original<typeof import('../catalogue/package-access.js')>();
   return { ...actual, createPackageAccess: vi.fn(actual.createPackageAccess) };
+});
+vi.mock('../ingest/on-demand.js', async (original) => {
+  const actual = await original<typeof import('../ingest/on-demand.js')>();
+  return { ...actual, createOnDemandFill: vi.fn(actual.createOnDemandFill) };
+});
+vi.mock('../ingest/package-sync-job.js', async (original) => {
+  const actual = await original<typeof import('../ingest/package-sync-job.js')>();
+  return { ...actual, createPackageSyncJob: vi.fn(actual.createPackageSyncJob) };
 });
 vi.mock('../ingest/apply-description.js', async (original) => ({
   ...(await original<typeof import('../ingest/apply-description.js')>()),
@@ -817,5 +827,273 @@ describe('stale refresh', () => {
     expect(h.jobs.enqueue).toHaveBeenCalledTimes(2);
     const second = h.jobs.enqueue.mock.calls[1]?.[3] as unknown as { idempotencyKey: string };
     expect(second.idempotencyKey).not.toBe(input.idempotencyKey);
+  });
+});
+
+describe('registry credential binding', () => {
+  it.each([
+    ['packagist_proxy', 'https://repo.packagist.org', '{"githubToken":true}'],
+    ['composer_repository', 'https://packages.example.com', '{}'],
+  ] as const)(
+    'fails closed when the stored %s credential cannot be loaded',
+    async (type, url, configJson) => {
+      const h = harness();
+      const record: SourceRecord = {
+        ...npmjsSource,
+        type,
+        ecosystem: 'composer',
+        url,
+        configJson,
+        credentialId: 'token',
+      };
+      vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+      h.module();
+      const { planFill } = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0];
+      await expect(planFill(org, record.id, 'acme/lib')).rejects.toMatchObject({
+        name: 'SourceUnavailableError',
+        reason: 'credential_unavailable',
+      });
+      expect(h.deps.ingest.credential).toHaveBeenCalledExactlyOnceWith(org, record);
+      expect(h.policyFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves Packagist with token mode disabled without loading its stored credential', async () => {
+    const h = harness();
+    const record: SourceRecord = {
+      ...npmjsSource,
+      type: 'packagist_proxy',
+      ecosystem: 'composer',
+      url: 'https://repo.packagist.org',
+      configJson: '{"githubToken":false}',
+      credentialId: 'token',
+    };
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+    h.policyFetch.mockImplementation(async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: new Response(
+        JSON.stringify({ packages: { 'acme/lib': [{ name: 'acme/lib', version: '1.0.0' }] } }),
+      ).body,
+    }));
+    h.module();
+    const { planFill } = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0];
+    const plan = await planFill(org, record.id, 'acme/lib');
+    expect(plan).not.toBeNull();
+    expect(await plan!.describe({}, new AbortController().signal)).toMatchObject({
+      kind: 'found',
+    });
+    expect(h.deps.ingest.credential).not.toHaveBeenCalled();
+    expect(h.policyFetch).toHaveBeenCalled();
+  });
+});
+
+describe('unbindable source', () => {
+  const admitted: PackageVisibility = {
+    kind: 'proxy_admissible',
+    projectId: 'proj-1',
+    ecosystem: 'npm',
+    key: 'left-pad',
+    sourceIds: ['src-1'],
+  };
+  const credentialed: SourceRecord = {
+    ...npmjsSource,
+    type: 'npm_registry',
+    url: 'https://npm.acme.test',
+    configJson: '{"scopes":["@acme"]}',
+    credentialId: 'cred-1',
+    lastError: null,
+  };
+  const scoped: PackageVisibility = { ...admitted, key: '@acme/x' } as PackageVisibility;
+
+  function setup(record: SourceRecord, options: { sync?: boolean } = {}) {
+    const h = harness();
+    if (options.sync === true)
+      h.deps = {
+        ...h.deps,
+        sync: {
+          packageId: vi.fn(async () => null),
+          upstreamState: {} as never,
+          executor: { batch: vi.fn(async () => []) },
+          writeGuard: vi.fn(() => [] as never),
+        },
+      };
+    const cache = {
+      get: vi.fn(async () => null),
+      set: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const write = vi.fn(async () => undefined);
+    h.deps = {
+      ...h.deps,
+      ports: { ...h.deps.ports, cache } as RegistryModuleDeps['ports'],
+      ingest: { ...h.deps.ingest, credentialUnavailable: write },
+    };
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+    const { ecosystemRoutes } = h.module();
+    const log = vi.mocked(h.deps.ports.observability!.log);
+    const get = (outcome: PackageVisibility, name: string) =>
+      routeOf(ecosystemRoutes, 'GET', '/:project/npm/:a').handler(
+        context(
+          `https://broker.test/demo/npm/${encodeURIComponent(name)}`,
+          {
+            project: 'demo',
+            a: name,
+          },
+          { outcome },
+        ),
+      );
+    const cacheWrites = () => cache.set.mock.calls.length;
+    return { h, cache, write, log, get, cacheWrites };
+  }
+
+  it('answers a paused source with 404, no event and no negative entry', async () => {
+    const t = setup({ ...npmjsSource, status: 'paused' } as SourceRecord);
+    const response = await t.get(admitted, 'left-pad');
+    expect(response.status).toBe(404);
+    expect(response.headers.get('retry-after')).toBeNull();
+    expect(t.cacheWrites()).toBe(0);
+    expect(t.h.policyFetch).not.toHaveBeenCalled();
+    expect(t.log.mock.calls.map(([record]) => record.event)).not.toContain('source.unavailable');
+    expect(t.write).not.toHaveBeenCalled();
+  });
+
+  it('answers an unreadable credential with 503, Retry-After and a reason-code event', async () => {
+    const t = setup(credentialed);
+    const response = await t.get(scoped, '@acme/x');
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('60');
+    expect(t.cacheWrites()).toBe(0);
+    expect(t.h.policyFetch).not.toHaveBeenCalled();
+    expect(t.log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'source.unavailable',
+      reason_code: 'credential_unavailable',
+      source_id: 'src-1',
+    });
+    const body = await response.text();
+    expect(body).not.toContain('npm.acme.test');
+    expect(body).not.toContain('cred-1');
+  });
+
+  it('answers an unparsable config with 503 and Retry-After without a credential write', async () => {
+    const t = setup({ ...npmjsSource, configJson: '{' } as SourceRecord);
+    const response = await t.get(admitted, 'left-pad');
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('60');
+    expect(t.cacheWrites()).toBe(0);
+    expect(t.write).not.toHaveBeenCalled();
+    expect(t.log).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'source.unavailable', reason_code: 'config_invalid' }),
+    );
+  });
+
+  it.each(['https://127.0.0.1', 'https://169.254.169.254', 'https://npm.acme.test:8443'])(
+    'reports a configured URL the outbound policy refuses (%s) as policy_denied',
+    async (url) => {
+      const t = setup({ ...credentialed, url, credentialId: null });
+      const response = await t.get(scoped, '@acme/x');
+      expect(response.status).toBe(503);
+      expect(t.log).toHaveBeenCalledWith({
+        level: 'warn',
+        event: 'source.unavailable',
+        reason_code: 'policy_denied',
+        source_id: 'src-1',
+      });
+      expect(JSON.stringify(t.log.mock.calls)).not.toContain(new URL(url).hostname);
+      expect(await response.text()).not.toContain(new URL(url).hostname);
+    },
+  );
+
+  it('refuses a source whose provider is not registered as unavailable', async () => {
+    const record = {
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'composer',
+      url: null,
+      configJson: '{"provider":"git","repository":"https://git.example.com/a/b.git"}',
+    } as SourceRecord;
+    const t = setup(record);
+    const { planFill } = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0];
+    await expect(planFill(org, record.id, 'acme/lib')).rejects.toMatchObject({
+      name: 'SourceUnavailableError',
+      reason: 'provider_unavailable',
+    });
+    expect(t.write).not.toHaveBeenCalled();
+  });
+
+  it('writes credential_unavailable once and not again while the source holds it', async () => {
+    const t = setup(credentialed);
+    await Promise.all([t.get(scoped, '@acme/x'), t.get(scoped, '@acme/x')]);
+    expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
+    vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
+      ...credentialed,
+      lastError: 'credential_unavailable',
+    });
+    for (let i = 0; i < 3; i += 1) expect((await t.get(scoped, '@acme/x')).status).toBe(503);
+    expect(t.write).toHaveBeenCalledTimes(1);
+    vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
+      ...credentialed,
+      lastError: null,
+    });
+    expect((await t.get(scoped, '@acme/x')).status).toBe(503);
+    expect(t.write).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['an unreadable credential', 503, credentialed],
+    ['an unparsable config', 503, { ...npmjsSource, configJson: '{' } as SourceRecord],
+    ['a paused source', 404, { ...npmjsSource, status: 'paused' } as SourceRecord],
+  ] as const)('answers an archive request for %s with %i', async (_label, status, record) => {
+    const t = setup(record);
+    t.h.reader.resolveDist.mockResolvedValue({
+      versionId: VERSION_ID,
+      revision: 1,
+      current: true,
+      packageId: 'pk',
+      sourceId: 'src-1',
+      status: 'active',
+      blob: null,
+      fetch: {
+        sourceRef: null,
+        upstreamDistUrl: 'https://registry.npmjs.org/x/-/x-1.0.0.tgz',
+        distType: 'zip',
+        composerShasum: null,
+        npmIntegrity: null,
+        npmShasum: null,
+      },
+    } as never);
+    t.h.versionById.mockResolvedValue({ packageName: 'acme/lib', version: '1.0.0' } as never);
+    const response = await routeOf(
+      t.h.module().ecosystemRoutes,
+      'GET',
+      '/:project/dist/:vendor/:name/:file',
+    ).handler(
+      context(
+        `https://broker.test/demo/dist/acme/lib/${VERSION_ID}.1.zip`,
+        { project: 'demo', vendor: 'acme', name: 'lib', file: `${VERSION_ID}.1.zip` },
+        { outcome: visibleNpm() },
+      ),
+    );
+    expect(response.status).toBe(status);
+    expect(response.headers.get('retry-after')).toBe(status === 503 ? '60' : null);
+    expect(t.h.policyFetch).not.toHaveBeenCalled();
+    const body = await response.text();
+    expect(body).not.toContain('npm.acme.test');
+    expect(body).not.toContain('registry.npmjs.org');
+  });
+
+  it('answers 503 when the credential write itself fails', async () => {
+    const t = setup(credentialed);
+    t.write.mockRejectedValue(new Error('db down'));
+    expect((await t.get(scoped, '@acme/x')).status).toBe(503);
+  });
+
+  it('keeps the package-sync job outcome for an unbindable source a silent no-op', async () => {
+    const t = setup(credentialed, { sync: true });
+    expect(t.h.module().packageSyncJob).toBeDefined();
+    const syncDeps = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0];
+    expect(await syncDeps.planFill(org, 'src-1', '@acme/x')).toBeNull();
+    expect(t.write).toHaveBeenCalledTimes(1);
   });
 });

@@ -134,7 +134,9 @@ describe('GitHub provider', () => {
         status,
       });
       expect(lsRefs).not.toHaveBeenCalled();
-      expect(provider.listPackages).toBeUndefined();
+      await expect(provider.listPackages!(ctx, source, null)).rejects.toMatchObject({
+        code: 'invalid_request',
+      });
     },
   );
   it.each([200, 403, 429])(
@@ -270,7 +272,7 @@ describe('GitHub provider review regressions', () => {
     expect(tokens.forRepositories).not.toHaveBeenCalled();
   });
   it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-    'refuses invalid installationId %s',
+    'rejects invalid installationId or a missing token credential (%s)',
     async (installationId) => {
       const { provider, ctx, tokens } = setup();
       await expect(
@@ -288,7 +290,11 @@ describe('GitHub provider review regressions', () => {
           'vendor/package',
           {},
         ),
-      ).rejects.toMatchObject({ code: 'invalid_request' });
+      ).rejects.toMatchObject(
+        installationId === undefined
+          ? { name: 'UpstreamError', code: 'http_status', status: 401 }
+          : { code: 'invalid_request' },
+      );
       expect(tokens.forRepositories).not.toHaveBeenCalled();
     },
   );
@@ -509,5 +515,107 @@ describe('GitHub provider review regressions', () => {
       return { refs: [], skipped: 0 };
     });
     await provider.describe({ ...ctx, fetch }, source, 'vendor/package', {});
+  });
+});
+
+describe('token source request controls', () => {
+  const tokenSource = {
+    ...source,
+    config: { provider: 'github', repository: 'owner/repo', refs: { tags: true, branches: [] } },
+  } satisfies ProviderSource;
+  function tokenContext() {
+    const result = setup();
+    const ctx: { -readonly [K in keyof ProviderContext]: ProviderContext[K] } = {
+      ...result.ctx,
+      credential: {
+        origins: ['https://api.github.com'],
+        queryParams: [],
+        apply(headers, url) {
+          headers.set('authorization', 'Bearer private-sentinel');
+          return { headers, url };
+        },
+      },
+    };
+    return { ...result, ctx };
+  }
+  it.each([
+    [undefined, 1700000060],
+    ['1', 1700000001],
+    ['9999999999', 1700003600],
+  ])('clamps GraphQL reset %s using the context clock', async (reset, expected) => {
+    const { provider, ctx } = tokenContext();
+    ctx.fetch = async (request) => ({
+      status: 200,
+      headers: new Headers(
+        reset === undefined
+          ? {}
+          : {
+              'x-ratelimit-limit': '5000',
+              'x-ratelimit-remaining': '4999',
+              'x-ratelimit-reset': reset,
+            },
+      ),
+      body: Response.json(
+        request.url.endsWith('/graphql')
+          ? { errors: [{ type: 'RATE_LIMITED', message: 'private-sentinel' }] }
+          : request.url.includes('/tags?')
+            ? [{ name: 'v1.0.0', commit: { sha } }]
+            : { archived: false, default_branch: 'main', full_name: 'owner/repo' },
+      ).body,
+    });
+    await expect(provider.describe(ctx, tokenSource, 'vendor/package', {})).rejects.toMatchObject({
+      code: 'rate_limited',
+      resetEpochSeconds: expected,
+      message: 'GitHub rate limit exhausted',
+    });
+  });
+  it('stops assigning branches after the first rejection while other workers finish', async () => {
+    const { provider, ctx } = tokenContext();
+    const pending: (() => void)[] = [];
+    const requested: string[] = [];
+    ctx.fetch = async (request) => {
+      if (request.url.includes('/branches/')) {
+        requested.push(request.url);
+        if (request.url.endsWith('/b0')) throw new Error('BranchLookupFailed');
+        await new Promise<void>((resolve) => pending.push(resolve));
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: Response.json({
+            name: request.url.split('/').at(-1),
+            commit: { sha },
+          }).body,
+        };
+      }
+      return {
+        status: 200,
+        headers: new Headers(),
+        body: Response.json({
+          archived: false,
+          default_branch: 'main',
+          full_name: 'owner/repo',
+        }).body,
+      };
+    };
+    const answer = provider.describe(
+      ctx,
+      {
+        ...tokenSource,
+        config: {
+          ...tokenSource.config,
+          refs: {
+            tags: false,
+            branches: Array.from({ length: 12 }, (_, index) => `b${index}`),
+          },
+        },
+      },
+      'vendor/package',
+      {},
+    );
+    await expect(answer).rejects.toThrow('BranchLookupFailed');
+    expect(requested).toHaveLength(4);
+    pending.forEach((resolve) => resolve());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requested).toHaveLength(4);
   });
 });

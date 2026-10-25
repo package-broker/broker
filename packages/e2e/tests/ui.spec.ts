@@ -207,6 +207,12 @@ test.describe('Node management UI', () => {
       archivedRow.getByRole('cell', { name: 'Status Archived', exact: true }),
     ).toBeVisible();
     await expect(archivedRow.getByRole('button', { name: 'Restore', exact: true })).toBeEnabled();
+    await expect(page.getByRole('alert')).toContainText('Project archived.');
+    await expect(page.getByRole('alert')).not.toContainText('Not found');
+    await expect(settings).toHaveCount(0);
+    await expect(page).toHaveURL(/#\/projects\?status=archived/);
+    await page.reload();
+    await expect(archivedRow.getByRole('button', { name: 'Restore', exact: true })).toBeEnabled();
     const restorePath = '/_pb/projects/browser-archive/restore';
     const refused = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === restorePath,
@@ -365,7 +371,42 @@ test.describe('Node management UI', () => {
   }) => {
     await confirmIdentity(page, admin);
     await go(page, 'sources');
-    await openDetails(page, 'Edit source');
+    await openDetails(page, 'More');
+    await expect(page.getByText('Last success:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Last error:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Next poll:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+    await expect(page.getByText('Enable before syncing.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByLabel('Registered pattern', { exact: true }).fill('@browser-fixture/*');
+    const registered = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/names'),
+    );
+    await page.getByRole('button', { name: 'Add name', exact: true }).click();
+    expect((await registered).status()).toBe(201);
+    await expect(activeDialog(page, 'Registered names')).toBeVisible();
+    await activeDialog(page, 'Registered names')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
+    await openDetails(page, 'More');
+    await expect(page.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled();
+    const enabled = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/enable'),
+    );
+    await page.getByRole('button', { name: 'Enable', exact: true }).click();
+    expect((await enabled).status()).toBe(204);
+    await openDetails(page, 'More');
+    const synced = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/sync'),
+    );
+    const refreshed = page.waitForResponse(
+      (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await page.getByRole('button', { name: 'Sync now', exact: true }).click();
+    expect((await synced).status()).toBe(202);
+    expect((await refreshed).status()).toBe(200);
+    await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
+    await openDetails(page, 'More');
     await page.getByRole('button', { name: 'Set credential', exact: true }).click();
     const material = randomBytes(32).toString('base64url');
     await page
@@ -382,8 +423,295 @@ test.describe('Node management UI', () => {
     await page.reload();
     await expect(page.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
     await expect(page.getByText('Browser fixture source', { exact: true }).first()).toBeVisible();
-    await openDetails(page, 'Edit source');
+    await openDetails(page, 'More');
     await expect(page.getByRole('button', { name: 'Set credential', exact: true })).toBeVisible();
+    await assertSecretAbsent(page, material);
+  });
+
+  test('opens source dialogs through More with the keyboard on desktop and mobile', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await go(page, 'sources');
+      const row = page.getByRole('row').filter({ hasText: 'Browser fixture source' });
+      const more = row.locator('summary').filter({ hasText: /^More$/ });
+      await expect(row.getByText('Edit source', { exact: true })).toHaveCount(0);
+      await more.focus();
+      await page.keyboard.press('Enter');
+      await expect(
+        row.getByRole('button', { name: 'Registered names', exact: true }),
+      ).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(more).toBeFocused();
+      await expect(
+        row.getByRole('button', { name: 'Registered names', exact: true }),
+      ).not.toBeVisible();
+      await page.keyboard.press('Space');
+      await row.getByRole('button', { name: 'Registered names', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const names = activeDialog(page, 'Registered names');
+      await expect(names).toBeVisible();
+      await expect(names.getByLabel('Registered pattern', { exact: true })).toBeVisible();
+      await assertLayout(page);
+      await names.getByRole('button', { name: 'Close', exact: true }).click();
+      await more.focus();
+      await page.keyboard.press('Enter');
+      await row.getByRole('button', { name: 'Set credential', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const credential = activeDialog(page, 'Set credential');
+      await expect(credential).toBeVisible();
+      await expect(credential.getByLabel('Credential kind', { exact: true })).toBeVisible();
+      await assertLayout(page);
+      await page.keyboard.press('Escape');
+      await expect(credential).toHaveCount(0);
+    }
+  });
+
+  test('creates a Composer source, attaches it, sets a credential and detaches it', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'sources');
+    await page.locator('details.filter-toolbar > summary').click();
+    await page.getByLabel('Name (loaded sources)', { exact: true }).fill('No matching source');
+    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+    await expect(page.getByText('No sources match these filters.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await expect(create).toBeVisible();
+    await create.getByRole('radio', { name: 'npm', exact: true }).check();
+    await create.getByRole('radio', { name: /^Private npm registry/ }).check();
+    await expect(create.getByLabel('Package scopes (one per line)', { exact: true })).toBeVisible();
+    await expect(create.getByLabel('Package names (one per line)', { exact: true })).toHaveCount(0);
+    await expect(
+      create
+        .getByRole('group', { name: 'Source type', exact: true })
+        .locator('label > span > span:first-child'),
+    ).toHaveText(['npmjs proxy', 'Private npm registry']);
+    await create.getByRole('radio', { name: 'Composer', exact: true }).check();
+    await create.getByRole('radio', { name: /^Composer repository/ }).check();
+    await expect(create.getByLabel('Package scopes (one per line)', { exact: true })).toHaveCount(
+      0,
+    );
+    await create
+      .getByLabel('Source name (required)', { exact: true })
+      .fill('Browser Composer repository');
+    await create
+      .getByLabel('Repository URL (required)', { exact: true })
+      .fill('https://composer.example.test');
+    await create
+      .getByLabel('Package names (one per line)', { exact: true })
+      .fill('browser/package');
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    expect((await created).status()).toBe(201);
+    await expect(create).toHaveCount(0);
+    await expect(
+      page.getByRole('combobox', { name: 'Credential kind', exact: true }),
+    ).toBeVisible();
+    await activeDialog(page, 'Set credential')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
+    const sourceRow = () =>
+      page.getByRole('row').filter({ hasText: 'Browser Composer repository' });
+    await expect(sourceRow()).toBeVisible();
+
+    await sourceRow().getByRole('button', { name: 'Edit', exact: true }).click();
+    const edit = activeDialog(page, 'Edit source');
+    await edit.getByText('Advanced settings', { exact: true }).click();
+    await edit.getByLabel('Sync interval (seconds)', { exact: true }).fill('600');
+    await edit.getByLabel('Replace type-specific configuration', { exact: true }).check();
+    await edit.getByLabel('Package names (one per line)', { exact: true }).fill('browser/updated');
+    const updated = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'PATCH' &&
+        /\/_pb\/sources\/[^/]+$/.test(new URL(r.url()).pathname),
+    );
+    await edit.getByRole('button', { name: 'Save source', exact: true }).click();
+    const updateResponse = await updated;
+    expect(updateResponse.status()).toBe(204);
+    expect(updateResponse.request().postDataJSON()).toMatchObject({
+      pollIntervalSeconds: 600,
+      config: { selection: { packages: ['browser/updated'] } },
+    });
+    await expect(edit).toHaveCount(0);
+
+    await go(page, 'sources', 'project=browser-fixture');
+    await expect(sourceRow()).toBeVisible();
+    const attached = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname.endsWith('/attachment'),
+    );
+    await sourceRow().getByRole('button', { name: 'Attach', exact: true }).click();
+    expect((await attached).status()).toBe(204);
+    await expect(sourceRow().getByRole('button', { name: 'Detach', exact: true })).toBeVisible();
+
+    await go(page, 'sources');
+    await sourceRow().getByText('More', { exact: true }).click();
+    await sourceRow().getByRole('button', { name: 'Set credential', exact: true }).click();
+    const material = randomBytes(32).toString('base64url');
+    await page
+      .getByRole('combobox', { name: 'Credential kind', exact: true })
+      .selectOption('bearer');
+    await fillSecret(page.getByLabel('token', { exact: true }), material);
+    const saved = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname.endsWith('/credential'),
+    );
+    await page.getByRole('button', { name: 'Save credential', exact: true }).click();
+    expect((await saved).status()).toBe(204);
+    await expect(page.getByRole('status').filter({ hasText: 'credential set' })).toBeVisible();
+    await assertSecretAbsent(page, material);
+
+    await go(page, 'sources', 'project=browser-fixture');
+    await sourceRow().getByRole('button', { name: 'Detach', exact: true }).click();
+    const detach = activeDialog(page, 'Detach?');
+    await expect(detach).toContainText('Browser Composer repository');
+    await expect(detach).toContainText('Project: browser-fixture');
+    await detach.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(sourceRow().getByRole('button', { name: 'Detach', exact: true })).toBeVisible();
+    await sourceRow().getByRole('button', { name: 'Detach', exact: true }).click();
+    const detached = page.waitForResponse(
+      (r) => r.request().method() === 'DELETE' && new URL(r.url()).pathname.endsWith('/attachment'),
+    );
+    await activeDialog(page, 'Detach?')
+      .getByRole('button', { name: 'Confirm detach', exact: true })
+      .click();
+    expect((await detached).status()).toBe(204);
+    await expect(sourceRow().getByRole('button', { name: 'Attach', exact: true })).toBeVisible();
+    await assertSecretAbsent(page, material);
+  });
+
+  test('creates, enables and requests sync for a project-owned Composer source', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await page
+      .getByRole('combobox', { name: 'Scope', exact: true })
+      .selectOption('browser-fixture');
+    await go(page, 'sources', 'project=browser-fixture');
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await create.getByRole('radio', { name: 'Composer', exact: true }).check();
+    await create.getByRole('radio', { name: /^Composer repository/ }).check();
+    await create
+      .getByLabel('Source name (required)', { exact: true })
+      .fill('Browser project Composer repository');
+    await create
+      .getByLabel('Repository URL (required)', { exact: true })
+      .fill('https://composer.example.test');
+    await create
+      .getByLabel('Package names (one per line)', { exact: true })
+      .fill('browser/project-package');
+    const created = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === '/_pb/projects/browser-fixture/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    const { id } = (await response.json()) as { id: string };
+    await expect(create).toHaveCount(0);
+    await activeDialog(page, 'Set credential')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
+    const sourceRow = () =>
+      page.getByRole('row').filter({ hasText: 'Browser project Composer repository' });
+    await expect(sourceRow().getByText('Paused', { exact: true }).first()).toBeVisible();
+    await sourceRow().getByText('More', { exact: true }).click();
+    await expect(sourceRow().getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+    await sourceRow().getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByLabel('Registered pattern', { exact: true }).fill('browser/project-package');
+    const registered = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' && new URL(r.url()).pathname === `/_pb/sources/${id}/names`,
+    );
+    await page.getByRole('button', { name: 'Add name', exact: true }).click();
+    expect((await registered).status()).toBe(201);
+    const enabled = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === `/_pb/sources/${id}/enable`,
+    );
+    await activeDialog(page, 'Registered names')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
+    await sourceRow().getByText('More', { exact: true }).click();
+    await sourceRow().getByRole('button', { name: 'Enable', exact: true }).click();
+    expect((await enabled).status()).toBe(204);
+    await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
+    await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
+    const nextPoll = () =>
+      sourceRow()
+        .getByText(/^Next poll:/)
+        .first()
+        .locator('time');
+    const previousPoll = await nextPoll().getAttribute('datetime');
+    const synced = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === `/_pb/projects/browser-fixture/sources/${id}/sync`,
+    );
+    const refreshed = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'GET' &&
+        new URL(r.url()).pathname === '/_pb/projects/browser-fixture/sources',
+    );
+    await sourceRow().getByRole('button', { name: 'Sync now', exact: true }).click();
+    expect((await synced).status()).toBe(202);
+    expect((await refreshed).status()).toBe(200);
+    await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
+    await expect(nextPoll()).toHaveAttribute('datetime', /\d{4}-\d{2}-\d{2}T/);
+    await expect(nextPoll()).not.toHaveAttribute('datetime', previousPoll!);
+    await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
+  });
+
+  test('creates a GitHub token source and saves its bearer credential', async ({ page, admin }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'sources');
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await create.getByLabel('Source name (required)', { exact: true }).fill('Browser GitHub token');
+    await create.getByRole('radio', { name: /^Git repository/ }).check();
+    await expect(
+      create
+        .getByRole('group', { name: 'GitHub authentication', exact: true })
+        .locator('label > span > span:first-child'),
+    ).toHaveText(['GitHub App', 'Personal access token']);
+    await expect(
+      create.getByLabel('GitHub App installation ID (required)', { exact: true }),
+    ).toBeVisible();
+    await create.getByRole('radio', { name: /^Personal access token/ }).check();
+    await expect(
+      create.getByLabel('GitHub App installation ID (required)', { exact: true }),
+    ).toHaveCount(0);
+    await create.getByLabel('GitHub repository (required)', { exact: true }).fill('browser/token');
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    expect(response.request().postDataJSON().config).toEqual({
+      provider: 'github',
+      repository: 'browser/token',
+      refs: { tags: true, branches: [] },
+    });
+    await expect(page.getByLabel('Credential kind', { exact: true })).toHaveValue('bearer');
+    const material = randomBytes(32).toString('base64url');
+    await fillSecret(page.getByLabel('token', { exact: true }), material);
+    const saved = page.waitForResponse(
+      (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname.endsWith('/credential'),
+    );
+    await page.getByRole('button', { name: 'Save credential', exact: true }).click();
+    expect((await saved).status()).toBe(204);
+    await expect(page.getByRole('status').filter({ hasText: 'credential set' })).toBeVisible();
     await assertSecretAbsent(page, material);
   });
 

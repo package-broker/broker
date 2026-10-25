@@ -402,6 +402,8 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
       const declared = response.headers.get('content-length');
       if (
         !bodyless &&
+        response.status >= 200 &&
+        response.status < 300 &&
         declared !== null &&
         /^\d+$/.test(declared) &&
         Number(declared) > request.maxBytes

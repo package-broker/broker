@@ -257,6 +257,17 @@ async function membership(name = 'removed'): Promise<void> {
 
 function loginPlan(groups: readonly string[], now = NOW): LoginPlan {
   return {
+    audit: {
+      id: ulid(),
+      occurredAt: NOW,
+      action: 'session.login',
+      actor: { type: 'user', id: USER },
+      target: { type: 'session', id: SESSION },
+      tokenSelector: null,
+      sourceIp: null,
+      projectId: null,
+      payloadJson: '{"op_id":"fixture","request_id":"fixture"}',
+    },
     userId: USER,
     createUser: false,
     email: 'user@example.test',

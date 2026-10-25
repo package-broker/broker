@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -64,6 +65,21 @@ export function removeWebhookRegistration(bundle: string): string {
   return bundle.replace(pattern, 'coreRoutes: Object.freeze([])');
 }
 
+export function injectSourcePollClock(bundle: string): string {
+  const target =
+    /(function createSourcePollJob\(deps\) \{)(\s+return defineJob\(\{\s+\.\.\.sourcePollJob,\s+validate: validatePoll,\s+async handler\(input, job\) \{\s+validatePoll\(input\);)/g;
+  assert.equal([...bundle.matchAll(target)].length, 1, 'SourcePollClockTargetMissing');
+  // Keep database time and every other job's clock real. Only poll-key minutes advance.
+  return bundle.replace(
+    target,
+    `$1
+  let pollTime = Date.now();$2
+    pollTime = Math.max(pollTime + 60_000, Date.now());
+    const now = new Date(pollTime);
+    job = { ...job, ports: { ...job.ports, clock: { now: () => now } } };`,
+  );
+}
+
 export async function reserveLoopbackPort(): Promise<number> {
   const server = createServer();
   try {
@@ -83,8 +99,12 @@ export async function reserveLoopbackPort(): Promise<number> {
   }
 }
 
-export async function until(check: () => Promise<boolean>, label: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+export async function until(
+  check: () => Promise<boolean>,
+  label: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await check()) return;
     await delay(100);
@@ -112,20 +132,127 @@ async function files(directory: string): Promise<string[]> {
   return result;
 }
 
+export interface SqlPort {
+  run(sql: string, params: (string | number | null)[]): Promise<void>;
+  all<T extends Record<string, unknown>>(
+    sql: string,
+    params: (string | number | null)[],
+  ): Promise<T[]>;
+}
+
+export type AuditRow = Record<string, string | number | null> & { seq: number; org_id: string };
+
+const auditColumns = [
+  'id',
+  'org_id',
+  'seq',
+  'prev_hash',
+  'hash',
+  'created_at',
+  'actor_type',
+  'actor_id',
+  'token_selector',
+  'source_ip',
+  'action',
+  'target_type',
+  'target_id',
+  'project_id',
+  'payload_json',
+] as const;
+const alterableAuditFields = ['action', 'payload_json', 'target_id', 'created_at'] as const;
+const enqueueableJobs = ['core:audit-seal:v1', 'core:audit-verify:v1'] as const;
+
+/* eslint-disable no-restricted-syntax -- Fixed statements; the pinned organization id is bound by the harness, never by callers. */
+export function infrastructureOperations(db: SqlPort, orgId: string) {
+  const seqOf = (value: number) => {
+    assert(Number.isSafeInteger(value) && value > 0, 'InvalidAuditSeq');
+    return value;
+  };
+  const snapshot = () =>
+    db.all<AuditRow>(
+      `SELECT ${auditColumns.join(', ')} FROM audit_event WHERE org_id = ? ORDER BY seq`,
+      [orgId],
+    );
+  return {
+    audit: {
+      snapshot,
+      async restore(rows: readonly AuditRow[]) {
+        assert(
+          rows.every((row) => row.org_id === orgId),
+          'ForeignAuditSnapshot',
+        );
+        await db.run('DELETE FROM audit_event WHERE org_id = ?', [orgId]);
+        for (const row of rows)
+          await db.run(
+            `INSERT INTO audit_event (${auditColumns.join(', ')}) VALUES (${auditColumns.map(() => '?').join(', ')})`,
+            auditColumns.map((column) => (column === 'org_id' ? orgId : (row[column] ?? null))),
+          );
+      },
+      async alter(seq: number, field: (typeof alterableAuditFields)[number], value: string) {
+        assert(alterableAuditFields.includes(field), 'AuditFieldNotAlterable');
+        await db.run(`UPDATE audit_event SET ${field} = ? WHERE org_id = ? AND seq = ?`, [
+          value,
+          orgId,
+          seqOf(seq),
+        ]);
+      },
+      async delete(seq: number) {
+        await db.run('DELETE FROM audit_event WHERE org_id = ? AND seq = ?', [orgId, seqOf(seq)]);
+      },
+      async truncateFrom(seq: number) {
+        await db.run('DELETE FROM audit_event WHERE org_id = ? AND seq >= ?', [orgId, seqOf(seq)]);
+      },
+      async reorder(first: number, second: number) {
+        const [top] = await db.all<{ seq: number | null }>(
+          'SELECT MAX(seq) AS seq FROM audit_event WHERE org_id = ?',
+          [orgId],
+        );
+        const park = Number(top?.seq ?? 0) + 1_000_000;
+        for (const [from, to] of [
+          [seqOf(first), park],
+          [seqOf(second), first],
+          [park, second],
+        ] as const)
+          await db.run('UPDATE audit_event SET seq = ? WHERE org_id = ? AND seq = ?', [
+            to,
+            orgId,
+            from,
+          ]);
+      },
+    },
+    jobs: {
+      async enqueue(type: (typeof enqueueableJobs)[number]) {
+        assert(enqueueableJobs.includes(type), 'JobTypeNotEnqueueable');
+        const id = '01' + randomBytes(12).toString('hex').toUpperCase();
+        await db.run('INSERT INTO job (id, org_id, type) VALUES (?, ?, ?)', [id, orgId, type]);
+        return id;
+      },
+    },
+  };
+}
+/* eslint-enable no-restricted-syntax */
+
+export type InfrastructureOperations = ReturnType<typeof infrastructureOperations>;
+
 export interface LocalBroker {
   origin: string;
   setupToken: string;
+  readerSetupToken?: string;
   logs: () => string;
   read<T extends Record<string, unknown>>(sql: string, params?: (string | number)[]): Promise<T[]>;
+  audit: InfrastructureOperations['audit'];
+  jobs: InfrastructureOperations['jobs'];
   loseBlob(orgId: string, sha256: string): Promise<void>;
   moduleEvidence(): Promise<void>;
+  pollTick(orgId: string): Promise<void>;
+  tick(): Promise<void>;
   close(): Promise<void>;
 }
 
 export async function startLocal(
   runtime: Runtime,
   fixtureOrigin: string,
-  options: { removeWebhook?: boolean } = {},
+  options: { removeWebhook?: boolean; reader?: boolean } = {},
 ): Promise<LocalBroker> {
   fixtureDestination(upstreamOrigins[0], fixtureOrigin);
   const fixture = new URL(fixtureOrigin);
@@ -167,6 +294,7 @@ export async function startLocal(
     const copy = join(directory, 'bundle');
     await cp(output, copy, { recursive: true });
     const script = join(copy, entry);
+    await writeFile(script, injectSourcePollClock(await readFile(script, 'utf8')));
     if (options.removeWebhook) {
       assert.equal(runtime, 'node');
       await writeFile(script, removeWebhookRegistration(await readFile(script, 'utf8')));
@@ -183,6 +311,9 @@ export async function startLocal(
     let worker:
       | {
           ready: Promise<URL>;
+          getWorker(): Promise<{
+            scheduled(options: { scheduledTime: number; cron: string }): Promise<unknown>;
+          }>;
           getD1Database(name: string): Promise<{
             prepare(sql: string): {
               bind(...params: unknown[]): {
@@ -191,6 +322,7 @@ export async function startLocal(
             };
           }>;
           getR2Bucket(name: string): Promise<{ delete(key: string): Promise<void> }>;
+          getWorker(): Promise<{ scheduled(options: { cron: string }): Promise<unknown> }>;
           dispose(): Promise<void>;
         }
       | undefined;
@@ -291,6 +423,32 @@ export async function startLocal(
       ],
       env,
     );
+    const organizations = (() => {
+      const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
+      try {
+        // eslint-disable-next-line no-restricted-syntax -- Pin infrastructure writes to the single bootstrapped organization.
+        return db.prepare('SELECT id FROM organization').all() as { id: string }[];
+      } finally {
+        db.close();
+      }
+    })();
+    assert.equal(organizations.length, 1, 'SingleOrganizationExpected');
+    const pinnedOrgId = organizations[0]!.id;
+    const readerTokenFile = join(directory, 'reader-setup-token');
+    if (options.reader)
+      await command(
+        [
+          'admin',
+          'bootstrap',
+          '--email',
+          'reader@example.test',
+          '--sqlite',
+          database,
+          '--token-file',
+          readerTokenFile,
+        ],
+        env,
+      );
     const moduleFile = join(directory, 'modules.json');
     if (runtime === 'node') {
       const require = createRequire(join(repository, 'packages/runtime-node/package.json'));
@@ -381,18 +539,61 @@ syncBuiltinESMExports();
             .bind(...params)
             .all()
         ).results as T[];
-      const db = new DatabaseSync(database, { readOnly: true });
+      const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
       try {
         return db.prepare(sql).all(...params) as T[];
       } finally {
         db.close();
       }
     };
+    const sqlPort: SqlPort = {
+      async run(sql, params) {
+        if (worker) {
+          await (
+            await worker.getD1Database('DB')
+          )
+            .prepare(sql)
+            .bind(...params)
+            .all();
+          return;
+        }
+        const db = new DatabaseSync(database, { timeout: 5000 });
+        try {
+          db.prepare(sql).run(...params);
+        } finally {
+          db.close();
+        }
+      },
+      async all<T extends Record<string, unknown>>(
+        sql: string,
+        params: (string | number | null)[],
+      ) {
+        if (worker)
+          return (
+            await (
+              await worker.getD1Database('DB')
+            )
+              .prepare(sql)
+              .bind(...params)
+              .all()
+          ).results as T[];
+        const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
+        try {
+          return db.prepare(sql).all(...params) as T[];
+        } finally {
+          db.close();
+        }
+      },
+    };
     return {
       origin,
       setupToken: (await readFile(tokenFile, 'utf8')).trim(),
+      ...(options.reader
+        ? { readerSetupToken: (await readFile(readerTokenFile, 'utf8')).trim() }
+        : {}),
       logs: () => logs,
       read,
+      ...infrastructureOperations(sqlPort, pinnedOrgId),
       async loseBlob(orgId, sha256) {
         assert(/^[a-f0-9]{64}$/.test(sha256), 'InvalidBlobDigest');
         const rows = await read<{ storage_key: string }>(
@@ -409,6 +610,44 @@ syncBuiltinESMExports();
           await rm(path);
           await rm(`${path}.media`, { force: true });
         }
+      },
+      async pollTick(orgId) {
+        // A unique ULID-shaped test ID also passes the Worker's queue notification validation.
+        const id = '01' + randomBytes(12).toString('hex').toUpperCase();
+        // Enqueue a due tick, then let the production runners claim and settle it.
+        const sql =
+          // eslint-disable-next-line no-restricted-syntax -- Scoped test infrastructure enqueue; production handlers perform polling and sync.
+          "INSERT INTO job (id, org_id, type) SELECT ?, id, 'core:source-poll:v1' FROM organization WHERE id = ?";
+        if (worker) {
+          await (await worker.getD1Database('DB')).prepare(sql).bind(id, orgId).all();
+        } else {
+          const db = new DatabaseSync(database, { timeout: 5000 });
+          try {
+            db.prepare(sql).run(id, orgId);
+          } finally {
+            db.close();
+          }
+        }
+        await until(async () => {
+          if (worker)
+            await (
+              await worker.getWorker()
+            ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
+          const [job] = await read<{ state: string }>(
+            // eslint-disable-next-line no-restricted-syntax -- Observe the scoped infrastructure enqueue.
+            'SELECT state FROM job WHERE org_id = ? AND id = ?',
+            [orgId, id],
+          );
+          assert(job, 'SourcePollJobMissing');
+          assert.notEqual(job.state, 'dead', 'SourcePollJobFailed');
+          return job.state === 'succeeded';
+        }, 'source-poll');
+      },
+      async tick() {
+        if (worker)
+          await (
+            await worker.getWorker()
+          ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
       },
       async moduleEvidence() {
         assert(!logOverflow, 'IncompleteLogEvidence');

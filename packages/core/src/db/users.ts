@@ -1,3 +1,4 @@
+import type { AuditEvent } from '../audit/actions.js';
 import type { OrgContext } from './port.js';
 import type { NewSession } from './sessions.js';
 
@@ -63,6 +64,7 @@ export interface UserRepository {
 }
 
 export interface LoginPlan {
+  readonly audit: AuditEvent;
   readonly userId: string;
   readonly createUser: boolean;
   readonly email: string;

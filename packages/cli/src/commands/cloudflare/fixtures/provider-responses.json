@@ -1,0 +1,154 @@
+{
+  "workersEmpty": {
+    "success": true,
+    "result": [],
+    "result_info": null
+  },
+  "d1Empty": {
+    "success": true,
+    "result": [],
+    "result_info": {
+      "count": 0,
+      "page": 1,
+      "per_page": 100,
+      "total_count": 0
+    }
+  },
+  "queuesEmpty": {
+    "success": true,
+    "errors": null,
+    "messages": null,
+    "result": [],
+    "result_info": {
+      "page": 1,
+      "per_page": 100,
+      "count": 0,
+      "total_pages": 0,
+      "total_count": 0
+    }
+  },
+  "queuesFirstPage": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "queue_id": "11111111111111111111111111111111",
+        "queue_name": "existing-jobs"
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "count": 1,
+      "total_pages": 2,
+      "total_count": 2
+    }
+  },
+  "queuesLastPage": {
+    "success": true,
+    "errors": null,
+    "messages": null,
+    "result": [
+      {
+        "queue_id": "22222222222222222222222222222222",
+        "queue_name": "existing-dlq"
+      }
+    ],
+    "result_info": {
+      "page": 2,
+      "count": 1,
+      "total_pages": 2,
+      "total_count": 2
+    }
+  },
+  "forbidden": {
+    "success": false,
+    "errors": [
+      {
+        "code": 10000,
+        "message": "SENTINEL person@example.com https://user:password@example.com"
+      }
+    ],
+    "messages": [],
+    "result": null
+  },
+  "queuesPlanLimit": {
+    "success": false,
+    "errors": [
+      {
+        "code": 10253,
+        "message": "SENTINEL provider diagnostic"
+      }
+    ],
+    "messages": null,
+    "result": null
+  },
+  "r2Empty": {
+    "success": true,
+    "errors": null,
+    "messages": null,
+    "result": {
+      "buckets": []
+    },
+    "result_info": {
+      "total_count": 0
+    }
+  },
+  "analyticsTablesEmpty": {
+    "meta": [
+      {
+        "name": "dataset",
+        "type": "String"
+      }
+    ],
+    "data": [],
+    "rows": 0,
+    "statistics": {
+      "elapsed": 0.001,
+      "rows_read": 0,
+      "bytes_read": 0
+    }
+  },
+  "workersPaid": {
+    "success": true,
+    "errors": null,
+    "messages": null,
+    "result": [
+      {
+        "rate_plan": {
+          "id": "WORKERS_PAID",
+          "scope": "account"
+        },
+        "state": "Paid"
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "count": 1,
+      "total_count": 1
+    }
+  },
+  "workerWithId": {
+    "success": true,
+    "result": [
+      {
+        "id": "broker",
+        "worker_id": "99999999999999999999999999999999"
+      }
+    ],
+    "result_info": null
+  },
+  "domainsEmpty": {
+    "success": true,
+    "result": []
+  },
+  "workerNameOnly": {
+    "success": true,
+    "result": [
+      {
+        "id": "broker"
+      }
+    ],
+    "result_info": null
+  }
+}

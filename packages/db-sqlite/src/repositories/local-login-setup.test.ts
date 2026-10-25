@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { auditEvent } from '@package-broker/core/audit/actions';
 import { DbError } from '@package-broker/core/db/errors';
 import type { CredentialRecord } from '@package-broker/core/db/credentials';
 import type { LocalLoginSetupWriter } from '@package-broker/core/db/local-login';
@@ -105,7 +106,23 @@ function newSession(overrides: Partial<NewSession> = {}): NewSession {
 function completeInput(
   overrides: Partial<Parameters<LocalLoginSetupWriter['completeSetup']>[1]> = {},
 ): Parameters<LocalLoginSetupWriter['completeSetup']>[1] {
+  const event = auditEvent({
+    id: '01K00000000000000000000002',
+    now: LATER,
+    action: 'setup.complete',
+    actor: { type: 'user', id: ADMIN },
+    target: { type: 'user', id: ADMIN },
+    projectId: null,
+    context: {
+      opId: '01K00000000000000000000002',
+      requestId: '01K00000000000000000000001',
+      sourceIp: '203.0.113.7',
+      tokenSelector: null,
+    },
+  });
+  if (!event.ok) throw new Error('Invalid audit fixture');
   return {
+    audit: event.event,
     userId: ADMIN,
     setupHash: SETUP_HASH,
     expectedCredentialId: OLD_CREDENTIAL,
@@ -545,6 +562,132 @@ describe('stagePendingTotp', () => {
 });
 
 describe('completeSetup', () => {
+  async function auditRows(): Promise<Record<string, unknown>[]> {
+    return executor.all(insert('SELECT * FROM audit_pending WHERE org_id = ?', a.orgId));
+  }
+
+  it('stages exactly one setup.complete row with correlation-only sorted payload', async () => {
+    await seedPending();
+    const input = completeInput();
+    expect(await writer.completeSetup(a, input)).toBe(true);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: input.audit.id,
+      action: 'setup.complete',
+      actor_type: 'user',
+      actor_id: ADMIN,
+      target_type: 'user',
+      target_id: ADMIN,
+      token_selector: null,
+      source_ip: '203.0.113.7',
+      project_id: null,
+      payload_json:
+        '{"op_id":"01K00000000000000000000002","request_id":"01K00000000000000000000001"}',
+    });
+    for (const sentinel of [
+      'admin@example.test',
+      PASSWORD_HASH,
+      credentialRow(a, OLD_CREDENTIAL).aad,
+    ]) {
+      expect(String(rows[0]?.payload_json).includes(sentinel)).toBe(false);
+    }
+  });
+
+  it('stages no audit row or session when the setup expires at batch time', async () => {
+    await seedPending();
+    expect(
+      await writer.completeSetup(
+        a,
+        completeInput({
+          now: SETUP_EXPIRES,
+          session: newSession({ now: SETUP_EXPIRES }),
+        }),
+      ),
+    ).toBe(false);
+    expect(await auditRows()).toEqual([]);
+    expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
+  });
+
+  it('stages no audit row or session for another organization', async () => {
+    await seedPending();
+    expect(await writer.completeSetup(b, completeInput())).toBe(false);
+    expect(await executor.all(insert('SELECT id FROM audit_pending'))).toEqual([]);
+    expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
+  });
+
+  it('keeps exactly one audit row after a refused retry', async () => {
+    await seedPending();
+    expect(await writer.completeSetup(a, completeInput())).toBe(true);
+    expect(await writer.completeSetup(a, completeInput())).toBe(false);
+    expect(await auditRows()).toHaveLength(1);
+    expect(await sessionRows()).toHaveLength(2);
+  });
+
+  it('stages no audit row or session for a stale credential revision', async () => {
+    await seedPending();
+    expect(await writer.completeSetup(a, completeInput({ credentialRev: 2 }))).toBe(false);
+    expect(await auditRows()).toEqual([]);
+    expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
+  });
+
+  it('rolls back the audit row and all setup changes after a later statement fails', async () => {
+    await seedPending();
+    const before = await loginRow();
+    let injected = false;
+    const failing: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: (statements) => {
+        const index = statements.findIndex((statement) =>
+          statement.sql.includes('INSERT INTO audit_pending'),
+        );
+        if (index < 0) throw new Error('Missing audit statement');
+        injected = true;
+        return executor.batch([
+          ...statements.slice(0, index + 1),
+          insert('INSERT INTO audit_pending SELECT * FROM audit_pending WHERE org_id = ?', a.orgId),
+          ...statements.slice(index + 1),
+        ]);
+      },
+    };
+    await expect(
+      createLocalLoginSetupWriter(failing).completeSetup(a, completeInput()),
+    ).rejects.toMatchObject({ kind: 'unique' });
+    expect(injected).toBe(true);
+    expect(await auditRows()).toEqual([]);
+    expect(await loginRow()).toEqual(before);
+    expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
+  });
+
+  it('stages no audit row when the session insert is suppressed while the guard passes', async () => {
+    await seedPending();
+    let suppressed = false;
+    const suppressing: SqlExecutor = {
+      driver: executor.driver,
+      all: (statement) => executor.all(statement),
+      batch: (statements) => {
+        const index = statements.findIndex((statement) =>
+          statement.sql.includes('insert into "session"'),
+        );
+        if (index < 0) throw new Error('Missing session statement');
+        suppressed = true;
+        return executor.batch([
+          ...statements.slice(0, index),
+          insert('SELECT 1 WHERE 0'),
+          ...statements.slice(index + 1),
+        ]);
+      },
+    };
+    expect(await createLocalLoginSetupWriter(suppressing).completeSetup(a, completeInput())).toBe(
+      false,
+    );
+    expect(suppressed).toBe(true);
+    expect((await loginRow()).totp_enabled_at).toBe(LATER);
+    expect(await auditRows()).toEqual([]);
+    expect(await sessionRows()).toEqual([{ id: OLD_SESSION, user_id: ADMIN, revoked_at: null }]);
+  });
+
   async function staged(): Promise<void> {
     await seedPending();
   }
@@ -792,6 +935,9 @@ describe('two connections', () => {
       ),
     ]);
     expect(results.filter(Boolean)).toHaveLength(1);
+    expect(
+      await executor.all(insert('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)),
+    ).toEqual([{ action: 'setup.complete' }]);
     expect((await loginRow()).credential_rev).toBe(4);
     expect(await sessionRows()).toHaveLength(2);
   });

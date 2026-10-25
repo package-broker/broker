@@ -1,9 +1,9 @@
-import { fork, spawn } from 'node:child_process';
+import { execFileSync, fork, spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
 import { once } from 'node:events';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -22,6 +22,14 @@ import { planMigrations } from '@package-broker/db-sqlite/migrations/plan';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor } from '@package-broker/runtime-cloudflare/db/d1-executor';
 import { createCacheApiAdapter } from '../dist/cache/cache-api.js';
+
+import {
+  TRACED_ROUTE,
+  buildTraceparentBundle,
+  checkTraceparentCases,
+} from './traceparent-smoke.mjs';
+
+import { checkUiBundle } from './ui-bundle-regression.mjs';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEADLINE_MS = 60_000;
@@ -267,15 +275,21 @@ async function readAssetsDescriptor(script) {
   return { ...descriptor, directory: resolve(outDir, descriptor.directory) };
 }
 
-async function createMiniflare(script) {
+async function createMiniflare(script, entry = basename(script)) {
   const assets = await readAssetsDescriptor(script);
   return trackMiniflare(
     new Miniflare(
       convertV4MiniflareOptions({
         rootPath: dirname(script),
         handleStructuredLogs: (record) => workerLogs.push(record.message),
-        modules: true,
-        scriptPath: basename(script),
+        ...(entry === basename(script)
+          ? { modules: true, scriptPath: entry }
+          : {
+              modules: [
+                { type: 'ESModule', path: entry },
+                { type: 'ESModule', path: basename(script) },
+              ],
+            }),
         compatibilityDate: '2026-10-01',
         compatibilityFlags: ['nodejs_compat'],
         d1Databases: ['DB'],
@@ -431,6 +445,19 @@ async function run() {
     assert.equal(stagedAssets.run_worker_first, true);
     assert.equal(stagedAssets.html_handling, 'none');
     assert.equal(stagedAssets.not_found_handling, 'none');
+    await checkUiBundle({
+      assetsDir: stagedAssets.directory,
+      https: true,
+      request: (path, options) =>
+        within(
+          mf.dispatchFetch(`${PUBLIC_ORIGIN}${path}`, {
+            ...options,
+            redirect: 'manual',
+          }),
+          limitMs,
+          'UI bundle regression',
+        ),
+    });
     const uiManifest = JSON.parse(
       await readFile(join(stagedAssets.directory, 'manifest.json'), 'utf8'),
     );
@@ -912,6 +939,55 @@ async function run() {
     assert.deepEqual(await envelopeOf(hiddenResponse), await envelopeOf(missingResponse));
     console.log(
       'smoke:cloudflare package route: 401 without credentials, 200 visible, uniform 404 invisible',
+    );
+
+    await disposeMiniflare();
+    for (const trusted of [true, false]) {
+      step = `building the traceparent Worker (trusted=${trusted})`;
+      const out = await buildTraceparentBundle(repoRoot, 'cloudflare', trusted);
+      await writeFile(
+        join(out, 'smoke-worker.js'),
+        `
+const log = console.log.bind(console);
+const error = console.error.bind(console);
+console.log = (value) => log(JSON.stringify(value));
+console.error = (value) => error(JSON.stringify(value));
+import worker from './worker.js';
+export default worker;
+`,
+      );
+      mf = await createMiniflare(join(out, 'worker.js'), 'smoke-worker.js');
+      await migrate(createD1Executor(await mf.getD1Database('DB')), await readMigrations(out), {
+        holder: 'smoke',
+      });
+      step = `checking traceparent (trusted=${trusted})`;
+      await checkTraceparentCases({
+        trusted,
+        records: () =>
+          workerLogs.flatMap((message) => {
+            try {
+              return [JSON.parse(message)];
+            } catch {
+              return [];
+            }
+          }),
+        request: (headers) =>
+          mf.dispatchFetch(`${PUBLIC_ORIGIN}${TRACED_ROUTE}`, {
+            headers,
+            signal: AbortSignal.timeout(limitMs),
+          }),
+      });
+      await disposeMiniflare();
+    }
+
+    step = 'checking the hostile held batch';
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../../../scripts/held-batch-smoke.mjs', import.meta.url)),
+        'cloudflare',
+      ],
+      { stdio: 'inherit' },
     );
 
     step = 'done';

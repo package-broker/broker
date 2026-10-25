@@ -1,3 +1,4 @@
+import type { AuditEvent } from '../audit/actions.js';
 import type { CredentialRecord } from './credentials.js';
 import type { OrgContext } from './port.js';
 import type { NewSession } from './sessions.js';
@@ -93,6 +94,7 @@ export interface LocalLoginSetupWriter {
     input: {
       readonly userId: string;
       readonly setupHash: string;
+      readonly audit: AuditEvent;
       readonly expectedCredentialId: string;
       readonly credentialRev: number;
       readonly passwordHash: string;
@@ -122,6 +124,7 @@ export interface LocalLoginSuccessWriter {
   succeed(
     ctx: OrgContext,
     input: {
+      readonly audit: AuditEvent;
       readonly snapshot: LocalLoginSnapshot;
       readonly step: number;
       readonly rehash: string | null;

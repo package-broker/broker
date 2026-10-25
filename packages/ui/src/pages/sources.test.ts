@@ -1,6 +1,7 @@
-import { createElement, isValidElement, type ReactNode } from 'react';
+import { createElement, isValidElement, type ReactNode, type ReactElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import { DropdownMenu } from '../components/ui/dropdown-menu.js';
 import { createApiClient } from '../api.js';
 import type { paths } from '../api-types.js';
 import { createReauthFlow, type ShellServices } from '../auth.js';
@@ -8,7 +9,8 @@ import { loadPending } from '../pending.js';
 import {
   createSourcesModel,
   filterSources,
-  SourceCard,
+  sourceCredentialKind,
+  SourceActions,
   CredentialFields,
   SourcesView,
   submitCredential,
@@ -29,6 +31,9 @@ const source: Source = {
   removalPolicy: 'flag',
   pollIntervalSeconds: 300,
   lastSuccessAt: null,
+  lastError: null,
+  lastPolledAt: null,
+  nextPollAt: null,
   hasCredential: false,
   lastRemovalRefusal: null,
   removalAcceptanceArmed: false,
@@ -40,8 +45,15 @@ const json = (data: unknown, status = 200, headers = {}) =>
 function setup(
   fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })),
   project: string | null = null,
+  organizationPermissions = ['org:sources:write'],
 ) {
-  const client = createApiClient<paths>({ fetch, readCookie: () => undefined });
+  const client = createApiClient<paths>({
+    fetch: (input, init) =>
+      input === '/_pb/me/permissions'
+        ? Promise.resolve(json({ organization: organizationPermissions }))
+        : fetch(input, init),
+    readCookie: () => undefined,
+  });
   const entries = new Map<string, string>();
   const storage = {
     getItem: (key: string) => entries.get(key) ?? null,
@@ -232,7 +244,8 @@ describe('sources and registered names', () => {
       'acme',
     );
     await model.load();
-    expect(html()).toMatch(/Attached to this project: (?:<!-- -->)?Yes/);
+    expect(html()).toContain('Attached to this project');
+    expect(html()).not.toContain('Not attached to this project');
     expect(html()).not.toMatch(/Attached to \d+ projects/);
     expect(html()).not.toContain('undefined');
   });
@@ -267,6 +280,7 @@ describe('sources and registered names', () => {
       ),
     );
     await model.load();
+    model.openEditor(model.snapshot().items[0]!);
     expect(html()).toContain('https://registry.example/path');
     for (const hidden of ['url-user', 'url-password', 'url-query', 'url-fragment']) {
       expect(html()).not.toContain(hidden);
@@ -799,40 +813,265 @@ describe('round 2 regressions', () => {
             next: null,
           }),
         );
-      const { model } = setup(fetch);
-      function settings(
-        node: ReactNode,
-      ): { key: unknown; props: { children?: ReactNode } } | undefined {
-        if (Array.isArray(node)) return node.map(settings).find(Boolean);
-        if (!isValidElement<{ children?: ReactNode }>(node)) return;
-        return node.type === 'form' ? node : settings(node.props.children);
-      }
+      const { model, html } = setup(fetch);
       await model.load();
-      const before = settings(
-        SourceCard({ source: model.snapshot().items[0]!, model, busy: false }),
-      );
+      model.openEditor(model.snapshot().items[0]!);
+      expect(html()).toContain('value="300"');
+      model.closeEditor();
       await model.load();
-      const after = settings(
-        SourceCard({ source: model.snapshot().items[0]!, model, busy: false }),
-      );
-      expect(after?.key).not.toBe(before?.key);
+      model.openEditor(model.snapshot().items[0]!);
+      expect(html()).toContain(`value="${changed ? 600 : 300}"`);
       expect(renderToString(createElement(SourcesView, { model }))).toContain(
         `<option value="${changed ? 'exclude' : 'flag'}" selected="">`,
       );
     },
   );
 
-  it('hides unsupported project reactivation and refuses the organization enable call', async () => {
+  it('checks organization permissions before offering project Enable', async () => {
     const paused = { ...attached, status: 'paused' as const };
-    const { model, fetch, html } = setup(
-      vi.fn().mockResolvedValue(json({ items: [paused], next: null })),
-      'acme',
-    );
+    const fetch = vi.fn().mockResolvedValue(json({ items: [paused], next: null }));
+    const { model, html } = setup(fetch, 'acme', ['project:sources:write']);
     await model.load();
-    expect(html()).not.toMatch(/>Enable<|>Resume</);
+    expect(html()).not.toMatch(/>Enable</);
+    expect(html()).toContain('<p role="status">An organization admin must enable this source.</p>');
     fetch.mockClear();
     await model.togglePause(paused);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['not_approved', 'unknown_error'] as const)(
+    'keeps project Enable and shows the normal error for a 403 with code %s',
+    async (code) => {
+      const paused = { ...attached, status: 'paused' as const };
+      const { model, html } = setup(
+        vi
+          .fn()
+          .mockResolvedValueOnce(json({ items: [paused], next: null }))
+          .mockResolvedValueOnce(json({ error: { code, message: SECRET } }, 403))
+          .mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+        'acme',
+      );
+      await model.load();
+      await model.togglePause(paused);
+      expect(html()).toMatch(/>Enable</);
+      expect(model.snapshot().enableDenied).toEqual([]);
+      expect(model.snapshot().error).toBe(
+        'The request could not be saved or loaded. Refresh and try again.',
+      );
+      expect(html()).not.toContain(SECRET);
+      await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: false, status: 403, code });
+      expect(html()).toMatch(/>Enable</);
+      expect(model.snapshot().enableDenied).toEqual([]);
+      expect(model.snapshot().error).toBe(
+        'The request could not be saved or loaded. Refresh and try again.',
+      );
+    },
+  );
+
+  it('announces project enable conflicts next to the source and permits retry after registering names', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockResolvedValueOnce(json({ error: { code: 'conflict', message: SECRET } }, 409))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        .mockResolvedValueOnce(json({ items: [attached], next: null })),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause(paused);
+    expect(html()).toContain(
+      '<p role="status">Register package names, then enable the source.</p>',
+    );
+    expect(html()).toMatch(/>Enable</);
+    expect(html()).not.toContain(SECRET);
+    expect(model.snapshot().error).toBeNull();
+    await model.togglePause(paused);
+    expect(model.snapshot().items[0]?.status).toBe('active');
+    expect(model.snapshot().enableConflicts).toEqual([]);
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(html()).not.toContain('Register package names, then enable the source.');
+  });
+
+  it('announces conflicts after replaying project enable', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+      'acme',
+    );
+    await model.load();
+    await model.replayed({
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 409,
+      code: 'conflict',
+    });
+    expect(html()).toContain(
+      '<p role="status">Register package names, then enable the source.</p>',
+    );
+    expect(html()).toMatch(/>Enable</);
+    expect(model.snapshot().error).toBeNull();
+  });
+
+  it('keeps project Enable available after a network failure', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockRejectedValueOnce(new Error(SECRET)),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause(paused);
+    expect(html()).toMatch(/>Enable</);
+    expect(model.snapshot().busy).toBe(false);
+    expect(model.snapshot().error).toBe(
+      'The request could not be saved or loaded. Refresh and try again.',
+    );
+    expect(html()).not.toContain(SECRET);
+    expect(model.snapshot().enableDenied).toEqual([]);
+  });
+
+  it('submits project enable once on a double click', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [paused], next: null }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(json({ items: [attached], next: null }));
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    const pending = model.togglePause(paused);
+    await model.togglePause(paused);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(html()).toMatch(/disabled="">Enable</);
+    finish(new Response(null, { status: 204 }));
+    await pending;
+    expect(model.snapshot().busy).toBe(false);
+    expect(model.snapshot().items[0]?.status).toBe('active');
+  });
+
+  it('clears cached enable denial on reload and reauthentication without duplicate entries', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html, fetch, requireReauth } = setup(
+      vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+      'acme',
+    );
+    await model.load();
+    const denial = {
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 403,
+      code: 'forbidden',
+    } as const;
+    await model.replayed(denial);
+    await model.replayed(denial);
+    expect(model.snapshot().enableDenied).toEqual([SOURCE]);
+    fetch.mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403));
+    await model.names(SOURCE);
+    expect(requireReauth).toHaveBeenCalledOnce();
+    expect(model.snapshot().enableDenied).toEqual([]);
+    await model.replayed(denial);
+    await model.load();
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(html()).toMatch(/>Enable</);
+    await model.replayed(denial);
+    await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: true, status: 204 });
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(html()).toMatch(/>Enable</);
+  });
+
+  it('replaces project Enable with admin guidance after the enable route denies access', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, fetch, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockResolvedValueOnce(json({ error: { code: 'forbidden', message: SECRET } }, 403)),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toMatch(/>Enable</);
+    await model.togglePause(paused);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      `/_pb/sources/${SOURCE}/enable`,
+      { method: 'POST' },
+    ]);
+    expect(html()).not.toMatch(/>Enable<|>Resume</);
+    expect(html()).toContain('An organization admin must enable this source.');
+    expect(html()).not.toContain(SECRET);
+    expect(model.snapshot().error).toBeNull();
+    fetch.mockClear();
+    await model.togglePause(paused);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('enables a project-owned paused source through the organization enable route and reloads project scope', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [paused], next: null }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [attached], next: null }));
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    expect(html()).toMatch(/>Enable</);
+    await model.togglePause(paused);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      `/_pb/sources/${SOURCE}/enable`,
+      { method: 'POST' },
+    ]);
+    expect(fetch.mock.calls[2]?.[0]).toBe('/_pb/projects/acme/sources?limit=100');
+    expect(model.snapshot().items[0]?.status).toBe('active');
+    expect(html()).not.toMatch(/>Enable</);
+  });
+
+  it('keeps reauthentication available for project enable and refreshes after replay', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html, requireReauth } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403))
+        .mockResolvedValueOnce(json({ items: [attached], next: null })),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause(paused);
+    expect(requireReauth).toHaveBeenCalledWith(
+      { method: 'POST', path: `/_pb/sources/${SOURCE}/enable` },
+      { credential: false, secretFields: [] },
+    );
+    expect(html()).toMatch(/>Enable</);
+    expect(html()).not.toContain('An organization admin must enable this source.');
+    await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: true, status: 204 });
+    expect(model.snapshot().items[0]?.status).toBe('active');
+  });
+
+  it('shows admin guidance if enabling is denied after reauthentication', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toMatch(/>Enable</);
+    await model.replayed({
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 403,
+      code: 'forbidden',
+    });
+    expect(html()).not.toMatch(/>Enable</);
+    expect(html()).toContain('<p role="status">An organization admin must enable this source.</p>');
   });
 });
 
@@ -881,5 +1120,744 @@ describe('source list presentation', () => {
     expect(html()).toContain('data-list-state="error"');
     expect(html()).not.toContain('data-list-state="empty"');
     expect(html()).not.toContain(SECRET);
+  });
+});
+
+describe('source creation and configuration editing', () => {
+  const body = {
+    name: 'Composer upstream',
+    ecosystem: 'composer' as const,
+    type: 'composer_repository' as const,
+    url: 'https://composer.example.test',
+    config: { selection: { packages: ['vendor/package'] } },
+  };
+
+  it.each([null, 'acme'])(
+    'creates in scope %s, reloads and opens the new credential editor',
+    async (project) => {
+      const created = { ...source, name: body.name, ecosystem: body.ecosystem, type: body.type };
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+        .mockResolvedValueOnce(json({ items: [created], next: null }));
+      const { model, html } = setup(fetch, project);
+      model.openEditor();
+      expect(html()).toContain('<dialog');
+      expect(html()).toContain('Add source');
+      await model.saveSource(body);
+      expect(fetch.mock.calls[0]).toMatchObject([
+        project === null ? '/_pb/sources' : '/_pb/projects/acme/sources',
+        { method: 'POST', body: JSON.stringify(body), credentials: 'same-origin' },
+      ]);
+      expect(model.snapshot().editor).toBeNull();
+      expect(model.snapshot().items).toHaveLength(1);
+      expect(model.snapshot().credentialSource).toBe(SOURCE);
+      expect(html()).toContain('Composer upstream');
+      expect(html()).toContain('Credential kind');
+    },
+  );
+
+  it('opens a bearer token editor after GitHub token source creation', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, type: 'vcs', ecosystem: 'composer' }], next: null }),
+      );
+    const { model, html } = setup(fetch);
+    model.openEditor();
+    await model.saveSource({
+      name: 'GitHub token',
+      ecosystem: 'composer',
+      type: 'vcs',
+      config: { provider: 'github', repository: 'owner/repo', refs: { tags: true, branches: [] } },
+    });
+    expect(model.snapshot().credentialSource).toBe(SOURCE);
+    expect(html()).toContain('<option value="bearer" selected="">');
+    expect(html()).toContain('id="credential-token"');
+    expect(html()).not.toContain('Installation ID');
+  });
+
+  it('finds a newly created source beyond the first page', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+      .mockResolvedValueOnce(json({ items: [{ ...source, id: 'older' }], next: 'older' }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model } = setup(fetch);
+    model.openEditor();
+    await model.saveSource(body);
+    expect(fetch.mock.calls[2]?.[0]).toContain('after=older');
+    expect(model.snapshot().items.map((item) => item.id)).toEqual(['older', SOURCE]);
+    expect(model.snapshot().credentialSource).toBe(SOURCE);
+  });
+
+  it.each(['npmjs_proxy', 'packagist_proxy'] as const)(
+    'does not open credentials for %s creation',
+    async (type) => {
+      const { model } = setup(
+        vi
+          .fn()
+          .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+          .mockResolvedValueOnce(json({ items: [{ ...source, type }], next: null })),
+      );
+      model.openEditor();
+      await model.saveSource({
+        ...body,
+        ecosystem: type === 'npmjs_proxy' ? 'npm' : 'composer',
+        type,
+        config: {},
+      });
+      expect(model.snapshot().credentialSource).toBeNull();
+    },
+  );
+
+  it.each([null, 'acme'])('updates full editable configuration in scope %s', async (project) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model } = setup(fetch, project);
+    model.openEditor({ ...source, projectId: project });
+    const changes = {
+      pollIntervalSeconds: 600,
+      removalPolicy: 'exclude' as const,
+      config: { scopes: ['@changed'], distHosts: ['dist.example.test'] },
+      defaultVisibleToNewProjects: true,
+      retentionDaysOverride: 0,
+    };
+    await model.saveSource(changes);
+    expect(fetch.mock.calls[0]).toMatchObject([
+      project === null ? `/_pb/sources/${SOURCE}` : `/_pb/projects/acme/sources/${SOURCE}`,
+      { method: 'PATCH', body: JSON.stringify(changes) },
+    ]);
+    expect(model.snapshot().editor).toBeNull();
+  });
+
+  it('keeps an organization source out of the project edit form', () => {
+    const { model, fetch } = setup(undefined, 'acme');
+    model.openEditor(source);
+    expect(model.snapshot().editor).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('shows field validation and a form alert without retaining hostile messages or pointers', async () => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(
+        json(
+          {
+            error: {
+              code: 'invalid_request',
+              message: SECRET,
+              details: [
+                { path: '/body/url', code: 'invalid' },
+                { path: '/body/pollIntervalSeconds', code: 'invalid' },
+                { path: '/body/config/selection/packages/0', code: 'invalid' },
+                { path: SECRET, code: 'invalid' },
+              ],
+            },
+          },
+          400,
+        ),
+      ),
+    );
+    model.openEditor();
+    await model.saveSource(body);
+    expect(model.snapshot().editor).toBe('create');
+    expect(model.snapshot().fieldErrors).toEqual({
+      url: 'Enter a valid HTTP or HTTPS URL without credentials, a query, or a fragment.',
+      pollIntervalSeconds: 'Enter a whole number of seconds greater than 0.',
+      'config/selection/packages':
+        'Enter valid Composer package names, one per line, without duplicates.',
+    });
+    expect(html()).toContain('aria-invalid="true"');
+    expect(html()).toContain('role="alert"');
+    expect(JSON.stringify(model.snapshot()) + html()).not.toContain(SECRET);
+  });
+
+  it('handles network failure and lets the admin cancel the retained form', async () => {
+    const { model } = setup(vi.fn().mockRejectedValue(new Error(SECRET)));
+    model.openEditor();
+    await model.saveSource(body);
+    expect(model.snapshot().busy).toBe(false);
+    expect(model.snapshot().formError).toBeTruthy();
+    expect(JSON.stringify(model.snapshot())).not.toContain(SECRET);
+    model.closeEditor();
+    expect(model.snapshot().editor).toBeNull();
+    expect(model.snapshot().fieldErrors).toEqual({});
+  });
+
+  it('blocks duplicate submits and closing while a creation is pending', async () => {
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValue(json({ items: [source], next: null }));
+    const { model } = setup(fetch);
+    model.openEditor();
+    const pending = model.saveSource(body);
+    model.closeEditor();
+    await model.saveSource(body);
+    expect(model.snapshot().editor).toBe('create');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    finish(json({ id: SOURCE }, 201));
+    await pending;
+  });
+
+  it('holds creation for explicit reauth replay, then opens credentials for the returned ID', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403))
+      .mockResolvedValueOnce(json({ id: SOURCE, material: SECRET }, 201))
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model, flow, entries } = setup(fetch);
+    model.openEditor();
+    await model.saveSource(body);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse([...entries.values()][0]!)).toMatchObject({
+      method: 'POST',
+      path: '/_pb/sources',
+      body,
+    });
+    const replay = vi.fn();
+    flow.subscribeReplay((result) => {
+      replay(result);
+      void model.replayed(result);
+    });
+    flow.restore();
+    await flow.confirm();
+    await vi.waitFor(() => expect(model.snapshot().credentialSource).toBe(SOURCE));
+    expect(replay).toHaveBeenCalledWith({
+      path: '/_pb/sources',
+      status: 201,
+      ok: true,
+      createdSourceId: SOURCE,
+    });
+    expect(model.snapshot().editor).toBeNull();
+    expect(JSON.stringify(model.snapshot())).not.toContain(SECRET);
+  });
+});
+
+describe('project source attachments', () => {
+  it.each([true, false])(
+    'writes attached=%s and refreshes project ordering and ETag',
+    async (attached) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        .mockResolvedValueOnce(
+          json(
+            {
+              items: [{ ...source, attached, ...(attached ? { precedence: 0 } : {}) }],
+              next: null,
+            },
+            200,
+            { ETag: '"9"' },
+          ),
+        );
+      const { model, html } = setup(fetch, 'acme');
+      await model.attachment(SOURCE, attached);
+      expect(fetch.mock.calls[0]).toMatchObject([
+        `/_pb/projects/acme/sources/${SOURCE}/attachment`,
+        { method: attached ? 'PUT' : 'DELETE' },
+      ]);
+      expect(fetch.mock.calls[0]?.[1].body).toBe(attached ? '{}' : undefined);
+      expect(model.snapshot().order).toEqual(attached ? [SOURCE] : []);
+      expect(model.snapshot().etag).toBe('"9"');
+      expect(html()).toContain(attached ? '>Detach<' : '>Attach<');
+    },
+  );
+
+  it('does not send attachment requests in organization scope', async () => {
+    const { model, fetch } = setup();
+    await model.attachment(SOURCE, true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('retains attachment state when the API refuses detachment', async () => {
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          json({ items: [{ ...source, attached: true, precedence: 0 }], next: null }, 200, {
+            ETag: '"1"',
+          }),
+        )
+        .mockResolvedValueOnce(json({ error: { code: 'forbidden', message: SECRET } }, 403)),
+      'acme',
+    );
+    await model.load();
+    await model.attachment(SOURCE, false);
+    expect(model.snapshot().order).toEqual([SOURCE]);
+    expect(model.snapshot().error).toBeTruthy();
+    expect(html()).toContain('>Detach<');
+    expect(html()).not.toContain(SECRET);
+  });
+});
+
+describe('unattached organization source candidates', () => {
+  it('loads authorized organization sources so Attach remains available before attachment and after detach', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [], next: null }, 200, { ETag: '"1"' }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, attached: true, precedence: 0 }], next: null }, 200, {
+          ETag: '"2"',
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [], next: null }, 200, { ETag: '"3"' }));
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    expect(html()).not.toContain(source.name);
+    await model.loadAvailable();
+    expect(fetch.mock.calls[1]?.[0]).toBe('/_pb/sources?limit=100');
+    expect(html()).toContain(source.name);
+    expect(html()).toContain('>Attach<');
+    await model.attachment(SOURCE, true);
+    expect(html()).toContain('>Detach<');
+    expect(html().match(/<strong>Private packages<\/strong>/g)).toHaveLength(1);
+    await model.attachment(SOURCE, false);
+    expect(html()).toContain('>Attach<');
+    expect(model.snapshot().order).toEqual([]);
+  });
+
+  it('defers candidates until later project pages resolve their attachment membership', async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      ...source,
+      id: `project-${index}`,
+      name: `Project source ${index}`,
+      attached: true,
+      precedence: index,
+    }));
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: firstPage, next: 'project-99' }, 200, { ETag: '"1"' }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, attached: true, precedence: 100 }], next: null }, 200, {
+          ETag: '"1"',
+        }),
+      );
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    await model.loadAvailable();
+    expect(html()).not.toContain(source.name);
+    expect(html()).not.toContain('>Attach<');
+    expect(html()).toContain('Load all project sources before attaching organization sources.');
+    await model.load(true);
+    expect(fetch.mock.calls[2]?.[0]).toContain('after=project-99');
+    expect(html()).toContain(source.name);
+    expect(html()).not.toContain('>Attach<');
+    expect(html().match(/<strong>Private packages<\/strong>/g)).toHaveLength(1);
+    expect(model.snapshot().order).toContain(SOURCE);
+  });
+
+  it('defers a newly attached candidate again until refreshed project pagination completes', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [], next: null }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        json(
+          {
+            items: [{ ...source, id: 'first', name: 'First', attached: true, precedence: 0 }],
+            next: 'first',
+          },
+          200,
+          { ETag: '"2"' },
+        ),
+      )
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, attached: true, precedence: 1 }], next: null }, 200, {
+          ETag: '"2"',
+        }),
+      );
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    await model.loadAvailable();
+    expect(html()).toContain('>Attach<');
+    await model.attachment(SOURCE, true);
+    expect(html()).not.toContain(source.name);
+    expect(html()).not.toContain('>Attach<');
+    await model.load(true);
+    expect(html()).toContain(source.name);
+    expect(html()).not.toContain('>Attach<');
+    expect(model.snapshot().order).toEqual(['first', SOURCE]);
+  });
+
+  it('paginates candidate sources independently of the project ordering list', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [source], next: SOURCE }))
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, id: 'second', name: 'Later source' }], next: null }),
+      );
+    const { model, html } = setup(fetch, 'acme');
+    await model.loadAvailable();
+    expect(model.snapshot().availableNext).toBe(SOURCE);
+    await model.loadAvailable(true);
+    expect(fetch.mock.calls[1]?.[0]).toContain(`after=${SOURCE}`);
+    expect(model.snapshot().available).toHaveLength(2);
+    expect(model.snapshot().availableNext).toBeNull();
+    expect(model.snapshot().next).toBeNull();
+    expect(model.snapshot().order).toEqual([]);
+    // The main list must load successfully before any rows are shown.
+    expect(html()).toContain('Loading sources');
+  });
+
+  it('keeps project sources usable when organization source reading is refused', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({ items: [{ ...source, projectId: 'project-id', attached: false }], next: null }),
+      )
+      .mockResolvedValueOnce(json({ error: { code: 'forbidden', message: SECRET } }, 403));
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    await model.loadAvailable();
+    expect(model.snapshot().available).toEqual([]);
+    expect(model.snapshot().listError).toBe(false);
+    expect(html()).toContain(source.name);
+    expect(html()).toContain('>Attach<');
+    expect(html()).toContain('Organization sources could not be loaded.');
+    expect(html()).not.toContain(SECRET);
+  });
+
+  it('makes no candidate request in organization scope', async () => {
+    const { model, fetch } = setup();
+    await model.loadAvailable();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('source replay metadata', () => {
+  it('keeps an invalid created ID and other response data out of replay notifications', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(json({ id: SECRET, token: SECRET }, 201));
+    const { flow } = setup(fetch);
+    const listener = vi.fn();
+    flow.subscribeReplay(listener);
+    flow.requireReauth(
+      {
+        method: 'POST',
+        path: '/_pb/sources',
+        body: { name: 'Public name', ecosystem: 'composer', type: 'composer_repository' },
+      },
+      { credential: false, secretFields: [] },
+      '#/sources',
+    );
+    flow.restore();
+    await flow.confirm();
+    expect(listener).toHaveBeenCalledWith({ path: '/_pb/sources', ok: true, status: 201 });
+    expect(JSON.stringify(listener.mock.calls)).not.toContain(SECRET);
+  });
+});
+
+describe('source sync', () => {
+  it.each([null, 'acme'])('requests a sync and refreshes status in scope %s', async (project) => {
+    const updated = { ...source, projectId: project, lastSuccessAt: NOW, nextPollAt: NOW };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [{ ...source, projectId: project }], next: null }))
+      .mockResolvedValueOnce(json({ requested: true }, 202))
+      .mockResolvedValueOnce(json({ items: [updated], next: null }));
+    const { model, html } = setup(fetch, project);
+    await model.load();
+    await model.syncNow(model.snapshot().items[0]!);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      project === null
+        ? `/_pb/sources/${SOURCE}/sync`
+        : `/_pb/projects/acme/sources/${SOURCE}/sync`,
+      { method: 'POST' },
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(model.snapshot().items[0]).toEqual(updated);
+    expect(html()).toContain('Sync requested.');
+    expect(html()).toContain(`dateTime="${NOW}"`);
+  });
+
+  it('disables paused sources with an accessible reason and blocks inherited source mutations', async () => {
+    const paused = { ...source, status: 'paused' as const };
+    const { model, fetch } = setup();
+    const markup = renderToString(
+      createElement(SourceActions, { model, source: paused, busy: false }),
+    );
+    expect(markup).toMatch(/disabled="" aria-describedby="sync-paused-/);
+    expect(markup).toContain('Enable before syncing.');
+    await model.syncNow(paused);
+    expect(fetch).not.toHaveBeenCalled();
+    const inherited = setup(vi.fn(), 'acme');
+    await inherited.model.syncNow(source);
+    expect(inherited.fetch).not.toHaveBeenCalled();
+    expect(
+      renderToString(createElement(SourceActions, { model: inherited.model, source, busy: false })),
+    ).not.toContain('Sync now');
+  });
+
+  it('prevents duplicate requests while a sync is pending', async () => {
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model } = setup(fetch);
+    const pending = model.syncNow(source);
+    await model.syncNow(source);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    finish(json({}, 202));
+    await pending;
+    expect(model.snapshot().busy).toBe(false);
+  });
+
+  it.each(['source_paused', 'forbidden', 'reauth_required'])(
+    'handles %s without displaying response text',
+    async (code) => {
+      const { model, fetch, html, requireReauth } = setup(
+        vi.fn().mockResolvedValueOnce(json({ error: { code, message: SECRET } }, 403)),
+      );
+      await model.syncNow(source);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(model.snapshot().notice).toBeNull();
+      expect(model.snapshot().error).not.toBeNull();
+      expect(html()).not.toContain(SECRET);
+      expect(requireReauth).toHaveBeenCalledTimes(code === 'reauth_required' ? 1 : 0);
+    },
+  );
+
+  it('refreshes a source beyond the first page', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({}, 202))
+      .mockResolvedValueOnce(json({ items: [{ ...source, id: 'earlier' }], next: 'earlier' }))
+      .mockResolvedValueOnce(json({ items: [{ ...source, lastSuccessAt: NOW }], next: null }));
+    const { model } = setup(fetch);
+    await model.syncNow(source);
+    expect(fetch.mock.calls[2]?.[0]).toContain('after=earlier');
+    expect(model.snapshot().items[1]?.lastSuccessAt).toBe(NOW);
+  });
+
+  it.each([
+    ['unauthorized', 'Authorization failed'],
+    ['future_error', 'future_error'],
+    ['<script>unknown</script>', '&lt;script&gt;unknown&lt;/script&gt;'],
+    ['toString', 'toString'],
+  ])('renders error code %s in responsive rows', async (code, label) => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValueOnce(
+        json({
+          items: [{ ...source, lastError: code, lastSuccessAt: NOW, nextPollAt: NOW }],
+          next: null,
+        }),
+      ),
+    );
+    await model.load();
+    expect(html().split(label)).toHaveLength(2);
+    expect(html()).toContain(`<code>${code.startsWith('<') ? label : code}</code>`);
+    expect(html()).toContain('Next poll:');
+    expect(html()).toContain('Last success:');
+  });
+
+  it('shows empty sync history explicitly', async () => {
+    const { model, html } = setup(vi.fn().mockResolvedValue(json({ items: [source], next: null })));
+    await model.load();
+    const markup = html();
+    expect(markup).toContain('Never');
+    expect(markup).toContain('None');
+    expect(markup).toContain('Next poll:');
+  });
+
+  it('updates creation guidance after registering names and enabling', async () => {
+    const paused = { ...source, status: 'paused' };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ id: SOURCE }, 201))
+      .mockResolvedValueOnce(json({ items: [paused], next: null }))
+      .mockResolvedValueOnce(
+        json({ items: [{ id: 'name', sourceId: SOURCE, pattern: 'vendor/*' }], next: null }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [source], next: null }));
+    const { model, html } = setup(fetch);
+    model.openEditor();
+    await model.saveSource({
+      name: source.name,
+      type: source.type,
+      ecosystem: source.ecosystem,
+      config: {},
+    });
+    expect(html()).toContain('Register names, then Enable the source.');
+    await model.names(SOURCE);
+    expect(html()).toContain('Enable the source.');
+    expect(html()).not.toContain('Register names, then');
+    await model.togglePause(model.snapshot().items[0]!);
+    expect(html()).not.toContain('Next steps for');
+  });
+});
+
+it.each([
+  ['composer_repository', {}, 'http_basic'],
+  ['npm_registry', {}, 'npm_token'],
+  ['vcs', { provider: 'github', repository: 'acme/payments', installationId: 42 }, 'github_app'],
+  ['vcs', { provider: 'github', repository: 'acme/payments' }, 'bearer'],
+  ['vcs', { provider: 'ssh', repository: 'git@example.com:acme/payments.git' }, 'ssh_key'],
+] as const)('preselects %s credentials for %j', (type, config, kind) => {
+  expect(
+    sourceCredentialKind({
+      name: 'Upstream',
+      ecosystem: type === 'npm_registry' ? 'npm' : 'composer',
+      type,
+      config,
+    }),
+  ).toBe(kind);
+});
+
+describe('source row action controls', () => {
+  function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
+    if (Array.isArray(node)) return node.flatMap(elements);
+    if (!isValidElement<Record<string, unknown>>(node)) return [];
+    return [node, ...elements(node.props.children as ReactNode)];
+  }
+
+  it.each([
+    ['Sync now', 'syncNow'],
+    ['Set credential', 'chooseCredential'],
+    ['Registered names', 'names'],
+  ] as const)('connects %s to the selected source', (label, method) => {
+    const { model } = setup();
+    const action = vi.spyOn(model, method).mockImplementation(vi.fn());
+    const controls = elements(SourceActions({ source, model, busy: false }));
+    const button = controls.find((node) => node.props.children === label);
+    expect(button).toBeDefined();
+    (button!.props.onClick as () => void)();
+    expect(action).toHaveBeenCalledWith(method === 'syncNow' ? source : SOURCE);
+  });
+
+  it.each(['active', 'paused'] as const)(
+    'connects the %s state control with pause or enable',
+    (status) => {
+      const { model } = setup();
+      const selected = { ...source, status };
+      const action = vi.spyOn(model, 'togglePause').mockResolvedValue();
+      const controls = elements(SourceActions({ source: selected, model, busy: false }));
+      const button = controls.find((node) =>
+        status === 'paused' ? node.props.children === 'Enable' : node.props.action === 'Pause',
+      );
+      expect(button).toBeDefined();
+      ((status === 'paused' ? button!.props.onClick : button!.props.onConfirm) as () => void)();
+      expect(action).toHaveBeenCalledWith(selected);
+    },
+  );
+
+  it('closes More with Escape and restores focus to its trigger', () => {
+    const { model } = setup();
+    const menu = elements(SourceActions({ source, model, busy: false })).find(
+      (node) => node.type === DropdownMenu,
+    )!;
+    const focus = vi.fn();
+    const details = {
+      open: true,
+      contains: vi.fn(() => true),
+      querySelector: vi.fn(() => ({ focus })),
+    };
+    const preventDefault = vi.fn();
+    (menu.props.onKeyDown as (event: unknown) => void)({
+      key: 'Escape',
+      currentTarget: details,
+      preventDefault,
+    });
+    expect(details.open).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    details.open = true;
+    details.contains.mockReturnValue(false);
+    preventDefault.mockClear();
+    (menu.props.onKeyDown as (event: unknown) => void)({
+      key: 'Escape',
+      currentTarget: details,
+      preventDefault,
+    });
+    expect(details.open).toBe(true);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('keeps row settings exclusively in Edit and includes the read-only identity summary', async () => {
+    const { model, html } = setup(vi.fn().mockResolvedValue(json({ items: [source], next: null })));
+    await model.load();
+    expect(html()).not.toContain('Edit source</summary>');
+    expect(html()).not.toContain('Save settings');
+    expect(html()).not.toContain('source-pollIntervalSeconds');
+    model.openEditor(model.snapshot().items[0]!);
+    expect(html()).toContain('aria-label="Source identity"');
+    expect(html()).toContain('https://registry.example/packages');
+    expect(html()).toContain('No credential set');
+    expect(html()).toContain('source-pollIntervalSeconds');
+    expect(html()).toContain('source-removalPolicy');
+    expect(html().match(/id="source-pollIntervalSeconds"/g)).toHaveLength(1);
+  });
+
+  it('uses dismissible source dialogs for credentials and names without retaining closed credentials', async () => {
+    const { model, html } = setup(vi.fn().mockResolvedValue(json({ items: [], next: null })));
+    model.chooseCredential(SOURCE);
+    expect(html()).toContain('Set credential</h2>');
+    expect(html()).toContain('<dialog');
+    expect(html()).toContain('h-dvh');
+    model.closeCredential();
+    expect(html()).not.toContain('credential-kind');
+    await model.names(SOURCE);
+    expect(html()).toContain('Registered names</h2>');
+    expect(html()).toContain('<dialog');
+    model.closeNames();
+    expect(html()).not.toContain('registered-pattern');
+  });
+});
+
+describe('source action dialog identity and switching', () => {
+  it.each([true, false])('shows attachment %s in the Edit identity summary', async (attached) => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(
+        json({
+          items: [{ ...source, projectId: 'project-id', attached, hasCredential: true }],
+          next: null,
+        }),
+      ),
+      'acme',
+    );
+    await model.load();
+    model.openEditor(model.snapshot().items[0]!);
+    expect(html()).toContain(
+      `<dt>Attached to this project</dt><dd>${attached ? 'Yes' : 'No'}</dd>`,
+    );
+    expect(html()).toContain('<dt>Credential</dt><dd>credential set · write-only</dd>');
+  });
+
+  it('does not reopen names over credential setup when a previous names request finishes', async () => {
+    let finish!: (response: Response) => void;
+    const { model } = setup(
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    );
+    const pending = model.names(SOURCE);
+    model.chooseCredential(SOURCE);
+    finish(json({ items: [], next: null }));
+    await pending;
+    expect(model.snapshot().names).toBeNull();
+    expect(model.snapshot().credentialSource).toBe(SOURCE);
   });
 });

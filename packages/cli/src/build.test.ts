@@ -1,15 +1,17 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition } from '@package-broker/core/plugin';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { build, BuildDiagnosticsError, declarationOnlyPackageResolver } from './build.js';
 
 const dirs: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -122,4 +124,48 @@ describe('build vulnerability configuration', () => {
       await expect(build(options)).rejects.toBeInstanceOf(BuildDiagnosticsError);
     },
   );
+});
+
+describe('build source provenance', () => {
+  it('records HEAD and clean, tracked and untracked worktree changes, with a CI override', async () => {
+    vi.stubEnv('GITHUB_SHA', undefined);
+    const options = await fixture(routeSource(''));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: options.cwd, encoding: 'utf8' }).trim();
+    await writeFile(path.join(options.cwd, '.gitignore'), 'node_modules\n.pb\n');
+    git('init', '--quiet');
+    git('add', 'broker.config.ts', 'runtime.ts', '.gitignore');
+    git(
+      '-c',
+      'user.name=Build Test',
+      '-c',
+      'user.email=build@example.test',
+      'commit',
+      '--no-gpg-sign',
+      '-s',
+      '--quiet',
+      '-m',
+      'fixture',
+    );
+    const head = git('rev-parse', 'HEAD');
+    const info = async () => JSON.parse(await readFile((await build(options)).buildInfo, 'utf8'));
+    expect(await info()).toMatchObject({ gitSha: head, dirty: false });
+    await writeFile(options.runtimeEntry, "export { platformPorts } from '#pb-manifest';\n");
+    expect(await info()).toMatchObject({ gitSha: head, dirty: true });
+    git('checkout', '--', 'runtime.ts');
+    await writeFile(path.join(options.cwd, 'untracked.txt'), 'untracked');
+    expect(await info()).toMatchObject({ gitSha: head, dirty: true });
+    const ciSha = 'f'.repeat(40);
+    vi.stubEnv('GITHUB_SHA', ciSha);
+    expect(await info()).toMatchObject({ gitSha: ciSha, dirty: true });
+  });
+
+  it('records null provenance outside a checkout and still honors a CI revision', async () => {
+    vi.stubEnv('GITHUB_SHA', undefined);
+    const options = await fixture(routeSource(''));
+    const info = async () => JSON.parse(await readFile((await build(options)).buildInfo, 'utf8'));
+    expect(await info()).toMatchObject({ gitSha: null, dirty: null });
+    vi.stubEnv('GITHUB_SHA', 'e'.repeat(40));
+    expect(await info()).toMatchObject({ gitSha: 'e'.repeat(40), dirty: null });
+  });
 });

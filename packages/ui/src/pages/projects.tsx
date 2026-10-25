@@ -1,4 +1,4 @@
-import { useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { operations } from '../api-types.js';
 import type { ApiResult } from '../api.js';
 import { useServices, type ShellServices, type ReplayResult } from '../auth.js';
@@ -30,6 +30,7 @@ type ProjectItem =
 type Create = operations['createProject']['requestBody']['content']['application/json'];
 type Changes = operations['updateProject']['requestBody']['content']['application/json'];
 export type ProjectsQuery = ManagementQuery & { status?: 'active' | 'archived' };
+const ARCHIVED_NOTICE = 'Project archived.';
 const STATUSES = ['active', 'archived'] as const;
 export const parseProjectsHash = (hash: string): ProjectsQuery =>
   parseManagementHash(hash, STATUSES) as ProjectsQuery;
@@ -39,6 +40,7 @@ type ProjectPage = { items: ProjectItem[]; next: string | null };
 async function loadProjectList(
   client: ShellServices['client'],
   query: ProjectsQuery,
+  includeArchived = true,
 ): Promise<ApiResult<ProjectPage>> {
   if (query.status)
     return client.request('get', '/_pb/projects', {
@@ -65,6 +67,12 @@ async function loadProjectList(
       };
     }
   }
+  if (!includeArchived && cursors[0] === null)
+    return { ok: true, status: 200, data: { items: [], next: null } };
+  if (!includeArchived)
+    return client.request('get', '/_pb/projects', {
+      query: { status: 'active', after: cursors[0] ?? undefined, limit: '50' },
+    });
   const pages = await Promise.all(
     STATUSES.map((status, index) =>
       cursors[index] === null
@@ -76,8 +84,14 @@ async function loadProjectList(
   );
   const items: ProjectItem[] = [];
   const next: (string | null)[] = [];
-  for (const page of pages) {
-    if (page && !page.ok) return page;
+  for (const [index, page] of pages.entries()) {
+    if (page && !page.ok) {
+      if (STATUSES[index] === 'archived' && page.status === 403) {
+        next.push(null);
+        continue;
+      }
+      return page;
+    }
     if (page?.ok) items.push(...page.data.items);
     next.push(page?.ok ? page.data.next : null);
   }
@@ -136,7 +150,13 @@ export function createProjectsController(services: ShellServices) {
   });
   let generation = 0;
   const { client } = services;
-  async function load(query: ProjectsQuery, notice: string | null = null): Promise<void> {
+  async function load(
+    query: ProjectsQuery,
+    notice: string | null = buildProjectsHash(query) ===
+      buildProjectsHash(store.snapshot().query) && store.snapshot().notice === ARCHIVED_NOTICE
+      ? ARCHIVED_NOTICE
+      : null,
+  ): Promise<void> {
     const current = ++generation;
     store.set({
       query,
@@ -152,9 +172,18 @@ export function createProjectsController(services: ShellServices) {
       stale: false,
       notice,
     });
-    const [list, organization, selected, permissions] = await Promise.all([
-      loadProjectList(client, query),
-      client.request('get', '/_pb/me/permissions'),
+    const organizationRequest = client.request('get', '/_pb/me/permissions');
+    const [initialList, organization, initialSelected, initialPermissions] = await Promise.all([
+      organizationRequest.then((result) =>
+        loadProjectList(
+          client,
+          query,
+          result.ok &&
+            result.data.organization.includes('org:projects:archive') &&
+            result.data.organization.includes('project:read'),
+        ),
+      ),
+      organizationRequest,
       query.project === null
         ? null
         : client.request('get', '/_pb/projects/{project}', { params: { project: query.project } }),
@@ -165,7 +194,47 @@ export function createProjectsController(services: ShellServices) {
           }),
     ]);
     if (current !== generation) return;
+    let list = initialList;
+    let selected = initialSelected;
+    let permissions = initialPermissions;
+    if (selected && !selected.ok && selected.status === 404) {
+      let after: string | undefined;
+      const cursors = new Set<string>();
+      while (true) {
+        const archivedQuery: ProjectsQuery = { project: null, status: 'archived', after };
+        const archived = await loadProjectList(client, archivedQuery);
+        if (current !== generation) return;
+        if (!archived.ok) break;
+        if (
+          archived.data.items.some(
+            (item) => item.slug === query.project && item.status === 'archived',
+          )
+        ) {
+          query = archivedQuery;
+          list = archived;
+          selected = null;
+          permissions = null;
+          notice = ARCHIVED_NOTICE;
+          break;
+        }
+        const next = archived.data.next;
+        if (!next || cursors.has(next)) break;
+        cursors.add(next);
+        after = next;
+      }
+    }
+    if (notice === ARCHIVED_NOTICE) {
+      query = { ...query, project: null };
+      selected = null;
+      permissions = null;
+      if (!list.ok) {
+        query = { ...query, status: 'active', after: undefined };
+        list = await loadProjectList(client, query);
+        if (current !== generation) return;
+      }
+    }
     store.set({
+      query,
       loading: false,
       listError: !list.ok,
       items: list.ok ? list.data.items : [],
@@ -181,7 +250,7 @@ export function createProjectsController(services: ShellServices) {
           : notice,
     });
   }
-  async function write(run: () => Promise<ApiResult<unknown>>) {
+  async function write(run: () => Promise<ApiResult<unknown>>, archivedSlug?: string) {
     const state = store.snapshot();
     if (state.busy || state.loading || state.stale) return;
     const current = generation;
@@ -197,7 +266,11 @@ export function createProjectsController(services: ShellServices) {
       });
     } else if (!result.ok) {
       store.set({ stale: result.status === 412, notice: failureNotice(result) });
-    } else await load(state.query, 'Project updated.');
+    } else
+      await load(
+        archivedSlug ? { ...state.query, project: archivedSlug } : state.query,
+        archivedSlug ? ARCHIVED_NOTICE : 'Project updated.',
+      );
   }
   return {
     snapshot: store.snapshot,
@@ -223,36 +296,40 @@ export function createProjectsController(services: ShellServices) {
     async transition() {
       const state = store.snapshot();
       if (projectsViewModel(state).transition)
-        await write(() =>
-          client.request(
-            'post',
-            state.selected!.status === 'active'
-              ? '/_pb/projects/{project}/archive'
-              : '/_pb/projects/{project}/restore',
-            {
-              params: { project: state.selected!.slug },
-              headers: { 'If-Match': state.etag! },
-              idempotencyKey: crypto.randomUUID(),
-            },
-          ),
+        await write(
+          () =>
+            client.request(
+              'post',
+              state.selected!.status === 'active'
+                ? '/_pb/projects/{project}/archive'
+                : '/_pb/projects/{project}/restore',
+              {
+                params: { project: state.selected!.slug },
+                headers: { 'If-Match': state.etag! },
+                idempotencyKey: crypto.randomUUID(),
+              },
+            ),
+          state.selected!.status === 'active' ? state.selected!.slug : undefined,
         );
     },
     async transitionItem(id: string) {
       const state = store.snapshot();
       const item = state.items.find((entry) => entry.id === id);
       if (!item?.etag || !projectsViewModel(state).transitionItems) return;
-      await write(() =>
-        client.request(
-          'post',
-          item.status === 'active'
-            ? '/_pb/projects/{project}/archive'
-            : '/_pb/projects/{project}/restore',
-          {
-            params: { project: item.slug },
-            headers: { 'If-Match': item.etag },
-            idempotencyKey: crypto.randomUUID(),
-          },
-        ),
+      await write(
+        () =>
+          client.request(
+            'post',
+            item.status === 'active'
+              ? '/_pb/projects/{project}/archive'
+              : '/_pb/projects/{project}/restore',
+            {
+              params: { project: item.slug },
+              headers: { 'If-Match': item.etag },
+              idempotencyKey: crypto.randomUUID(),
+            },
+          ),
+        item.status === 'active' ? item.slug : undefined,
       );
     },
     async replayed(result: ReplayResult) {
@@ -265,8 +342,18 @@ export function createProjectsController(services: ShellServices) {
         (path === null || ![path, `${path}/archive`, `${path}/restore`].includes(result.path))
       )
         return;
-      if (result.ok) await load(store.snapshot().query, 'Project updated.');
-      else store.set({ stale: true, notice: failureNotice(result) });
+      if (result.ok) {
+        const archivedSlug =
+          listTransition && result.path.endsWith('/archive')
+            ? decodeURIComponent(result.path.split('/')[3]!)
+            : null;
+        await load(
+          archivedSlug
+            ? { ...store.snapshot().query, project: archivedSlug }
+            : store.snapshot().query,
+          archivedSlug ? ARCHIVED_NOTICE : 'Project updated.',
+        );
+      } else store.set({ stale: true, notice: failureNotice(result) });
     },
     dispose() {
       ++generation;
@@ -494,6 +581,13 @@ export function ProjectsPage() {
     controller.snapshot,
   );
   const hash = useManagementHash(services, controller, parseProjectsHash, 'projects');
+  useEffect(() => {
+    if (state.loading || state.notice !== ARCHIVED_NOTICE || state.query.project !== null) return;
+    const next = buildProjectsHash(state.query);
+    if (window.location.hash === next) return;
+    window.history.replaceState(null, '', next);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  }, [state.loading, state.notice, state.query]);
   return (
     <section aria-labelledby="page-heading">
       <h1 id="page-heading" className="text-xl font-semibold">

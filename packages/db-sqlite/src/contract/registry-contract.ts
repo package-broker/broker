@@ -4,10 +4,15 @@ import { mutationFence, type AuthenticatedActor } from '@package-broker/core/aut
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { sql } from 'kysely';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { createSourcePollJob } from '@package-broker/core/ingest/retention-jobs';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { defineJob, type JobContext } from '@package-broker/core/platform/jobs';
 import type { Sha256 } from '@package-broker/core/platform/blob';
+import { CREDENTIAL_UNAVAILABLE_REPLACES } from '@package-broker/core/sources/source-unavailable';
 import { compile, db } from '../kysely.js';
 import { migrate } from '../migrations/runner.js';
 import { loadMigrationSource } from '../migrations/source.js';
+import { createJobRepository } from '../repositories/job.js';
 import { createSourceRepository } from '../repositories/source.js';
 import { createScopedAdmission } from '../repositories/scoped-admission.js';
 import {
@@ -190,6 +195,95 @@ const evidence = (count: number) => ({
 
 type Case = (open: RegistryExecutorFactory, wrap?: Wrap) => Promise<void>;
 export const registryContractCases = {
+  completedPollKeepsSameMinuteRequestDue: (open, wrap: Wrap | undefined = undefined) =>
+    withWorld(
+      open,
+      async (w) => {
+        const sources = createSourceRepository(w.executor);
+        const store = createJobRepository(w.executor);
+        const type = 'core:source-sync:v1';
+        let now = new Date(OLD);
+        let sequence = 0;
+        const clock = { now: () => now };
+        const jobs = createRepositoryJobs({
+          store,
+          clock,
+          ids: { ulid: () => `poll-sync-${String(++sequence)}` },
+          jobs: [
+            {
+              qualifiedName: type,
+              definition: defineJob({
+                name: 'source-sync',
+                version: 1,
+                validate: (input) => input,
+                handler: async () => {},
+              }),
+            },
+          ],
+        })('core', { projectId: null, tokenId: null });
+        const poll = createSourcePollJob({ sources });
+        const context = {
+          org: w.a,
+          signal: new AbortController().signal,
+          ports: { clock, platform: { jobs } },
+          observability: {
+            counter: () => {
+              throw new Error('unexpected poll failure');
+            },
+          },
+        } as unknown as JobContext;
+        await w.seed(
+          `INSERT INTO source (id, org_id, name, ecosystem, type, poll_interval_seconds, next_poll_at)
+          VALUES ('poll-source', ?, 'Poll source', 'composer', 'composer_repository', 86400, ?)`,
+          w.a.orgId,
+          OLD,
+        );
+        await poll.handler({}, context);
+        expect(await sources.listDue(w.a, 50)).toEqual([]);
+        const first = await store.claim(w.a, '01J00000000000000000000001', {
+          types: [type],
+          leaseSeconds: 60,
+          maxRunning: 1,
+        });
+        expect(first).not.toBeNull();
+        await store.settle(w.a, first!, { outcome: 'succeeded' });
+
+        // A new sync/enable request arrives after completion in the same minute.
+        now = new Date('2000-01-01T00:00:10.000Z');
+        await w.seed(
+          "UPDATE source SET next_poll_at = ? WHERE org_id = ? AND id = 'poll-source'",
+          now.toISOString(),
+          w.a.orgId,
+        );
+        await poll.handler({}, context);
+        expect(await sources.listDue(w.a, 50)).toMatchObject([
+          { id: 'poll-source', nextPollAt: now.toISOString() },
+        ]);
+        expect(
+          await w.executor.all(st('SELECT id, state FROM job WHERE org_id = ?', w.a.orgId)),
+        ).toEqual([{ id: first!.id, state: 'succeeded' }]);
+
+        now = new Date('2000-01-01T00:01:00.000Z');
+        await poll.handler({}, context);
+        expect(await sources.listDue(w.a, 50)).toEqual([]);
+        const second = await store.claim(w.a, '01J00000000000000000000002', {
+          types: [type],
+          leaseSeconds: 60,
+          maxRunning: 1,
+        });
+        expect(second).not.toBeNull();
+        expect(second!.id).not.toBe(first!.id);
+        expect(JSON.parse(second!.payloadJson)).toEqual({
+          sourceId: 'poll-source',
+          reason: 'poll',
+        });
+        const source = (await sources.get(w.a, 'poll-source'))!;
+        expect(source.pollIntervalSeconds).toBe(86400);
+        expect(Date.parse(source.nextPollAt!)).toBeGreaterThan(Date.now() + 86_390_000);
+        expect(await store.status(w.b, second!.id)).toBeNull();
+      },
+      wrap,
+    ),
   registeredNameEnableOperation: (open, wrap: Wrap | undefined = undefined) =>
     withWorld(
       open,
@@ -267,11 +361,106 @@ export const registryContractCases = {
           w.a.orgId,
         );
         expect(await names.enable(w.b, fence, input)).toBe('forbidden');
+        await w.seed(
+          "UPDATE source SET next_poll_at = '2999-01-01T00:00:00.000Z' WHERE id = 'source-a'",
+        );
         expect(await names.enable(w.a, fence, input)).toBe('enabled');
+        const sources = createSourceRepository(w.executor);
+        expect(Date.parse((await sources.get(w.a, 'source-a'))!.nextPollAt!)).toBeLessThanOrEqual(
+          Date.now(),
+        );
         expect(await names.enable(w.a, fence, input)).toBe('already_enabled');
         expect(await w.executor.all(st('SELECT action FROM audit_pending'))).toEqual([
           { action: 'source.resume' },
         ]);
+        const syncInput = {
+          ...input,
+          audit: {
+            ...audit,
+            id: '01J00000000000000000000002',
+            action: 'source.sync_requested' as const,
+          },
+        };
+        await w.seed(
+          "UPDATE source SET next_poll_at = '2999-01-01T00:00:00.000Z' WHERE id = 'source-a'",
+        );
+        expect(await sources.syncNow(w.b, fence, syncInput)).toBe('forbidden');
+        expect(await sources.syncNow(w.a, fence, syncInput)).toBe('requested');
+        expect(await sources.get(w.a, 'source-a')).toMatchObject({ pollIntervalSeconds: 86400 });
+        expect(Date.parse((await sources.get(w.a, 'source-a'))!.nextPollAt!)).toBeLessThanOrEqual(
+          Date.now(),
+        );
+        expect(await w.executor.all(st('SELECT action FROM audit_pending ORDER BY id'))).toEqual([
+          { action: 'source.resume' },
+          { action: 'source.sync_requested' },
+        ]);
+        await w.seed(
+          "INSERT INTO job (id, org_id, type, idempotency_key, resource_key, state, lease_owner, lease_until, fence) VALUES ('sync-job', ?, 'core:source-sync:v1', 'sync', 'source:source-a', 'running', 'worker', '2999-01-01T00:00:00.000Z', 1)",
+          w.a.orgId,
+        );
+        const guard = { id: 'sync-job', owner: 'worker', fence: 1 };
+        expect(
+          await sources.pollState(w.a, guard, {
+            id: 'source-a',
+            outcome: 'failure',
+            error: 'credential_unavailable',
+          }),
+        ).toBe('written');
+        expect(await sources.get(w.a, 'source-a')).toMatchObject({
+          lastError: 'credential_unavailable',
+          lastPolledAt: expect.any(String),
+          nextPollAt: expect.any(String),
+        });
+        expect(await sources.pollState(w.a, guard, { id: 'source-a', outcome: 'success' })).toBe(
+          'written',
+        );
+        expect(await sources.get(w.a, 'source-a')).toMatchObject({
+          lastError: null,
+          lastSuccessAt: expect.any(String),
+        });
+        await w.seed("UPDATE source SET status = 'paused' WHERE id = 'source-a'");
+        expect(
+          await sources.syncNow(w.a, fence, {
+            ...syncInput,
+            audit: { ...syncInput.audit, id: '01J00000000000000000000003' },
+          }),
+        ).toBe('source_paused');
+      },
+      wrap,
+    ),
+  credentialUnavailableMark: (open, wrap: Wrap | undefined = undefined) =>
+    withWorld(
+      open,
+      async (w) => {
+        const sources = createSourceRepository(w.executor);
+        const before = (await sources.get(w.a, 'source-a'))!;
+        expect(before.lastError).not.toBe('credential_unavailable');
+        await sources.markCredentialUnavailable(w.b, 'source-a');
+        expect(await sources.get(w.a, 'source-a')).toEqual(before);
+        await sources.markCredentialUnavailable(w.a, 'source-a');
+        const marked = { ...before, lastError: 'credential_unavailable' };
+        expect(await sources.get(w.a, 'source-a')).toEqual(marked);
+        await sources.markCredentialUnavailable(w.a, 'source-a');
+        expect(await sources.get(w.a, 'source-a')).toEqual(marked);
+        for (const transient of CREDENTIAL_UNAVAILABLE_REPLACES) {
+          await w.seed(`UPDATE source SET last_error = '${transient}' WHERE id = 'source-a'`);
+          await sources.markCredentialUnavailable(w.a, 'source-a');
+          expect(await sources.get(w.a, 'source-a')).toEqual(marked);
+        }
+        for (const specific of [
+          'unauthorized',
+          'mass_absence',
+          'policy_denied',
+          'not_found',
+          'invalid_response',
+          'too_large',
+          'internal',
+        ]) {
+          await w.seed(`UPDATE source SET last_error = '${specific}' WHERE id = 'source-a'`);
+          await sources.markCredentialUnavailable(w.a, 'source-a');
+          expect(await sources.get(w.a, 'source-a')).toEqual({ ...before, lastError: specific });
+        }
+        await expect(sources.markCredentialUnavailable(w.a, 'missing')).resolves.toBeUndefined();
       },
       wrap,
     ),
@@ -473,9 +662,11 @@ export const registryContractCases = {
         expect(await snapshot(w)).toEqual(digestBefore);
         await w.seed("UPDATE version SET metadata_json = '{}' WHERE id = 'version-a'");
         await w.seed(
-          "UPDATE source SET ecosystem = 'composer', type = 'composer_repository' WHERE id = 'source-a'",
+          "INSERT INTO source (id, org_id, name, ecosystem, type) SELECT 'source-composer', org_id, 'Composer', 'composer', 'composer_repository' FROM source WHERE id = 'source-a'",
         );
-        await w.seed("UPDATE package SET ecosystem = 'composer' WHERE id = 'package-a'");
+        await w.seed(
+          "UPDATE package SET source_id = 'source-composer', ecosystem = 'composer' WHERE id = 'package-a'",
+        );
         await w.seed("UPDATE version SET composer_shasum = 'published' WHERE id = 'version-a'");
         const composerBefore = await snapshot(w);
         await expect(w.executor.batch(plan().statements)).rejects.toThrow();

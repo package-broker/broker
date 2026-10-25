@@ -1,9 +1,10 @@
 import { REAUTH_WINDOW_MS, SESSION_IDLE_MS } from './session.js';
-import type { AuthenticatedSession } from './session.js';
+import type { AuthCallMeta, AuthenticatedSession } from './session.js';
 import type { OrgContext } from '../db/port.js';
 import type { SessionRepository } from '../db/sessions.js';
 import type { UserRepository } from '../db/users.js';
-import type { Clock } from '../ids.js';
+import { ulid, type Clock } from '../ids.js';
+import { auditEvent, isIpLiteral } from '../audit/actions.js';
 import { runResolveIdentityHooks } from '../identity/hooks.js';
 import { evaluateDomainPolicy, normalizeEmail } from '../identity/policy.js';
 import { isValidTrustAnchor } from '../identity/port.js';
@@ -102,6 +103,7 @@ export async function reauthenticateWithIdentity(
   provider: IdentityProvider,
   identity: VerifiedIdentity,
   loginState: ReauthLoginState,
+  meta: AuthCallMeta,
 ): Promise<ReauthResult> {
   if (!(await isReauthSessionActive(deps, ctx, session.session.id))) {
     return refuse('session_inactive');
@@ -180,7 +182,22 @@ export async function reauthenticateWithIdentity(
   if (!(await isReauthSessionActive(deps, ctx, session.session.id))) {
     return refuse('session_inactive');
   }
+  const audit = auditEvent({
+    id: ulid(now.getTime()),
+    now: now.toISOString(),
+    action: 'session.reauth',
+    actor: { type: 'user', id: session.session.userId },
+    target: { type: 'session', id: session.session.id },
+    context: {
+      opId: ulid(now.getTime()),
+      requestId: meta.requestId,
+      sourceIp: isIpLiteral(meta.ip) ? meta.ip : null,
+      tokenSelector: null,
+    },
+  });
+  if (!audit.ok) throw new TypeError('Invalid session reauthentication audit event');
   const updated = await deps.sessions.markReauthenticatedByIdentity(ctx, {
+    audit: audit.event,
     sessionId: session.session.id,
     identityId,
     authTime,

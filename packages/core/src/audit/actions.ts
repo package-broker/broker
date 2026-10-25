@@ -8,6 +8,8 @@ export const AUDIT_ACTIONS = [
   'session.reauth',
   'setup.complete',
   'identity.unblock',
+  'identity.unlink',
+  'identity.block',
   'user.suspend',
   'user.reactivate',
   'role.create',
@@ -34,6 +36,7 @@ export const AUDIT_ACTIONS = [
   'source.create',
   'source.update',
   'source.pause',
+  'source.sync_requested',
   'source.removal_accepted',
   'source.removal_applied',
   'source.resume',
@@ -73,6 +76,8 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'session.reauth': [],
   'setup.complete': [],
   'identity.unblock': [],
+  'identity.unlink': [],
+  'identity.block': [],
   'user.suspend': [],
   'user.reactivate': [],
   'role.create': ['key', 'name', 'scope', 'permissions'],
@@ -97,8 +102,17 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'service_principal.suspend': [],
   'service_principal.restore': [],
   'source.create': ['name', 'type', 'ecosystem', 'project_id', 'url'],
-  'source.update': ['name', 'url', 'status', 'removal_policy'],
+  'source.update': [
+    'name',
+    'url',
+    'status',
+    'removal_policy',
+    'poll_interval_seconds',
+    'retention_days_override',
+    'default_visible_to_new_projects',
+  ],
   'source.pause': [],
+  'source.sync_requested': [],
   'source.removal_accepted': ['source_id', 'refused_at', 'absent', 'listed', 'successful'],
   'source.removal_applied': ['source_id', 'absent', 'listed'],
   'source.resume': [],
@@ -230,7 +244,7 @@ const TOKEN_SELECTOR = /^[a-z2-7]{12}$/;
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 const IPV6_CHARS = /^[0-9a-fA-F:.]+$/;
 
-function isIpLiteral(value: unknown): boolean {
+export function isIpLiteral(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   if (IPV4.test(value)) return true;
   if (!value.includes(':') || !IPV6_CHARS.test(value)) return false;

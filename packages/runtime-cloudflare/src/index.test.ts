@@ -337,6 +337,43 @@ function context() {
 }
 
 describe('runtime-cloudflare platform assembly', () => {
+  it('uses the auth client-address rule for management API metadata', async () => {
+    let resolve: ((request: Request) => string | null) | undefined;
+    vi.resetModules();
+    vi.doMock('@package-broker/core/api/module', async (original) => {
+      const actual = await original<typeof import('@package-broker/core/api/module')>();
+      return {
+        ...actual,
+        createApiModule: (...args: Parameters<typeof actual.createApiModule>) => {
+          resolve = args[0].organization.clientIp;
+          return actual.createApiModule(...args);
+        },
+      };
+    });
+    try {
+      const { createWorker: createCapturedWorker } = await import('./index.js');
+      await createCapturedWorker([], quiet).services(boundEnv());
+      expect(resolve).toBeTypeOf('function');
+      for (const [address, expected] of [
+        ['2001:db8::1', '2001:db8::1'],
+        ['203.0.113.7', '203.0.113.7'],
+        [':', null],
+        ['a'.repeat(64), null],
+      ] as const) {
+        expect(
+          resolve!(
+            new Request('https://broker.test/_pb/me', {
+              headers: { 'cf-connecting-ip': address },
+            }),
+          ),
+        ).toBe(expected);
+      }
+    } finally {
+      vi.doUnmock('@package-broker/core/api/module');
+      vi.resetModules();
+    }
+  });
+
   it('hands the kernel all four services when the cloudflare stanza is bound', async () => {
     let seen: PluginPorts | undefined;
     const worker = createWorker([probe((ports) => void (seen = ports))], {

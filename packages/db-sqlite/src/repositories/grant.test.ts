@@ -2260,14 +2260,22 @@ describe('concurrent guarded operations on one file database', () => {
         ...boundHolderInput(),
         exclude: { userId: actorOf(ctx).user },
       }),
-    }).unlinkIdentity(org, await fenceFor(org), {
-      identityId: `ID-oidc-${userId}`,
-      userId,
-      provider: 'oidc',
-      subject: `oidc-${userId}`,
-      anchor: UNLINK_ANCHOR,
-      now: LATER,
-    });
+    }).unlinkIdentity(
+      org,
+      await fenceFor(org),
+      {
+        identityId: `ID-oidc-${userId}`,
+        userId,
+        provider: 'oidc',
+        subject: `oidc-${userId}`,
+        anchor: UNLINK_ANCHOR,
+        now: LATER,
+      },
+      {
+        unlink: mutationAudit('identity.unlink', null),
+        block: mutationAudit('identity.block', null),
+      },
+    );
     if (outcome !== 'unlinked' && outcome !== 'last_holder') {
       throw new Error(`unexpected unlink outcome ${outcome}`);
     }

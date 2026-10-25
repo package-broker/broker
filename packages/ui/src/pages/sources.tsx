@@ -9,6 +9,19 @@ import { Badge } from '../components/ui/badge.js';
 import { LoadedListFilters } from '../components/ui/toolbar.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '../components/ui/dialog.js';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '../components/ui/dropdown-menu.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Input } from '../components/ui/input.js';
@@ -16,6 +29,13 @@ import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
 import { DataTable } from '../components/ui/table.js';
 import { buildListFilterHash } from '../page-hash.js';
+import {
+  SourceForm,
+  SOURCE_TYPE_LABELS,
+  sourceFieldErrors,
+  type CreateSource,
+  type SourceChanges,
+} from './sources/source-form.js';
 
 type ResponseBody<K extends keyof operations> = operations[K] extends {
   responses: { 200: { content: { 'application/json': infer T } } };
@@ -39,15 +59,32 @@ const CREDENTIAL_FIELDS = {
 } as const satisfies Record<CredentialKind, readonly string[]>;
 const CREDENTIAL_KINDS = Object.keys(CREDENTIAL_FIELDS) as CredentialKind[];
 
-function canTogglePause(project: string | null, source: Source) {
-  return (
-    project === null ||
-    source.status !== 'paused' ||
-    ['packagist_proxy', 'npmjs_proxy'].includes(source.type)
-  );
+export function sourceCredentialKind(body: CreateSource): CredentialKind {
+  if (body.type === 'composer_repository') return 'http_basic';
+  if (body.type === 'npm_registry') return 'npm_token';
+  if (body.type === 'vcs') {
+    const config = body.config as { provider?: string; installationId?: number } | undefined;
+    if (config?.provider === 'ssh') return 'ssh_key';
+    if (config?.provider === 'github' && config.installationId !== undefined) return 'github_app';
+  }
+  return 'bearer';
 }
 
+function isProxy(source: Source) {
+  return ['packagist_proxy', 'npmjs_proxy'].includes(source.type);
+}
+
+const ENABLE_ADMIN_MESSAGE = 'An organization admin must enable this source.';
+const ENABLE_CONFLICT_MESSAGE = 'Register package names, then enable the source.';
+
 interface SourcesState {
+  editor: 'create' | Source | null;
+  fieldErrors: Record<string, string>;
+  formError: string | null;
+  available: Source[];
+  availableNext: string | null;
+  availableLoading: boolean;
+  availableError: boolean;
   items: Source[];
   next: string | null;
   loading: boolean;
@@ -55,16 +92,22 @@ interface SourcesState {
   settingsVersion: number;
   busy: boolean;
   error: string | null;
+  notice: string | null;
+  createdSource: string | null;
   credentialSource: string | null;
   credentialVersion: number;
+  credentialKind: CredentialKind;
   savedCredential: { source: string; at: string } | null;
   names: (Names & { source: string }) | null;
   preview: Preview | null;
   order: string[];
   etag: string | null;
+  canEnableProjectSource: boolean;
+  enableDenied: string[];
+  enableConflicts: string[];
 }
 
-function displayUrl(value: string | null): string | null {
+export function displayUrl(value: string | null): string | null {
   if (value === null) return null;
   try {
     const url = new URL(value);
@@ -86,6 +129,13 @@ export function createSourcesModel(
 ) {
   const { client } = services;
   let state: SourcesState = {
+    editor: null,
+    fieldErrors: {},
+    formError: null,
+    available: [],
+    availableNext: null,
+    availableLoading: false,
+    availableError: false,
     items: [],
     next: null,
     loading: true,
@@ -93,13 +143,19 @@ export function createSourcesModel(
     settingsVersion: 0,
     busy: false,
     error: null,
+    notice: null,
+    createdSource: null,
     credentialSource: null,
     credentialVersion: 0,
+    credentialKind: 'bearer',
     savedCredential: null,
     names: null,
     preview: null,
     order: [],
     etag: null,
+    canEnableProjectSource: false,
+    enableDenied: [],
+    enableConflicts: [],
   };
   const listeners = new Set<() => void>();
   const set = (patch: Partial<SourcesState>) => {
@@ -107,6 +163,7 @@ export function createSourcesModel(
     for (const listener of listeners) listener();
   };
   let listVersion = 0;
+  let availableVersion = 0;
   let namesVersion = 0;
   let previewVersion = 0;
 
@@ -118,6 +175,7 @@ export function createSourcesModel(
         { credential, secretFields: [] },
       );
       set({
+        enableDenied: [],
         error: credential
           ? 'Reauthenticate, then enter the credential again.'
           : 'Reauthentication is required.',
@@ -134,21 +192,37 @@ export function createSourcesModel(
     const after = more ? state.next : null;
     const previousEtag = state.etag;
     ++previewVersion;
-    set({ loading: true, listError: false, error: null, etag: null, preview: null, order: [] });
+    set({
+      loading: true,
+      listError: false,
+      error: null,
+      etag: null,
+      preview: null,
+      order: [],
+      enableDenied: [],
+      enableConflicts: [],
+      canEnableProjectSource: false,
+    });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
-    const result: ApiResult<SourcePage> =
+    const [permissions, result] = await Promise.all([
+      project === null ? null : client.request('get', '/_pb/me/permissions'),
       project === null
-        ? await client.request('get', '/_pb/sources', { query })
-        : await client.request('get', '/_pb/projects/{project}/sources', {
+        ? client.request('get', '/_pb/sources', { query })
+        : client.request('get', '/_pb/projects/{project}/sources', {
             params: { project },
             query,
-          });
+          }),
+    ]);
     if (version !== listVersion) return;
     if (failure(result) || !result.ok) {
       set({ loading: false, listError: true });
       return;
     }
-    const etag = responseHeader(result, 'etag') ?? null;
+    set({
+      canEnableProjectSource:
+        permissions?.ok === true && permissions.data.organization.includes('org:sources:write'),
+    });
+    const etag = responseHeader<SourcePage>(result, 'etag') ?? null;
     if (project !== null && more && etag !== previousEtag) {
       await load();
       return;
@@ -173,8 +247,66 @@ export function createSourcesModel(
     });
   }
 
+  async function loadAvailable(more = false) {
+    if (project === null || (more && (state.availableLoading || state.availableNext === null)))
+      return;
+    const version = ++availableVersion;
+    const after = more ? state.availableNext : null;
+    set({ availableLoading: true, availableError: false });
+    const result = await client.request('get', '/_pb/sources', {
+      query: { limit: '100', ...(after === null ? {} : { after }) },
+    });
+    if (version !== availableVersion) return;
+    if (!result.ok) {
+      set({ available: [], availableNext: null, availableLoading: false, availableError: true });
+      return;
+    }
+    const page = result.data.items.map((item) => ({
+      ...item,
+      attached: false as const,
+      url: displayUrl(item.url),
+    }));
+    set({
+      available: more ? [...state.available, ...page] : page,
+      availableNext: result.data.next,
+      availableLoading: false,
+    });
+  }
+
+  async function findLoadedSource(source: string) {
+    while (
+      !state.items.some((item) => item.id === source) &&
+      state.next !== null &&
+      !state.listError
+    ) {
+      await load(true);
+    }
+    return state.items.find((item) => item.id === source);
+  }
+
+  async function revealCreated(source: string, body?: CreateSource) {
+    const created = await findLoadedSource(source);
+    if (created) set({ createdSource: source });
+    if (created && !isProxy(created) && created.type !== 'hosted') {
+      set({
+        credentialSource: source,
+        credentialVersion: state.credentialVersion + 1,
+        credentialKind: body
+          ? sourceCredentialKind(body)
+          : created.type === 'composer_repository'
+            ? 'http_basic'
+            : created.type === 'npm_registry'
+              ? 'npm_token'
+              : created.githubAuthentication === 'app'
+                ? 'github_app'
+                : 'bearer',
+      });
+    }
+  }
+
   async function names(source: string, more = false) {
     const previous = state.names;
+    if (!more) set({ credentialSource: null, error: null });
     if (more && (previous?.source !== source || previous.next === null)) return;
     const version = ++namesVersion;
     const after = more ? previous?.next : null;
@@ -194,7 +326,7 @@ export function createSourcesModel(
 
   async function mutate(request: () => Promise<ApiResult<unknown>>, after: () => Promise<void>) {
     if (state.busy) return;
-    set({ busy: true, error: null });
+    set({ busy: true, error: null, notice: null });
     try {
       const result = await request();
       if (!failure(result)) await after();
@@ -206,6 +338,12 @@ export function createSourcesModel(
   return {
     project,
     snapshot: () => state,
+    enableNeedsAdmin(source: Source) {
+      return (
+        project !== null &&
+        (!state.canEnableProjectSource || state.enableDenied.includes(source.id))
+      );
+    },
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => {
@@ -213,14 +351,100 @@ export function createSourcesModel(
       };
     },
     load,
+    loadAvailable,
     names,
+    openEditor(source: Source | null = null) {
+      if (state.busy) return;
+      if (source && project !== null && source.projectId === null) return;
+      set({
+        editor: source ?? 'create',
+        fieldErrors: {},
+        formError: null,
+        error: null,
+        credentialSource: null,
+        savedCredential: null,
+      });
+    },
+    closeEditor() {
+      if (!state.busy) set({ editor: null, fieldErrors: {}, formError: null });
+    },
+    async saveSource(body: CreateSource | SourceChanges) {
+      if (state.busy || state.editor === null) return;
+      const editor = state.editor;
+      set({ busy: true, error: null, formError: null, fieldErrors: {} });
+      try {
+        const result =
+          editor === 'create'
+            ? project === null
+              ? await client.request('post', '/_pb/sources', { body: body as CreateSource })
+              : await client.request('post', '/_pb/projects/{project}/sources', {
+                  params: { project },
+                  body: body as CreateSource,
+                })
+            : project === null
+              ? await client.request('patch', '/_pb/sources/{source}', {
+                  params: { source: editor.id },
+                  body,
+                })
+              : await client.request('patch', '/_pb/projects/{project}/sources/{source}', {
+                  params: { project, source: editor.id },
+                  body,
+                });
+        if (!result.ok) {
+          failure(result);
+          set({ fieldErrors: sourceFieldErrors(result.details), formError: state.error });
+          return;
+        }
+        set({ editor: null, fieldErrors: {}, formError: null });
+        await load();
+        if (editor === 'create' && result.data && 'id' in result.data) {
+          await revealCreated(result.data.id, body as CreateSource);
+        }
+      } finally {
+        set({ busy: false });
+      }
+    },
+    attachment(source: string, attached: boolean) {
+      if (project === null) return Promise.resolve();
+      return mutate(
+        () =>
+          attached
+            ? client.request('put', '/_pb/projects/{project}/sources/{source}/attachment', {
+                params: { project, source },
+                body: {},
+              })
+            : client.request('delete', '/_pb/projects/{project}/sources/{source}/attachment', {
+                params: { project, source },
+              }),
+        () => load(),
+      );
+    },
     async replayed(result: ReplayResult) {
       const prefix =
         project === null ? '/_pb/sources' : `/_pb/projects/${encodeURIComponent(project)}/sources`;
       const namesChange = /^\/_pb\/sources\/[^/]+\/names(?:\/[^/]+)?$/.test(result.path);
-      if (result.path !== prefix && !result.path.startsWith(`${prefix}/`) && !namesChange) return;
+      const enableChange = /^\/_pb\/sources\/([^/]+)\/enable$/.exec(result.path);
+      if (
+        result.path !== prefix &&
+        !result.path.startsWith(`${prefix}/`) &&
+        !namesChange &&
+        !enableChange
+      )
+        return;
       const selectedNames = state.names?.source;
+      set({ enableDenied: [], enableConflicts: [] });
+      if (result.ok) set({ editor: null, fieldErrors: {}, formError: null });
       await load();
+      if (enableChange && !result.ok) {
+        if (project !== null && result.status === 403 && result.code === 'forbidden') {
+          set({ enableDenied: [enableChange[1]!] });
+        } else if (result.status === 409 && result.code === 'conflict') {
+          set({ enableConflicts: [enableChange[1]!] });
+        } else {
+          set({ error: 'The request could not be saved or loaded. Refresh and try again.' });
+        }
+      }
+      if (result.ok && result.createdSourceId) await revealCreated(result.createdSourceId);
       if (selectedNames !== undefined) await names(selectedNames);
     },
     moveSource(source: string, direction: -1 | 1) {
@@ -261,10 +485,22 @@ export function createSourcesModel(
         set({ busy: false });
       }
     },
+    closeCredential() {
+      if (!state.busy) set({ credentialSource: null });
+    },
+    closeNames() {
+      if (state.busy) return;
+      ++namesVersion;
+      set({ names: null });
+    },
     chooseCredential(source: string) {
+      ++namesVersion;
       set({
         credentialSource: source,
+        names: null,
+        savedCredential: null,
         credentialVersion: state.credentialVersion + 1,
+        credentialKind: 'bearer',
         error: null,
       });
     },
@@ -317,16 +553,60 @@ export function createSourcesModel(
         () => load(),
       );
     },
-    togglePause(source: Source) {
-      if (!canTogglePause(project, source)) return Promise.resolve();
-      if (source.status === 'paused' && !['packagist_proxy', 'npmjs_proxy'].includes(source.type)) {
-        return mutate(
-          () =>
-            client.request('post', '/_pb/sources/{source}/enable', {
-              params: { source: source.id },
-            }),
-          () => load(),
-        );
+    syncNow(source: Source) {
+      if (source.status === 'paused' || (project !== null && source.projectId === null))
+        return Promise.resolve();
+      return mutate(
+        () =>
+          project === null
+            ? client.request('post', '/_pb/sources/{source}/sync', {
+                params: { source: source.id },
+              })
+            : client.request('post', '/_pb/projects/{project}/sources/{source}/sync', {
+                params: { project, source: source.id },
+              }),
+        async () => {
+          await load();
+          await findLoadedSource(source.id);
+          set({ notice: 'Sync requested.' });
+        },
+      );
+    },
+    async togglePause(source: Source) {
+      if (project !== null && source.projectId === null) return;
+      if (source.status === 'paused' && !isProxy(source)) {
+        if (
+          state.busy ||
+          (project !== null &&
+            (!state.canEnableProjectSource || state.enableDenied.includes(source.id)))
+        )
+          return;
+        set({
+          busy: true,
+          error: null,
+          notice: null,
+          enableConflicts: state.enableConflicts.filter((id) => id !== source.id),
+        });
+        try {
+          const result = await client.request('post', '/_pb/sources/{source}/enable', {
+            params: { source: source.id },
+          });
+          if (
+            project !== null &&
+            !result.ok &&
+            result.status === 403 &&
+            result.code === 'forbidden'
+          ) {
+            set({ enableDenied: [...new Set([...state.enableDenied, source.id])] });
+          } else if (!result.ok && result.status === 409 && result.code === 'conflict') {
+            set({ enableConflicts: [...new Set([...state.enableConflicts, source.id])] });
+          } else if (!failure(result)) {
+            await load();
+          }
+        } finally {
+          set({ busy: false });
+        }
+        return;
       }
       const action = source.status === 'paused' ? 'resume' : 'pause';
       return mutate(
@@ -432,12 +712,14 @@ function CredentialEditor({
   model,
   source,
   busy,
+  initialKind,
 }: {
   model: SourcesModel;
   source: string;
   busy: boolean;
+  initialKind: CredentialKind;
 }) {
-  const [kind, setKind] = useState<CredentialKind>('bearer');
+  const [kind, setKind] = useState<CredentialKind>(initialKind);
   return (
     <form
       className="grid gap-3"
@@ -471,7 +753,50 @@ function formValue(form: HTMLFormElement, name: string): string {
   return new FormData(form).get(name)?.toString() ?? '';
 }
 
-export function SourceCard({
+const SYNC_ERROR_LABELS: Record<string, string> = {
+  network: 'Network failure',
+  timeout: 'Sync timed out',
+  http_error: 'HTTP error',
+  unauthorized: 'Authorization failed',
+  rate_limited: 'Rate limited',
+  not_found: 'Not found',
+  invalid_response: 'Invalid response',
+  mass_absence: 'Mass package absence',
+  too_large: 'Response too large',
+  policy_denied: 'Policy denied',
+  credential_unavailable: 'Credential unavailable',
+  internal: 'Internal error',
+};
+
+function SyncStatus({ source }: { source: Source }) {
+  const errorLabel =
+    source.lastError !== null && Object.hasOwn(SYNC_ERROR_LABELS, source.lastError)
+      ? SYNC_ERROR_LABELS[source.lastError]
+      : null;
+  return (
+    <div className="grid gap-1 text-sm">
+      <p>
+        Last success: <Time value={source.lastSuccessAt} fallback="Never" />
+      </p>
+      <p>
+        Last error:{' '}
+        {source.lastError === null ? (
+          'None'
+        ) : (
+          <>
+            {errorLabel && `${errorLabel} · `}
+            <code>{source.lastError}</code>
+          </>
+        )}
+      </p>
+      <p>
+        Next poll: <Time value={source.nextPollAt} fallback="None" />
+      </p>
+    </div>
+  );
+}
+
+export function SourceActions({
   source,
   model,
   busy,
@@ -482,65 +807,37 @@ export function SourceCard({
 }) {
   const owned = model.project === null || source.projectId !== null;
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{source.name}</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        <IdText value={source.id} label="source ID" />
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">
-            {source.ecosystem} · {source.type}
-          </Badge>
-          <StatusBadge status={source.status} />
-        </div>
-        <p className="break-all">{displayUrl(source.url) ?? 'No displayable URL'}</p>
-        <p>{source.hasCredential ? 'credential set · write-only' : 'No credential set'}</p>
-        {model.project !== null && 'attached' in source ? (
-          <p>Attached to this project: {source.attached ? 'Yes' : 'No'}</p>
-        ) : null}
-        {owned ? (
-          <form
-            key={model.snapshot().settingsVersion}
-            className="grid gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const form = event.currentTarget;
-              void model.edit(
-                source.id,
-                Number(formValue(form, 'interval')),
-                formValue(form, 'policy') as Source['removalPolicy'],
-              );
-            }}
+    <>
+      {owned ? (
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy || source.status === 'paused'}
+            aria-describedby={source.status === 'paused' ? `sync-paused-${source.id}` : undefined}
+            onClick={() => void model.syncNow(source)}
           >
-            <div>
-              <Label htmlFor={`interval-${source.id}`}>Polling interval (seconds)</Label>
-              <Input
-                id={`interval-${source.id}`}
-                name="interval"
-                type="number"
-                min={1}
-                step={1}
-                required
-                defaultValue={source.pollIntervalSeconds}
-              />
-            </div>
-            <div>
-              <Label htmlFor={`policy-${source.id}`}>Removal policy</Label>
-              <Select id={`policy-${source.id}`} name="policy" defaultValue={source.removalPolicy}>
-                <option value="flag">Flag</option>
-                <option value="exclude">Exclude</option>
-              </Select>
-            </div>
-            <Button disabled={busy}>Save settings</Button>
-          </form>
-        ) : (
-          <p>Manage this organization source in organization scope.</p>
-        )}
-        <div className="flex flex-wrap gap-2">
+            Sync now
+          </Button>
+          {source.status === 'paused' ? (
+            <p id={`sync-paused-${source.id}`}>Enable before syncing.</p>
+          ) : null}
+        </>
+      ) : null}
+      <DropdownMenu
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && event.currentTarget.contains(event.target as Node)) {
+            event.preventDefault();
+            event.currentTarget.open = false;
+            event.currentTarget.querySelector('summary')?.focus();
+          }
+        }}
+      >
+        <DropdownMenuTrigger>More</DropdownMenuTrigger>
+        <DropdownMenuContent className="grid gap-1">
           {owned ? (
             <>
-              {canTogglePause(model.project, source) ? (
+              {source.status !== 'paused' || isProxy(source) || !model.enableNeedsAdmin(source) ? (
                 source.status === 'paused' ? (
                   <Button
                     type="button"
@@ -561,30 +858,26 @@ export function SourceCard({
                     onConfirm={() => void model.togglePause(source)}
                   />
                 )
+              ) : (
+                <p role="status">{ENABLE_ADMIN_MESSAGE}</p>
+              )}
+              {model.snapshot().enableConflicts.includes(source.id) ? (
+                <p role="status">{ENABLE_CONFLICT_MESSAGE}</p>
               ) : null}
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy}
-                onClick={() => model.chooseCredential(source.id)}
-              >
+
+              <DropdownMenuItem disabled={busy} onClick={() => model.chooseCredential(source.id)}>
                 Set credential
-              </Button>
+              </DropdownMenuItem>
             </>
-          ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            disabled={busy}
-            onClick={() => {
-              void model.names(source.id);
-            }}
-          >
+          ) : (
+            <p>Manage this organization source in organization scope.</p>
+          )}
+          <DropdownMenuItem disabled={busy} onClick={() => void model.names(source.id)}>
             Registered names
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
   );
 }
 
@@ -606,7 +899,15 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
   const [filters, setFilters] = useState<SourceFilters>({ q: '', type: '', scope: '' });
   const filtered = !!(filters.q || filters.type || filters.scope);
-  const items = filterSources(state.items, filters).sort((a, b) => {
+  const created = state.items.find((item) => item.id === state.createdSource);
+  const membershipKnown = !state.loading && !state.listError && state.next === null;
+  const combined = [
+    ...state.items,
+    ...(membershipKnown
+      ? state.available.filter((candidate) => !state.items.some((item) => item.id === candidate.id))
+      : []),
+  ];
+  const items = filterSources(combined, filters).sort((a, b) => {
     const position = (id: string) => {
       const index = state.order.indexOf(id);
       return index < 0 ? Infinity : index;
@@ -615,9 +916,27 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   });
   return (
     <section aria-labelledby="page-heading" className="grid gap-6">
-      <h1 id="page-heading" className="text-xl font-semibold">
-        Sources
-      </h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 id="page-heading" className="text-xl font-semibold">
+          Sources
+        </h1>
+        <Button type="button" disabled={state.busy} onClick={() => model.openEditor()}>
+          Add source
+        </Button>
+      </div>
+      {state.editor !== null ? (
+        <SourceForm
+          source={state.editor === 'create' ? null : state.editor}
+          busy={state.busy}
+          errors={state.fieldErrors}
+          alert={state.formError}
+          onSubmit={(body) => {
+            if (state.editor === 'create') setFilters({ q: '', type: '', scope: '' });
+            void model.saveSource(body);
+          }}
+          onClose={() => model.closeEditor()}
+        />
+      ) : null}
       <p className="text-neutral-600">
         Upstream registries and private repositories. Attached sources are tried in precedence
         order.
@@ -627,18 +946,37 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         rotate a secret.
       </p>
       <LoadedListFilters
-        values={filters}
+        values={{ ...filters, type: SOURCE_TYPE_LABELS[filters.type as Source['type']] ?? '' }}
         fields={[
           { key: 'q', label: 'Name (loaded sources)' },
           {
             key: 'type',
             label: 'Type',
-            options: [...new Set(state.items.map((item) => item.type))].sort(),
+            options: [...new Set(combined.map((item) => SOURCE_TYPE_LABELS[item.type]))].sort(),
           },
           { key: 'scope', label: 'Source scope', options: ['organization', 'project'] },
         ]}
-        onChange={setFilters}
+        onChange={(next) =>
+          setFilters({
+            ...next,
+            type:
+              Object.keys(SOURCE_TYPE_LABELS).find(
+                (key) => SOURCE_TYPE_LABELS[key as Source['type']] === next.type,
+              ) ?? '',
+          })
+        }
       />
+      {state.notice ? <p role="status">{state.notice}</p> : null}
+      {created?.status === 'paused' && !isProxy(created) ? (
+        <p role="status">
+          Next steps for {created.name}:{' '}
+          {model.enableNeedsAdmin(created)
+            ? ENABLE_ADMIN_MESSAGE
+            : state.names?.source === created.id && state.names.items.length > 0
+              ? 'Enable the source.'
+              : 'Register names, then Enable the source.'}
+        </p>
+      ) : null}
       {state.error ? <ListState kind="error" title={state.error} /> : null}
       <Button
         type="button"
@@ -646,10 +984,25 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         disabled={state.loading || state.busy}
         onClick={() => {
           void model.load();
+          void model.loadAvailable();
         }}
       >
         Refresh sources
       </Button>
+      {model.project !== null && !membershipKnown && state.available.length > 0 ? (
+        <p className="text-sm text-neutral-600">
+          Load all project sources before attaching organization sources.
+        </p>
+      ) : null}
+      {state.availableLoading ? (
+        <ListState kind="loading" title="Loading organization sources…" />
+      ) : null}
+      {state.availableError ? (
+        <ListState
+          kind="error"
+          title="Organization sources could not be loaded. Project sources are still shown."
+        />
+      ) : null}
       {state.loading ? (
         <ListState kind="loading" title="Loading sources…" />
       ) : !state.listError && items.length === 0 ? (
@@ -675,7 +1028,8 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   <div className="grid gap-1">
                     <strong>{source.name}</strong>
                     <span className="text-xs text-neutral-600">
-                      {source.ecosystem} · {source.type}
+                      {source.ecosystem === 'composer' ? 'Composer' : 'npm'} ·{' '}
+                      {SOURCE_TYPE_LABELS[source.type]}
                     </span>
                     <StatusBadge status={source.status} />
                   </div>
@@ -751,10 +1105,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               },
               {
                 key: 'sync',
-                label: 'Last successful sync',
+                label: 'Sync status',
                 value: (source) => source.lastSuccessAt ?? '',
-                priority: 2,
-                render: (source) => <Time value={source.lastSuccessAt} fallback="Never" />,
+                render: (source) => <SyncStatus source={source} />,
               },
               {
                 key: 'id',
@@ -769,12 +1122,42 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 value: () => '',
                 sortable: false,
                 render: (source) => (
-                  <details>
-                    <summary className="cursor-pointer underline">Edit source</summary>
-                    <div className="mt-3">
-                      <SourceCard source={source} model={model} busy={state.busy} />
-                    </div>
-                  </details>
+                  <div className="flex flex-wrap items-start gap-2">
+                    {model.project === null || source.projectId !== null ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={state.busy}
+                        onClick={() => model.openEditor(source)}
+                      >
+                        Edit
+                      </Button>
+                    ) : null}
+                    {model.project !== null && 'attached' in source ? (
+                      source.attached ? (
+                        <ConfirmAction
+                          action="Detach"
+                          target={`${source.name} (${source.id})`}
+                          scope={`Project: ${model.project}`}
+                          description="Detaching this source stops this project from resolving packages through it. You can attach it again later."
+                          disabled={state.busy}
+                          onConfirm={() => void model.attachment(source.id, false)}
+                        />
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={state.busy}
+                          onClick={() => void model.attachment(source.id, true)}
+                        >
+                          Attach
+                        </Button>
+                      )
+                    ) : null}
+                    <SourceActions source={source} model={model} busy={state.busy} />
+                  </div>
                 ),
               },
             ]}
@@ -791,76 +1174,122 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           Load more sources
         </Button>
       ) : null}
-      {state.credentialSource !== null ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Set credential</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <IdText value={state.credentialSource} label="source ID" />
-            <CredentialEditor
-              key={state.credentialVersion}
-              model={model}
-              source={state.credentialSource}
-              busy={state.busy}
-            />
-          </CardContent>
-        </Card>
+      {state.availableNext !== null ? (
+        <Button
+          disabled={state.availableLoading || state.busy}
+          onClick={() => void model.loadAvailable(true)}
+        >
+          Load more organization sources
+        </Button>
       ) : null}
-      {state.savedCredential ? (
+      {state.credentialSource !== null ? (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) model.closeCredential();
+          }}
+        >
+          <DialogContent
+            variant="source"
+            onCancel={(event) => {
+              if (state.busy) event.preventDefault();
+            }}
+          >
+            <DialogHeader className="shrink-0 p-6 pr-16">
+              <DialogTitle>Set credential</DialogTitle>
+              <DialogDescription>
+                Credentials are write-only. Save a new credential to rotate a secret.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
+              <IdText value={state.credentialSource} label="source ID" />
+              <CredentialEditor
+                key={state.credentialVersion}
+                model={model}
+                source={state.credentialSource}
+                initialKind={state.credentialKind}
+                busy={state.busy}
+              />
+              {state.error ? <p role="alert">{state.error}</p> : null}
+              {state.savedCredential?.source === state.credentialSource ? (
+                <p role="status">
+                  credential set · <Time value={state.savedCredential.at} />
+                </p>
+              ) : null}
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+      {state.savedCredential && state.credentialSource === null ? (
         <p role="status">
           credential set · {state.savedCredential.source} ·{' '}
           <Time value={state.savedCredential.at} />
         </p>
       ) : null}
       {state.names ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Registered names</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            <IdText value={state.names.source} label="source ID" />
-            <ul>
-              {state.names.items.map((name) => (
-                <li key={name.id} className="flex items-center gap-3">
-                  <span>{name.pattern}</span>
-                  <ConfirmAction
-                    action={`Remove ${name.pattern}`}
-                    target={name.pattern}
-                    scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
-                    description="Removing this registered pattern can stop the source from resolving matching packages. Add the pattern again to restore it."
-                    disabled={state.busy}
-                    onConfirm={() => void model.removeName(name.sourceId, name.id)}
-                  />
-                </li>
-              ))}
-            </ul>
-            {state.names.next !== null ? (
-              <Button
-                disabled={state.busy}
-                onClick={() => {
-                  void model.names(state.names!.source, true);
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) model.closeNames();
+          }}
+        >
+          <DialogContent
+            variant="source"
+            onCancel={(event) => {
+              if (state.busy) event.preventDefault();
+            }}
+          >
+            <DialogHeader className="shrink-0 p-6 pr-16">
+              <DialogTitle>Registered names</DialogTitle>
+              <DialogDescription>
+                Manage the package patterns registered for this source.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
+              {state.error ? <p role="alert">{state.error}</p> : null}
+              <IdText value={state.names.source} label="source ID" />
+              <ul>
+                {state.names.items.map((name) => (
+                  <li key={name.id} className="flex items-center gap-3">
+                    <span>{name.pattern}</span>
+                    <ConfirmAction
+                      action={`Remove ${name.pattern}`}
+                      target={name.pattern}
+                      scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
+                      description="Removing this registered pattern can stop the source from resolving matching packages. Add the pattern again to restore it."
+                      disabled={state.busy}
+                      onConfirm={() => void model.removeName(name.sourceId, name.id)}
+                    />
+                  </li>
+                ))}
+              </ul>
+              {state.names.next !== null ? (
+                <Button
+                  disabled={state.busy}
+                  onClick={() => {
+                    void model.names(state.names!.source, true);
+                  }}
+                >
+                  Load more names
+                </Button>
+              ) : null}
+              <form
+                className="grid gap-3"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const pattern = formValue(form, 'pattern');
+                  form.reset();
+                  void model.addName(state.names!.source, pattern);
                 }}
               >
-                Load more names
-              </Button>
-            ) : null}
-            <form
-              className="grid gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = event.currentTarget;
-                const pattern = formValue(form, 'pattern');
-                form.reset();
-                void model.addName(state.names!.source, pattern);
-              }}
-            >
-              <Label htmlFor="registered-pattern">Registered pattern</Label>
-              <Input id="registered-pattern" name="pattern" maxLength={50} required />
-              <Button disabled={state.busy}>Add name</Button>
-            </form>
-          </CardContent>
-        </Card>
+                <Label htmlFor="registered-pattern">Registered pattern</Label>
+                <Input id="registered-pattern" name="pattern" maxLength={50} required />
+                <Button disabled={state.busy}>Add name</Button>
+              </form>
+            </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
       {model.project !== null ? (
         <Card>
@@ -942,6 +1371,7 @@ export function SourcesPage() {
   const model = useMemo(() => createSourcesModel(services, project), [services, project]);
   useEffect(() => {
     void model.load();
+    void model.loadAvailable();
   }, [model]);
   useEffect(
     () =>

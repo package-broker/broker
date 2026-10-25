@@ -107,6 +107,7 @@ function fixture(resolve?: HookMap['auth.resolveIdentity'], map?: HookMap['auth.
     clock,
     ids: { ulid: () => '01K7R5V0000000000000000001' },
     publicOrigin: origin,
+    clientIp: () => null,
     providers: new Map([[provider.id, provider]]),
     hooks: {
       'access.check': [],

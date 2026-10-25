@@ -95,7 +95,7 @@ export function createLocalRoutes(deps: {
   readonly setup: LocalSetupService;
   readonly sessions: SessionService;
   readonly publicOrigin: string;
-  readonly clientIp?: (request: Request) => string | null;
+  readonly clientIp: (request: Request) => string | null;
   readonly log: KernelLog;
 }): readonly RouteDefinition[] {
   const { local, setup, sessions, publicOrigin } = deps;

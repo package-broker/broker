@@ -147,7 +147,7 @@ async function harness(options: Options = {}): Promise<Harness> {
         setup: { start, finish } as unknown as LocalSetupService,
         sessions,
         publicOrigin: ORIGIN,
-        ...(options.clientIp === undefined ? {} : { clientIp: options.clientIp }),
+        clientIp: options.clientIp ?? (() => null),
         log,
       }),
     ),
@@ -207,7 +207,7 @@ describe('createLocalRoutes', () => {
     [FINISH, { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code }, 'finish'],
     [REAUTH, { password: SENTINEL.password, code: SENTINEL.code }, 'reauth'],
   ] as const)('passes request metadata to %s', async (path, body, service) => {
-    const h = await harness();
+    const h = await harness({ clientIp: () => '203.0.113.7' });
     const response = await h.fetch(
       post(path, body, {
         ...sessionHeaders,
@@ -249,6 +249,7 @@ describe('createLocalRoutes', () => {
       setup: {} as LocalSetupService,
       sessions: {} as SessionService,
       publicOrigin: ORIGIN,
+      clientIp: () => null,
       log: () => undefined,
     });
 
@@ -265,6 +266,7 @@ describe('createLocalRoutes', () => {
         setup: {} as LocalSetupService,
         sessions: {} as SessionService,
         publicOrigin: `${ORIGIN}/`,
+        clientIp: () => null,
         log: () => undefined,
       }),
     ).toThrow(TypeError);
@@ -663,6 +665,7 @@ describe('createLocalRoutes', () => {
         } as unknown as LocalSetupService,
         sessions: {} as SessionService,
         publicOrigin: ORIGIN,
+        clientIp: () => null,
         log: () => undefined,
       });
       const context = (path: string, body: unknown) => ({
@@ -982,6 +985,7 @@ describe('createLocalRoutes', () => {
         setup: {} as LocalSetupService,
         sessions: {} as SessionService,
         publicOrigin: ORIGIN,
+        clientIp: () => null,
         log: () => {
           throw new Error('sink down');
         },

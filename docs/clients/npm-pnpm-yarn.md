@@ -4,8 +4,6 @@ sidebar_position: 2
 description: Configure npm, pnpm and yarn to use Package Broker.
 ---
 
-import TokenKinds from '../reference/_token-kinds.md';
-
 Map a package scope to one broker project, then use a token to install packages from that project.
 
 ## Prerequisites
@@ -17,12 +15,12 @@ You need a running broker, a project with an npm source, and a token that can re
 
 ## Token kinds
 
-<TokenKinds />
+See [token kinds in the access model](/docs/reference/access-model#token-kinds) for token boundaries, expiry and revocation.
 
-Both client pages use the shared token-kind table. Supply `NPM_TOKEN` through your terminal environment or CI secret settings before installing. It is a client recipe variable, not a broker runtime setting. Keep the literal `${NPM_TOKEN}` placeholder in committed config; never replace it with a token in a committed file. Avoid shell tracing and commands that print authentication configuration.
+Supply `NPM_TOKEN` through your terminal environment or CI secret settings before installing. It is a client recipe variable, not a broker runtime setting. Keep the literal `${NPM_TOKEN}` placeholder in committed config; never replace it with a token in a committed file. Avoid shell tracing and commands that print authentication configuration.
 
 <!-- source: packages/core/src/auth/client-matrix.test.ts:124 -->
-<!-- source: Mac live verification, 2026-10-25 (npm-env): npm 11.17, pnpm 12 with user-level auth, Yarn 1.22.22 and Yarn 4.9.2 expanded NPM_TOKEN. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (npm-env): npm 11.17, pnpm 12 with user-level auth, Yarn 1.22.22 and Yarn 4.9.2 expanded NPM_TOKEN. -->
 
 The registry is `https://<broker-host>/<project>/npm/`. Scope the credential to this host and path. A package scope mapping chooses a registry; it does not grant project access.
 
@@ -35,7 +33,7 @@ Add these lines to `.npmrc` beside `package.json`. Other package scopes continue
 
 <!-- source: packages/ui/src/pages/tokens/client-config.ts:6 -->
 <!-- source: packages/core/src/auth/client-matrix.test.ts:124 -->
-<!-- source: Mac live verification, 2026-10-25 (npm-scope): npm install and npm ci with an empty cache passed; the lock used the broker archive URL; wrong token returned E401. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (npm-scope): npm install and npm ci with an empty cache passed; the lock used the broker archive URL; wrong token returned E401. -->
 
 ```ini
 @<scope>:registry=https://<broker-host>/<project>/npm/
@@ -57,7 +55,7 @@ Keep only the scope mapping in the application's `.npmrc`. pnpm 12 ignores repos
 
 <!-- source: packages/ui/src/pages/tokens/client-config.ts:6 -->
 <!-- source: packages/core/src/auth/client-matrix.test.ts:124 -->
-<!-- source: Mac live verification, 2026-10-25 (pnpm-scope): pnpm 12.8.1 and 12.15.0 ignored project auth; user-level auth with the project scope mapping passed. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (pnpm-scope): pnpm 12.8.1 and 12.15.0 ignored project auth; user-level auth with the project scope mapping passed. -->
 
 ```ini
 @<scope>:registry=https://<broker-host>/<project>/npm/
@@ -72,7 +70,7 @@ Put the credential reference in your user-level `~/.npmrc`, outside the applicat
 Add a dependency and commit the resulting `pnpm-lock.yaml`. Use the locked install in CI:
 
 <!-- source: .github/workflows/ci.yml:32 -->
-<!-- source: Mac live verification, 2026-10-25 (pnpm-install): pnpm add and pnpm install --frozen-lockfile passed with user-level auth; no credential in the lock. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (pnpm-install): pnpm add and pnpm install --frozen-lockfile passed with user-level auth; no credential in the lock. -->
 
 ```sh
 pnpm add '@<scope>/<package>'
@@ -84,7 +82,7 @@ pnpm install --frozen-lockfile
 Add these lines to `.npmrc`; Classic reads npm-style registry credentials:
 
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:708 -->
-<!-- source: Mac live verification, 2026-10-25 (yarn-classic): Yarn 1.22.22 add and frozen install passed; wrong token returned 401; no credential in yarn.lock. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (yarn-classic): Yarn 1.22.22 add and frozen install passed; wrong token returned 401; no credential in yarn.lock. -->
 
 ```ini
 @<scope>:registry=https://<broker-host>/<project>/npm/
@@ -108,7 +106,7 @@ yarn install --frozen-lockfile
 Use `.yarnrc.yml` instead of `.npmrc`. Scope names under `npmScopes` omit `@`. Keep the token on the project registry entry and set `npmAlwaysAuth` so package reads carry it.
 
 <!-- source: packages/core/src/auth/client-matrix.test.ts:149 -->
-<!-- source: Mac live verification, 2026-10-25 (yarn-berry): Yarn 4.9.2 accepted this registry key, including its trailing slash; wrong token failed with mirror/global cache disabled. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (yarn-berry): Yarn 4.9.2 accepted this registry key, including its trailing slash; wrong token failed with mirror/global cache disabled. -->
 
 ```yaml
 npmScopes:
@@ -123,7 +121,7 @@ npmRegistries:
 Add a package, then use an immutable install with the committed lock file:
 
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:727 -->
-<!-- source: Mac live verification, 2026-10-25 (yarn-immutable): Yarn 4.9.2 add and immutable install passed; lock contained a package resolution, no URL or credential. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (yarn-immutable): Yarn 4.9.2 add and immutable install passed; lock contained a package resolution, no URL or credential. -->
 
 ```sh
 yarn add '@<scope>/<package>'
@@ -136,7 +134,7 @@ Confirm the dependency appears in the client's lock file and that its archive is
 
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:651 -->
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:730 -->
-<!-- source: Mac live verification, 2026-10-25 (npm-locks): fresh locks contained no credentials; pnpm used user-level auth. Berry stores a package resolution rather than an archive URL. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (npm-locks): fresh locks contained no credentials; pnpm used user-level auth. Berry stores a package resolution rather than an archive URL. -->
 <!-- verify: npm-locks-existing — CI (hosted runners): exercise pre-existing npm, pnpm, Yarn Classic and Berry locks after a registry switch, including empty-cache installs. -->
 
 For 401, check token placement, host/path, expiry and revocation. For 403, check grants and token scope. An inaccessible project or package can return 404. See [Composer authentication failures](composer.md#resolve-authentication-failures) for the shared status meanings.

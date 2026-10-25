@@ -14,7 +14,7 @@ Configure the repository URLs in your application's [Composer setup](../clients/
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:586 -->
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:660 -->
 
-Have someone with `project:service-principals:write` create a service principal bound to the project with `project:read` and `project:packages:read`. Someone with `project:tokens:create` and the permissions being conferred can issue its token with scope `read`. Issuance requires fresh re-authentication. Use the same project-bound token for the two secret representations below; [token kinds](../clients/composer.md#token-kinds) explains the boundary and expiry.
+Have someone with `project:service-principals:write` create a service principal bound to the project with `project:read` and `project:packages:read`. Someone with `project:tokens:create` and the permissions being conferred can issue its token with scope `read`. Issuance requires fresh re-authentication. Use the same project-bound token for the two secret representations below; [token kinds](/docs/reference/access-model#token-kinds) explains the boundary and expiry.
 
 <!-- source: packages/core/src/api/routes/service-principals-schemas.ts:18 -->
 <!-- source: packages/core/src/authz/service-principal-service.ts:431 -->
@@ -109,9 +109,13 @@ Replace `<organization>` and `<project>` in the cache key with identifiers for t
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:522 -->
 <!-- verify: actions-cache-access — CI (hosted runners): check GitHub's current cache read/write rules for the repository and any fork workflows before enabling private package caching. -->
 
-If you adapt this recipe for pnpm 12, commit only the scope registry line in the project's `.npmrc` and put the literal token reference in the runner user's `~/.npmrc`, as shown in [pnpm setup](../clients/npm-pnpm-yarn.md#pnpm). Supply `NPM_TOKEN` to the install step. Use the pnpm lock and cache paths for that job; project-level `_authToken` settings are ignored.
+If you adapt this recipe for pnpm 12, commit only the scope registry line in the project's `.npmrc` and put the literal token reference in the runner user's `~/.npmrc`, as shown in [pnpm setup](../clients/npm-pnpm-yarn.md#pnpm). Before the pnpm install, run the following line after replacing the host and project placeholders. The single quotes preserve the literal `${NPM_TOKEN}` reference. Supply `NPM_TOKEN` to the install step. Use the pnpm lock and cache paths for that job; project-level `_authToken` settings are ignored.
 
-<!-- source: Mac live verification, 2026-10-25 (pnpm-scope): pnpm 12.8.1 and 12.15.0 installed successfully with user-level auth; project-level auth returned 401. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (pnpm-scope): pnpm 12.8.1 and 12.15.0 installed successfully with user-level auth; project-level auth returned 401. -->
+
+```sh
+printf '%s\n' '//<broker-host>/<project>/npm/:_authToken=${NPM_TOKEN}' >> "$HOME/.npmrc"
+```
 
 ## Verify and separate publishing
 

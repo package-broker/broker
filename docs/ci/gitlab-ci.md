@@ -14,7 +14,7 @@ Complete [Composer setup](../clients/composer.md) and [npm setup](../clients/npm
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:586 -->
 <!-- source: packages/runtime-node/src/registry-clients.test.ts:660 -->
 
-Use a service principal bound to one project with `project:read` and `project:packages:read`, and issue a token with scope `read`. Creating the principal requires `project:service-principals:write`; issuing the token requires `project:tokens:create`, the permissions it confers and fresh re-authentication. See [token kinds](../clients/composer.md#token-kinds) for expiry and project boundaries.
+Use a service principal bound to one project with `project:read` and `project:packages:read`, and issue a token with scope `read`. Creating the principal requires `project:service-principals:write`; issuing the token requires `project:tokens:create`, the permissions it confers and fresh re-authentication. See [token kinds](/docs/reference/access-model#token-kinds) for expiry and project boundaries.
 
 <!-- source: packages/core/src/api/routes/service-principals-schemas.ts:18 -->
 <!-- source: packages/core/src/authz/service-principal-service.ts:431 -->
@@ -94,9 +94,13 @@ Composer plugins and scripts are disabled in this recipe. Review any plugins or 
 
 <!-- source: scripts/docker-smoke.mjs:815 -->
 
-If you adapt this recipe for pnpm 12, commit only the scope registry line in the project's `.npmrc` and put the literal token reference in the runner user's `~/.npmrc`, as shown in [pnpm setup](../clients/npm-pnpm-yarn.md#pnpm). Supply `NPM_TOKEN` to the install step. Use the pnpm lock and cache paths for that job; project-level `_authToken` settings are ignored.
+If you adapt this recipe for pnpm 12, commit only the scope registry line in the project's `.npmrc` and put the literal token reference in the runner user's `~/.npmrc`, as shown in [pnpm setup](../clients/npm-pnpm-yarn.md#pnpm). Before the pnpm install, run the following line after replacing the host and project placeholders. The single quotes preserve the literal `${NPM_TOKEN}` reference. Supply `NPM_TOKEN` to the install step. Use the pnpm lock and cache paths for that job; project-level `_authToken` settings are ignored.
 
-<!-- source: Mac live verification, 2026-10-25 (pnpm-scope): pnpm 12.8.1 and 12.15.0 installed successfully with user-level auth; project-level auth returned 401. -->
+<!-- source: verified 2026-10-25 on Node 24 / Docker (pnpm-scope): pnpm 12.8.1 and 12.15.0 installed successfully with user-level auth; project-level auth returned 401. -->
+
+```sh
+printf '%s\n' '//<broker-host>/<project>/npm/:_authToken=${NPM_TOKEN}' >> "$HOME/.npmrc"
+```
 
 ## Verify and separate publishing
 

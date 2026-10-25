@@ -140,8 +140,8 @@ describe('git runtime availability', () => {
       };
       const result =
         operation === 'create'
-          ? await service.create(ctx, org, fence, { ...vcs, credential })
-          : await service.update(ctx, org, fence, 'source', { credential });
+          ? await service.create(ctx, org, fence, { ...vcs, credential }, call)
+          : await service.update(ctx, org, fence, 'source', { credential }, call);
       expect(result).toEqual({
         ok: false,
         error: 'invalid_config',
@@ -236,12 +236,19 @@ describe('source administration', () => {
         }),
       } as SourceRecord);
       credentialRepository.get.mockResolvedValue({ kind: 'bearer' });
-      const result = await service.update(ctx, org, fence, 'source', {
-        configJson: JSON.stringify({
-          provider,
-          repository: provider === 'github' ? 'owner/repo' : 'https://github.com/owner/repo.git',
-        }),
-      });
+      const result = await service.update(
+        ctx,
+        org,
+        fence,
+        'source',
+        {
+          configJson: JSON.stringify({
+            provider,
+            repository: provider === 'github' ? 'owner/repo' : 'https://github.com/owner/repo.git',
+          }),
+        },
+        call,
+      );
       expect(result.ok).toBe(true);
       expect(credentialRepository.get).toHaveBeenCalledTimes(provider === 'github' ? 1 : 0);
     },
@@ -250,9 +257,9 @@ describe('source administration', () => {
   it('links an existing credential id without preparing a credential', async () => {
     const { service, sources, credentials, credentialRepository } = setup();
     credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'bearer' });
-    expect((await service.create(ctx, org, fence, { ...input, credentialId: 'existing' })).ok).toBe(
-      true,
-    );
+    expect(
+      (await service.create(ctx, org, fence, { ...input, credentialId: 'existing' }, call)).ok,
+    ).toBe(true);
     expect(credentials.prepare).not.toHaveBeenCalled();
     expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
     const created = sources.create.mock.calls[0]?.[2] as { credential: unknown };
@@ -263,11 +270,17 @@ describe('source administration', () => {
   it('refuses plaintext together with a credential id', async () => {
     const { service, sources, credentials } = setup();
     expect(
-      await service.create(ctx, org, fence, {
-        ...input,
-        credential: { kind: 'bearer', plaintext: JSON.stringify({ token: 'long-enough-token' }) },
-        credentialId: 'existing',
-      }),
+      await service.create(
+        ctx,
+        org,
+        fence,
+        {
+          ...input,
+          credential: { kind: 'bearer', plaintext: JSON.stringify({ token: 'long-enough-token' }) },
+          credentialId: 'existing',
+        },
+        call,
+      ),
     ).toMatchObject({ ok: false, error: 'invalid_config', problems: [{ field: 'credential' }] });
     expect(sources.create).not.toHaveBeenCalled();
     expect(credentials.prepare).not.toHaveBeenCalled();
@@ -279,17 +292,23 @@ describe('source administration', () => {
   ] as const)('checks the kind of a linked GitHub App credential (%s)', async (kind, allowed) => {
     const { service, sources, credentialRepository } = setup();
     credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind });
-    const result = await service.create(ctx, org, fence, {
-      ...input,
-      type: 'vcs',
-      url: null,
-      configJson: JSON.stringify({
-        provider: 'github',
-        repository: 'owner/name',
-        installationId: 123,
-      }),
-      credentialId: 'existing',
-    });
+    const result = await service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        type: 'vcs',
+        url: null,
+        configJson: JSON.stringify({
+          provider: 'github',
+          repository: 'owner/name',
+          installationId: 123,
+        }),
+        credentialId: 'existing',
+      },
+      call,
+    );
     expect(result.ok).toBe(allowed);
     expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
     expect(sources.create).toHaveBeenCalledTimes(allowed ? 1 : 0);
@@ -304,14 +323,20 @@ describe('source administration', () => {
       kind: 'github_app',
     });
     expect(
-      await service.create(ctx, project, fence, {
-        ...input,
-        projectId: 'project-a',
-        type: 'vcs',
-        url: null,
-        configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
-        credentialId: 'existing',
-      }),
+      await service.create(
+        ctx,
+        project,
+        fence,
+        {
+          ...input,
+          projectId: 'project-a',
+          type: 'vcs',
+          url: null,
+          configJson: JSON.stringify({ provider: 'github', repository: 'owner/name' }),
+          credentialId: 'existing',
+        },
+        call,
+      ),
     ).toEqual({ ok: false, error: 'credential_scope_mismatch' });
     expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
     expect(sources.create).not.toHaveBeenCalled();
@@ -327,9 +352,9 @@ describe('source administration', () => {
       credentialId: 'existing',
     };
     credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'bearer' });
-    const wrongKind = await service.create(ctx, org, fence, github);
+    const wrongKind = await service.create(ctx, org, fence, github, call);
     credentialRepository.get.mockResolvedValue(null);
-    expect(await service.create(ctx, org, fence, github)).toEqual(wrongKind);
+    expect(await service.create(ctx, org, fence, github, call)).toEqual(wrongKind);
   });
 
   it.each([
@@ -349,17 +374,23 @@ describe('source administration', () => {
   ] as const)('validates linked %s for %s on %s', async (kind, type, runtime, allowed) => {
     const { service, sources, credentials, credentialRepository } = setup(runtime);
     credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind });
-    const result = await service.create(ctx, org, fence, {
-      ...input,
-      type,
-      ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
-      url: type === 'vcs' ? null : kind === 'query' ? `${input.url}?key=discarded` : input.url,
-      configJson:
-        type === 'vcs'
-          ? JSON.stringify({ provider: 'git', repository: 'https://git.example.com/repo' })
-          : '{}',
-      credentialId: 'existing',
-    });
+    const result = await service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        type,
+        ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
+        url: type === 'vcs' ? null : kind === 'query' ? `${input.url}?key=discarded` : input.url,
+        configJson:
+          type === 'vcs'
+            ? JSON.stringify({ provider: 'git', repository: 'https://git.example.com/repo' })
+            : '{}',
+        credentialId: 'existing',
+      },
+      call,
+    );
     expect(credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
     expect(credentials.prepare).not.toHaveBeenCalled();
     expect(sources.create).toHaveBeenCalledTimes(allowed ? 1 : 0);
@@ -376,7 +407,9 @@ describe('source administration', () => {
 
   it('refuses missing credentials for a non-GitHub source before persistence', async () => {
     const { service, sources, credentialRepository } = setup();
-    expect(await service.create(ctx, org, fence, { ...input, credentialId: 'missing' })).toEqual({
+    expect(
+      await service.create(ctx, org, fence, { ...input, credentialId: 'missing' }, call),
+    ).toEqual({
       ok: false,
       error: 'credential_scope_mismatch',
     });
@@ -389,13 +422,19 @@ describe('source administration', () => {
     async (plaintext) => {
       const { service, sources, credentials, credentialRepository } = setup();
       expect(
-        await service.create(ctx, org, fence, {
-          ...input,
-          credentialId: null,
-          ...(plaintext
-            ? { credential: { kind: 'bearer' as const, plaintext: '{"token":"shared-token"}' } }
-            : {}),
-        }),
+        await service.create(
+          ctx,
+          org,
+          fence,
+          {
+            ...input,
+            credentialId: null,
+            ...(plaintext
+              ? { credential: { kind: 'bearer' as const, plaintext: '{"token":"shared-token"}' } }
+              : {}),
+          },
+          call,
+        ),
       ).toMatchObject({ ok: true });
       expect(credentialRepository.get).not.toHaveBeenCalled();
       expect(credentials.prepare).toHaveBeenCalledTimes(plaintext ? 1 : 0);
@@ -408,13 +447,19 @@ describe('source administration', () => {
   it('treats a null credentialId as absent when the source forbids credentials', async () => {
     const { service, sources, credentialRepository } = setup();
     expect(
-      await service.create(ctx, org, fence, {
-        ...input,
-        type: 'npmjs_proxy',
-        ecosystem: 'npm',
-        url: 'https://registry.npmjs.org',
-        credentialId: null,
-      }),
+      await service.create(
+        ctx,
+        org,
+        fence,
+        {
+          ...input,
+          type: 'npmjs_proxy',
+          ecosystem: 'npm',
+          url: 'https://registry.npmjs.org',
+          credentialId: null,
+        },
+        call,
+      ),
     ).toMatchObject({ ok: true });
     expect(credentialRepository.get).not.toHaveBeenCalled();
     expect(sources.create.mock.calls[0]?.[2]).toMatchObject({ credential: null });
@@ -427,7 +472,13 @@ describe('source administration', () => {
     ['node', ['10.0.0.1'], true],
   ] as const)('classifies private source URLs on %s with %j', async (runtime, hosts, allowed) => {
     const { service, sources } = setup(runtime, [...hosts]);
-    const result = await service.create(ctx, org, fence, { ...input, url: 'https://10.0.0.1' });
+    const result = await service.create(
+      ctx,
+      org,
+      fence,
+      { ...input, url: 'https://10.0.0.1' },
+      call,
+    );
     expect(result.ok).toBe(allowed);
     if (!allowed)
       expect(result).toMatchObject({ problems: [{ field: 'url', message: 'denied_by_policy' }] });
@@ -440,7 +491,7 @@ describe('source administration', () => {
       { configJson: '{"distHosts":["metadata.google.internal"]}' },
       { url: 'https://broker.example.com' },
     ]) {
-      expect(await service.create(ctx, org, fence, { ...input, ...change })).toMatchObject({
+      expect(await service.create(ctx, org, fence, { ...input, ...change }, call)).toMatchObject({
         ok: false,
         problems: [{ message: 'denied_by_policy' }],
       });
@@ -451,7 +502,7 @@ describe('source administration', () => {
   it('allows project writes only to the actor owner, never registered-name edits', async () => {
     const { service, sources, registeredNames } = setup();
     expect(
-      (await service.create(ctx, project, fence, { ...input, projectId: 'project-a' })).ok,
+      (await service.create(ctx, project, fence, { ...input, projectId: 'project-a' }, call)).ok,
     ).toBe(true);
     sources.get.mockResolvedValue({
       ...input,
@@ -459,10 +510,14 @@ describe('source administration', () => {
       projectId: 'project-a',
       credentialId: null,
     } as SourceRecord);
-    expect((await service.update(ctx, project, fence, 'source', { url: input.url })).ok).toBe(true);
-    expect(await service.create(ctx, project, fence, input)).toMatchObject({ error: 'forbidden' });
+    expect((await service.update(ctx, project, fence, 'source', { url: input.url }, call)).ok).toBe(
+      true,
+    );
+    expect(await service.create(ctx, project, fence, input, call)).toMatchObject({
+      error: 'forbidden',
+    });
     expect(
-      await service.create(ctx, project, fence, { ...input, projectId: 'project-b' }),
+      await service.create(ctx, project, fence, { ...input, projectId: 'project-b' }, call),
     ).toMatchObject({ error: 'forbidden' });
     expect(
       await service.addRegisteredName(
@@ -486,7 +541,7 @@ describe('source administration', () => {
       id: 'source',
       projectId: 'project-b',
     } as SourceRecord);
-    expect(await service.update(ctx, project, fence, 'source', {})).toMatchObject({
+    expect(await service.update(ctx, project, fence, 'source', {}, call)).toMatchObject({
       error: 'not_found',
     });
   });
@@ -536,10 +591,16 @@ describe('source administration', () => {
 
   it('passes warnings through and logs only each field', async () => {
     const { service, log } = setup();
-    const result = await service.create(ctx, org, fence, {
-      ...input,
-      configJson: '{"selection":{"patterns":["*/package"]}}',
-    });
+    const result = await service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        configJson: '{"selection":{"patterns":["*/package"]}}',
+      },
+      call,
+    );
     expect(result).toMatchObject({ ok: true, warnings: [{ field: 'selection.patterns[0]' }] });
     expect(log).toHaveBeenCalledWith({
       level: 'info',
@@ -572,11 +633,17 @@ describe('source administration', () => {
         npm_token: { token: secret },
         ssh_key: { privateKeyPem: pem, knownHosts: 'git.example.com ssh-ed25519 YWJjZGVmZ2g=' },
       };
-      const result = await service.create(ctx, org, fence, {
-        ...input,
-        url: kind === 'query' ? `${input.url}?token=${secret}` : input.url,
-        credential: { kind, plaintext: JSON.stringify(values[kind]) },
-      });
+      const result = await service.create(
+        ctx,
+        org,
+        fence,
+        {
+          ...input,
+          url: kind === 'query' ? `${input.url}?token=${secret}` : input.url,
+          credential: { kind, plaintext: JSON.stringify(values[kind]) },
+        },
+        call,
+      );
       expect(result.ok).toBe(true);
       const output = JSON.stringify([sources.create.mock.calls, result, log.mock.calls]);
       expect(output).not.toContain(secret);
@@ -591,14 +658,22 @@ describe('source administration', () => {
   it('rejects malformed credentials and invalid config before writing', async () => {
     const { service, sources, credentials } = setup();
     expect(
-      await service.create(ctx, org, fence, {
-        ...input,
-        credential: { kind: 'bearer', plaintext: '{}' },
-      }),
+      await service.create(
+        ctx,
+        org,
+        fence,
+        {
+          ...input,
+          credential: { kind: 'bearer', plaintext: '{}' },
+        },
+        call,
+      ),
     ).toMatchObject({ error: 'invalid_config' });
-    expect(await service.create(ctx, org, fence, { ...input, type: 'hosted' })).toMatchObject({
-      error: 'invalid_config',
-    });
+    expect(await service.create(ctx, org, fence, { ...input, type: 'hosted' }, call)).toMatchObject(
+      {
+        error: 'invalid_config',
+      },
+    );
     expect(credentials.prepare).not.toHaveBeenCalled();
     expect(sources.create).not.toHaveBeenCalled();
   });
@@ -628,8 +703,8 @@ describe('source administration regressions', () => {
     for (const operation of ['create', 'update'] as const) {
       const result =
         operation === 'create'
-          ? await service.create(ctx, org, fence, vcs)
-          : await service.update(ctx, org, fence, 'source', { configJson: vcs.configJson });
+          ? await service.create(ctx, org, fence, vcs, call)
+          : await service.update(ctx, org, fence, 'source', { configJson: vcs.configJson }, call);
       expect(result.ok).toBe(allowed);
       if (!allowed)
         expect(result).toMatchObject({
@@ -642,7 +717,7 @@ describe('source administration regressions', () => {
 
   it('rejects an empty update before invoking the repository', async () => {
     const { service, sources, credentials } = setup();
-    expect(await service.update(ctx, org, fence, 'source', {})).toMatchObject({
+    expect(await service.update(ctx, org, fence, 'source', {}, call)).toMatchObject({
       ok: false,
       error: 'invalid_config',
       problems: [{ field: 'changes', message: 'must name one or more updatable source fields' }],
@@ -662,8 +737,8 @@ describe('source administration regressions', () => {
         const credential = { kind: 'bearer' as const, plaintext };
         const result =
           operation === 'create'
-            ? await service.create(ctx, org, fence, { ...input, credential })
-            : await service.update(ctx, org, fence, 'source', { credential });
+            ? await service.create(ctx, org, fence, { ...input, credential }, call)
+            : await service.update(ctx, org, fence, 'source', { credential }, call);
         expect(result.ok).toBe(!refused);
         expect(Uint8Array.from(plaintext)).toEqual(original);
         const temporary = credentials.prepare.mock.calls[0]?.[1].plaintext as Uint8Array;
@@ -690,8 +765,8 @@ describe('source administration regressions', () => {
       sources.get.mockResolvedValue({ ...vcs, id: 'source', credentialId: null } as SourceRecord);
       const result =
         operation === 'create'
-          ? await service.create(ctx, org, fence, vcs)
-          : await service.update(ctx, org, fence, 'source', { configJson: vcs.configJson });
+          ? await service.create(ctx, org, fence, vcs, call)
+          : await service.update(ctx, org, fence, 'source', { configJson: vcs.configJson }, call);
       expect(result.ok).toBe(allowed);
       if (!allowed)
         expect(result).toMatchObject({
@@ -703,7 +778,7 @@ describe('source administration regressions', () => {
   it('requires the project actor form for project source writes', async () => {
     const { service, sources, registeredNames } = setup();
     expect(
-      await service.create(ctx, org, fence, { ...input, projectId: 'project-a' }),
+      await service.create(ctx, org, fence, { ...input, projectId: 'project-a' }, call),
     ).toMatchObject({ error: 'forbidden' });
     sources.get.mockResolvedValue({
       ...input,
@@ -711,13 +786,15 @@ describe('source administration regressions', () => {
       projectId: 'project-a',
     } as SourceRecord);
     expect(
-      await service.update(ctx, org, fence, 'source', { pollIntervalSeconds: 600 }),
+      await service.update(ctx, org, fence, 'source', { pollIntervalSeconds: 600 }, call),
     ).toMatchObject({ error: 'not_found' });
     for (const operation of ['delete', 'resume', 'enable'] as const) {
       expect(
         await (operation === 'enable'
           ? service.enable(ctx, org, fence, 'source', call)
-          : service[operation](ctx, org, fence, 'source')),
+          : operation === 'resume'
+            ? service.resume(ctx, org, fence, 'source', call)
+            : service.delete(ctx, org, fence, 'source')),
       ).toMatchObject({
         error: 'not_found',
       });
@@ -749,9 +826,16 @@ describe('source administration regressions', () => {
     sources.update.mockResolvedValue('conflict');
     const plaintext = new TextEncoder().encode(JSON.stringify({ token: 'replacement-token' }));
     expect(
-      await service.update(ctx, org, fence, 'source', {
-        credential: { kind: 'bearer', plaintext },
-      }),
+      await service.update(
+        ctx,
+        org,
+        fence,
+        'source',
+        {
+          credential: { kind: 'bearer', plaintext },
+        },
+        call,
+      ),
     ).toMatchObject({ error: 'conflict' });
     expect(credentials.put).not.toHaveBeenCalled();
     expect(credentials.prepare).toHaveBeenCalledOnce();
@@ -760,6 +844,7 @@ describe('source administration regressions', () => {
       providerAnchors: [],
       changes: { credentialId: 'credential' },
       preparedCredential: { id: 'credential', statement: { sql: 'sealed', params: [] } },
+      audit: [expect.objectContaining({ action: 'source.credential_set' })],
     });
     expect(
       credentials.prepare.mock.calls[0]?.[1].plaintext.every((byte: number) => byte === 0),
@@ -778,7 +863,7 @@ describe('source administration regressions', () => {
     },
   ])('preserves the supplied patch fields for %j', async (patch) => {
     const { service, sources } = setup();
-    expect((await service.update(ctx, org, fence, 'source', patch)).ok).toBe(true);
+    expect((await service.update(ctx, org, fence, 'source', patch, call)).ok).toBe(true);
     const changes = sources.update.mock.calls[0]?.[2].changes;
     expect(changes).not.toHaveProperty('url');
     expect(changes).not.toHaveProperty('configJson');
@@ -789,10 +874,16 @@ describe('source administration regressions', () => {
     const parse = vi.spyOn(JSON, 'parse');
     const classify = vi.spyOn(urlPolicy, 'classifyUrl');
     try {
-      const result = await service.create(ctx, org, fence, {
-        ...input,
-        configJson: ' '.repeat(65537),
-      });
+      const result = await service.create(
+        ctx,
+        org,
+        fence,
+        {
+          ...input,
+          configJson: ' '.repeat(65537),
+        },
+        call,
+      );
       expect(result).toMatchObject({ problems: [{ field: 'config' }] });
       expect(parse).not.toHaveBeenCalled();
       expect(classify).not.toHaveBeenCalled();
@@ -811,7 +902,7 @@ describe('source administration regressions', () => {
     const classify = vi.spyOn(urlPolicy, 'classifyUrl');
     try {
       expect(
-        await service.create(ctx, org, fence, { ...input, url: null, configJson }),
+        await service.create(ctx, org, fence, { ...input, url: null, configJson }, call),
       ).toMatchObject({ problems: [{ field: 'distHosts' }] });
       expect(classify).not.toHaveBeenCalled();
       expect(sources.create).not.toHaveBeenCalled();
@@ -839,8 +930,8 @@ describe('source write input bounds', () => {
           };
           const result =
             operation === 'create'
-              ? await service.create(ctx, org, fence, { ...input, ...patch })
-              : await service.update(ctx, org, fence, 'source', patch);
+              ? await service.create(ctx, org, fence, { ...input, ...patch }, call)
+              : await service.update(ctx, org, fence, 'source', patch, call);
           expect(result).toMatchObject({
             ok: false,
             error: 'invalid_config',
@@ -882,8 +973,8 @@ describe('source write input bounds', () => {
           };
           result =
             operation === 'create'
-              ? await service.create(ctx, org, fence, { ...input, ...changes })
-              : await service.update(ctx, org, fence, 'source', changes);
+              ? await service.create(ctx, org, fence, { ...input, ...changes }, call)
+              : await service.update(ctx, org, fence, 'source', changes, call);
           expect(parse).not.toHaveBeenCalled();
         } finally {
           parse.mockRestore();
@@ -910,8 +1001,8 @@ describe('source write input bounds', () => {
         const patch = { retentionDaysOverride };
         const result =
           operation === 'create'
-            ? await service.create(ctx, org, fence, { ...input, ...patch })
-            : await service.update(ctx, org, fence, 'source', patch);
+            ? await service.create(ctx, org, fence, { ...input, ...patch }, call)
+            : await service.update(ctx, org, fence, 'source', patch, call);
         const allowed = retentionDaysOverride === null || retentionDaysOverride >= 365;
         expect(result.ok).toBe(allowed);
         if (retentionDaysOverride !== null) expect(organizations.get).toHaveBeenCalledWith(ctx);
@@ -932,12 +1023,18 @@ describe('source write input bounds', () => {
 it('checks URL length first when numeric fields are also invalid', async () => {
   const { service } = setup();
   expect(
-    await service.create(ctx, org, fence, {
-      ...input,
-      url: 'x'.repeat(2049),
-      pollIntervalSeconds: 0,
-      retentionDaysOverride: -1,
-    }),
+    await service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        url: 'x'.repeat(2049),
+        pollIntervalSeconds: 0,
+        retentionDaysOverride: -1,
+      },
+      call,
+    ),
   ).toMatchObject({ problems: [{ field: 'url' }] });
 });
 
@@ -945,11 +1042,17 @@ it('accepts a URL at the parser length limit and skips retention lookup when omi
   const { service, organizations } = setup();
   const prefix = 'https://packages.example.com/';
   expect(
-    await service.create(ctx, org, fence, {
-      ...input,
-      url: prefix + 'a'.repeat(2048 - prefix.length),
-      pollIntervalSeconds: 1,
-    }),
+    await service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        url: prefix + 'a'.repeat(2048 - prefix.length),
+        pollIntervalSeconds: 1,
+      },
+      call,
+    ),
   ).toMatchObject({ ok: true });
   expect(organizations.get).not.toHaveBeenCalled();
 });
@@ -957,7 +1060,9 @@ it('accepts a URL at the parser length limit and skips retention lookup when omi
 it('refuses supplied retention overrides when the organization is missing', async () => {
   const { service, sources, organizations } = setup();
   organizations.get.mockResolvedValue(null);
-  expect(await service.create(ctx, org, fence, { ...input, retentionDaysOverride: 365 })).toEqual({
+  expect(
+    await service.create(ctx, org, fence, { ...input, retentionDaysOverride: 365 }, call),
+  ).toEqual({
     ok: false,
     error: 'not_found',
   });
@@ -1664,7 +1769,7 @@ describe('GitHub personal access tokens', () => {
   };
   it('prepares a token using the existing per-source credential store', async () => {
     const f = setup();
-    expect((await f.service.create(ctx, org, fence, github)).ok).toBe(true);
+    expect((await f.service.create(ctx, org, fence, github, call)).ok).toBe(true);
     expect(f.credentials.prepare).toHaveBeenCalledWith(
       ctx,
       expect.objectContaining({ kind: 'bearer' }),
@@ -1672,14 +1777,20 @@ describe('GitHub personal access tokens', () => {
   });
   it('rejects installationId together with a token without leaking it', async () => {
     const f = setup();
-    const result = await f.service.create(ctx, org, fence, {
-      ...github,
-      configJson: JSON.stringify({
-        provider: 'github',
-        repository: 'owner/name',
-        installationId: 123,
-      }),
-    });
+    const result = await f.service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...github,
+        configJson: JSON.stringify({
+          provider: 'github',
+          repository: 'owner/name',
+          installationId: 123,
+        }),
+      },
+      call,
+    );
     expect(result).toMatchObject({
       ok: false,
       error: 'invalid_config',
@@ -1724,6 +1835,7 @@ describe('GitHub token updates', () => {
             },
           }
         : { configJson: JSON.stringify(config) },
+      call,
     );
     expect(result).toMatchObject({
       ok: false,
@@ -1754,13 +1866,19 @@ describe('GitHub App installation conflicts', () => {
         projectId: null,
         kind: 'github_app',
       });
-      const result = await f.service.create(ctx, org, fence, {
-        ...input,
-        type: 'vcs',
-        url: null,
-        configJson: JSON.stringify(config),
-        ...(kind === 'linked' ? { credentialId: 'existing' } : { credential: app }),
-      });
+      const result = await f.service.create(
+        ctx,
+        org,
+        fence,
+        {
+          ...input,
+          type: 'vcs',
+          url: null,
+          configJson: JSON.stringify(config),
+          ...(kind === 'linked' ? { credentialId: 'existing' } : { credential: app }),
+        },
+        call,
+      );
       expect(result).toMatchObject({
         ok: false,
         error: 'invalid_config',
@@ -1787,10 +1905,17 @@ describe('GitHub App installation conflicts', () => {
         projectId: null,
         kind: 'github_app',
       });
-      const result = await f.service.update(ctx, org, fence, 'source', {
-        configJson: JSON.stringify(config),
-        ...(kind === 'new' ? { credential: app } : {}),
-      });
+      const result = await f.service.update(
+        ctx,
+        org,
+        fence,
+        'source',
+        {
+          configJson: JSON.stringify(config),
+          ...(kind === 'new' ? { credential: app } : {}),
+        },
+        call,
+      );
       expect(result).toMatchObject({
         ok: false,
         error: 'invalid_config',
@@ -1812,7 +1937,7 @@ it('rejects a URL query on update with a stored query credential without strippi
   f.credentialRepository.get.mockResolvedValue({ id: 'existing', projectId: null, kind: 'query' });
   const url = 'https://packages.example.com/repository?channel=stable';
   const patch = { url };
-  expect(await f.service.update(ctx, org, fence, 'source', patch)).toMatchObject({
+  expect(await f.service.update(ctx, org, fence, 'source', patch, call)).toMatchObject({
     ok: false,
     error: 'invalid_config',
     problems: [
@@ -1842,7 +1967,7 @@ describe('Packagist stored credentials', () => {
         projectId: null,
         kind: 'http_basic',
       });
-      expect(await f.service.update(ctx, org, fence, 'source', patch)).toMatchObject({
+      expect(await f.service.update(ctx, org, fence, 'source', patch, call)).toMatchObject({
         ok: true,
       });
       expect(f.sources.update).toHaveBeenCalledWith(
@@ -1853,9 +1978,16 @@ describe('Packagist stored credentials', () => {
       expect(f.credentialRepository.get).not.toHaveBeenCalled();
       f.sources.update.mockClear();
       expect(
-        await f.service.update(ctx, org, fence, 'source', {
-          configJson: JSON.stringify({ githubToken: true }),
-        }),
+        await f.service.update(
+          ctx,
+          org,
+          fence,
+          'source',
+          {
+            configJson: JSON.stringify({ githubToken: true }),
+          },
+          call,
+        ),
       ).toMatchObject({ ok: false, error: 'invalid_config' });
       expect(f.credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
       expect(f.sources.update).not.toHaveBeenCalled();
@@ -1875,9 +2007,16 @@ describe('Packagist stored credentials', () => {
     } as SourceRecord);
     f.credentialRepository.get.mockResolvedValue(null);
     expect(
-      await f.service.update(ctx, org, fence, 'source', {
-        configJson: JSON.stringify({ githubToken: true }),
-      }),
+      await f.service.update(
+        ctx,
+        org,
+        fence,
+        'source',
+        {
+          configJson: JSON.stringify({ githubToken: true }),
+        },
+        call,
+      ),
     ).toEqual({ ok: false, error: 'credential_scope_mismatch' });
     expect(f.credentialRepository.get).toHaveBeenCalledWith(ctx, 'existing');
     expect(f.sources.update).not.toHaveBeenCalled();
@@ -1897,9 +2036,16 @@ describe('Packagist stored credentials', () => {
         credentialId: null,
       } as SourceRecord);
       const plaintext = JSON.stringify({ token: 'T972-private-token-sentinel' });
-      const result = await f.service.update(ctx, org, fence, 'source', {
-        credential: { kind: 'bearer', plaintext },
-      });
+      const result = await f.service.update(
+        ctx,
+        org,
+        fence,
+        'source',
+        {
+          credential: { kind: 'bearer', plaintext },
+        },
+        call,
+      );
       expect(result).toMatchObject({ ok: true });
       expect(f.sources.update).toHaveBeenCalledWith(
         ctx,
@@ -1932,7 +2078,7 @@ describe('Packagist stored credentials', () => {
         kind: 'http_basic',
       });
       const enable = { configJson: JSON.stringify({ githubToken: true }) };
-      expect(await f.service.update(ctx, org, fence, 'source', enable)).toMatchObject({
+      expect(await f.service.update(ctx, org, fence, 'source', enable, call)).toMatchObject({
         ok: false,
         error: 'invalid_config',
       });
@@ -1942,7 +2088,9 @@ describe('Packagist stored credentials', () => {
         projectId: null,
         kind: 'bearer',
       });
-      expect(await f.service.update(ctx, org, fence, 'source', enable)).toMatchObject({ ok: true });
+      expect(await f.service.update(ctx, org, fence, 'source', enable, call)).toMatchObject({
+        ok: true,
+      });
       expect(f.credentialRepository.get).toHaveBeenLastCalledWith(ctx, 'existing');
       f.sources.update.mockClear();
       f.sources.get.mockResolvedValue({
@@ -1953,9 +2101,9 @@ describe('Packagist stored credentials', () => {
         configJson: enable.configJson,
         credentialId: 'existing',
       } as SourceRecord);
-      expect(await f.service.update(ctx, org, fence, 'source', { credential: null })).toMatchObject(
-        { ok: false, error: 'invalid_config' },
-      );
+      expect(
+        await f.service.update(ctx, org, fence, 'source', { credential: null }, call),
+      ).toMatchObject({ ok: false, error: 'invalid_config' });
       expect(f.sources.update).not.toHaveBeenCalled();
       expect(f.log).not.toHaveBeenCalled();
     },
@@ -2010,7 +2158,7 @@ describe('GitHub source editing metadata', () => {
         installationId: 42,
       }),
     };
-    const result = await f.service.update(ctx, org, fence, 'source', changes);
+    const result = await f.service.update(ctx, org, fence, 'source', changes, call);
     expect(f.credentialRepository.get).toHaveBeenCalledWith(ctx, 'stored');
     expect(result).toMatchObject({ ok: false, problems: [{ field: 'installationId' }] });
     expect(f.sources.update).not.toHaveBeenCalled();

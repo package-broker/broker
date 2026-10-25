@@ -13,6 +13,10 @@ import type { Clock } from '../ids.js';
 import { defaultEntry, type ScopedCache } from '../platform/cache.js';
 import type { SourceType } from '../sources/config.js';
 import type { DescribeOptions, DescribeResult, DocumentValidators } from '../sources/provider.js';
+import {
+  SOURCE_UNAVAILABLE_RETRY_SECONDS,
+  SourceUnavailableError,
+} from '../sources/source-unavailable.js';
 import { applyChunk, type ApplyDeps, type ApplyInput } from './apply-description.js';
 import { createCoalescer, type CoalesceFill, type DoneState } from './coalesce.js';
 import { PackagistBusyError } from './composer/packagist-proxy.js';
@@ -457,6 +461,8 @@ export function createOnDemandFill(deps: OnDemandDeps): OnDemandFill {
           return await hold();
         return mapped(result);
       } catch (error) {
+        if (error instanceof SourceUnavailableError)
+          return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
         if (isUpstreamRefusal(error)) return { kind: 'upstream_refused' };
         if (error instanceof PackagistBusyError)
           return {

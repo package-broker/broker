@@ -49,6 +49,12 @@ import type { PlatformPorts, Platform, RequestContext, RouteDefinition } from '.
 import { sourceCredentialRequired } from '../sources/credential-origins.js';
 import { parseSourceConfig } from '../sources/config.js';
 import type { CredentialEchoProbe } from '../sources/credentials.js';
+import {
+  createCredentialUnavailableMark,
+  SourceUnavailableError,
+  type CredentialUnavailableWrite,
+  type SourceUnavailableReason,
+} from '../sources/source-unavailable.js';
 import type { Observability } from '../platform/observability.js';
 import type {
   PolicyFetchOptions,
@@ -61,7 +67,7 @@ import {
   type ProviderSource,
   type SourceProvider,
 } from '../sources/provider.js';
-import type { OutboundPolicy } from '../sources/url-policy.js';
+import { classifyUrl, type OutboundPolicy, type OutboundRefusal } from '../sources/url-policy.js';
 import type { AccessRecorder } from './access-recorder.js';
 import { composerVersionInput } from './composer/version-object.js';
 import { composerRoutes } from './composer/routes.js';
@@ -133,6 +139,7 @@ export interface RegistryModuleDeps {
       ctx: OrgContext,
       source: SourceRecord,
     ) => Promise<SourceCredential | null>;
+    readonly credentialUnavailable?: CredentialUnavailableWrite;
   };
   readonly sync?: {
     readonly packageId: PackageIdReads['packageId'];
@@ -165,6 +172,13 @@ export interface RegistryModule extends Partial<RegistryJobs> {
 
 const NO_PROBE: CredentialEchoProbe = { secrets: [], queryParams: [] };
 const PROXY_TYPES: ReadonlySet<string> = new Set(['packagist_proxy', 'npmjs_proxy']);
+const POLICY_REFUSALS: ReadonlySet<OutboundRefusal> = new Set<OutboundRefusal>([
+  'self_origin',
+  'blocked_address',
+  'blocked_host',
+  'port',
+  'scheme',
+]);
 
 export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   const { jobs } = deps.ports;
@@ -227,6 +241,29 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       : registry.userAgent.default;
   }
 
+  const credentialMark = createCredentialUnavailableMark(ingest.credentialUnavailable);
+
+  function policyDenied(url: string): boolean {
+    const verdict = classifyUrl(url, deps.outboundPolicy);
+    return !verdict.ok && POLICY_REFUSALS.has(verdict.reason);
+  }
+
+  async function unavailable(
+    ctx: OrgContext,
+    record: SourceRecord,
+    reason: SourceUnavailableReason,
+    requestObservability: Observability | undefined,
+  ): Promise<SourceUnavailableReason> {
+    (requestObservability ?? observability).log({
+      level: 'warn',
+      event: 'source.unavailable',
+      reason_code: reason,
+      source_id: record.id,
+    });
+    if (reason === 'credential_unavailable') await credentialMark.mark(ctx, record);
+    return reason;
+  }
+
   async function bind(ctx: OrgContext, record: SourceRecord, requestObservability?: Observability) {
     if (record.status === 'paused') return null;
     const parsed = parseSourceConfig(record.type, record.ecosystem, record.url, record.configJson, {
@@ -234,7 +271,13 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       policy: deps.outboundPolicy,
       hasCredential: record.credentialId !== null,
     });
-    if (!parsed.ok) return null;
+    if (!parsed.ok)
+      return unavailable(
+        ctx,
+        record,
+        record.url !== null && policyDenied(record.url) ? 'policy_denied' : 'config_invalid',
+        requestObservability,
+      );
     const base = { id: record.id, ecosystem: record.ecosystem, url: record.url };
     const draft = (
       record.type === 'vcs'
@@ -242,12 +285,14 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
         : { ...base, type: record.type, config: parsed.config, providerId: '' }
     ) as ProviderSource;
     const provider = providerFor(ctx, draft);
-    if (provider === null) return null;
+    if (provider === null)
+      return unavailable(ctx, record, 'provider_unavailable', requestObservability);
     const source =
       draft.type === 'vcs' ? draft : ({ ...draft, providerId: provider.id } as ProviderSource);
     const needsCredential = record.credentialId !== null && sourceCredentialRequired(source);
     const credential = needsCredential ? await ingest.credential(ctx, record) : null;
-    if (needsCredential && credential === null) return null;
+    if (needsCredential && credential === null)
+      return unavailable(ctx, record, 'credential_unavailable', requestObservability);
     const fetch = deps.policyFetch(userAgentOf(record), {
       sourceId: record.id,
       observability: requestObservability ?? observability,
@@ -265,7 +310,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
 
   function providerContext(
     ctx: OrgContext,
-    bound: NonNullable<Awaited<ReturnType<typeof bind>>>,
+    bound: Exclude<Awaited<ReturnType<typeof bind>>, SourceUnavailableReason | null>,
     signal: AbortSignal,
   ): ProviderContext {
     return {
@@ -288,6 +333,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     const record = await catalogue.sources.get(ctx, sourceId);
     if (record === null) return null;
     const bound = await bind(ctx, record, requestObservability);
+    if (typeof bound === 'string') throw new SourceUnavailableError(bound);
     if (bound === null) return null;
     if (
       bound.source.type === 'composer_repository' &&
@@ -387,6 +433,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     const record = await catalogue.sources.get(ctx, target.sourceId);
     if (record === null) return null;
     const bound = await bind(ctx, record, requestObservability);
+    if (typeof bound === 'string') throw new SourceUnavailableError(bound);
     if (bound === null) return null;
     return {
       packageName: row.packageName,
@@ -436,7 +483,14 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
           upstreamState: sync.upstreamState,
           executor: sync.executor,
           sourceMetadata,
-          planFill,
+          planFill: async (ctx, sourceId, key) => {
+            try {
+              return await planFill(ctx, sourceId, key);
+            } catch (error) {
+              if (error instanceof SourceUnavailableError) return null;
+              throw error;
+            }
+          },
           findPackageId: sync.packageId,
           writeGuard: sync.writeGuard,
           clock: deps.clock,

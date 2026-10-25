@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   assertBuiltModules,
   assertWorkerBundle,
@@ -234,8 +234,6 @@ describe('T448 fixture transport', () => {
 });
 
 describe('production bundle HTTP scenario', () => {
-  beforeAll(() => local.buildBundles(), 600_000);
-
   it.each(['node', 'cloudflare'])(
     'can inject the poll clock into the %s bundle',
     async (runtime) => {

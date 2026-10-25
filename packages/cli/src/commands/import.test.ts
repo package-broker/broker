@@ -2,8 +2,37 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from '
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { importRoutes } from '@package-broker/core/api/routes/import';
+import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
+import { sha256Hex } from '@package-broker/core/auth/primitives';
+import {
+  createAuthorizationEngine,
+  patValidationGate,
+  type EngineTokenAccess,
+} from '@package-broker/core/authz/engine';
+import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-fence';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { systemClock, ulid } from '@package-broker/core/ids';
+import { createImportCredentialService } from '@package-broker/core/import/credentials';
+import { createImportRunService } from '@package-broker/core/import/run-service';
+import { createKernel } from '@package-broker/core/kernel/kernel';
+import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
+import { createSecretCipher } from '@package-broker/core/secrets/cipher';
+import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
+import { createBlobRepository } from '@package-broker/db-sqlite/repositories/blob';
+import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import { createImportCredentialRepository } from '@package-broker/db-sqlite/repositories/import-credential';
+import { createImportRunStore } from '@package-broker/db-sqlite/repositories/import-run';
+import {
+  openMigratedDatabase,
+  type MigratedDatabase,
+} from '@package-broker/db-sqlite/testing/migrated-database';
 import { run } from '../cli.js';
-import { importManifest } from '../import/client.js';
+import { ImportClient, importManifest, type CredentialResolver } from '../import/client.js';
 import { credentialBindings, localResolver, runImport, type ImportOptions } from './import.js';
 
 const ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
@@ -40,6 +69,7 @@ const ready = {
   approvedAt: '2026-10-24T11:50:00.000Z',
   credentialWindowUntil: '2026-10-24T12:50:00.000Z',
   acceptedAt: null,
+  credentials: [{ sourceRef: 'satis:source/test', bound: false }],
 };
 const map = {
   version: 1,
@@ -112,6 +142,142 @@ describe('submit receipt', () => {
       expect(content).not.toContain(SECRET);
       expect(content).not.toContain(TOKEN);
     }
+  });
+  it('binds an unresolved receipt to its token before replaying with the same principal label', async () => {
+    const otherToken = 'different-principal-token-sentinel';
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      throw new Error(SECRET);
+    });
+    expect(await runImport({ ...options, fetch: fetcher })).toBe(6);
+    const saved = await readFile(options.receipt!, 'utf8');
+    fetcher.mockClear();
+    expect(
+      await runImport({
+        ...options,
+        resume: true,
+        env: { PB_IMPORT_TOKEN: otherToken },
+        fetch: fetcher,
+      }),
+    ).toBe(2);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(await readFile(options.receipt!, 'utf8')).toBe(saved);
+    expect(JSON.parse(saved)).toMatchObject({ tokenFingerprint: await sha256Hex(TOKEN) });
+    expect(saved).not.toContain(TOKEN);
+    expect(saved).not.toContain(otherToken);
+    expect(output()).not.toContain(TOKEN);
+    expect(output()).not.toContain(otherToken);
+    expect(await runImport({ ...options, resume: true, fetch: fetcher })).toBe(6);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('refuses replay of an unresolved legacy receipt without a token fingerprint', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      throw new Error(SECRET);
+    });
+    expect(await runImport({ ...options, fetch: fetcher })).toBe(6);
+    const saved = JSON.parse(await readFile(options.receipt!, 'utf8')) as Record<string, unknown>;
+    delete saved.tokenFingerprint;
+    await writeFile(options.receipt!, JSON.stringify(saved));
+    fetcher.mockClear();
+    expect(await runImport({ ...options, resume: true, fetch: fetcher })).toBe(2);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('reads known receipts with rotated tokens, legacy=%s', async (legacy) => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
+      init?.method === 'GET' ? json(ready) : created(),
+    );
+    expect(await runImport({ ...options, fetch: fetcher })).toBe(0);
+    if (legacy) {
+      const saved = JSON.parse(await readFile(options.receipt!, 'utf8')) as Record<string, unknown>;
+      delete saved.tokenFingerprint;
+      await writeFile(options.receipt!, JSON.stringify(saved));
+    }
+    fetcher.mockClear();
+    expect(
+      await runImport({
+        ...options,
+        resume: true,
+        env: { PB_IMPORT_TOKEN: 'rotated-token' },
+        fetch: fetcher,
+      }),
+    ).toBe(0);
+    expect(fetcher.mock.calls.map((call) => call[1]!.method)).toEqual(['GET']);
+  });
+  it.each(['failed', 'cancelled', 'rolled_back'])(
+    'returns failure for a known receipt run in state %s',
+    async (state) => {
+      const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
+        init?.method === 'GET' ? json({ ...ready, state }) : created(),
+      );
+      expect(await runImport({ ...options, fetch: fetcher })).toBe(0);
+      fetcher.mockClear();
+      expect(await runImport({ ...options, resume: true, fetch: fetcher })).toBe(1);
+      expect(fetcher.mock.calls.map((call) => call[1]!.method)).toEqual(['GET']);
+      expect(output()).toContain(`${ID}: ${state};`);
+    },
+  );
+  it.each(['failed', 'cancelled', 'rolled_back'])(
+    'returns failure after unresolved submit replay finds state %s',
+    async (state) => {
+      const fetcher = vi.fn<typeof fetch>(async () => {
+        throw new Error(SECRET);
+      });
+      expect(await runImport({ ...options, fetch: fetcher })).toBe(6);
+      fetcher.mockClear();
+      fetcher.mockImplementation(async (_url, init) =>
+        init?.method === 'GET'
+          ? json({ ...ready, state })
+          : Response.json(
+              { id: ID, planHash: plan.hash, state: 'planned' },
+              { status: 201, headers: { 'idempotent-replayed': 'true' } },
+            ),
+      );
+      expect(await runImport({ ...options, resume: true, fetch: fetcher })).toBe(1);
+      expect(fetcher.mock.calls.map((call) => call[1]!.method)).toEqual(['POST', 'GET']);
+      expect(output()).toContain(`${ID}: ${state};`);
+      expect(JSON.parse(await readFile(options.receipt!, 'utf8'))).toMatchObject({ run: ID });
+    },
+  );
+  it('stops unknown submit replay at the one-hour guard margin', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      throw new Error(SECRET);
+    });
+    expect(await runImport({ ...options, fetch: fetcher })).toBe(6);
+    fetcher.mockClear();
+    expect(
+      await runImport({
+        ...options,
+        fetch: fetcher,
+        resume: true,
+        now: () => NOW + 23 * 3600000 - 1,
+      }),
+    ).toBe(6);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    fetcher.mockClear();
+    expect(
+      await runImport({ ...options, fetch: fetcher, resume: true, now: () => NOW + 23 * 3600000 }),
+    ).toBe(6);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('reads and prints the live state after a replayed submit', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
+      init?.method === 'GET'
+        ? json({ ...ready, state: 'verified' })
+        : Response.json(
+            { id: ID, planHash: plan.hash, state: 'planned' },
+            { status: 201, headers: { 'idempotent-replayed': 'true' } },
+          ),
+    );
+    expect(await runImport({ ...options, fetch: fetcher })).toBe(0);
+    expect(fetcher.mock.calls.map((call) => call[1]!.method)).toEqual(['POST', 'GET']);
+    expect(output()).toContain(`${ID}: verified;`);
+    expect(output()).not.toContain(`${ID}: planned`);
+  });
+  it('refuses resolving the broker token as source material', async () => {
+    await expect(localResolver(options.env)('env:PB_IMPORT_TOKEN')).rejects.toMatchObject({
+      code: 'invalid_credential_ref',
+      exitCode: 2,
+    });
+    expect(output()).not.toContain(TOKEN);
   });
   it('requires an explicit resume and refuses changed origin, principal, manifest and expired replay', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => {
@@ -197,20 +363,19 @@ describe('credentials and token input', () => {
     expect(await readdir(dir)).toEqual(files);
     for (const file of files) expect(await readFile(join(dir, file), 'utf8')).not.toContain(SECRET);
   });
-  it('fails closed on the current server DTO without resolving secrets', async () => {
-    const currentDto = { ...ready, credentialWindowUntil: undefined };
+  it('refuses a closed window with a clear message without resolving secrets', async () => {
     const resolve = vi.fn(async () => SECRET);
     expect(
       await runImport({
         ...options,
         command: 'credentials',
         run: ID,
-        fetch: vi.fn(async () => json(currentDto)),
+        fetch: vi.fn(async () => json({ ...ready, credentialWindowUntil: null })),
         resolve,
       }),
-    ).toBe(2);
+    ).toBe(1);
     expect(resolve).not.toHaveBeenCalled();
-    expect(output()).toContain('credential_window_unavailable');
+    expect(output()).toContain('credential_window_closed');
   });
   it('supports existing file references without copying their contents', async () => {
     const path = join(dir, 'auth-input');
@@ -330,6 +495,33 @@ describe('status, verify, accept and CLI dispatch', () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
   });
+  it.each([null, '', 'rate limit: ' + SECRET])(
+    'waits on a non-JSON 429 body %s using Retry-After',
+    async (body) => {
+      let time = NOW;
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response(body, { status: 429, headers: { 'retry-after': '2' } }))
+        .mockResolvedValueOnce(json(ready));
+      const sleep = vi.fn(async (ms: number) => {
+        time += ms;
+      });
+      expect(
+        await runImport({
+          ...options,
+          command: 'status',
+          run: ID,
+          waitSeconds: 5,
+          fetch: fetcher,
+          now: () => time,
+          sleep,
+        }),
+      ).toBe(0);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(2000);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(output()).not.toContain(SECRET);
+    },
+  );
   it('honors Retry-After within the wait budget and stops on a larger delay', async () => {
     let reads = 0;
     const fetcher = vi.fn<typeof fetch>(async () =>
@@ -369,6 +561,94 @@ describe('status, verify, accept and CLI dispatch', () => {
     expect(output()).not.toContain(SECRET);
   });
 
+  it('retries the first verify status read after Retry-After without repeating POST', async () => {
+    let time = NOW;
+    let reads = 0;
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      if (init!.method === 'POST') return new Response(null, { status: 204 });
+      if (reads++ === 0) return Response.json({}, { status: 429, headers: { 'retry-after': '2' } });
+      return json({ ...ready, state: 'verified' });
+    });
+    const sleep = vi.fn(async (ms: number) => {
+      time += ms;
+    });
+    expect(
+      await runImport({
+        ...options,
+        command: 'verify',
+        run: ID,
+        waitSeconds: 5,
+        now: () => time,
+        fetch: fetcher,
+        sleep,
+      }),
+    ).toBe(0);
+    expect(sleep).toHaveBeenCalledExactlyOnceWith(2000);
+    expect(fetcher.mock.calls.map((call) => call[1]!.method)).toEqual(['POST', 'GET', 'GET']);
+  });
+  it.each(['status', 'verify', 'accept', 'verify-post'] as const)(
+    'caps a stalled %s request to the remaining wait budget',
+    async (command) => {
+      vi.useFakeTimers();
+      try {
+        const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+          const controller = new AbortController();
+          setTimeout(() => controller.abort(), ms);
+          return controller.signal;
+        });
+        let time = NOW;
+        const signals: AbortSignal[] = [];
+        const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+          const signal = init!.signal!;
+          signals.push(signal);
+          if (init!.method === 'POST' && command !== 'verify-post') {
+            time += 1200;
+            return new Response(null, { status: 204 });
+          }
+          return new Promise<Response>((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason)),
+          );
+        });
+        const pending = runImport({
+          ...options,
+          command: command === 'verify-post' ? 'verify' : command,
+          run: ID,
+          waitSeconds: 2,
+          now: () => time,
+          fetch: fetcher,
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        const remaining = command === 'verify' ? 800 : 2000;
+        await vi.advanceTimersByTimeAsync(remaining - 1);
+        expect(signals.at(-1)!.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await pending).toBe(3);
+        expect(signals.at(-1)!.aborted).toBe(true);
+        expect(timeout).toHaveBeenLastCalledWith(remaining);
+        timeout.mockRestore();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it('does not start another read when sleeping exhausts the deadline', async () => {
+    let time = NOW;
+    const fetcher = vi.fn(async () => json({ ...ready, state: 'planned' }));
+    expect(
+      await runImport({
+        ...options,
+        command: 'status',
+        run: ID,
+        waitSeconds: 1,
+        now: () => time,
+        fetch: fetcher,
+        sleep: async (ms) => {
+          time += ms;
+        },
+      }),
+    ).toBe(3);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it('verifies through POST then observes the state transition', async () => {
     const states = ['verifying', 'verified'];
     const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
@@ -457,5 +737,515 @@ describe('status, verify, accept and CLI dispatch', () => {
     ).toBe(2);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(output()).not.toContain(TOKEN);
+  });
+});
+
+describe('against the real import routes on SQLite', () => {
+  const ORIGIN = 'https://broker.test';
+  const SESSION_SECRET = 'A'.repeat(43);
+  const CSRF = 'B'.repeat(43);
+  const anchors = [
+    {
+      provider: 'oidc',
+      anchor: 'oidc:https://idp.example.test',
+      emailAuthoritative: true,
+      emailAuthoritativeDomains: ['example.test'],
+    },
+  ];
+  const stmt = (sql: string, ...params: Statement['params']): Statement => ({ sql, params });
+  const source = (ref: string) => ({
+    ...raw.items[0]!,
+    external_ref: ref,
+    name: ref,
+    url: `https://${ref}.example.test/`,
+    credential_ref: `env:${ref.toUpperCase()}_AUTH`,
+  });
+  const twoSources = { ...raw, source_system: 'test', items: [source('alpha'), source('beta')] };
+  const secretOf = (ref: string) => `${SECRET}-${ref}`;
+  type Hook = (method: string, path: string) => 'before' | 'after' | undefined;
+
+  let database: MigratedDatabase;
+  let executor: SqlExecutor;
+  let ctx: OrgContext;
+  let app: { fetch(request: Request): Promise<Response> };
+  let hook: Hook;
+  let sent: string[];
+  let bearerMode: boolean;
+  let tokenAllowed: boolean;
+  const bearer = formatToken('svc', 'abcdefghijkl', new Uint8Array(32).fill(6));
+  const tokenKeyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(9) }]);
+  const tokenFence = vi.fn(importWriteTokenFence);
+
+  const session = (method: string, path: string, body?: unknown) =>
+    app.fetch(
+      new Request(ORIGIN + path, {
+        method,
+        headers: {
+          origin: ORIGIN,
+          cookie: `${SESSION_COOKIE}=${SESSION_SECRET}`,
+          'x-csrf-token': CSRF,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+  // The routes under test run unchanged; only the bearer token is swapped for the harness session.
+  const broker: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const headers = new Headers(init!.headers);
+    expect(headers.get('authorization')).toBe(`Bearer ${bearerMode ? bearer : TOKEN}`);
+    if (!bearerMode) {
+      headers.delete('authorization');
+      headers.set('origin', ORIGIN);
+      headers.set('cookie', `${SESSION_COOKIE}=${SESSION_SECRET}`);
+      headers.set('x-csrf-token', CSRF);
+    } else {
+      expect(headers.has('cookie')).toBe(false);
+      expect(headers.has('x-csrf-token')).toBe(false);
+    }
+    const method = init!.method ?? 'GET';
+    const step = hook(method, url.pathname);
+    if (step === 'before') throw new Error(SECRET);
+    sent.push(`${method} ${url.pathname}`);
+    const response = await app.fetch(
+      new Request(url, {
+        method,
+        headers,
+        ...(init!.body === undefined ? {} : { body: init!.body as string }),
+      }),
+    );
+    if (step === 'after') throw new Error(SECRET);
+    return response;
+  };
+  const runRows = () =>
+    executor.all<{ id: string }>(stmt('SELECT id FROM import_run WHERE org_id = ?', ctx.orgId));
+  const statusOf = async (id: string) =>
+    (await (await session('GET', `/_pb/import-runs/${id}`)).json()) as {
+      state: string;
+      credentialWindowUntil: string | null;
+      credentials: { sourceRef: string; bound: boolean }[];
+    };
+  const submitted = async () => {
+    expect(await runImport({ ...options, now: Date.now, fetch: broker })).toBe(0);
+    return (JSON.parse(await readFile(options.receipt!, 'utf8')) as { run: string }).run;
+  };
+  const approve = async (id: string) => {
+    const { planHash } = (await (await session('GET', `/_pb/import-runs/${id}`)).json()) as {
+      planHash: string;
+    };
+    expect((await session('POST', `/_pb/import-runs/${id}/approve`, { planHash })).status).toBe(
+      204,
+    );
+  };
+  const apply = async (id: string) => {
+    await executor.batch([
+      ...['alpha', 'beta'].flatMap((ref) => [
+        stmt(
+          "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, ?, 'composer', 'composer_repository')",
+          `source-${ref}`,
+          ctx.orgId,
+          ref,
+        ),
+        stmt(
+          "INSERT INTO import_ref (id, org_id, import_run_id, entity_type, entity_id, external_ref, action) VALUES (?, ?, ?, 'source', ?, ?, 'create')",
+          `ref-${ref}`,
+          ctx.orgId,
+          id,
+          `source-${ref}`,
+          ref,
+        ),
+      ]),
+      stmt("UPDATE import_run SET state = 'applied' WHERE org_id = ? AND id = ?", ctx.orgId, id),
+    ]);
+  };
+  const credentials = (resolve: CredentialResolver, id: string) =>
+    runImport({
+      ...options,
+      now: Date.now,
+      command: 'credentials',
+      run: id,
+      fetch: broker,
+      resolve,
+    });
+  const expectNoLeak = async () => {
+    expect(output()).not.toContain(SECRET);
+    expect(output()).not.toContain(TOKEN);
+    for (const file of await readdir(dir))
+      expect(await readFile(join(dir, file), 'utf8')).not.toContain(SECRET);
+  };
+
+  beforeEach(async () => {
+    hook = () => undefined;
+    sent = [];
+    bearerMode = false;
+    tokenAllowed = true;
+    tokenFence.mockClear();
+    database = await openMigratedDatabase({ twoOrganizations: true });
+    executor = database.executor;
+    if (database.orgs === null) throw new Error('missing organizations');
+    ctx = database.orgs.a;
+    await executor.batch([
+      stmt(
+        "INSERT INTO user_account (id, org_id, email) VALUES ('actor', ?, 'actor@example.test')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, 'oidc', 'oidc:https://idp.example.test')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES ('identity', ?, 'actor', 'oidc', 'subject', 'actor@example.test', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO role (id, org_id, key, name, scope) VALUES ('importer', ?, 'importer', 'Importer', 'organization')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'importer', 'org:import:write')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'importer', 'org:import:approve')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES ('grant', ?, 'email', 'actor@example.test', 'organization', 'importer')",
+        ctx.orgId,
+      ),
+      stmt(
+        `INSERT INTO session (id, org_id, user_id, secret_hash, csrf_hash, expires_at, last_seen_at, reauth_at)
+        VALUES ('session', ?, 'actor', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 hour'),
+        strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+        ctx.orgId,
+        'a'.repeat(64),
+        'b'.repeat(64),
+      ),
+    ]);
+    const objects = new Map<string, Uint8Array>();
+    const blobs = createBlobStore(
+      {
+        async putVerified(key, body, input) {
+          objects.set(key, new Uint8Array(await new Response(body).arrayBuffer()));
+          return { size: input.size, mediaType: input.mediaType };
+        },
+        async get(key) {
+          const bytes = objects.get(key);
+          return bytes === undefined
+            ? null
+            : {
+                size: bytes.length,
+                mediaType: 'application/json',
+                range: null,
+                body: new Response(bytes).body!,
+              };
+        },
+        async head(key) {
+          const bytes = objects.get(key);
+          return bytes === undefined ? null : { size: bytes.length, mediaType: 'application/json' };
+        },
+        async remove(key) {
+          objects.delete(key);
+        },
+      },
+      createBlobRepository(executor),
+      { admission: createBlobUploadAdmission() },
+    );
+    const routes = importRoutes({
+      service: createImportRunService({
+        store: createImportRunStore({ executor, blobs, providerAnchors: anchors }),
+        ids: { ulid },
+        clock: systemClock,
+      }),
+      credentials: createImportCredentialService({
+        store: createImportCredentialRepository(executor, { blobs, providerAnchors: anchors }),
+        credentials: createCredentialStore({
+          repository: createCredentialRepository(executor),
+          cipher: createSecretCipher(
+            createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
+            'credential-encryption',
+          ),
+          ids: { ulid },
+          clock: systemClock,
+        }),
+        runtime: 'node',
+        ids: { ulid },
+        auditStatement: auditPendingStatement,
+      }),
+      clock: systemClock,
+      ids: { ulid },
+      clientIp: () => null,
+      auditStatement: auditPendingStatement,
+      tokenFence,
+    });
+    const csrfHash = await sha256Hex(CSRF);
+    app = await createKernel({
+      platform: 'node',
+      plugins: [],
+      coreRoutes: routes,
+      ports: { organizations: { get: async () => null }, clock: systemClock, ids: { ulid } },
+      resolveOrg: async () => ctx,
+      health: async () => true,
+      log: () => undefined,
+      authorization: createAuthorizationEngine({
+        access: {
+          lookupSession: async () => ({
+            session: { id: 'session', csrfHash },
+            user: { id: 'actor' },
+            identity: null,
+            protectedHolder: false,
+            project: null,
+            organizationPermissions: ['org:import:write', 'org:import:approve'],
+            projectPermissions: [],
+          }),
+          lookupToken: async (_org, input) =>
+            input.selector !== 'abcdefghijkl'
+              ? null
+              : (Object.defineProperty(
+                  {
+                    token: {
+                      id: 'import-token',
+                      kind: 'svc',
+                      expired: false,
+                      revoked: false,
+                      lastUsedAt: null,
+                      userId: null,
+                      servicePrincipalId: 'import-service',
+                      bindingOk: true,
+                      projectMode: 'all',
+                      scope: { level: 'full', readOnly: false },
+                    },
+                    principalStatus: 'active',
+                    projectVisible: true,
+                    project: null,
+                    validation: { kind: null, identityId: null, fresh: true, evidenceAt: null },
+                    organizationPermissions: tokenAllowed ? ['org:import:write'] : [],
+                    projectPermissions: [],
+                  },
+                  'verifier',
+                  {
+                    value: {
+                      secretHash: await hashToken(tokenKeyring, 1, bearer),
+                      pepperVersion: 1,
+                    },
+                  },
+                ) as unknown as EngineTokenAccess),
+          touchSession: async () => true,
+          touchToken: async () => true,
+        },
+        tokenUse: {
+          keyring: tokenKeyring,
+          nowMs: () => Date.now(),
+          dispatch: (task) => {
+            void task();
+          },
+          log: () => undefined,
+        },
+        patValidation: patValidationGate,
+        publicOrigin: ORIGIN,
+        providerAnchors: async () => [],
+      }),
+    });
+    await writeFile(options.manifest!, JSON.stringify(twoSources));
+    await writeFile(
+      options.credentials!,
+      JSON.stringify({
+        version: 1,
+        sources: ['alpha', 'beta'].map((ref) => ({
+          external_ref: ref,
+          credential_ref: `env:${ref.toUpperCase()}_AUTH`,
+          kind: 'bearer',
+        })),
+      }),
+    );
+    options = {
+      ...options,
+      env: {
+        PB_IMPORT_TOKEN: TOKEN,
+        ALPHA_AUTH: JSON.stringify({ token: secretOf('alpha') }),
+        BETA_AUTH: JSON.stringify({ token: secretOf('beta') }),
+      },
+    };
+  });
+  afterEach(async () => {
+    await database.close();
+  });
+
+  it('uses bearer authority and token fences for create, verify and PUT, with GET permission checks and principal-scoped replay', async () => {
+    bearerMode = true;
+    options = { ...options, env: { ...options.env, PB_IMPORT_TOKEN: bearer } };
+    await executor.batch([
+      stmt(
+        "INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES ('import-service', ?, 'Importer', 'actor')",
+        ctx.orgId,
+      ),
+      stmt(
+        "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, 'import-service', 'org:import:write')",
+        ctx.orgId,
+      ),
+      stmt(
+        `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, service_principal_id, expires_at, project_mode)
+        VALUES ('import-token', ?, 'svc', 'abcdefghijkl', ?, 1, 'Importer', '["full"]', 'import-service', strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 hour'), 'all')`,
+        ctx.orgId,
+        await hashToken(tokenKeyring, 1, bearer),
+      ),
+    ]);
+    const client = new ImportClient({ broker: ORIGIN, token: bearer, fetch: broker });
+    const plan = await importManifest(JSON.stringify(twoSources));
+    const result = await client.submit(plan.canonical, 'bearer-key');
+    expect(result.replayed).toBe(false);
+    expect(await client.status(result.id)).toMatchObject({ state: 'planned' });
+    expect(await client.submit(plan.canonical, 'bearer-key')).toMatchObject({
+      id: result.id,
+      replayed: true,
+    });
+    expect(
+      await executor.all(
+        stmt(
+          'SELECT principal_key FROM api_idempotency WHERE org_id = ? AND key = ?',
+          ctx.orgId,
+          'bearer-key',
+        ),
+      ),
+    ).toEqual([{ principal_key: 'service:import-service' }]);
+    await approve(result.id);
+    await apply(result.id);
+    expect(await credentials(localResolver(options.env), result.id)).toBe(0);
+    await client.verify(result.id);
+    expect(await client.status(result.id)).toMatchObject({ state: 'verifying' });
+    expect(await Promise.all(tokenFence.mock.results.map((entry) => entry.value))).toEqual(
+      Array.from({ length: 5 }, () =>
+        expect.objectContaining({
+          tokenId: 'import-token',
+          tokenKind: 'svc',
+          principalId: 'import-service',
+          permission: 'org:import:write',
+        }),
+      ),
+    );
+    tokenAllowed = false;
+    for (const [method, path, body] of [
+      ['POST', '', plan.canonical],
+      ['GET', `/${result.id}`, undefined],
+      ['POST', `/${result.id}/verify`, undefined],
+      [
+        'PUT',
+        `/${result.id}/credentials/alpha`,
+        JSON.stringify({ kind: 'bearer', material: JSON.stringify({ token: SECRET }) }),
+      ],
+    ] as const) {
+      const response = await broker(`${ORIGIN}/_pb/import-runs${path}`, {
+        method,
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body }),
+      });
+      expect(response.status).toBe(403);
+    }
+    expect(output()).not.toContain(bearer);
+    await expectNoLeak();
+  });
+  it('resumes a submit whose response was lost into the same run', async () => {
+    hook = (method) => (method === 'POST' ? 'after' : undefined);
+    expect(await runImport({ ...options, now: Date.now, fetch: broker })).toBe(6);
+    const [created] = await runRows();
+    expect(created).toBeDefined();
+    hook = () => undefined;
+    expect(await runImport({ ...options, now: Date.now, fetch: broker, resume: true })).toBe(0);
+    expect(await runRows()).toEqual([created]);
+    expect(JSON.parse(await readFile(options.receipt!, 'utf8'))).toMatchObject({
+      run: created!.id,
+    });
+    expect(output()).toContain(`${created!.id}: planned;`);
+    expect(sent).toEqual([
+      'POST /_pb/import-runs',
+      'POST /_pb/import-runs',
+      `GET /_pb/import-runs/${created!.id}`,
+    ]);
+    await expectNoLeak();
+  });
+
+  it('reports a reused key with a different manifest as an idempotency mismatch', async () => {
+    const client = new ImportClient({ broker: ORIGIN, token: TOKEN, fetch: broker });
+    const first = await importManifest(JSON.stringify(twoSources));
+    const second = await importManifest(
+      JSON.stringify({ ...twoSources, items: [source('alpha')] }),
+    );
+    expect(await client.submit(first.canonical, 'reused-key')).toMatchObject({ replayed: false });
+    await expect(client.submit(second.canonical, 'reused-key')).rejects.toMatchObject({
+      code: 'idempotency_mismatch',
+      exitCode: 1,
+    });
+    expect(await runRows()).toHaveLength(1);
+  });
+
+  it('waits for approval and apply, then refuses once the window has closed', async () => {
+    const id = await submitted();
+    const resolve = vi.fn(localResolver(options.env));
+    expect(await credentials(resolve, id)).toBe(3);
+    expect(output()).toContain('opens when the run is approved');
+    await approve(id);
+    expect(await credentials(resolve, id)).toBe(3);
+    expect(output()).toContain('Wait for apply to finish');
+    await apply(id);
+    await executor.batch([
+      stmt(
+        "UPDATE import_run SET credential_window_until = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 second') WHERE org_id = ? AND id = ?",
+        ctx.orgId,
+        id,
+      ),
+    ]);
+    expect(await credentials(resolve, id)).toBe(1);
+    expect(output()).toContain('credential_window_closed');
+    expect(resolve).not.toHaveBeenCalled();
+    expect(sent.filter((line) => line.startsWith('PUT'))).toEqual([]);
+    expect((await statusOf(id)).credentials.every((entry) => !entry.bound)).toBe(true);
+  });
+
+  it('completes a partial upload on rerun, uploading only the unbound source', async () => {
+    const id = await submitted();
+    await approve(id);
+    await apply(id);
+    expect(
+      await runImport({ ...options, now: Date.now, command: 'status', run: id, fetch: broker }),
+    ).toBe(0);
+    expect(output()).toMatch(/applied; .*credentials=0\/2 bound, upload until /);
+    hook = (method, path) => (method === 'PUT' && path.endsWith('/beta') ? 'before' : undefined);
+    const resolve = vi.fn(localResolver(options.env));
+    expect(await credentials(resolve, id)).toBe(6);
+    expect((await statusOf(id)).credentials).toEqual([
+      { sourceRef: 'alpha', bound: true },
+      { sourceRef: 'beta', bound: false },
+    ]);
+    hook = () => undefined;
+    resolve.mockClear();
+    sent = [];
+    expect(await credentials(resolve, id)).toBe(0);
+    expect(resolve.mock.calls).toEqual([['env:BETA_AUTH']]);
+    expect(sent.filter((line) => line.startsWith('PUT'))).toEqual([
+      `PUT /_pb/import-runs/${id}/credentials/beta`,
+    ]);
+    expect(output()).toContain('Uploaded credentials for 1 source entries; 1 already bound.');
+    expect((await statusOf(id)).credentials).toEqual([
+      { sourceRef: 'alpha', bound: true },
+      { sourceRef: 'beta', bound: true },
+    ]);
+    await expectNoLeak();
+  });
+
+  it('treats an upload whose response was lost as bound on rerun', async () => {
+    const id = await submitted();
+    await approve(id);
+    await apply(id);
+    hook = (method, path) => (method === 'PUT' && path.endsWith('/beta') ? 'after' : undefined);
+    const resolve = vi.fn(localResolver(options.env));
+    expect(await credentials(resolve, id)).toBe(6);
+    hook = () => undefined;
+    resolve.mockClear();
+    sent = [];
+    expect(await credentials(resolve, id)).toBe(0);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(sent).toEqual([`GET /_pb/import-runs/${id}`]);
+    expect(output()).toContain('Uploaded credentials for 0 source entries; 2 already bound.');
+    await expectNoLeak();
   });
 });

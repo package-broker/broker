@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { open, rename, unlink } from 'node:fs/promises';
 import { isUlid } from '@package-broker/core/ids';
 import { isCanonicalUrl } from '@package-broker/core/import/source-config';
@@ -14,6 +14,7 @@ import {
   type CredentialBinding,
   type CredentialResolver,
   type RunStatus,
+  uploadsAccepted,
 } from '../import/client.js';
 
 export interface ImportOptions {
@@ -59,6 +60,11 @@ async function readLocal(path: string, maxBytes: number): Promise<string> {
 
 export function localResolver(env: ImportOptions['env']): CredentialResolver {
   return async (reference) => {
+    if (reference === 'env:PB_IMPORT_TOKEN')
+      throw localError(
+        'invalid_credential_ref',
+        'The broker token cannot be used as a source credential.',
+      );
     if (/^env:[A-Z_][A-Z0-9_]{0,127}$/.test(reference)) {
       const value = env[reference.slice(4)];
       if (value !== undefined) return value;
@@ -180,6 +186,7 @@ interface Receipt {
   readonly hash: string;
   readonly key: string;
   readonly principal: string;
+  readonly tokenFingerprint?: string;
   readonly attemptedAt: string;
   readonly run: string | null;
 }
@@ -204,7 +211,12 @@ async function writeReceipt(path: string, receipt: Receipt, fresh: boolean): Pro
   }
 }
 
-async function submit(options: ImportOptions, client: ImportClient): Promise<void> {
+async function submit(
+  options: ImportOptions,
+  client: ImportClient,
+  token: string,
+): Promise<number> {
+  const tokenFingerprint = createHash('sha256').update(token).digest('hex');
   if (
     !options.manifest ||
     !options.receipt ||
@@ -228,11 +240,24 @@ async function submit(options: ImportOptions, client: ImportClient): Promise<voi
     }
     if (
       !object(raw) ||
-      !strictKeys(raw, ['version', 'origin', 'hash', 'key', 'principal', 'attemptedAt', 'run']) ||
+      !strictKeys(raw, [
+        'version',
+        'origin',
+        'hash',
+        'key',
+        'principal',
+        'tokenFingerprint',
+        'attemptedAt',
+        'run',
+      ]) ||
       raw.version !== 1 ||
       raw.origin !== client.origin ||
       raw.hash !== plan.hash ||
       raw.principal !== options.principal ||
+      !(
+        raw.tokenFingerprint === undefined ||
+        (typeof raw.tokenFingerprint === 'string' && /^[a-f0-9]{64}$/.test(raw.tokenFingerprint))
+      ) ||
       typeof raw.key !== 'string' ||
       !/^[A-Za-z0-9_-]{1,128}$/.test(raw.key) ||
       !timestamp(raw.attemptedAt) ||
@@ -247,11 +272,16 @@ async function submit(options: ImportOptions, client: ImportClient): Promise<voi
       const status = await client.status(receipt.run);
       if (status.planHash !== plan.hash)
         throw localError('plan_hash_mismatch', 'The receipt run does not match the manifest.');
-      printStatus(status);
-      return;
+      printStatus(status, now);
+      return failed(status) ? 1 : 0;
     }
+    if (receipt.tokenFingerprint !== tokenFingerprint)
+      throw localError(
+        'receipt_mismatch',
+        'Receipt does not match this authentication token; reconcile the run in the UI.',
+      );
     const age = now - Date.parse(receipt.attemptedAt);
-    if (age < 0 || age >= 86400000 - 60000)
+    if (age < 0 || age >= 86400000 - 3600000)
       throw new ImportClientError(
         'outcome_unknown',
         6,
@@ -264,6 +294,7 @@ async function submit(options: ImportOptions, client: ImportClient): Promise<voi
       hash: plan.hash,
       key: randomUUID(),
       principal: options.principal,
+      tokenFingerprint,
       attemptedAt: new Date(now).toISOString(),
       run: null,
     };
@@ -285,12 +316,26 @@ async function submit(options: ImportOptions, client: ImportClient): Promise<voi
       'Run created but receipt could not be saved; reconcile in the UI before retrying.',
     );
   }
-  console.log(`${result.id}: planned. Review, approve and apply in the UI at ${client.origin}.`);
+  if (result.replayed) {
+    const status = await client.status(result.id);
+    if (status.planHash !== plan.hash)
+      throw localError('plan_hash_mismatch', 'The receipt run does not match the manifest.');
+    printStatus(status, (options.now ?? Date.now)());
+    return failed(status) ? 1 : 0;
+  } else {
+    console.log(`${result.id}: planned. Review, approve and apply in the UI at ${client.origin}.`);
+  }
+  return 0;
 }
 
-function printStatus(status: RunStatus): void {
+function printStatus(status: RunStatus, nowMs: number): void {
+  const bound = status.credentials.filter((entry) => entry.bound).length;
+  const credentials =
+    status.credentials.length === 0
+      ? ''
+      : `; credentials=${bound}/${status.credentials.length} bound${uploadsAccepted(status, nowMs) ? `, upload until ${status.credentialWindowUntil}` : ''}`;
   console.log(
-    `${status.id}: ${status.state}; approved=${status.approvedAt ?? 'pending'}; accepted=${status.acceptedAt ?? 'pending'}${status.credentialWindowUntil === undefined ? '' : `; credentials-until=${status.credentialWindowUntil ?? 'closed'}`}`,
+    `${status.id}: ${status.state}; approved=${status.approvedAt ?? 'pending'}; accepted=${status.acceptedAt ?? 'pending'}${credentials}`,
   );
 }
 function failed(status: RunStatus): boolean {
@@ -313,10 +358,7 @@ export async function runImport(options: ImportOptions): Promise<number> {
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.now === undefined ? {} : { now: options.now }),
     });
-    if (options.command === 'submit') {
-      await submit(options, client);
-      return 0;
-    }
+    if (options.command === 'submit') return await submit(options, client, token!);
     if (!options.run) throw localError('invalid_run', 'Supply an import run ID.');
     if (options.command === 'credentials') {
       if (!options.manifest || !options.credentials)
@@ -326,13 +368,15 @@ export async function runImport(options: ImportOptions): Promise<number> {
         await readLocal(options.credentials, 8 * 1048576),
         plan.manifest,
       );
-      const count = await client.credentials(
+      const result = await client.credentials(
         options.run,
         plan.manifest,
         bindings,
         options.resolve ?? localResolver(options.env),
       );
-      console.log(`Uploaded credentials for ${count} source entries.`);
+      console.log(
+        `Uploaded credentials for ${result.uploaded} source entries; ${result.skipped} already bound.`,
+      );
       return 0;
     }
     const wait = options.waitSeconds ?? 0;
@@ -348,7 +392,7 @@ export async function runImport(options: ImportOptions): Promise<number> {
         if (wait > 0 && reads++ > wait)
           throw new ImportClientError('wait_timeout', 3, 'Import status wait timed out.');
         try {
-          return await client.status(options.run!);
+          return await client.status(options.run!, wait > 0 ? deadline : undefined);
         } catch (error) {
           if (!(error instanceof ImportClientError) || error.code !== 'rate_limited' || wait === 0)
             throw error;
@@ -359,8 +403,9 @@ export async function runImport(options: ImportOptions): Promise<number> {
         }
       }
     };
-    let status =
-      options.command === 'verify' ? await client.verify(options.run) : await readStatus();
+    if (options.command === 'verify')
+      await client.verify(options.run, wait > 0 ? deadline : undefined);
+    let status = await readStatus();
     const pending = () =>
       options.command === 'accept'
         ? status.acceptedAt === null
@@ -373,10 +418,10 @@ export async function runImport(options: ImportOptions): Promise<number> {
       i < wait && pending() && !failed(status) && (options.now ?? Date.now)() < deadline;
       i++
     ) {
-      await sleep(1000);
+      await sleep(Math.min(1000, Math.max(0, deadline - now())));
       status = await readStatus();
     }
-    printStatus(status);
+    printStatus(status, now());
     if (failed(status)) return 1;
     if (options.command === 'accept' && status.acceptedAt === null) {
       console.log(`Accept run ${status.id} in the UI at ${client.origin}.`);

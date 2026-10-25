@@ -75,13 +75,33 @@ export const RUN_STATES = [
   'rolled_back',
   'cancelled',
 ] as const;
+export interface CredentialState {
+  readonly sourceRef: string;
+  readonly bound: boolean;
+}
 export interface RunStatus {
   readonly id: string;
   readonly state: (typeof RUN_STATES)[number];
   readonly planHash: string | null;
   readonly approvedAt: string | null;
   readonly acceptedAt: string | null;
-  readonly credentialWindowUntil?: string | null;
+  readonly credentialWindowUntil: string | null;
+  readonly credentials: readonly CredentialState[];
+}
+const WINDOW_MARGIN_MS = 5000;
+/** Sources exist only once apply has run; the server refuses uploads before that. */
+export const UPLOAD_STATES: ReadonlySet<RunStatus['state']> = new Set([
+  'applied',
+  'verifying',
+  'verified',
+]);
+export function uploadsAccepted(status: RunStatus, nowMs: number): boolean {
+  return (
+    status.approvedAt !== null &&
+    status.credentialWindowUntil !== null &&
+    UPLOAD_STATES.has(status.state) &&
+    Date.parse(status.credentialWindowUntil) > nowMs + WINDOW_MARGIN_MS
+  );
 }
 export interface CredentialBinding {
   readonly external_ref: string;
@@ -107,6 +127,20 @@ function hash(value: unknown): value is string {
 function nullableDate(value: unknown): value is string | null {
   return value === null || timestamp(value);
 }
+function credentialStates(value: unknown): value is CredentialState[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10000 &&
+    value.every(
+      (entry) =>
+        object(entry) &&
+        typeof entry.sourceRef === 'string' &&
+        typeof entry.bound === 'boolean' &&
+        Object.keys(entry).length === 2,
+    ) &&
+    new Set(value.map((entry: CredentialState) => entry.sourceRef)).size === value.length
+  );
+}
 export function runId(value: string): string {
   if (!isUlid(value)) throw localError('invalid_run', 'Invalid import run ID.');
   return value;
@@ -125,7 +159,11 @@ const unknownOutcome = () =>
     'Outcome unknown; check the run in the UI before retrying.',
   );
 
-async function readResponse(response: Response): Promise<unknown> {
+// Credential summaries repeat only a subset of manifest content; allow room for the run DTO.
+const MAX_STATUS_BYTES = MAX_MANIFEST_BYTES + 65536;
+const waitTimeout = () => new ImportClientError('wait_timeout', 3, 'Import status wait timed out.');
+
+async function readResponse(response: Response, maxBytes: number): Promise<unknown> {
   if (response.body === null) throw incompatible();
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -135,7 +173,7 @@ async function readResponse(response: Response): Promise<unknown> {
       const chunk = await reader.read();
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
-      if (bytes > 65536) throw incompatible();
+      if (bytes > maxBytes) throw incompatible();
       chunks.push(chunk.value);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
@@ -169,7 +207,11 @@ export class ImportClient {
     method: 'GET' | 'POST' | 'PUT',
     body?: string,
     key?: string,
-  ): Promise<unknown> {
+    deadline?: number,
+  ): Promise<{ data: unknown; headers: Headers }> {
+    const remaining = deadline === undefined ? 30000 : deadline - this.now();
+    if (remaining <= 0) throw waitTimeout();
+    const signal = AbortSignal.timeout(Math.min(30000, remaining));
     const mutating = method !== 'GET';
     let response: Response;
     let data: unknown;
@@ -177,7 +219,7 @@ export class ImportClient {
       response = await this.fetcher(new URL(`/_pb/import-runs${path}`, this.origin), {
         method,
         redirect: 'error',
-        signal: AbortSignal.timeout(30000),
+        signal,
         headers: {
           authorization: `Bearer ${this.token}`,
           accept: 'application/json',
@@ -186,16 +228,24 @@ export class ImportClient {
         },
         ...(body === undefined ? {} : { body }),
       });
+      if (deadline !== undefined && this.now() >= deadline) throw waitTimeout();
       if (response.status === 204) {
         if (method === 'GET' || path === '') throw incompatible();
-        return null;
+        return { data: null, headers: response.headers };
       }
-      data = await readResponse(response);
+      if (response.status === 429) void response.body?.cancel().catch(() => undefined);
+      else data = await readResponse(response, method === 'GET' ? MAX_STATUS_BYTES : 65536);
     } catch {
+      if (
+        deadline !== undefined &&
+        (this.now() >= deadline || (remaining <= 30000 && signal.aborted))
+      )
+        throw waitTimeout();
       throw mutating
         ? unknownOutcome()
         : new ImportClientError('request_failed', 1, 'Could not read broker response.');
     }
+    if (deadline !== undefined && this.now() >= deadline) throw waitTimeout();
     if (!response.ok) {
       if (response.status === 429) {
         const header = response.headers.get('retry-after');
@@ -222,16 +272,28 @@ export class ImportClient {
       (method !== 'GET' && path !== '')
     )
       throw mutating ? unknownOutcome() : incompatible();
-    return data;
+    return { data, headers: response.headers };
   }
 
   async submit(
     canonical: string,
     key: string,
-  ): Promise<{ id: string; planHash: string; state: 'planned' }> {
+  ): Promise<{ id: string; planHash: string; state: 'planned'; replayed: boolean }> {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(key))
       throw localError('invalid_key', 'Invalid idempotency key.');
-    const data = await this.request('', 'POST', canonical, key);
+    let answer: Awaited<ReturnType<ImportClient['request']>>;
+    try {
+      answer = await this.request('', 'POST', canonical, key);
+    } catch (error) {
+      if (error instanceof ImportClientError && error.code === 'idempotency_mismatch')
+        throw new ImportClientError(
+          'idempotency_mismatch',
+          1,
+          'The broker already holds a different manifest under this receipt key; reconcile the run in the UI and submit with a new receipt.',
+        );
+      throw error;
+    }
+    const { data, headers } = answer;
     if (
       !object(data) ||
       typeof data.id !== 'string' ||
@@ -240,11 +302,16 @@ export class ImportClient {
       data.state !== 'planned'
     )
       throw unknownOutcome();
-    return { id: data.id, planHash: data.planHash, state: 'planned' };
+    return {
+      id: data.id,
+      planHash: data.planHash,
+      state: 'planned',
+      replayed: headers.get('idempotent-replayed') === 'true',
+    };
   }
 
-  async status(id: string): Promise<RunStatus> {
-    const data = await this.request(`/${runId(id)}`, 'GET');
+  async status(id: string, deadline?: number): Promise<RunStatus> {
+    const { data } = await this.request(`/${runId(id)}`, 'GET', undefined, undefined, deadline);
     if (
       !object(data) ||
       data.id !== id ||
@@ -252,7 +319,8 @@ export class ImportClient {
       !(data.planHash === null || hash(data.planHash)) ||
       !nullableDate(data.approvedAt) ||
       !nullableDate(data.acceptedAt) ||
-      (data.credentialWindowUntil !== undefined && !nullableDate(data.credentialWindowUntil))
+      !nullableDate(data.credentialWindowUntil) ||
+      !credentialStates(data.credentials)
     )
       throw incompatible();
     return {
@@ -261,34 +329,50 @@ export class ImportClient {
       planHash: data.planHash,
       approvedAt: data.approvedAt,
       acceptedAt: data.acceptedAt,
-      ...(data.credentialWindowUntil === undefined
-        ? {}
-        : { credentialWindowUntil: data.credentialWindowUntil as string | null }),
+      credentialWindowUntil: data.credentialWindowUntil,
+      credentials: data.credentials.map(({ sourceRef, bound }) => ({ sourceRef, bound })),
     };
   }
 
-  async verify(id: string): Promise<RunStatus> {
-    await this.request(`/${runId(id)}/verify`, 'POST');
-    return this.status(id);
+  async verify(id: string, deadline?: number): Promise<void> {
+    await this.request(`/${runId(id)}/verify`, 'POST', undefined, undefined, deadline);
   }
 
+  /**
+   * Uploads material for every manifest source the broker reports unbound, re-reading the run
+   * before each upload so a rerun after a partial failure skips sources bound meanwhile.
+   */
   async credentials(
     id: string,
     manifest: ParsedManifest,
     bindings: readonly CredentialBinding[],
     resolve: CredentialResolver,
-  ): Promise<number> {
+  ): Promise<{ uploaded: number; skipped: number }> {
     runId(id);
     const sources = manifest.items.filter(
       (item) => item.type === 'source' && item.credential_ref !== null,
     );
-    const seen = new Set<string>();
+    if (sources.some((source) => source.external_ref === '.' || source.external_ref === '..'))
+      throw localError(
+        'invalid_external_ref',
+        'Credential source reference cannot be a dot segment.',
+      );
+    if (
+      sources.some(
+        (source) => source.type === 'source' && source.credential_ref === 'env:PB_IMPORT_TOKEN',
+      )
+    )
+      throw localError(
+        'invalid_credential_ref',
+        'The broker token cannot be used as a source credential.',
+      );
+    const byRef = new Map<string, CredentialBinding>();
     for (const binding of bindings) {
       const source = sources.find((item) => item.external_ref === binding.external_ref);
       if (
         source?.type !== 'source' ||
         source.credential_ref !== binding.credential_ref ||
-        seen.has(binding.external_ref)
+        byRef.has(binding.external_ref)
       )
         throw localError(
           'credential_binding_mismatch',
@@ -309,38 +393,69 @@ export class ImportClient {
           'invalid_credential_kind',
           'Credential kind is incompatible with the manifest source.',
         );
-      seen.add(binding.external_ref);
+      byRef.set(binding.external_ref, binding);
     }
-    if (seen.size !== sources.length)
-      throw localError(
-        'credential_binding_missing',
-        'Supply a credential kind for every manifest source reference.',
-      );
     const expectedHash = await planHash(manifest);
-    for (const binding of bindings) {
+    const expectedRefs = sources.map((item) => item.external_ref).sort();
+    const ready = async (): Promise<RunStatus> => {
       const status = await this.status(id);
       if (status.planHash !== expectedHash)
         throw localError(
           'plan_hash_mismatch',
           'The local manifest does not match the broker plan.',
         );
-      if (status.credentialWindowUntil === undefined)
-        throw localError(
-          'credential_window_unavailable',
-          'The broker must expose the credential window before secrets can be resolved.',
-        );
+      const reported = status.credentials.map((entry) => entry.sourceRef).sort();
       if (
-        status.approvedAt === null ||
-        status.credentialWindowUntil === null ||
-        Date.parse(status.credentialWindowUntil) <= this.now() + 5000
+        reported.length !== expectedRefs.length ||
+        reported.some((ref, index) => ref !== expectedRefs[index])
       )
-        throw new ImportClientError('conflict', 1, API_ERROR_CODES.conflict.message);
-      if (status.state !== 'applied')
+        throw incompatible();
+      return status;
+    };
+    const assertOpen = (status: RunStatus) => {
+      if (status.approvedAt === null)
         throw new ImportClientError(
           'not_ready',
           3,
-          'Wait for approval and apply in the UI before uploading credentials.',
+          'The credential window opens when the run is approved; approve and apply it in the UI first.',
         );
+      if (status.credentialWindowUntil === null)
+        throw new ImportClientError(
+          'credential_window_closed',
+          1,
+          'The credential window for this run is closed; bind the remaining credentials in the UI.',
+        );
+      if (!UPLOAD_STATES.has(status.state))
+        throw new ImportClientError(
+          'not_ready',
+          3,
+          'Wait for apply to finish in the UI before uploading credentials.',
+        );
+      if (!uploadsAccepted(status, this.now()))
+        throw new ImportClientError(
+          'credential_window_closed',
+          1,
+          'The credential window for this run is closing; bind the remaining credentials in the UI.',
+        );
+    };
+    let status = await ready();
+    const pending = status.credentials.filter((entry) => !entry.bound);
+    if (pending.length === 0) return { uploaded: 0, skipped: status.credentials.length };
+    assertOpen(status);
+    if (pending.some((entry) => !byRef.has(entry.sourceRef)))
+      throw localError(
+        'credential_binding_missing',
+        'Supply a credential kind for every source the broker reports unbound.',
+      );
+    let uploaded = 0;
+    for (const [index, entry] of pending.entries()) {
+      if (index > 0) {
+        status = await ready();
+        if (status.credentials.some((item) => item.sourceRef === entry.sourceRef && item.bound))
+          continue;
+        assertOpen(status);
+      }
+      const binding = byRef.get(entry.sourceRef)!;
       let material: string;
       try {
         material = await resolve(binding.credential_ref);
@@ -352,14 +467,19 @@ export class ImportClient {
           'Could not resolve valid credential material.',
         );
       }
-      if (Date.parse(status.credentialWindowUntil) <= this.now() + 5000)
-        throw new ImportClientError('conflict', 1, API_ERROR_CODES.conflict.message);
+      if (!uploadsAccepted(status, this.now()))
+        throw new ImportClientError(
+          'credential_window_closed',
+          1,
+          'The credential window for this run is closing; bind the remaining credentials in the UI.',
+        );
       await this.request(
         `/${id}/credentials/${encodeURIComponent(binding.external_ref)}`,
         'PUT',
         JSON.stringify({ kind: binding.kind, material }),
       );
+      uploaded++;
     }
-    return bindings.length;
+    return { uploaded, skipped: status.credentials.length - uploaded };
   }
 }

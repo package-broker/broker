@@ -20,6 +20,23 @@ export type CreateSource =
   operations['createOrganizationSource']['requestBody']['content']['application/json'];
 export type SourceChanges =
   operations['updateOrganizationSource']['requestBody']['content']['application/json'];
+export type VcsProvider =
+  operations['listOrganizationSources']['responses'][200]['content']['application/json']['vcsProviders'][number];
+const VCS_PROVIDER_LABELS: Record<VcsProvider, string> = {
+  github: 'GitHub',
+  git: 'Git over HTTP(S)',
+  ssh: 'Git over SSH',
+};
+const DEFAULT_VCS_PROVIDERS: readonly VcsProvider[] = ['github'];
+
+/** The provider choices in display order, limited to those the broker reports it serves. */
+export function vcsProviderOptions(
+  reported: readonly string[],
+): readonly (readonly [VcsProvider, string])[] {
+  return (Object.keys(VCS_PROVIDER_LABELS) as VcsProvider[])
+    .filter((provider) => reported.includes(provider))
+    .map((provider) => [provider, VCS_PROVIDER_LABELS[provider]] as const);
+}
 export const SOURCE_TYPES = {
   composer: ['packagist_proxy', 'composer_repository', 'vcs'],
   npm: ['npmjs_proxy', 'npm_registry'],
@@ -80,8 +97,7 @@ const FIELD_MESSAGES: Record<string, string> = {
   defaultVisibleToNewProjects: 'Choose whether this source is visible to new projects.',
   retentionDaysOverride:
     'Enter a whole number of days that does not shorten organization retention.',
-  'config/provider':
-    'Choose a supported repository provider. Git over HTTP(S) and SSH require the Node runtime.',
+  'config/provider': 'Choose a repository provider this broker supports.',
   'config/repository':
     'Enter a valid repository for the selected provider: owner/repository for GitHub, or a clone URL for Git.',
   'config/installationId': 'Enter a positive whole-number installation ID.',
@@ -270,6 +286,7 @@ export function SourceForm({
   alert,
   onSubmit,
   onClose,
+  vcsProviders = DEFAULT_VCS_PROVIDERS,
 }: {
   source: Source | null;
   busy: boolean;
@@ -277,12 +294,20 @@ export function SourceForm({
   alert: string | null;
   onSubmit: (body: CreateSource | SourceChanges) => void;
   onClose: () => void;
+  vcsProviders?: readonly VcsProvider[] | undefined;
 }) {
   const [ecosystem, setEcosystem] = useState<CreateSource['ecosystem']>(
     source?.ecosystem ?? 'composer',
   );
   const [type, setType] = useState<CreateSource['type']>(source?.type ?? 'packagist_proxy');
-  const [provider, setProvider] = useState<'github' | 'git' | 'ssh'>('github');
+  const providerOptions = vcsProviderOptions(vcsProviders);
+  const firstProvider = providerOptions[0]?.[0] ?? 'github';
+  const [provider, setProvider] = useState<VcsProvider>(firstProvider);
+  const providerOffered = providerOptions.some(([value]) => value === provider);
+  const vcsUnserved = type === 'vcs' && providerOptions.length === 0;
+  useEffect(() => {
+    if (!providerOffered && providerOptions.length > 0) setProvider(firstProvider);
+  }, [providerOffered, providerOptions.length, firstProvider]);
   const [githubAuthentication, setGithubAuthentication] = useState(
     source?.githubAuthentication ?? 'app',
   );
@@ -537,13 +562,15 @@ export function SourceForm({
                   {radios(
                     'type',
                     type,
-                    SOURCE_TYPES[ecosystem].map(
-                      (value) =>
-                        [value, SOURCE_TYPE_LABELS[value], TYPE_DESCRIPTIONS[value]] as const,
-                    ),
+                    SOURCE_TYPES[ecosystem]
+                      .filter((value) => value !== 'vcs' || providerOptions.length > 0)
+                      .map(
+                        (value) =>
+                          [value, SOURCE_TYPE_LABELS[value], TYPE_DESCRIPTIONS[value]] as const,
+                      ),
                     (value) => {
                       setType(value as CreateSource['type']);
-                      setProvider('github');
+                      setProvider(firstProvider);
                       setGithubAuthentication('app');
                       setLocalErrors({});
                     },
@@ -551,10 +578,17 @@ export function SourceForm({
                   {input('name', { required: true, placeholder: namePlaceholder })}
                 </>
               ) : (
-                <p className="text-sm text-neutral-600">
-                  Some saved settings cannot be displayed. Leave a replacement option unchecked to
-                  keep those settings.
-                </p>
+                <>
+                  <p className="text-sm text-neutral-600">
+                    Some saved settings cannot be displayed. Leave a replacement option unchecked to
+                    keep those settings.
+                  </p>
+                  {vcsUnserved ? (
+                    <p className="text-sm">
+                      {`Source type: ${SOURCE_TYPE_LABELS[type]}. This broker cannot change its repository settings.`}
+                    </p>
+                  ) : null}
+                </>
               )}
               {editing && !proxy && type !== 'vcs'
                 ? check('replaceNetwork', 'Replace URL and User-Agent', setReplaceNetwork)
@@ -584,7 +618,7 @@ export function SourceForm({
                   })}
                 </div>
               ) : null}
-              {editing && !proxy
+              {editing && !proxy && !vcsUnserved
                 ? check('replaceConfig', 'Replace type-specific configuration', setReplaceConfig)
                 : null}
               {configEnabled ? (
@@ -604,14 +638,13 @@ export function SourceForm({
                             setProvider(event.currentTarget.value as typeof provider)
                           }
                         >
-                          <option value="github">GitHub</option>
-                          <option value="git">Git over HTTP(S)</option>
-                          <option value="ssh">Git over SSH</option>
+                          {providerOptions.map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
                         </Select>,
                       )}
-                      <p className="text-sm text-neutral-600">
-                        Git over HTTP(S) and SSH require the Node runtime.
-                      </p>
                       <div key={provider}>
                         {input('config/repository', {
                           required: true,

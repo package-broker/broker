@@ -21,7 +21,7 @@ import {
   type AccessAssembly,
 } from '@package-broker/db-sqlite/repositories/access-services';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { parseSourceConfig, reportedVcsProviders } from '@package-broker/core/sources/config';
 import { sourceCredentialOrigins } from '@package-broker/core/sources/credential-origins';
 import {
   createProviderRegistry,
@@ -1867,6 +1867,10 @@ export function createWorker(
             lifetime,
             log,
             blob: services?.platformServices.blob,
+            vcsProviders: () =>
+              registryModule === undefined
+                ? []
+                : reportedVcsProviders('cloudflare', registration.sourceProviders.values()),
           });
     const authorization = options.authorization ?? auth?.authorization;
 

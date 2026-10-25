@@ -3,6 +3,7 @@ import type { createVulnerabilityRuntime } from '@package-broker/core/runtime/vu
 import { createApiModule, ApiModuleDependencyError } from '@package-broker/core/api/module';
 import type { AuditReader } from '@package-broker/core/api/routes/audit';
 import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
+import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
@@ -73,6 +74,9 @@ export interface ApiRoutesOptions {
   readonly lifetime: TokenLifetimePolicy;
   readonly log: KernelLog;
   readonly blob: BlobStore | undefined;
+  /** The VCS providers the runtime has registered and serves, read per request. */
+  readonly vcsProviders?: () => readonly VcsProvider[];
+  readonly refuseVcsProvider?: (provider: VcsProvider) => boolean;
 }
 
 export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefinition[] {
@@ -161,6 +165,10 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         projectSources: createProjectSourceReader(executor),
         projects,
         sessions: services.sessions,
+        ...(input.vcsProviders === undefined ? {} : { vcsProviders: input.vcsProviders }),
+        ...(input.refuseVcsProvider === undefined
+          ? {}
+          : { refuseVcsProvider: input.refuseVcsProvider }),
       },
       sourceNames: {
         ...common,

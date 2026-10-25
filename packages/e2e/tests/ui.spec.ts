@@ -750,6 +750,23 @@ test.describe('Node management UI', () => {
     await assertSecretAbsent(page, material);
   });
 
+  test('offers only the repository providers the Node runtime serves', async ({ page, admin }) => {
+    await confirmIdentity(page, admin);
+    const listed = page.waitForResponse(
+      (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await go(page, 'sources');
+    expect((await (await listed).json()).vcsProviders).toEqual(['github', 'git']);
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await create.getByRole('radio', { name: /^Git repository/ }).check();
+    const provider = create.getByLabel('Repository provider', { exact: true });
+    await expect(provider.locator('option')).toHaveText(['GitHub', 'Git over HTTP(S)']);
+    await expect(create.getByText(/Node runtime/)).toHaveCount(0);
+    await provider.selectOption('git');
+    await expect(create.getByLabel('Git repository URL (required)', { exact: true })).toBeVisible();
+  });
+
   for (const transport of ['no-cors fetch', 'HTML form'] as const) {
     test(`refuses a cross-origin POST from ${transport} with no auth state change`, async ({
       context,

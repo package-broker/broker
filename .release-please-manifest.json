@@ -7,5 +7,7 @@
   "packages/plugin-sso-oidc": "0.1.0-rc.0",
   "packages/plugin-github": "0.1.0-rc.0",
   "packages/db-sqlite": "2.0.0-rc.0",
-  "packages/ui-assets": "0.1.0-rc.0"
+  "packages/ui-assets": "0.1.0-rc.0",
+  "packages/prebuilt": "2.0.0-rc.0",
+  "packages/prebuilt-cloudflare": "2.0.0-rc.0"
 }

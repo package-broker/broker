@@ -19,10 +19,15 @@
     "!dist/**/*.test.*"
   ],
   "dependencies": {
-    "@package-broker/core": "workspace:^",
-    "@package-broker/db-sqlite": "workspace:^",
-    "@package-broker/runtime-cloudflare": "workspace:^",
-    "@package-broker/runtime-node": "workspace:^",
+    "@package-broker/core": "workspace:*",
+    "@package-broker/db-sqlite": "workspace:*",
+    "@package-broker/runtime-cloudflare": "workspace:*",
+    "@package-broker/runtime-node": "workspace:*",
     "esbuild": "catalog:"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/package-broker/broker.git",
+    "directory": "packages/cli"
   }
 }

@@ -86,6 +86,8 @@ const RULES: Readonly<Record<string, Rule>> = {
   },
   cli: { allow: [ANY_WORKSPACE, 'esbuild', 'node', 'typescript'], testOnly: ['vitest'] },
   plugin: { allow: ws('core'), testOnly: ['vitest'] },
+  prebuilt: { allow: [], testOnly: [] },
+  'prebuilt-cloudflare': { allow: [], testOnly: [] },
   ui: {
     allow: [
       'react',

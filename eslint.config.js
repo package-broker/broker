@@ -42,7 +42,15 @@ const uiSelectors = [
 ];
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/.pb/**', '**/node_modules/**'] },
+  {
+    ignores: [
+      '**/dist/**',
+      '**/.pb/**',
+      '**/node_modules/**',
+      'packages/prebuilt/node/**',
+      'packages/prebuilt-cloudflare/cloudflare/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

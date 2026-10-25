@@ -452,6 +452,7 @@ export function PackageVersions(props: {
             <div className="flex flex-wrap gap-2">
               {packageActions(props.item, version.status, props.access).map((action) => (
                 <Button
+                  type="button"
                   key={action}
                   size="sm"
                   variant={action === 'tombstone' ? 'ghost' : 'outline'}
@@ -502,7 +503,12 @@ export function PackagesView(props: {
         <span className="mr-auto text-neutral-600">
           {state.selected ? state.selected.name : `${state.items.length} packages on this page`}
         </span>
-        <Button variant="outline" onClick={props.onRefresh} disabled={state.loading || state.busy}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={props.onRefresh}
+          disabled={state.loading || state.busy}
+        >
           Refresh
         </Button>
       </div>
@@ -522,6 +528,7 @@ export function PackagesView(props: {
                   render: (item) => (
                     <>
                       <Button
+                        type="button"
                         variant="link"
                         className="h-auto justify-start p-0 text-left"
                         disabled={state.busy}
@@ -574,6 +581,7 @@ export function PackagesView(props: {
             />
             {state.next ? (
               <Button
+                type="button"
                 className="my-4"
                 variant="outline"
                 disabled={state.busy}
@@ -585,7 +593,7 @@ export function PackagesView(props: {
           </>
         ) : state.listError ? (
           <ListState kind="error" title="Packages could not be loaded">
-            <Button variant="outline" onClick={props.onRefresh}>
+            <Button type="button" variant="outline" onClick={props.onRefresh}>
               Retry
             </Button>
           </ListState>
@@ -601,7 +609,13 @@ export function PackagesView(props: {
         )
       ) : (
         <section aria-labelledby="versions-heading" className="space-y-4">
-          <Button variant="link" className="px-0" onClick={props.onBack} disabled={state.busy}>
+          <Button
+            type="button"
+            variant="link"
+            className="px-0"
+            onClick={props.onBack}
+            disabled={state.busy}
+          >
             ← Back to packages
           </Button>
           <div className="flex flex-wrap items-center gap-3">
@@ -623,7 +637,12 @@ export function PackagesView(props: {
                 onAction={props.onAction}
               />
               {state.versionsNext ? (
-                <Button variant="outline" disabled={state.busy} onClick={props.onVersionNext}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={state.busy}
+                  onClick={props.onVersionNext}
+                >
                   Next versions
                 </Button>
               ) : null}
@@ -660,10 +679,10 @@ export function PackagesView(props: {
               <dd>{mutationScope(state.access)}</dd>
             </dl>
             <DialogFooter>
-              <Button variant="outline" onClick={props.onCancel}>
+              <Button type="button" variant="outline" onClick={props.onCancel}>
                 Cancel
               </Button>
-              <Button variant="destructive" onClick={props.onConfirm}>
+              <Button type="button" variant="destructive" onClick={props.onConfirm}>
                 Confirm tombstone
               </Button>
             </DialogFooter>
@@ -796,7 +815,7 @@ export function PackagesPage() {
   };
   return (
     <section aria-labelledby="page-heading">
-      <h1 id="page-heading" className="text-2xl font-semibold">
+      <h1 tabIndex={-1} id="page-heading" className="text-2xl font-semibold">
         Packages
       </h1>
       {state.selected === null ? (

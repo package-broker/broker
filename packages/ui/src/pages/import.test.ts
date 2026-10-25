@@ -1,9 +1,14 @@
-import { createElement } from 'react';
+import { createElement, isValidElement, useState, useEffect, type ReactNode } from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { createApiClient } from '../api.js';
 import type { paths } from '../api-types.js';
 import { ImportView, createImportController } from './import.js';
+
+vi.mock('react', async (original) => {
+  const actual = await original<typeof import('react')>();
+  return { ...actual, useState: vi.fn(actual.useState), useEffect: vi.fn(actual.useEffect) };
+});
 
 const run = {
   id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
@@ -61,6 +66,48 @@ describe('import runs', () => {
     expect(markup(controller)).toMatch(/disabled=""[^>]*>Approve run/);
     await controller.action('approve');
     expect(fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0);
+  });
+  it('submits approval through the confirmation form and guards unchecked and busy submissions', async () => {
+    let finish!: (response: Response) => void;
+    const fetch = vi.fn(async (_url: string, init: RequestInit) =>
+      init.method === 'POST'
+        ? new Promise<Response>((resolve) => {
+            finish = resolve;
+          })
+        : Response.json(
+            _url.split('?')[0] === '/_pb/import-runs' ? { items: [run], next: null } : run,
+          ),
+    );
+    const controller = createImportController({
+      client: createApiClient<paths>({ fetch, readCookie: () => undefined }),
+      requireReauth: vi.fn(),
+    });
+    await controller.select(run.id);
+    controller.openApproval();
+    function form(node: ReactNode): Record<string, unknown> | undefined {
+      if (Array.isArray(node)) return node.map(form).find(Boolean);
+      if (!isValidElement<Record<string, unknown>>(node)) return;
+      return node.type === 'form' ? node.props : form(node.props.children as ReactNode);
+    }
+    const submit = () => {
+      vi.mocked(useState).mockReturnValueOnce([Date.now(), vi.fn()]);
+      vi.mocked(useEffect).mockImplementationOnce(() => {});
+      const props = form(ImportView({ state: controller.snapshot(), controller }));
+      expect(props).toBeDefined();
+      const event = { preventDefault: vi.fn() };
+      (props!.onSubmit as (event: unknown) => void)(event);
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+    };
+    submit();
+    expect(fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0);
+    controller.confirmApproval(true);
+    expect(markup(controller)).toMatch(/type="submit"[^>]*>Approve run/);
+    submit();
+    expect(controller.snapshot().busy).toBe(true);
+    submit();
+    expect(fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
+    finish(new Response(null, { status: 204 }));
+    await vi.waitFor(() => expect(controller.snapshot().busy).toBe(false));
   });
   it('sends the full confirmed hash through the client', async () => {
     const { controller, fetch } = setup();

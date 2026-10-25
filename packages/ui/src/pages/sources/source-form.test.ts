@@ -488,7 +488,7 @@ describe('source form UX', () => {
     expect(html).toContain('sm:max-w-lg');
     expect(html).toContain('min-h-0 flex-1 overflow-y-auto');
     expect(html).toMatch(
-      /<\/details><\/fieldset><\/div><div class="[^"]*shrink-0[^"]*border-t[^"]*bg-white/,
+      /<\/details><\/fieldset><\/div><div data-dialog-footer="true" class="[^"]*shrink-0[^"]*border-t[^"]*bg-white/,
     );
     expect(html).toContain('env(safe-area-inset-bottom)');
   });

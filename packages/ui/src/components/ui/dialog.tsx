@@ -82,12 +82,110 @@ export function DialogContent({
   const context = useContext(DialogContext);
   const ref = useRef<HTMLDialogElement>(null);
   const open = context?.open ?? false;
+  const stopRestore = useRef<(() => void) | null>(null);
   useEffect(() => {
+    if (!open) return;
+    stopRestore.current?.();
+    if (!ref.current) return;
     const dialog = ref.current;
-    if (!dialog || !open) return;
+    const document = dialog.ownerDocument;
+    const active = document.activeElement as HTMLElement | null;
+    const opener = active === document.body ? null : active;
     dialog.showModal();
+    const visible = (element: HTMLElement) =>
+      !element.matches(':disabled') && element.getClientRects().length > 0;
+    const first = (selector: string) =>
+      Array.from(dialog.querySelectorAll<HTMLElement>(selector)).find(visible);
+    const target =
+      first('input:not([type="hidden"]), select, textarea') ??
+      first('[data-initial-focus]') ??
+      first('[data-dialog-footer] button:not([data-variant="destructive"])') ??
+      dialog.querySelector<HTMLElement>('button[aria-label="Close"]');
+    target?.focus();
+    let cancelled = false;
     return () => {
       dialog.close();
+      const stop = () => {
+        cancelled = true;
+      };
+      stopRestore.current = stop;
+      queueMicrotask(() => {
+        if (cancelled) return;
+        let restoring = false;
+        let restored = false;
+        const observer = new MutationObserver(() => restore());
+        const deadline = setTimeout(() => {
+          restore(true);
+          cleanup();
+        }, 5000);
+        function cleanup() {
+          cancelled = true;
+          observer.disconnect();
+          clearTimeout(deadline);
+          document.removeEventListener('focusin', onFocus);
+          document.removeEventListener('keydown', onInteraction, true);
+          document.removeEventListener('pointerdown', onInteraction, true);
+        }
+        function onFocus() {
+          if (
+            !restoring &&
+            document.activeElement !== null &&
+            document.activeElement !== document.body &&
+            !dialog.contains(document.activeElement)
+          )
+            cleanup();
+        }
+        function onInteraction() {
+          if (
+            document.activeElement !== null &&
+            document.activeElement !== document.body &&
+            !dialog.contains(document.activeElement)
+          )
+            cleanup();
+        }
+        function restore(expired = false) {
+          if (cancelled) return;
+          const active = document.activeElement;
+          if (
+            active !== null &&
+            active !== document.body &&
+            active !== opener &&
+            !dialog.contains(active)
+          ) {
+            cleanup();
+            return;
+          }
+          if (restored && opener?.isConnected) return;
+          const menu = opener?.closest('details:not([open])');
+          const candidate = menu?.querySelector<HTMLElement>('summary') ?? opener;
+          const fallback = document.querySelector<HTMLElement>('#page-heading');
+          const target =
+            !candidate?.isConnected || (!candidate.getClientRects().length && expired)
+              ? fallback
+              : candidate;
+          if (!target || !visible(target)) return;
+          restoring = true;
+          target.focus();
+          restoring = false;
+          if (target !== opener) cleanup();
+          else {
+            restored = true;
+            observer.disconnect();
+            observer.observe(document.documentElement, { subtree: true, childList: true });
+          }
+        }
+        stopRestore.current = cleanup;
+        observer.observe(document.documentElement, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ['disabled', 'hidden', 'style', 'class', 'open'],
+        });
+        document.addEventListener('focusin', onFocus);
+        document.addEventListener('keydown', onInteraction, true);
+        document.addEventListener('pointerdown', onInteraction, true);
+        restore();
+      });
     };
   }, [open]);
   const container = portalContainer();
@@ -143,7 +241,13 @@ export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElem
 }
 
 export function DialogFooter({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex flex-wrap justify-end gap-2', className)} {...props} />;
+  return (
+    <div
+      data-dialog-footer
+      className={cn('flex flex-wrap justify-end gap-2', className)}
+      {...props}
+    />
+  );
 }
 
 export function DialogTitle({ className, ...props }: ComponentProps<'h2'>) {

@@ -1,8 +1,36 @@
 import type { ComponentProps } from 'react';
 import { cn } from '../../lib/utils.js';
 
-export function DropdownMenu({ className, ...props }: ComponentProps<'details'>) {
-  return <details className={cn('relative', className)} {...props} />;
+export function DropdownMenu({ className, onKeyDown, ...props }: ComponentProps<'details'>) {
+  return (
+    <details
+      className={cn('relative', className)}
+      {...props}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (
+          !event.defaultPrevented &&
+          event.key === 'Escape' &&
+          event.currentTarget.open &&
+          event.currentTarget.contains(event.target as Node)
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          const dialog = event.currentTarget.closest('dialog');
+          if (dialog) {
+            const ignoreCancel = (cancel: Event) => {
+              cancel.preventDefault();
+              cancel.stopImmediatePropagation();
+            };
+            dialog.addEventListener('cancel', ignoreCancel, { once: true, capture: true });
+            setTimeout(() => dialog.removeEventListener('cancel', ignoreCancel, true), 0);
+          }
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector('summary')?.focus();
+        }
+      }}
+    />
+  );
 }
 
 export function DropdownMenuTrigger({ className, ...props }: ComponentProps<'summary'>) {

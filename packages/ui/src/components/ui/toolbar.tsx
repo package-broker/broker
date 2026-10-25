@@ -111,7 +111,7 @@ export function LoadedListFilters<K extends string>({
             </Label>
           </div>
         ))}
-        <Button>Apply filters</Button>
+        <Button type="submit">Apply filters</Button>
         <Button
           type="button"
           variant="outline"

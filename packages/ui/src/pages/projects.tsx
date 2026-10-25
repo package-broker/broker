@@ -465,6 +465,7 @@ export function ProjectsView({
                           />
                         ) : (
                           <Button
+                            type="button"
                             size="sm"
                             variant="outline"
                             disabled={state.busy}
@@ -504,6 +505,8 @@ export function ProjectsView({
           <form
             className="my-6 grid gap-3"
             onSubmit={(event) => {
+              event.preventDefault();
+              if (state.busy) return;
               const values = formValues(event);
               void controller.create({
                 name: values['name'] ?? '',
@@ -517,7 +520,9 @@ export function ProjectsView({
             <Field name="name" label="Project name" />
             <Field name="slug" label="Slug" />
             <TokenPolicy />
-            <Button disabled={state.busy}>Create project</Button>
+            <Button type="submit" disabled={state.busy}>
+              Create project
+            </Button>
           </form>
         </details>
       ) : null}
@@ -533,6 +538,8 @@ export function ProjectsView({
               key={`${state.selected.id}-${state.etag}`}
               className="grid gap-3"
               onSubmit={(event) => {
+                event.preventDefault();
+                if (state.busy) return;
                 const values = formValues(event);
                 void controller.update({
                   name: values['name'] ?? '',
@@ -543,7 +550,9 @@ export function ProjectsView({
             >
               <Field name="name" label="Project name" value={state.selected.name} />
               <TokenPolicy project={state.selected} />
-              <Button disabled={state.busy}>Save settings</Button>
+              <Button type="submit" disabled={state.busy}>
+                Save settings
+              </Button>
             </form>
           ) : null}
           {model.transition ? (
@@ -559,6 +568,7 @@ export function ProjectsView({
               />
             ) : (
               <Button
+                type="button"
                 variant="outline"
                 disabled={state.busy}
                 onClick={() => void controller.transition()}
@@ -590,7 +600,7 @@ export function ProjectsPage() {
   }, [state.loading, state.notice, state.query]);
   return (
     <section aria-labelledby="page-heading">
-      <h1 id="page-heading" className="text-xl font-semibold">
+      <h1 tabIndex={-1} id="page-heading" className="text-xl font-semibold">
         Projects
       </h1>
       <p className="mt-1 text-neutral-600">

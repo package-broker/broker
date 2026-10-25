@@ -1,3 +1,4 @@
+import { entries as npmAuditSnapshotEntries } from './mutation-table/npm-audit-snapshot.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
 import { entries as sourceAttachmentCountsEntries } from './mutation-table/source-attachment-counts.js';
 import { entries as projectGrantReadEntries } from './mutation-table/project-grant-read.js';
@@ -122,6 +123,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sourcePauseEntries,
   ...fixtureVersionListingsEntries,
   ...vulnerabilityEntries,
+  ...npmAuditSnapshotEntries,
   ...selectedPatInvalidationEntries,
   ...accessLossEntries,
   ...identityBlockEntries,

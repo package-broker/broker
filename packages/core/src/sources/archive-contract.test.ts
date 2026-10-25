@@ -15,7 +15,8 @@ import {
   type Codecs,
   type DigestAlgorithm,
 } from '../platform/codec.js';
-import { forwardNpmAudit } from '../registry/npm/audit.js';
+import { npmRoutes } from '../registry/npm/routes.js';
+import type { RequestContext } from '../plugin.js';
 import type { ProviderContext, ProviderSource } from './provider.js';
 import { ArchiveError, buildZipFromTree, type ArchiveIo } from './git/archive.js';
 import { DeltaError, MAX_DELTA_CHAIN_DEPTH, resolvePackObjects } from './git/delta.js';
@@ -548,27 +549,46 @@ describe('dist body cap contract', () => {
 
 describe('npm audit gzip bomb contract', () => {
   it('refuses a body that inflates past the decompressed cap before classifying or forwarding', async () => {
-    const classifyWinners = vi.fn();
-    const policyFetch = vi.fn();
-    const response = await forwardNpmAudit(
-      new Request('https://broker.test/project/npm/-/npm/v1/security/advisories/bulk', {
+    const versions = vi.fn();
+    const serve = vi.fn();
+    const ensure = vi.fn();
+    const reresolve = vi.fn();
+    const route = npmRoutes({
+      access: {
+        versions,
+        list: vi.fn(),
+        dist: vi.fn(),
+        resolve: vi.fn(),
+        version: vi.fn(),
+        tag: vi.fn(),
+        distTags: vi.fn(),
+        search: vi.fn(),
+      },
+      dist: { serve },
+      onDemand: { ensure },
+      reresolve,
+      handleOf: () => null,
+      publicUrl: 'https://broker.test',
+      codecs: nodeCodecs,
+    }).find((route) => route.path.endsWith('/security/advisories/bulk'))!;
+    const response = await route.handler({
+      request: new Request('https://broker.test/project/npm/-/npm/v1/security/advisories/bulk', {
         method: 'POST',
         body: gzipSync(Buffer.alloc(64 * MIB, 0x20)),
         headers: { 'content-encoding': 'gzip' },
       }),
-      orgContext('org-a'),
-      'project',
-      'request',
-      {
-        catalogue: { classifyWinners },
-        sources: { hasAttachedProxy: async () => true },
-        codecs: nodeCodecs,
-        policyFetch,
-      },
-    );
+      requestId: 'request',
+      org: orgContext('org-a'),
+      principal: null,
+      projectId: 'project',
+      params: {},
+      ports: {} as RequestContext['ports'],
+    });
     expect(response.status).toBe(413);
-    expect(await response.json()).toMatchObject({ error: { code: 'too_large' } });
-    expect(classifyWinners).not.toHaveBeenCalled();
-    expect(policyFetch).not.toHaveBeenCalled();
+    expect(await response.json()).toMatchObject({ code: 'payload_too_large' });
+    expect(versions).not.toHaveBeenCalled();
+    expect(serve).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect(reresolve).not.toHaveBeenCalled();
   });
 });

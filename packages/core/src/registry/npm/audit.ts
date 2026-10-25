@@ -1,26 +1,51 @@
 import { packageKey } from '../../catalogue/names.js';
+import { validateVersion } from '../../catalogue/versions.js';
 import { CATALOGUE_WINNER_KEYS_MAX, type CatalogueReader } from '../../db/catalogue.js';
 import type { OrgContext } from '../../db/port.js';
 import type { SourceRepository } from '../../db/source.js';
-import { errorEnvelope } from '../../envelope.js';
-import { CodecLimitError, type Codecs } from '../../platform/codec.js';
-import type { PolicyFetch } from '../../sources/policy-fetch.js';
+import type {
+  AuthorizedNpmAudit,
+  NpmAuditAuthorizer,
+  NpmAuditRef,
+} from '../../db/vulnerability.js';
+import type { Observability } from '../../platform/observability.js';
+import { UpstreamError, type PolicyFetch } from '../../sources/policy-fetch.js';
+import { sanitizeNpmAuditResponse, type NpmAuditAdvisory } from './audit-response.js';
 
-const REQUEST_MAX = 1024 * 1024;
-const RESPONSE_MAX = 4 * REQUEST_MAX;
+const RESPONSE_MAX = 4 * 1024 * 1024;
 const ORIGIN = 'https://registry.npmjs.org';
+const HEADERS = {
+  'content-type': 'application/json',
+  'cache-control': 'private, no-store',
+};
 
-export interface NpmAuditDependencies {
-  readonly catalogue: Pick<CatalogueReader, 'classifyWinners'>;
-  readonly sources: Pick<SourceRepository, 'hasAttachedProxy'>;
-  readonly codecs: Pick<Codecs, 'gunzip'>;
+export type NpmAuditEntries = readonly (readonly [string, readonly string[]])[];
+
+export interface NpmAuditDependencies extends NpmAuditAuthorizer {
+  readonly classifyWinners: CatalogueReader['classifyWinners'];
+  readonly hasAttachedProxy: SourceRepository['hasAttachedProxy'];
+  /** Bound to registry.userAgent.default, without credentials or request tracing headers. */
   readonly policyFetch: PolicyFetch;
+  readonly observability: Pick<Observability, 'log'>;
 }
 
-async function boundedBody(
-  stream: ReadableStream<Uint8Array> | null,
-  max: number,
-): Promise<Uint8Array> {
+export function serializeNpmAudit(grant: AuthorizedNpmAudit): string {
+  const names = new Map<string, Set<string>>();
+  for (const { name, version } of grant.tuples) {
+    const versions = names.get(name) ?? new Set<string>();
+    versions.add(version);
+    names.set(name, versions);
+  }
+  return JSON.stringify(
+    Object.fromEntries(
+      [...names]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, versions]) => [name, [...versions].sort()]),
+    ),
+  );
+}
+
+async function boundedBody(stream: ReadableStream<Uint8Array> | null): Promise<Uint8Array> {
   if (stream === null) return new Uint8Array();
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -30,7 +55,7 @@ async function boundedBody(
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > max) throw new RangeError('Body exceeds limit');
+      if (size > RESPONSE_MAX) throw new RangeError('Body exceeds limit');
       chunks.push(value);
     }
   } catch (error) {
@@ -48,92 +73,174 @@ async function boundedBody(
   return bytes;
 }
 
+type Reason =
+  | 'ok'
+  | 'empty'
+  | 'unsupported'
+  | 'verify_overflow'
+  | 'verify_failed'
+  | 'upstream_unavailable'
+  | 'upstream_rate_limited'
+  | 'upstream_status'
+  | 'upstream_protocol'
+  | 'aborted';
+
 export async function forwardNpmAudit(
+  entries: NpmAuditEntries,
   request: Request,
   ctx: OrgContext,
   projectId: string,
   requestId: string,
   dependencies: NpmAuditDependencies,
 ): Promise<Response> {
-  const fail = (status: number, code: string, message: string) =>
-    Response.json(errorEnvelope(code, message, requestId), { status });
-  if (!(await dependencies.sources.hasAttachedProxy(ctx, projectId, 'npm'))) {
-    return fail(404, 'not_found', 'Not found');
+  let reason: Reason = 'verify_failed';
+  let forwardedNames = 0;
+  let advisories = 0;
+  let unexpectedKeys = 0;
+  let droppedAdvisories = 0;
+  const json = (status: number, body: unknown) => Response.json(body, { status, headers: HEADERS });
+  const fail = () =>
+    json(502, { error: 'Upstream request failed', code: 'upstream_error', requestId });
+  function checkAbort() {
+    if (request.signal.aborted) {
+      reason = 'aborted';
+      throw new DOMException('Audit request aborted', 'AbortError');
+    }
   }
-  const encoding = request.headers.get('content-encoding')?.trim().toLowerCase();
-  if (encoding && encoding !== 'identity' && encoding !== 'gzip') {
-    return fail(415, 'unsupported_encoding', 'Unsupported content encoding');
-  }
-  let entries: [string, string[]][];
-  let keys: string[];
   try {
-    const stream =
-      encoding === 'gzip' && request.body !== null
-        ? request.body.pipeThrough(dependencies.codecs.gunzip(REQUEST_MAX))
-        : request.body;
-    const bytes = await boundedBody(stream, REQUEST_MAX);
-    const input: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-      return fail(400, 'invalid_request', 'Invalid audit request');
+    checkAbort();
+    const normalized = new Map<string, { spellings: Set<string>; versions: Set<string> }>();
+    for (const [name, versions] of entries) {
+      const key = packageKey(name, { ecosystem: 'npm', legacyCase: true });
+      const value = normalized.get(key) ?? {
+        spellings: new Set<string>(),
+        versions: new Set<string>(),
+      };
+      value.spellings.add(name);
+      for (const version of versions) {
+        if (new TextEncoder().encode(version).byteLength > 200) continue;
+        try {
+          validateVersion({ ecosystem: 'npm', version, versionNormalized: version });
+          value.versions.add(version);
+        } catch {
+          // Invalid versions are ineligible pairs, not malformed bulk requests.
+        }
+      }
+      normalized.set(key, value);
     }
-    const values = Object.entries(input);
-    if (values.length > CATALOGUE_WINNER_KEYS_MAX) {
-      return fail(413, 'too_large', 'Audit request exceeds limit');
+
+    let grant: AuthorizedNpmAudit;
+    try {
+      if (!(await dependencies.hasAttachedProxy(ctx, projectId, 'npm'))) {
+        reason = 'unsupported';
+        checkAbort();
+        return json(501, {
+          error: 'npm audit requires an npmjs.org proxy source in this project',
+          code: 'unsupported',
+          requestId,
+        });
+      }
+      checkAbort();
+      const keys = [...normalized.keys()];
+      const refs: NpmAuditRef[] = [];
+      for (let offset = 0; offset < keys.length; offset += CATALOGUE_WINNER_KEYS_MAX) {
+        const winners = await dependencies.classifyWinners(ctx, {
+          projectId,
+          ecosystem: 'npm',
+          keys: keys.slice(offset, offset + CATALOGUE_WINNER_KEYS_MAX),
+        });
+        checkAbort();
+        for (const { key, winner } of winners) {
+          if (winner?.sourceType !== 'npmjs_proxy') continue;
+          for (const version of normalized.get(key)?.versions ?? []) {
+            refs.push({ sourceId: winner.sourceId, key, version });
+          }
+        }
+      }
+      grant = await dependencies.authorizeNpmAudit(ctx, refs);
+    } catch (error) {
+      checkAbort();
+      reason =
+        error instanceof Error &&
+        (error.message === 'vulnerability evidence unavailable' ||
+          error.message === 'vulnerability snapshot malformed')
+          ? 'verify_overflow'
+          : 'verify_failed';
+      return fail();
     }
-    if (
-      !values.every(
-        ([, versions]) =>
-          Array.isArray(versions) && versions.every((v: unknown) => typeof v === 'string'),
-      )
-    ) {
-      return fail(400, 'invalid_request', 'Invalid audit request');
+    checkAbort();
+    if (grant.orgId !== ctx.orgId) {
+      reason = 'verify_failed';
+      return fail();
     }
-    entries = values as [string, string[]][];
-    keys = entries.map(([name]) => packageKey(name, { ecosystem: 'npm', legacyCase: true }));
-  } catch (error) {
-    return error instanceof RangeError || error instanceof CodecLimitError
-      ? fail(413, 'too_large', 'Audit request exceeds limit')
-      : fail(400, 'invalid_request', 'Invalid audit request');
-  }
-  const winners = await dependencies.catalogue.classifyWinners(ctx, {
-    projectId,
-    ecosystem: 'npm',
-    keys,
-  });
-  const publicKeys = new Set(
-    winners.filter(({ winner }) => winner?.sourceType === 'npmjs_proxy').map(({ key }) => key),
-  );
-  const body = JSON.stringify(
-    Object.fromEntries(entries.filter((_, index) => publicKeys.has(keys[index]!))),
-  );
-  try {
-    const upstream = await dependencies.policyFetch({
-      url: `${ORIGIN}/-/npm/v1/security/advisories/bulk`,
-      method: 'POST',
-      purpose: 'api',
-      headers: { 'content-type': 'application/json' },
-      body: new TextEncoder().encode(body),
-      destinations: [ORIGIN],
-      redirects: 'error',
-      maxBytes: RESPONSE_MAX,
-      timeoutMs: 30_000,
-      signal: request.signal,
+    const sentNames = new Set(grant.tuples.map(({ name }) => name));
+    forwardedNames = sentNames.size;
+    if (grant.tuples.length === 0) {
+      reason = 'empty';
+      return json(200, {});
+    }
+    reason = 'upstream_unavailable';
+    try {
+      const upstream = await dependencies.policyFetch({
+        url: `${ORIGIN}/-/npm/v1/security/advisories/bulk`,
+        method: 'POST',
+        purpose: 'api',
+        headers: { 'content-type': 'application/json' },
+        body: new TextEncoder().encode(serializeNpmAudit(grant)),
+        destinations: [ORIGIN],
+        redirects: 'error',
+        maxBytes: RESPONSE_MAX,
+        timeoutMs: 30_000,
+        signal: request.signal,
+      });
+      checkAbort();
+      if (upstream.status < 200 || upstream.status >= 300 || upstream.redirected) {
+        reason =
+          upstream.status === 429
+            ? 'upstream_rate_limited'
+            : upstream.status >= 500 || upstream.redirected
+              ? 'upstream_unavailable'
+              : 'upstream_status';
+        await upstream.body?.cancel().catch(() => undefined);
+        checkAbort();
+        return fail();
+      }
+      reason = 'upstream_protocol';
+      const clean = sanitizeNpmAuditResponse(await boundedBody(upstream.body), sentNames);
+      checkAbort();
+      if (clean === null) return fail();
+      const body: Record<string, NpmAuditAdvisory[]> = Object.create(null);
+      for (const [name, list] of Object.entries(clean.body)) {
+        advisories += list.length;
+        const key = packageKey(name, { ecosystem: 'npm', legacyCase: true });
+        for (const spelling of normalized.get(key)?.spellings ?? []) body[spelling] = list;
+      }
+      unexpectedKeys = clean.unexpectedKeys;
+      droppedAdvisories = clean.droppedAdvisories;
+      reason = 'ok';
+      return json(200, body);
+    } catch (error) {
+      checkAbort();
+      if (error instanceof UpstreamError) {
+        reason = error.code === 'too_large' ? 'upstream_protocol' : 'upstream_unavailable';
+      }
+      return fail();
+    }
+  } finally {
+    dependencies.observability.log({
+      level: 'info',
+      event: 'registry.npm_audit',
+      outcome: request.signal.aborted
+        ? 'aborted'
+        : reason === 'ok' || reason === 'empty'
+          ? 'success'
+          : 'error',
+      reason_code: reason,
+      requested_names: new Set(entries.map(([name]) => name)).size,
+      forwarded_names: forwardedNames,
+      advisories,
+      unexpected_keys: unexpectedKeys,
+      dropped_advisories: droppedAdvisories,
     });
-    if (upstream.status < 200 || upstream.status >= 300) {
-      await upstream.body?.cancel().catch(() => undefined);
-      return fail(502, 'upstream_error', 'Upstream request failed');
-    }
-    const bytes = await boundedBody(upstream.body, RESPONSE_MAX);
-    const bodyless =
-      request.method === 'HEAD' ||
-      upstream.status === 204 ||
-      upstream.status === 205 ||
-      upstream.status === 304;
-    return new Response(bodyless ? null : bytes, {
-      status: upstream.status,
-      headers: { 'content-type': upstream.headers.get('content-type') ?? 'application/json' },
-    });
-  } catch {
-    return fail(502, 'upstream_error', 'Upstream request failed');
   }
 }

@@ -44,8 +44,15 @@ const json = (data: unknown, status = 200, headers = {}) =>
 function setup(
   fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })),
   project: string | null = null,
+  organizationPermissions = ['org:sources:write'],
 ) {
-  const client = createApiClient<paths>({ fetch, readCookie: () => undefined });
+  const client = createApiClient<paths>({
+    fetch: (input, init) =>
+      input === '/_pb/me/permissions'
+        ? Promise.resolve(json({ organization: organizationPermissions }))
+        : fetch(input, init),
+    readCookie: () => undefined,
+  });
   const entries = new Map<string, string>();
   const storage = {
     getItem: (key: string) => entries.get(key) ?? null,
@@ -826,17 +833,251 @@ describe('round 2 regressions', () => {
     },
   );
 
-  it('hides unsupported project reactivation and refuses the organization enable call', async () => {
+  it('checks organization permissions before offering project Enable', async () => {
     const paused = { ...attached, status: 'paused' as const };
-    const { model, fetch, html } = setup(
-      vi.fn().mockResolvedValue(json({ items: [paused], next: null })),
-      'acme',
-    );
+    const fetch = vi.fn().mockResolvedValue(json({ items: [paused], next: null }));
+    const { model, html } = setup(fetch, 'acme', ['project:sources:write']);
     await model.load();
-    expect(html()).not.toMatch(/>Enable<|>Resume</);
+    expect(html()).not.toMatch(/>Enable</);
+    expect(html()).toContain('<p role="status">An organization admin must enable this source.</p>');
     fetch.mockClear();
     await model.togglePause(paused);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['not_approved', 'unknown_error'] as const)(
+    'keeps project Enable and shows the normal error for a 403 with code %s',
+    async (code) => {
+      const paused = { ...attached, status: 'paused' as const };
+      const { model, html } = setup(
+        vi
+          .fn()
+          .mockResolvedValueOnce(json({ items: [paused], next: null }))
+          .mockResolvedValueOnce(json({ error: { code, message: SECRET } }, 403))
+          .mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+        'acme',
+      );
+      await model.load();
+      await model.togglePause(paused);
+      expect(html()).toMatch(/>Enable</);
+      expect(model.snapshot().enableDenied).toEqual([]);
+      expect(model.snapshot().error).toBe(
+        'The request could not be saved or loaded. Refresh and try again.',
+      );
+      expect(html()).not.toContain(SECRET);
+      await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: false, status: 403, code });
+      expect(html()).toMatch(/>Enable</);
+      expect(model.snapshot().enableDenied).toEqual([]);
+      expect(model.snapshot().error).toBe(
+        'The request could not be saved or loaded. Refresh and try again.',
+      );
+    },
+  );
+
+  it('announces project enable conflicts next to the source and permits retry after registering names', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockResolvedValueOnce(json({ error: { code: 'conflict', message: SECRET } }, 409))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        .mockResolvedValueOnce(json({ items: [attached], next: null })),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause(paused);
+    expect(html()).toContain(
+      '<p role="status">Register package names, then enable the source.</p>',
+    );
+    expect(html()).toMatch(/>Enable</);
+    expect(html()).not.toContain(SECRET);
+    expect(model.snapshot().error).toBeNull();
+    await model.togglePause(paused);
+    expect(model.snapshot().items[0]?.status).toBe('active');
+    expect(model.snapshot().enableConflicts).toEqual([]);
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(html()).not.toContain('Register package names, then enable the source.');
+  });
+
+  it('announces conflicts after replaying project enable', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+      'acme',
+    );
+    await model.load();
+    await model.replayed({
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 409,
+      code: 'conflict',
+    });
+    expect(html()).toContain(
+      '<p role="status">Register package names, then enable the source.</p>',
+    );
+    expect(html()).toMatch(/>Enable</);
+    expect(model.snapshot().error).toBeNull();
+  });
+
+  it('keeps project Enable available after a network failure', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockRejectedValueOnce(new Error(SECRET)),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause(paused);
+    expect(html()).toMatch(/>Enable</);
+    expect(model.snapshot().busy).toBe(false);
+    expect(model.snapshot().error).toBe(
+      'The request could not be saved or loaded. Refresh and try again.',
+    );
+    expect(html()).not.toContain(SECRET);
+    expect(model.snapshot().enableDenied).toEqual([]);
+  });
+
+  it('submits project enable once on a double click', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    let finish!: (response: Response) => void;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [paused], next: null }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(json({ items: [attached], next: null }));
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    const pending = model.togglePause(paused);
+    await model.togglePause(paused);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(html()).toMatch(/disabled="">Enable</);
+    finish(new Response(null, { status: 204 }));
+    await pending;
+    expect(model.snapshot().busy).toBe(false);
+    expect(model.snapshot().items[0]?.status).toBe('active');
+  });
+
+  it('clears cached enable denial on reload and reauthentication without duplicate entries', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html, fetch, requireReauth } = setup(
+      vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+      'acme',
+    );
+    await model.load();
+    const denial = {
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 403,
+      code: 'forbidden',
+    } as const;
+    await model.replayed(denial);
+    await model.replayed(denial);
+    expect(model.snapshot().enableDenied).toEqual([SOURCE]);
+    fetch.mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403));
+    await model.names(SOURCE);
+    expect(requireReauth).toHaveBeenCalledOnce();
+    expect(model.snapshot().enableDenied).toEqual([]);
+    await model.replayed(denial);
+    await model.load();
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(html()).toMatch(/>Enable</);
+    await model.replayed(denial);
+    await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: true, status: 204 });
+    expect(model.snapshot().enableDenied).toEqual([]);
+    expect(html()).toMatch(/>Enable</);
+  });
+
+  it('replaces project Enable with admin guidance after the enable route denies access', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, fetch, html } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockResolvedValueOnce(json({ error: { code: 'forbidden', message: SECRET } }, 403)),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toMatch(/>Enable</);
+    await model.togglePause(paused);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      `/_pb/sources/${SOURCE}/enable`,
+      { method: 'POST' },
+    ]);
+    expect(html()).not.toMatch(/>Enable<|>Resume</);
+    expect(html()).toContain('An organization admin must enable this source.');
+    expect(html()).not.toContain(SECRET);
+    expect(model.snapshot().error).toBeNull();
+    fetch.mockClear();
+    await model.togglePause(paused);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('enables a project-owned paused source through the organization enable route and reloads project scope', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ items: [paused], next: null }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json({ items: [attached], next: null }));
+    const { model, html } = setup(fetch, 'acme');
+    await model.load();
+    expect(html()).toMatch(/>Enable</);
+    await model.togglePause(paused);
+    expect(fetch.mock.calls[1]).toMatchObject([
+      `/_pb/sources/${SOURCE}/enable`,
+      { method: 'POST' },
+    ]);
+    expect(fetch.mock.calls[2]?.[0]).toBe('/_pb/projects/acme/sources?limit=100');
+    expect(model.snapshot().items[0]?.status).toBe('active');
+    expect(html()).not.toMatch(/>Enable</);
+  });
+
+  it('keeps reauthentication available for project enable and refreshes after replay', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html, requireReauth } = setup(
+      vi
+        .fn()
+        .mockResolvedValueOnce(json({ items: [paused], next: null }))
+        .mockResolvedValueOnce(json({ error: { code: 'reauth_required' } }, 403))
+        .mockResolvedValueOnce(json({ items: [attached], next: null })),
+      'acme',
+    );
+    await model.load();
+    await model.togglePause(paused);
+    expect(requireReauth).toHaveBeenCalledWith(
+      { method: 'POST', path: `/_pb/sources/${SOURCE}/enable` },
+      { credential: false, secretFields: [] },
+    );
+    expect(html()).toMatch(/>Enable</);
+    expect(html()).not.toContain('An organization admin must enable this source.');
+    await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: true, status: 204 });
+    expect(model.snapshot().items[0]?.status).toBe('active');
+  });
+
+  it('shows admin guidance if enabling is denied after reauthentication', async () => {
+    const paused = { ...attached, status: 'paused' as const };
+    const { model, html } = setup(
+      vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toMatch(/>Enable</);
+    await model.replayed({
+      path: `/_pb/sources/${SOURCE}/enable`,
+      ok: false,
+      status: 403,
+      code: 'forbidden',
+    });
+    expect(html()).not.toMatch(/>Enable</);
+    expect(html()).toContain('<p role="status">An organization admin must enable this source.</p>');
   });
 });
 

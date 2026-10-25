@@ -252,7 +252,7 @@ export function createJobRepository(
       WHERE job.org_id = ${ctx.orgId} AND job.state = 'running' AND job.lease_until <= ${NOW}
       AND job.id IN (${ids})
       AND NOT EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence
-        AND a.outcome = 'running')`);
+        AND a.outcome = 'running') RETURNING id`);
   }
 
   const requeueExpired = (ctx: OrgContext): Statement =>
@@ -297,7 +297,7 @@ export function createJobRepository(
       updated_at = ${finished}
       WHERE ${where}
       AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence
-        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL)`);
+        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL) RETURNING id`);
   }
 
   return {
@@ -333,6 +333,20 @@ export function createJobRepository(
           statement(sql`SELECT id, type, payload_json, project_id, resource_key FROM job
           WHERE org_id = ${ctx.orgId} AND idempotency_key = ${key}`),
           statement(sql`SELECT id FROM project WHERE org_id = ${ctx.orgId} AND id = ${projectId}`),
+          statement(sql`INSERT INTO source_sync_package
+            (org_id, source_id, package_key, generation, job_id, state)
+            SELECT j.org_id, s.id, json_extract(j.payload_json, '$.key'), s.sync_generation, j.id, j.state
+            FROM job j JOIN source s ON s.org_id = j.org_id
+              AND s.id = json_extract(j.payload_json, '$.sourceId')
+            WHERE j.org_id = ${ctx.orgId} AND j.id = ${id}
+              AND j.type = 'core:package-sync:v1' AND j.state = 'queued'
+              AND s.sync_generation = json_extract(j.payload_json, '$.syncGeneration')
+              AND json_type(j.payload_json, '$.key') = 'text'
+            ON CONFLICT (org_id, source_id, package_key) DO UPDATE SET
+              job_id = excluded.job_id, state = excluded.state, error = NULL
+            WHERE source_sync_package.org_id = ${ctx.orgId}
+              AND source_sync_package.generation = excluded.generation
+              AND source_sync_package.job_id <> excluded.job_id`),
         ])
         .catch(async (error: unknown) => {
           if (
@@ -537,7 +551,7 @@ export function createJobRepository(
         requeueExpired(ctx),
         expireOrphans(ctx, expired(sql`NOT EXISTS`)),
       ]);
-      return (requeued?.changes ?? 0) + (orphans?.changes ?? 0);
+      return (requeued?.rows.length ?? 0) + (orphans?.rows.length ?? 0);
     },
 
     async listDue(ctx, input) {

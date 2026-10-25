@@ -480,3 +480,19 @@ it('uses a plugin claiming composer_repository before the built-in default', asy
   );
   expect(h.transport).not.toHaveBeenCalled();
 });
+
+it('wires stable child error recording from the source repository into package jobs', async () => {
+  const h = harness();
+  const packageErrorStatements = vi.fn(() => [{ sql: 'record-source-error', params: [] }]);
+  Object.assign(h.deps.catalogue.sources, { packageErrorStatements });
+  h.transport.mockRejectedValue(new Error('private upstream failure'));
+  const definition = createRegistryModule(h.deps).packageSyncJob!;
+  await expect(
+    definition.handler(
+      definition.validate({ sourceId: 'src-1', key: h.key, syncGeneration: 'a'.repeat(64) }),
+      h.context,
+    ),
+  ).rejects.toThrow();
+  expect(packageErrorStatements).toHaveBeenCalledExactlyOnceWith(org, lease, 'network');
+  expect(h.batch).toHaveBeenCalledWith([{ sql: 'record-source-error', params: [] }]);
+});

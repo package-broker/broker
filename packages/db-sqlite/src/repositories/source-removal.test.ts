@@ -200,12 +200,11 @@ it.each([false, true])(
         ctx.orgId,
       ),
       stmt(
-        "INSERT INTO job (id, org_id, type, idempotency_key, state, lease_owner, lease_until, fence) VALUES ('J', ?, 'sync:v1', 'poll', 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",
+        "INSERT INTO job (id, org_id, type, idempotency_key, resource_key, state, lease_owner, lease_until, fence) VALUES ('J', ?, 'sync:v1', 'poll', 'source:S', 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",
         ctx.orgId,
       ),
     ]);
     const reads = createSourceSyncReads(executor);
-    const revision = await reads.selectionRevision(ctx, 'S');
     let accepted = false;
     const finalizer = createIngestFinalizer(executor);
     const job = createSourceSyncJob({
@@ -293,6 +292,7 @@ it.each([false, true])(
     await run();
     expect(await state()).toEqual([{ removal_accepted: 0, last_refusal_absent: 9 }]);
     expect(await removed()).toEqual([{ n: 0 }]);
+    const revision = await reads.selectionRevision(ctx, 'S');
     expect(await accept()).toBe('accepted');
     accepted = true;
     expect(await reads.selectionRevision(ctx, 'S')).toBe(revision);

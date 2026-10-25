@@ -124,7 +124,7 @@ export interface RegistryModuleDeps {
     readonly epoch: EpochReader;
     readonly representationClock: RepresentationClock;
     readonly upstreamState: Pick<UpstreamStateRepository, 'get'>;
-    readonly sources: Pick<SourceRepository, 'get'>;
+    readonly sources: Pick<SourceRepository, 'get' | 'packageErrorStatements'>;
     readonly covers: (ctx: OrgContext, sourceId: string, key: string) => Promise<boolean>;
     readonly versionById: (
       ctx: OrgContext,
@@ -482,6 +482,9 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
           jobs,
           upstreamState: sync.upstreamState,
           executor: sync.executor,
+          ...(catalogue.sources.packageErrorStatements === undefined
+            ? {}
+            : { sourceErrorStatements: catalogue.sources.packageErrorStatements }),
           sourceMetadata,
           planFill: async (ctx, sourceId, key) => {
             try {

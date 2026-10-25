@@ -550,7 +550,7 @@ const upgrade: Case = async (open) => {
         executor,
         "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
       ),
-    ).toBe(55);
+    ).toBe(56);
     expect(
       await rowsOf(
         executor,
@@ -1672,7 +1672,7 @@ export function describeAuthContract(name: string, open: Open): void {
     it('SSO reauth stages one audit with the timestamp update and stages nothing on replay', () =>
       authContractCases.sessionReauth(open));
     it(
-      '1. baseline rerun keeps populated rows, adds no authority and gives 55 tables',
+      '1. baseline rerun keeps populated rows, adds no authority and gives 56 tables',
       () => authContractCases.upgrade(open),
       30_000,
     );

@@ -62,7 +62,7 @@ async function fixture(open: () => Promise<OpenedCatalogueWriteDatabase>) {
         ctx.orgId,
       ),
       st(
-        "INSERT INTO job (id, org_id, type, idempotency_key, state, lease_owner, lease_until, fence) VALUES ('J', ?, 'sync:v1', 'poll', 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",
+        "INSERT INTO job (id, org_id, type, idempotency_key, resource_key, state, lease_owner, lease_until, fence) VALUES ('J', ?, 'sync:v1', 'poll', 'source:S', 'running', 'worker', '2099-01-01T00:00:00.000Z', 1)",
         ctx.orgId,
       ),
       ...names.map((key, i) =>

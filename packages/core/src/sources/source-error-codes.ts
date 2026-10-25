@@ -6,6 +6,7 @@ export const SOURCE_ERROR_CODES = [
   'rate_limited',
   'not_found',
   'invalid_response',
+  'tag_limit_exceeded',
   'mass_absence',
   'too_large',
   'policy_denied',

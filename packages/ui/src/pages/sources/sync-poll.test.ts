@@ -51,3 +51,29 @@ it('cancels on disposal and does not reschedule an in-flight request', async () 
   expect(refresh).toHaveBeenCalledOnce();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it('keeps polling active child work beyond the unchanged-status attempt cap', async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn<() => Promise<boolean | 'pending'>>().mockResolvedValue('pending');
+  pollSync(refresh);
+  await vi.advanceTimersByTimeAsync(SYNC_POLL_INTERVAL_MS * (SYNC_POLL_ATTEMPTS + 2));
+  expect(refresh).toHaveBeenCalledTimes(SYNC_POLL_ATTEMPTS + 2);
+  refresh.mockResolvedValue(true);
+  await vi.advanceTimersByTimeAsync(SYNC_POLL_INTERVAL_MS * 2);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('waits for listing and children even when the listing timestamp has changed', async () => {
+  const { syncPollResult } = await import('./sync-poll.js');
+  const before = { status: 'active', lastPolledAt: null, lastSuccessAt: null, lastError: null };
+  const sync = { generation: 'new', listing: true, queued: 0, running: 0 };
+  const after = { ...before, lastSuccessAt: 'now', sync };
+  expect(syncPollResult(before, after)).toBe('pending');
+  expect(syncPollResult(before, { ...after, sync: { ...sync, listing: false, queued: 1 } })).toBe(
+    'pending',
+  );
+  expect(syncPollResult(before, { ...after, sync: { ...sync, listing: false, running: 1 } })).toBe(
+    'pending',
+  );
+  expect(syncPollResult(before, { ...after, sync: { ...sync, listing: false } })).toBe(true);
+});

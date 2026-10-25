@@ -2,6 +2,7 @@ export const SYNC_POLL_INTERVAL_MS = 2_000;
 export const SYNC_POLL_ATTEMPTS = 15;
 
 type SyncStatus = {
+  sync?: { generation: string; listing: boolean; queued: number; running: number };
   status: string;
   lastPolledAt: string | null;
   lastSuccessAt: string | null;
@@ -10,6 +11,7 @@ type SyncStatus = {
 
 export function syncStatusChanged(before: SyncStatus, after: SyncStatus) {
   return (
+    before.sync?.generation !== after.sync?.generation ||
     before.status !== after.status ||
     before.lastPolledAt !== after.lastPolledAt ||
     before.lastSuccessAt !== after.lastSuccessAt ||
@@ -17,8 +19,14 @@ export function syncStatusChanged(before: SyncStatus, after: SyncStatus) {
   );
 }
 
+export function syncPollResult(before: SyncStatus, after: SyncStatus): boolean | 'pending' {
+  if (after.sync && (after.sync.listing || after.sync.queued + after.sync.running > 0))
+    return 'pending';
+  return syncStatusChanged(before, after);
+}
+
 export function pollSync(
-  refresh: () => Promise<boolean>,
+  refresh: () => Promise<boolean | 'pending'>,
   visibility:
     | Pick<Document, 'hidden' | 'addEventListener' | 'removeEventListener'>
     | undefined = typeof document === 'undefined' ? undefined : document,
@@ -46,7 +54,8 @@ export function pollSync(
       }
       attempts++;
       void refresh().then((complete) => {
-        if (complete) stop();
+        if (complete === 'pending') attempts = 0;
+        if (complete === true) stop();
         else schedule();
       }, stop);
     }, SYNC_POLL_INTERVAL_MS);

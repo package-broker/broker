@@ -1,3 +1,4 @@
+import type { JobGuard } from '@package-broker/core/platform/job-repository';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -156,6 +157,8 @@ interface SourceRow {
   readonly last_polled_at: string | null;
   readonly last_success_at: string | null;
   readonly last_error: string | null;
+  readonly sync_generation: string | null;
+  readonly sync_counts: string;
   readonly consecutive_failures: number;
   readonly root_hash: string | null;
   readonly listing_hash: string | null;
@@ -175,6 +178,28 @@ function removalRefusalOf(row: SourceRow): SourceRecord['removalRefusal'] {
   if (at === null || absent === null || listed === null || successful === null)
     throw new TypeError('source removal refusal facts are incomplete');
   return { at, absent, listed, successful };
+}
+
+function syncStatus(generation: string, counts: string): NonNullable<SourceRecord['sync']> {
+  const { listing, queued, running, failed, completed, errors } = JSON.parse(counts) as {
+    listing: boolean;
+    queued: number;
+    running: number;
+    failed: number;
+    completed: number;
+    errors: Record<string, number>;
+  };
+  return {
+    generation,
+    listing,
+    queued,
+    running,
+    failed,
+    completed,
+    errors: SOURCE_ERROR_CODES.flatMap((code) =>
+      (errors[code] ?? 0) > 0 ? [{ code, count: errors[code]! }] : [],
+    ).sort((a, b) => b.count - a.count || a.code.localeCompare(b.code)),
+  };
 }
 
 function toRecord(row: SourceRow): SourceRecord {
@@ -197,6 +222,11 @@ function toRecord(row: SourceRow): SourceRecord {
     lastPolledAt: row.last_polled_at,
     lastSuccessAt: row.last_success_at,
     lastError: row.last_error,
+    ...(row.sync_generation === null
+      ? {}
+      : {
+          sync: syncStatus(row.sync_generation, row.sync_counts),
+        }),
     consecutiveFailures: row.consecutive_failures,
     rootHash: row.root_hash,
     listingHash: row.listing_hash,
@@ -226,6 +256,8 @@ const SOURCE_COLUMNS = [
   'last_polled_at',
   'last_success_at',
   'last_error',
+  'sync_generation',
+  'sync_counts',
   'consecutive_failures',
   'root_hash',
   'listing_hash',
@@ -237,6 +269,27 @@ const SOURCE_COLUMNS = [
   'last_refusal_successful',
   'removal_accepted',
 ] as const;
+
+export function packageSyncErrorStatements(
+  ctx: OrgContext,
+  guard: JobGuard,
+  code: SourceErrorCode,
+): readonly Statement[] {
+  return [
+    compile(
+      db
+        .updateTable('job')
+        .set({ sync_error: errorCode(code) })
+        .where('org_id', '=', ctx.orgId)
+        .where('id', '=', guard.id)
+        .where('type', '=', 'core:package-sync:v1')
+        .where('state', '=', 'running')
+        .where('lease_owner', '=', guard.owner)
+        .where('fence', '=', guard.fence)
+        .where('lease_until', '>', DB_NOW),
+    ),
+  ];
+}
 
 export function findByRepositoryStatement(
   ctx: OrgContext,
@@ -912,12 +965,20 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       ]);
     },
 
+    packageErrorStatements: packageSyncErrorStatements,
     async pollState(ctx, guard, input) {
       const format = '%Y-%m-%dT%H:%M:%fZ';
       const keep = (column: string, value: string | null | undefined) =>
         value === undefined ? sql<string | null>`${sql.ref(column)}` : sql<string | null>`${value}`;
       let update;
-      if (input.outcome === 'success') {
+      if (input.outcome === 'started') {
+        if (!/^[a-f0-9]{64}$/.test(input.generation))
+          throw new TypeError('invalid sync generation');
+        update = db.updateTable('source').set({
+          sync_generation: input.generation,
+          sync_counts: sql<string>`json_set(sync_counts, '$.listing', json('true'))`,
+        });
+      } else if (input.outcome === 'success') {
         update = db.updateTable('source').set({
           status: sql<'active'>`case when status = 'paused' then 'paused' else 'active' end`,
           consecutive_failures: 0,
@@ -943,7 +1004,14 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
               ' seconds')`,
         });
       }
-      const statement = compile(update.where('id', '=', input.id).where('org_id', '=', ctx.orgId));
+      if (input.outcome !== 'started') {
+        update = update.set({
+          sync_counts: sql<string>`json_set(sync_counts, '$.listing', json('false'))`,
+        });
+      }
+      const statement = compile(
+        update.where('id', '=', input.id).where('org_id', '=', ctx.orgId).returning('id'),
+      );
       let results;
       try {
         results = await executor.batch([
@@ -959,7 +1027,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         if (error instanceof DbError && error.kind === 'unique') return 'stale';
         throw error;
       }
-      return results[results.length - 1]?.changes === 1 ? 'written' : 'not_found';
+      return results[results.length - 1]?.rows.length === 1 ? 'written' : 'not_found';
     },
   };
 }

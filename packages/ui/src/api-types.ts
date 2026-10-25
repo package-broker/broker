@@ -5928,6 +5928,32 @@ export interface operations {
                   removalPolicy: 'flag' | 'exclude';
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
+                  sync?: {
+                    completed: number;
+                    errors: {
+                      /** @enum {string} */
+                      code:
+                        | 'network'
+                        | 'timeout'
+                        | 'http_error'
+                        | 'unauthorized'
+                        | 'rate_limited'
+                        | 'not_found'
+                        | 'invalid_response'
+                        | 'tag_limit_exceeded'
+                        | 'mass_absence'
+                        | 'too_large'
+                        | 'policy_denied'
+                        | 'credential_unavailable'
+                        | 'internal';
+                      count: number;
+                    }[];
+                    failed: number;
+                    generation: string;
+                    listing: boolean;
+                    queued: number;
+                    running: number;
+                  };
                   /** @enum {string} */
                   type:
                     | 'vcs'
@@ -5965,6 +5991,32 @@ export interface operations {
                   removalPolicy: 'flag' | 'exclude';
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
+                  sync?: {
+                    completed: number;
+                    errors: {
+                      /** @enum {string} */
+                      code:
+                        | 'network'
+                        | 'timeout'
+                        | 'http_error'
+                        | 'unauthorized'
+                        | 'rate_limited'
+                        | 'not_found'
+                        | 'invalid_response'
+                        | 'tag_limit_exceeded'
+                        | 'mass_absence'
+                        | 'too_large'
+                        | 'policy_denied'
+                        | 'credential_unavailable'
+                        | 'internal';
+                      count: number;
+                    }[];
+                    failed: number;
+                    generation: string;
+                    listing: boolean;
+                    queued: number;
+                    running: number;
+                  };
                   /** @enum {string} */
                   type:
                     | 'vcs'
@@ -8357,6 +8409,32 @@ export interface operations {
               removalPolicy: 'flag' | 'exclude';
               /** @enum {string} */
               status: 'active' | 'degraded' | 'failing' | 'paused';
+              sync?: {
+                completed: number;
+                errors: {
+                  /** @enum {string} */
+                  code:
+                    | 'network'
+                    | 'timeout'
+                    | 'http_error'
+                    | 'unauthorized'
+                    | 'rate_limited'
+                    | 'not_found'
+                    | 'invalid_response'
+                    | 'tag_limit_exceeded'
+                    | 'mass_absence'
+                    | 'too_large'
+                    | 'policy_denied'
+                    | 'credential_unavailable'
+                    | 'internal';
+                  count: number;
+                }[];
+                failed: number;
+                generation: string;
+                listing: boolean;
+                queued: number;
+                running: number;
+              };
               /** @enum {string} */
               type:
                 | 'vcs'

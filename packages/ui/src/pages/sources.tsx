@@ -1,5 +1,5 @@
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
-import { pollSync, syncStatusChanged } from './sources/sync-poll.js';
+import { pollSync, syncPollResult } from './sources/sync-poll.js';
 import type { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { responseHeader, type ApiResult } from '../api.js';
@@ -639,7 +639,7 @@ export function createSourcesModel(
               }),
         async () => {
           if (generation !== syncGeneration) return;
-          const refresh = async () => {
+          const refresh = async (): Promise<boolean | 'pending'> => {
             const version = listVersion;
             const ownership = state.ownership;
             let after: string | null = null;
@@ -666,23 +666,24 @@ export function createSourcesModel(
                     item.id === source.id ? { ...current, url: displayUrl(current.url) } : item,
                   ),
                 });
-                return syncStatusChanged(source, current);
+                return syncPollResult(source, current);
               }
               after = result.data.next;
             } while (after !== null);
             return true;
           };
-          let complete: boolean;
+          let complete: boolean | 'pending';
           if (state.loading && state.items.length === 0) {
             await load();
             const current = await findLoadedSource(source.id);
-            complete = state.listError || !current || syncStatusChanged(source, current);
+            complete = state.listError || !current || syncPollResult(source, current);
           } else {
             complete = await refresh();
           }
           if (generation !== syncGeneration) return;
           set({ notice: 'Sync requested.' });
-          if (!complete && generation === syncGeneration) stopSyncPolling = pollSync(refresh);
+          if (complete !== true && generation === syncGeneration)
+            stopSyncPolling = pollSync(refresh);
         },
       );
     },
@@ -880,6 +881,7 @@ export const SYNC_ERROR_LABELS: Record<(typeof SOURCE_ERROR_CODES)[number], stri
   rate_limited: 'Rate limited',
   not_found: 'Not found',
   invalid_response: 'Invalid response',
+  tag_limit_exceeded: 'Tag limit exceeded',
   mass_absence: 'Mass package absence',
   too_large: 'Response too large',
   policy_denied: 'Policy denied',
@@ -908,6 +910,19 @@ function SyncStatus({ source }: { source: Source }) {
           </>
         )}
       </p>
+      {source.sync && (
+        <>
+          <p>
+            Latest sync: {source.sync.queued} queued · {source.sync.running} running ·{' '}
+            {source.sync.failed} failed · {source.sync.completed} completed
+          </p>
+          {source.sync.errors.slice(0, 3).map(({ code, count }) => (
+            <p key={code}>
+              {SYNC_ERROR_LABELS[code]} · <code>{code}</code>: {count}
+            </p>
+          ))}
+        </>
+      )}
       {isProxy(source) ? <p>{PROXY_DEMAND_MESSAGE}</p> : null}
       <p>
         Next poll: <Time value={source.nextPollAt} fallback="None" />

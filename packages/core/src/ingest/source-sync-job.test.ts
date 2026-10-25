@@ -102,6 +102,7 @@ function setup(options: {
   const marks: { stamp: string; present: readonly string[] }[] = [];
   const finalizes: IngestFinalizeInput[] = [];
   const polls: unknown[] = [];
+  const starts: unknown[] = [];
   const calls = { list: [] as (string | null)[], open: 0, abandon: 0, release: 0, held: 0 };
   const credentialSeen: unknown[] = [];
 
@@ -150,7 +151,8 @@ function setup(options: {
     sources: {
       get: async () => source,
       pollState: async (_ctx, _guard, input) => {
-        polls.push(input);
+        if (input.outcome === 'started') starts.push(input);
+        else polls.push(input);
         return 'written';
       },
     },
@@ -311,6 +313,7 @@ function setup(options: {
     marks,
     finalizes,
     polls,
+    starts,
     calls,
     state,
     credentialSeen,
@@ -392,9 +395,9 @@ describe('source sync job: listing and fan-out', () => {
     const t = setup({ pages: twoPages, existing: (names) => names.filter((n) => n !== 'a/two') });
     await t.run(payload());
     expect(t.fanout().map((e) => e.payload)).toEqual([
-      { sourceId: 'src', key: 'a/one' },
-      { sourceId: 'src', key: 'a/two' },
-      { sourceId: 'src', key: 'a/three' },
+      { sourceId: 'src', key: 'a/one', syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      { sourceId: 'src', key: 'a/two', syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      { sourceId: 'src', key: 'a/three', syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/) },
     ]);
     expect(t.fanout().map((e) => e.idempotencyKey)).toEqual(
       ['a/one', 'a/two', 'a/three'].map((key) => sha(['v1', 'src', key, 'sess-1', 1])),
@@ -477,7 +480,11 @@ describe('source sync job: listing and fan-out', () => {
     expect(t.continuations()).toHaveLength(1);
     const [first] = t.continuations();
     expect(first?.resourceKey).toBe('source:src');
-    expect(first?.payload).toEqual({ sourceId: 'src', reason: 'poll' });
+    expect(first?.payload).toEqual({
+      sourceId: 'src',
+      reason: 'poll',
+      syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     expect(first?.idempotencyKey).toBe(sha(['sess-1', 1, t.state.session!.pagesSoFar]));
 
     await t.run(payload());
@@ -787,8 +794,8 @@ describe('source sync job: proxy sources', () => {
       expect(t.calls.open).toBe(0);
       expect(t.finalizes).toEqual([]);
       expect(t.fanout().map((e) => e.payload)).toEqual([
-        { sourceId: 'src', key: 'a/one' },
-        { sourceId: 'src', key: 'a/two' },
+        { sourceId: 'src', key: 'a/one', syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        { sourceId: 'src', key: 'a/two', syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/) },
       ]);
       expect(t.polls).toEqual([{ id: 'src', outcome: 'success' }]);
     });
@@ -1067,4 +1074,48 @@ describe('built-in Composer repository listing evidence', () => {
       }),
     ]);
   });
+});
+
+describe('source sync generation', () => {
+  it('carries the same generation through bounded fanout continuations', async () => {
+    const t = setup({
+      pages: {
+        '': page(
+          Array.from({ length: 101 }, (_, i) => `a/p${i}`),
+          null,
+        ),
+      },
+    });
+    await t.run(payload());
+    const next = t.continuations()[0]!.payload;
+    expect(next.syncGeneration).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+    await t.run(next);
+    expect(new Set(t.fanout().map((job) => job.payload.syncGeneration))).toEqual(
+      new Set([next.syncGeneration]),
+    );
+    expect(t.starts).toEqual([
+      { id: 'src', outcome: 'started', generation: next.syncGeneration },
+      { id: 'src', outcome: 'started', generation: next.syncGeneration },
+    ]);
+  });
+});
+
+it('ignores a late source continuation from an older generation', async () => {
+  const t = setup({
+    source: record({
+      sync: {
+        generation: 'b'.repeat(64),
+        listing: false,
+        queued: 0,
+        running: 0,
+        failed: 0,
+        completed: 3,
+        errors: [],
+      },
+    }),
+  });
+  await t.run(payload({ syncGeneration: 'a'.repeat(64) }));
+  expect(t.starts).toEqual([]);
+  expect(t.fanout()).toEqual([]);
+  expect(t.calls.list).toEqual([]);
 });

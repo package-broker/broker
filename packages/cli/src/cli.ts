@@ -18,6 +18,7 @@ import { runCloudflareSmoke } from './commands/cloudflare/smoke.js';
 import { runCloudflareTeardown } from './commands/cloudflare/teardown.js';
 import { runCloudflareJanitor } from './commands/cloudflare/janitor.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
+import { runImport } from './commands/import.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
 import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
@@ -41,11 +42,17 @@ const USAGE =
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
+  '       pb import submit --manifest <file> --receipt <file> --principal <label> --broker <origin> [--resume] [--token-file <path>]\n' +
+  '       pb import status <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
+  '       pb import credentials <run> --manifest <file> --credentials <map> --broker <origin> [--token-file <path>]\n' +
+  '       pb import verify <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
+  '       pb import accept <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
   '       pb source accept-removal --url <https-origin> --source <id> (PB_SESSION and PB_CSRF_TOKEN)\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
   'Exit codes for pb cloudflare teardown/janitor: 0 cleaned or skipped; 1 cleanup failed; 2 invalid inventory, wrong inventory id or missing destructive confirmation; 4 inventory locked; 6 unresolved resource or deletion outcome; 8 ownership conflict. Production confirmation uses identity.owner_digest as --inventory-id. Adopted D1 and R2 resources always require --i-understand-this-deletes; janitor retains them. Inventory schema version 2 records deployment history and lifecycle baselines. Janitor requires run_identity pb-e2e-<repository-id>-<epoch-seconds> (optional run suffix) and a matching worker_name stem; Worker stems may encode both numbers in lowercase base 36 to fit name limits. Both the run and inventory update must be older than 6 hours. Deleting a Worker removes its versions.\n' +
+  'Import commands use PB_IMPORT_TOKEN or --token-file. Approval, apply and accept stay in the UI. Import exit codes: 0 success; 1 API or run failure; 2 local validation; 3 pending UI action or wait timeout; 6 outcome unknown.\n' +
   'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
   'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)\n' +
   'Exit codes for pb admin show-provider-binding: 0 success; 1 error; 2 usage or invalid provider; 5 organization not bootstrapped; 6 no_binding; nothing is bound for that provider; 7 outcome unknown (D1 response lost, re-running is safe)';
@@ -57,6 +64,13 @@ function parseCliArgs(argv: string[]) {
       allowPositionals: true,
       options: {
         url: { type: 'string' },
+        broker: { type: 'string' },
+        manifest: { type: 'string' },
+        receipt: { type: 'string' },
+        principal: { type: 'string' },
+        resume: { type: 'boolean' },
+        wait: { type: 'boolean' },
+        'wait-seconds': { type: 'string' },
         source: { type: 'string' },
         config: { type: 'string' },
         target: { type: 'string' },
@@ -260,13 +274,22 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'baseline',
     'mode',
   ],
+  'import submit': ['manifest', 'receipt', 'principal', 'broker', 'resume', 'token-file'],
+  'import status': ['broker', 'token-file', 'wait', 'wait-seconds'],
+  'import credentials': ['broker', 'token-file', 'manifest', 'credentials'],
+  'import verify': ['broker', 'token-file', 'wait', 'wait-seconds'],
+  'import accept': ['broker', 'token-file', 'wait', 'wait-seconds'],
   'source accept-removal': ['url', 'source'],
   openapi: ['out'],
   version: [],
 };
 
 function acceptsInvocation(positionals: readonly string[], flags: readonly string[]): boolean {
-  const allowed = ALLOWED_FLAGS[positionals.join(' ')];
+  const isImportRun =
+    positionals[0] === 'import' &&
+    ['status', 'credentials', 'verify', 'accept'].includes(positionals[1] ?? '');
+  if (isImportRun && positionals.length !== 3) return false;
+  const allowed = ALLOWED_FLAGS[(isImportRun ? positionals.slice(0, 2) : positionals).join(' ')];
   return allowed !== undefined && flags.every((flag) => allowed.includes(flag));
 }
 
@@ -354,6 +377,36 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
 
   if (command === 'openapi') return runOpenApi(values.out);
+
+  if (
+    command === 'import' &&
+    ['submit', 'status', 'credentials', 'verify', 'accept'].includes(subcommand ?? '')
+  ) {
+    if (
+      !values.broker ||
+      (values.wait === true && values['wait-seconds'] !== undefined) ||
+      (values['wait-seconds'] !== undefined &&
+        !/^(?:0|[1-9][0-9]?|[12][0-9]{2}|300)$/.test(values['wait-seconds']))
+    )
+      return usageError();
+    return runImport({
+      command: subcommand as 'submit' | 'status' | 'credentials' | 'verify' | 'accept',
+      broker: values.broker,
+      env: process.env,
+      ...(positionals[2] === undefined ? {} : { run: positionals[2] }),
+      ...(values.manifest === undefined ? {} : { manifest: values.manifest }),
+      ...(values.credentials === undefined ? {} : { credentials: values.credentials }),
+      ...(values.receipt === undefined ? {} : { receipt: values.receipt }),
+      ...(values.principal === undefined ? {} : { principal: values.principal }),
+      ...(values.resume === undefined ? {} : { resume: values.resume }),
+      ...(values['token-file'] === undefined ? {} : { tokenFile: values['token-file'] }),
+      ...(values['wait-seconds'] === undefined
+        ? values.wait
+          ? { waitSeconds: 300 }
+          : {}
+        : { waitSeconds: Number(values['wait-seconds']) }),
+    });
+  }
 
   if (command === 'import' && subcommand === 'satis') {
     const { config, out, mode } = values;

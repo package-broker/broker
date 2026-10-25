@@ -8314,6 +8314,7 @@ export interface operations {
       query?: {
         after?: string;
         limit?: string;
+        ownership?: 'organization' | 'project' | 'all';
       };
       header?: never;
       path?: never;
@@ -8349,6 +8350,7 @@ export interface operations {
               nextPollAt: string | null;
               pollIntervalSeconds: number;
               projectId: string | null;
+              projectName: string | null;
               removalAcceptanceArmed: boolean;
               /** @enum {string} */
               removalPolicy: 'flag' | 'exclude';

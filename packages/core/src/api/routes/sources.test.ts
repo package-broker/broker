@@ -7,7 +7,7 @@ import {
   type EngineTokenAccess,
 } from '../../authz/engine.js';
 import { orgContext } from '../../db/port.js';
-import type { SourceRecord } from '../../db/source.js';
+import type { SourceListQuery, SourceRecord } from '../../db/source.js';
 import { fixedClock } from '../../ids.js';
 import { createKernel } from '../../kernel/kernel.js';
 import { createKeyring } from '../../secrets/keyring.js';
@@ -138,8 +138,14 @@ async function fixture(
     delete: vi.fn(async () => 'deleted' as const),
     resume: vi.fn(async () => 'activation_requires_registered_names' as const),
     pause: vi.fn(async () => 'paused' as const),
-    list: vi.fn(async (_org: unknown, input: { after: string | null; limit: number }) =>
+    list: vi.fn(async (_org: unknown, input: SourceListQuery) =>
       [...(options.rows ?? [row])]
+        .filter(
+          (r) =>
+            input.projectId !== null ||
+            input.ownership === 'all' ||
+            (input.ownership === 'project' ? r.projectId !== null : r.projectId === null),
+        )
         .filter((r) => input.after === null || r.id > input.after)
         .sort((a, b) => a.id.localeCompare(b.id))
         .slice(0, input.limit + 1),
@@ -537,7 +543,9 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
       expect(text).not.toContain(SENTINEL);
       const body = JSON.parse(text) as { items: Record<string, unknown>[]; next: string | null };
       expect(Object.keys(body.items[0]!).sort()).toEqual(
-        project ? [...fields, 'attached'].sort() : [...fields, 'attachedProjectCount'].sort(),
+        project
+          ? [...fields, 'attached'].sort()
+          : [...fields, 'attachedProjectCount', 'projectName'].sort(),
       );
       if (!project) expect(body.items[0]?.attachedProjectCount).toBe(2);
       expect(body.items[0]?.hasCredential).toBe(true);
@@ -964,6 +972,115 @@ it.each(['absent', 'foreign', 'archived', 'invisible'] as const)(
   async (projectState) => {
     const f = await fixture({ projectState });
     expect((await f.request('GET', '/_pb/projects/demo/sources')).status).toBe(404);
+    expect(f.sources.list).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['organization', 'project', 'all'] as const)(
+  'passes organization ownership %s through with stable pagination',
+  async (ownership) => {
+    const f = await fixture();
+    const response = await f.request(
+      'GET',
+      `/_pb/sources?ownership=${ownership}&limit=1&after=${SECOND}`,
+    );
+    expect(response.status).toBe(200);
+    expect(f.sources.list.mock.calls[0]?.[1]).toEqual({
+      projectId: null,
+      ownership,
+      after: SECOND,
+      limit: 1,
+      ...(ownership === 'organization'
+        ? {}
+        : {
+            projectVisibility: {
+              userId: 'user-1',
+              allProjects: false,
+              includeArchived: false,
+              providerAnchors: [],
+            },
+          }),
+    });
+  },
+);
+
+it.each(['project', 'all'] as const)(
+  'passes a capped PAT visibility into %s ownership reads',
+  async (ownership) => {
+    const f = await fixture({
+      tokenProjectMode: 'selected',
+      tokenProjectIds: [PROJECT],
+      tokenInherited: true,
+      tokenAdmin: true,
+    });
+    expect(
+      (await f.request('GET', `/_pb/sources?ownership=${ownership}`, undefined, true)).status,
+    ).toBe(200);
+    expect(f.sources.list.mock.calls[0]?.[1]).toMatchObject({
+      ownership,
+      projectVisibility: {
+        userId: 'user-1',
+        restrictTo: [PROJECT],
+        allProjects: true,
+        includeArchived: false,
+        providerAnchors: [],
+      },
+    });
+  },
+);
+
+it('rejects unknown ownership and ownership on the project route', async () => {
+  const f = await fixture();
+  expect((await f.request('GET', '/_pb/sources?ownership=unknown')).status).toBe(400);
+  expect((await f.request('GET', '/_pb/projects/acme/sources?ownership=all')).status).toBe(400);
+  expect(f.sources.list).not.toHaveBeenCalled();
+});
+
+it.each([undefined, 'organization', 'project', 'all'] as const)(
+  'returns the expected rows for ownership %s',
+  async (ownership) => {
+    const base = {
+      ...create,
+      configJson: '{}',
+      credentialId: null,
+      status: 'paused',
+      removalPolicy: 'flag',
+      pollIntervalSeconds: 60,
+      lastSuccessAt: null,
+      lastPolledAt: null,
+      nextPollAt: null,
+    };
+    const rows = [
+      { ...base, id: SOURCE, projectId: null },
+      { ...base, id: SECOND, projectId: PROJECT, projectName: 'Payments' },
+    ] as SourceRecord[];
+    const f = await fixture({ rows });
+    const query = ownership === undefined ? '' : `&ownership=${ownership}`;
+    const first = await f.request('GET', `/_pb/sources?limit=1${query}`);
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({
+      items: [
+        {
+          id: ownership === 'project' ? SECOND : SOURCE,
+          projectName: ownership === 'project' ? 'Payments' : null,
+        },
+      ],
+      next: ownership === 'all' ? SOURCE : null,
+    });
+    if (ownership === 'all') {
+      const second = await f.request('GET', `/_pb/sources?limit=1&ownership=all&after=${SOURCE}`);
+      expect(await second.json()).toMatchObject({
+        items: [{ id: SECOND, projectId: PROJECT, projectName: 'Payments' }],
+        next: null,
+      });
+    }
+  },
+);
+it.each(['project', 'all'])(
+  'retains organization read authority for ownership %s',
+  async (ownership) => {
+    const f = await fixture({ organizationPermissions: [] });
+    expect((await f.request('GET', `/_pb/sources?ownership=${ownership}`)).status).toBe(403);
     expect(f.sources.list).not.toHaveBeenCalled();
   },
 );

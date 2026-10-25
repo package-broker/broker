@@ -1766,3 +1766,44 @@ describe('recorded exchanges', () => {
     expect((settled as { value: { text: string | null }[] }).value[0]?.text).toContain('acme/lib');
   });
 });
+
+describe('retained budget across fetch stages', () => {
+  it('releases each raw pack once its objects are stored, so later stages fit the Workers budget', async () => {
+    const fake = new FakeGit();
+    fake.rejected.add('tree:1');
+    const host = 'release-stages.example.com';
+    const blob = fake.add(makeObj('blob', enc.encode('{"name":"acme/lib"}')));
+    const filler = Array.from({ length: (6 * 1024 * 1024) / 40 }, (_, n) => ({
+      mode: '100644',
+      name: `f${String(n).padStart(10, '0')}`,
+      oid: createHash('sha1').update(String(n)).digest('hex'),
+    }));
+    const tree = fake.add(
+      makeObj(
+        'tree',
+        makeTree([{ mode: '100644', name: 'composer.json', oid: blob.oid }, ...filler]).data,
+        true,
+      ),
+    );
+    const head = enc.encode(
+      `tree ${tree.oid}\nauthor Dev One <dev@example.com> 1700000000 +0000\n` +
+        `committer Dev One <dev@example.com> 1700000000 +0000\n\n`,
+    );
+    const commit = fake.add(
+      makeObj('commit', concat([head, new Uint8Array(randomBytes(7 * MIB))]), true),
+    );
+    const [file] = await readFileAtRefs(
+      ctx(fake, host, 'cloudflare'),
+      url(host),
+      [{ name: 'refs/tags/v1.0.0', oid: commit.oid }],
+      'composer.json',
+    );
+    expect(file).toMatchObject({ commit: commit.oid, text: '{"name":"acme/lib"}' });
+    expect(fake.requests.map((request) => request.filter)).toEqual([
+      'tree:1',
+      'tree:0',
+      'tree:0',
+      undefined,
+    ]);
+  });
+});

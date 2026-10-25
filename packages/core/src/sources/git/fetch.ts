@@ -385,10 +385,17 @@ async function fetchChunk(
   const { codecs } = s.ctx;
   const parsed = await parsePackObjects(pack, codecs, s.budget);
   const resolved = await resolvePackObjects(parsed, codecs, s.budget);
+  let done = Math.max(pack.length, pack.buffer.byteLength);
+  for (const object of parsed.objects) if (object.kind !== 'base') done += object.delta.length;
   for (const object of resolved.objects) {
-    s.held += object.data.length - (s.store.get(object.oid)?.data.length ?? 0);
+    if (s.store.has(object.oid)) {
+      done += object.data.length;
+      continue;
+    }
+    s.held += object.data.length;
     s.store.set(object.oid, { type: object.type, data: object.data });
   }
+  s.budget.release(done);
 }
 
 async function fetchPack(

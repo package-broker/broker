@@ -30,12 +30,20 @@ const components = {
   sources: `
       import { SourcesView, createSourcesModel } from './pages/sources';
       const source = { projectId: null, ecosystem: 'npm', type: 'npm_registry', url: 'https://registry.example', status: 'active', removalPolicy: 'flag', pollIntervalSeconds: 300, hasCredential: false, lastSuccessAt: null };
-      const alpha = { ...source, id: 'alpha', name: 'Alpha', attached: true, precedence: 0 };
+      const alpha = { ...source, id: 'alpha', name: 'Alpha', pollIntervalSeconds: 600, attached: true, precedence: 0 };
       const beta = { ...source, id: 'beta', name: 'Beta', attached: true, precedence: 1 };
       let state = { ...createSourcesModel({ client: {}, requireReauth: () => {} }, null).snapshot(), items: [alpha, beta], order: ['alpha', 'beta'], settingsVersion: 0, loading: false, busy: false, listError: false, next: null, credentialSource: null, names: null, preview: null, savedCredential: null, error: null, etag: '"r1"' };
       const listeners = new Set();
       globalThis.edits = [];
-      const model = { project: null, snapshot: () => state, subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); }, edit: (...args) => globalThis.edits.push(args) };
+      const publish = (patch) => { state = { ...state, ...patch }; for (const listener of listeners) listener(); };
+      const model = {
+        project: null,
+        snapshot: () => state,
+        subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+        openEditor: (source) => publish({ editor: source ?? 'create' }),
+        closeEditor: () => publish({ editor: null }),
+        saveSource: (body) => { globalThis.edits.push([state.editor.id, body.pollIntervalSeconds, body.removalPolicy]); publish({ editor: null }); },
+      };
       globalThis.reorder = () => { state = { ...state, items: [beta, alpha], order: ['beta', 'alpha'] }; for (const listener of listeners) listener(); };
       createRoot(document.getElementById('root')).render(<SourcesView model={model} />);
     `,
@@ -122,34 +130,46 @@ describe('mounted review regressions', () => {
     await browserExpect(page.locator('tbody tr')).toHaveCount(2);
     await browserExpect(page.locator('dialog[open]')).toHaveCount(0);
     const row = (name: string) => page.locator('tbody tr').filter({ hasText: name });
-    step = 'open Alpha settings';
-    await row('Alpha').getByText('Edit source', { exact: true }).click();
+    const dialog = page.locator('dialog[open]');
+    const interval = dialog.getByLabel('Sync interval (seconds)', { exact: true });
+    const openEdit = async (name: string) => {
+      await row(name).getByRole('button', { name: 'Edit', exact: true }).click();
+      await browserExpect(dialog).toHaveCount(1);
+      await browserExpect(dialog.getByRole('heading', { name: 'Edit source' })).toBeVisible();
+      await dialog.getByText('Advanced settings', { exact: true }).click();
+    };
+    step = 'open Alpha edit dialog';
+    await openEdit('Alpha');
     step = 'fill Alpha draft';
-    await row('Alpha').locator('input[name="interval"]').fill('777');
+    await browserExpect(interval).toHaveValue('600');
+    await interval.fill('777');
+    step = 'cancel Alpha edit';
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(dialog).toHaveCount(0);
     step = 'filter to Beta';
     await page.getByLabel('Name (loaded sources)', { exact: true }).fill('Beta');
     step = 'submit filters';
     await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
-    step = 'open Beta settings';
-    await row('Beta').getByText('Edit source', { exact: true }).click();
-    step = 'verify Beta draft';
-    await browserExpect(row('Beta').locator('input[name="interval"]')).toHaveValue('300');
+    await browserExpect(page.locator('tbody tr')).toHaveCount(1);
+    step = 'open Beta edit dialog';
+    await openEdit('Beta');
+    step = 'verify Beta shows its own value';
+    await browserExpect(interval).toHaveValue('300');
     step = 'save Beta settings';
-    await row('Beta').getByRole('button', { name: 'Save settings', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Save source', exact: true }).click();
+    await browserExpect(dialog).toHaveCount(0);
     step = 'verify submitted source ID and settings';
     expect(await page.evaluate('globalThis.edits')).toEqual([['beta', 300, 'flag']]);
     step = 'clear filters';
     await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
-    step = 'open Alpha settings';
-    await row('Alpha').getByText('Edit source', { exact: true }).click();
-    step = 'fill Alpha draft';
-    await row('Alpha').locator('input[name="interval"]').fill('888');
-    step = 'reorder sources and verify both drafts';
+    await browserExpect(page.locator('tbody tr')).toHaveCount(2);
+    step = 'reorder sources';
     await page.evaluate('globalThis.reorder()');
     await browserExpect(page.locator('tbody tr').first()).toContainText('Beta');
-    await browserExpect(row('Alpha').locator('input[name="interval"]')).toHaveValue('888');
-    step = 'verify Beta draft';
-    await browserExpect(row('Beta').locator('input[name="interval"]')).toHaveValue('300');
+    step = 'open Alpha edit dialog after reorder';
+    await openEdit('Alpha');
+    step = 'verify Alpha shows its stored value, not the cancelled draft';
+    await browserExpect(interval).toHaveValue('600');
   });
 
   it('clears rendered unapplied text and select values before another submit', async (context) => {

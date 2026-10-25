@@ -378,6 +378,18 @@ describe('import run routes on the SQLite store', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'unavailable' } });
   });
 
+  it('answers a credential upload with 503 unavailable when the stored manifest is missing', async () => {
+    const created = await create(withSources);
+    objects.clear();
+    const response = await request('PUT', `${ROOT}/${String(created.body.id)}/credentials/beta`, {
+      body: { kind: 'bearer', material: JSON.stringify({ token: MATERIAL }) },
+    });
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect(JSON.parse(text)).toMatchObject({ error: { code: 'unavailable' } });
+    expect(text).not.toContain(MATERIAL);
+  });
+
   it('hides an expired window and the window of a cancelled run', async () => {
     const created = await create(manifest);
     const id = String(created.body.id);

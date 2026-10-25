@@ -8,6 +8,7 @@ import { createSourcePollJob } from '@package-broker/core/ingest/retention-jobs'
 import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { defineJob, type JobContext } from '@package-broker/core/platform/jobs';
 import type { Sha256 } from '@package-broker/core/platform/blob';
+import { CREDENTIAL_UNAVAILABLE_REPLACES } from '@package-broker/core/sources/source-unavailable';
 import { compile, db } from '../kysely.js';
 import { migrate } from '../migrations/runner.js';
 import { loadMigrationSource } from '../migrations/source.js';
@@ -424,6 +425,42 @@ export const registryContractCases = {
             audit: { ...syncInput.audit, id: '01J00000000000000000000003' },
           }),
         ).toBe('source_paused');
+      },
+      wrap,
+    ),
+  credentialUnavailableMark: (open, wrap: Wrap | undefined = undefined) =>
+    withWorld(
+      open,
+      async (w) => {
+        const sources = createSourceRepository(w.executor);
+        const before = (await sources.get(w.a, 'source-a'))!;
+        expect(before.lastError).not.toBe('credential_unavailable');
+        await sources.markCredentialUnavailable(w.b, 'source-a');
+        expect(await sources.get(w.a, 'source-a')).toEqual(before);
+        await sources.markCredentialUnavailable(w.a, 'source-a');
+        const marked = { ...before, lastError: 'credential_unavailable' };
+        expect(await sources.get(w.a, 'source-a')).toEqual(marked);
+        await sources.markCredentialUnavailable(w.a, 'source-a');
+        expect(await sources.get(w.a, 'source-a')).toEqual(marked);
+        for (const transient of CREDENTIAL_UNAVAILABLE_REPLACES) {
+          await w.seed(`UPDATE source SET last_error = '${transient}' WHERE id = 'source-a'`);
+          await sources.markCredentialUnavailable(w.a, 'source-a');
+          expect(await sources.get(w.a, 'source-a')).toEqual(marked);
+        }
+        for (const specific of [
+          'unauthorized',
+          'mass_absence',
+          'policy_denied',
+          'not_found',
+          'invalid_response',
+          'too_large',
+          'internal',
+        ]) {
+          await w.seed(`UPDATE source SET last_error = '${specific}' WHERE id = 'source-a'`);
+          await sources.markCredentialUnavailable(w.a, 'source-a');
+          expect(await sources.get(w.a, 'source-a')).toEqual({ ...before, lastError: specific });
+        }
+        await expect(sources.markCredentialUnavailable(w.a, 'missing')).resolves.toBeUndefined();
       },
       wrap,
     ),

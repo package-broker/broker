@@ -24,6 +24,7 @@ import {
   type VersionCandidate,
 } from '@package-broker/core/sources/provider';
 import type { DnsGuard } from './dns-guard.js';
+import { SshArchiveStoreError } from './ssh-archive-store.js';
 import {
   openSshGitSession,
   SshGitError,
@@ -517,9 +518,18 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
       } catch {
         throw new UpstreamError('refused');
       }
-      const zip = await options.archives.readZip(ctx.org, source, name, version, target.sourceRef);
+      let zip: Uint8Array | null;
+      try {
+        zip = await options.archives.readZip(ctx.org, source, name, version, target.sourceRef);
+      } catch (error) {
+        if (error instanceof SshArchiveStoreError) throw new UpstreamError('network');
+        throw error;
+      }
       ctx.signal.throwIfAborted();
-      if (zip === null) throw new UpstreamError('http_status', 404);
+      if (zip === null) {
+        ctx.observability.log({ level: 'warn', event: 'dist.archive_missing' });
+        throw new UpstreamError('http_status', 404);
+      }
       return {
         size: zip.byteLength,
         body: new ReadableStream<Uint8Array>({

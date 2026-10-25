@@ -428,6 +428,7 @@ export async function startLocal(
     outboundDestination?: (url: string, brokerOrigin: string) => string;
     patchBundle?: (bundle: string) => string;
     publicUrl?: string;
+    nodeEnv?: Record<string, string>;
   } = {},
 ): Promise<LocalBroker> {
   fixtureDestination(upstreamOrigins[0], fixtureOrigin);
@@ -686,7 +687,7 @@ syncBuiltinESMExports();
       );
       const child = spawn(process.execPath, ['--import', preload, script], {
         cwd: copy,
-        env: { ...env, PB_SQLITE_PATH: database, TMPDIR: nodeTmp },
+        env: { ...env, PB_SQLITE_PATH: database, TMPDIR: nodeTmp, ...options.nodeEnv },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout?.on('data', record);

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { Observability } from '@package-broker/core/platform/observability';
 import { fetchAndVerifyDist } from '@package-broker/core/ingest/dist-fetch';
 import { nodeCodecs } from '../codec/node-codec.js';
 import { orgContext } from '@package-broker/core/db/port';
@@ -22,7 +23,8 @@ import type {
   VersionCandidate,
 } from '@package-broker/core/sources/provider';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { createFilesystemArchiveStore } from './ssh-archive-store.js';
+import { UpstreamError } from '@package-broker/core/sources/policy-fetch';
+import { createFilesystemArchiveStore, SshArchiveStoreError } from './ssh-archive-store.js';
 import { createDnsGuard } from './dns-guard.js';
 import { openSshGitSession, type SpawnGit } from './ssh-git.js';
 import {
@@ -207,14 +209,16 @@ function memoryStore(): SshArchiveReader & { stored: Map<string, Uint8Array> } {
   const records = new Map<string, { sha1: string; time: string | null }>();
   return {
     stored,
-    async find(_ctx, _source, _name, versionNormalized, commit) {
-      return records.get(`${versionNormalized}@${commit}`) ?? null;
+    async find(scope, from, name, versionNormalized, commit) {
+      return (
+        records.get(`${scope.orgId}/${from.id}/${name}/${versionNormalized}@${commit}`) ?? null
+      );
     },
-    async readZip(_ctx, _source, _name, versionNormalized, commit) {
-      return stored.get(`${versionNormalized}@${commit}`) ?? null;
+    async readZip(scope, from, name, versionNormalized, commit) {
+      return stored.get(`${scope.orgId}/${from.id}/${name}/${versionNormalized}@${commit}`) ?? null;
     },
-    async store(_ctx, _source, _name, archive) {
-      const key = `${archive.versionNormalized}@${archive.commit}`;
+    async store(scope, from, name, archive) {
+      const key = `${scope.orgId}/${from.id}/${name}/${archive.versionNormalized}@${archive.commit}`;
       stored.set(key, archive.zip);
       records.set(key, { sha1: archive.sha1, time: archive.time });
     },
@@ -236,10 +240,17 @@ const source = (
   },
 });
 
+const observability: Observability = {
+  log: () => undefined,
+  counter: () => undefined,
+  histogram: () => undefined,
+};
+
 const ctx = {
   org: orgContext('org-1'),
   signal: new AbortController().signal,
   clock: fixedClock('2026-10-16T12:00:00.000Z'),
+  observability,
 } as ProviderContext;
 
 function provider(
@@ -466,6 +477,58 @@ describe('createSshGitProvider', () => {
         status: 404,
       });
     }
+  });
+
+  it('logs a data-free event for a missing archive and maps store failures to a network error', async () => {
+    const store = memoryStore();
+    const log = vi.fn();
+    const target = {
+      packageName: 'acme/lib',
+      version: 'v1.0.0',
+      sourceRef: commits['main']!,
+      distType: 'zip' as const,
+      url: null,
+    };
+    const observed = { ...ctx, observability: { ...ctx.observability, log } };
+    await expect(provider(store, true).openDist(observed, source(), target)).rejects.toMatchObject({
+      name: 'UpstreamError',
+      code: 'http_status',
+      status: 404,
+    });
+    expect(log.mock.calls).toEqual([[{ level: 'warn', event: 'dist.archive_missing' }]]);
+    log.mockClear();
+    for (const failure of ['io', 'unsafe_root', 'invalid_metadata'] as const) {
+      vi.spyOn(store, 'readZip').mockRejectedValueOnce(new SshArchiveStoreError(failure, 'EIO'));
+      const error = await provider(store, true)
+        .openDist(observed, source(), target)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(UpstreamError);
+      expect(error).toMatchObject({ code: 'network', message: 'upstream network' });
+    }
+    vi.spyOn(store, 'readZip').mockRejectedValueOnce(new RangeError('programming error'));
+    await expect(provider(store, true).openDist(observed, source(), target)).rejects.toThrow(
+      RangeError,
+    );
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('keys the in-memory archive helper by organization, source and package name', async () => {
+    const store = memoryStore();
+    const zip = new Uint8Array([80, 75, 5, 6]);
+    await store.store(ctx.org, source(), 'acme/lib', {
+      version: 'v1.0.0',
+      versionNormalized: '1.0.0.0',
+      commit: commits['main']!,
+      zip,
+      sha1: createHash('sha1').update(zip).digest('hex'),
+      time: null,
+    });
+    const read = (org: string, id: string, name: string) =>
+      store.readZip(orgContext(org), { ...source(), id }, name, '1.0.0.0', commits['main']!);
+    expect(await read('org-1', 'src-1', 'acme/lib')).toEqual(zip);
+    expect(await read('org-2', 'src-1', 'acme/lib')).toBeNull();
+    expect(await read('org-1', 'src-2', 'acme/lib')).toBeNull();
+    expect(await read('org-1', 'src-1', 'acme/other')).toBeNull();
   });
 
   it('refuses invalid dist targets with data-free errors and honours cancellation', async () => {

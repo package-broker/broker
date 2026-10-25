@@ -32,6 +32,7 @@ export const upstreamOrigins = [
   'https://codeload.github.com',
   'https://repo.packagist.org',
   'https://registry.npmjs.org',
+  'https://git.example.test',
 ] as const;
 export type Runtime = 'node' | 'cloudflare';
 
@@ -211,8 +212,8 @@ async function releaseBundleLock(lock: string, owner: LockOwner): Promise<void> 
   await rm(parked, { recursive: true, force: true });
 }
 
-// Test files run in parallel workers. One build per run (or per source change in watch mode)
-// keeps a worker from rewriting a bundle another worker is copying.
+// Runs from the e2e global setup before any test file starts, so no test reads .pb while it is
+// rewritten. The lock covers concurrent vitest runs sharing one checkout.
 export async function buildBundles(): Promise<void> {
   const deadline = Date.now() + bundleBudgetMs;
   await mkdir(join(repository, '.pb'), { recursive: true });

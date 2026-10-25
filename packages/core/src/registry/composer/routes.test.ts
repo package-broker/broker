@@ -665,6 +665,18 @@ describe('dist refusal', () => {
     expect(body.error).toMatchObject({ code: 'bad_gateway', message: 'Bad gateway' });
   });
 
+  it('answers 410 with the fixed gone message when a non-refetchable archive is lost', async () => {
+    const h = harness();
+    h.serve.mockResolvedValue({ kind: 'gone' });
+    const response = await h.find(DIST).handler(dist(FILE));
+    expect(response.status).toBe(410);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error).toMatchObject({
+      code: 'gone',
+      message: 'Archive is no longer available',
+    });
+  });
+
   it('keeps the uniform 404 for a plain not_found', async () => {
     const h = harness();
     h.serve.mockResolvedValue({ kind: 'not_found' });

@@ -3305,6 +3305,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Port types plus the NPM_AUDIT_REFS_MAX numeric constant from the core vulnerability port; no executor, SQL or D1 call crosses this import.',
+      sites: [
+        "db-sqlite/src/repositories/vulnerability.ts:opaque dependency: import {\n  NPM_AUDIT_REFS_MAX,\n  type AuthorizedNpmAudit,\n  type NpmAuditAuthorizer,\n  type NpmAuditRef,\n  type NpmAuditTuple,\n} from '@package-broker/core/db/vulnerability'; #1",
+      ],
+    },
+    {
+      reason:
         'Installed Kysely API is an opaque boundary; local builders, SQL inputs and count consumers are reviewed separately.',
       sites: [
         "db-sqlite/src/internal/catalogue-status-statements.ts:opaque dependency: import { sql } from 'kysely'; #1",

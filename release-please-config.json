@@ -12,7 +12,16 @@
     {
       "type": "linked-versions",
       "groupName": "product",
-      "components": ["core", "db-sqlite", "cli", "runtime-cloudflare", "runtime-node", "ui"]
+      "components": [
+        "core",
+        "db-sqlite",
+        "cli",
+        "runtime-cloudflare",
+        "runtime-node",
+        "ui",
+        "dist",
+        "dist-cloudflare"
+      ]
     }
   ],
   "packages": {
@@ -58,6 +67,16 @@
     },
     "packages/db-sqlite": {
       "component": "db-sqlite",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/prebuilt": {
+      "component": "dist",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/prebuilt-cloudflare": {
+      "component": "dist-cloudflare",
       "prerelease": true,
       "prerelease-type": "rc"
     }

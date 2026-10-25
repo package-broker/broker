@@ -86,6 +86,8 @@ const RULES: Readonly<Record<string, Rule>> = {
   },
   cli: { allow: [ANY_WORKSPACE, 'esbuild', 'node', 'typescript'], testOnly: ['vitest'] },
   plugin: { allow: ws('core'), testOnly: ['vitest'] },
+  prebuilt: { allow: [], testOnly: [] },
+  'prebuilt-cloudflare': { allow: [], testOnly: [] },
   ui: {
     allow: [
       'react',
@@ -1393,6 +1395,197 @@ describe('db-sqlite testing and contract kits', () => {
     const violations = sourceFiles('db-sqlite').flatMap((file) =>
       testingImports(file, readFileSync(path.join(REPO_ROOT, file), 'utf8')),
     );
+    expect(violations).toEqual([]);
+  });
+});
+
+describe('core and db-sqlite read no forwarding header', () => {
+  const FORWARDING_HEADERS = new Set([
+    'cf-connecting-ip',
+    'x-forwarded-for',
+    'x-real-ip',
+    'x-client-ip',
+    'true-client-ip',
+    'x-cluster-client-ip',
+    'fastly-client-ip',
+    'x-forwarded',
+    'client-ip',
+  ]);
+  const READ_ONLY_HEADERS = new Set(['forwarded']);
+  const HEADER_READS = new Set(['get', 'has', 'getAll']);
+  const HEADER_ITERATION = new Set(['entries', 'keys', 'values', 'forEach']);
+  const TEST_FILE = /\.(?:test|spec)\.tsx?$/;
+
+  function headerName(node: ts.Node | undefined, readPosition: boolean): string | null {
+    if (node === undefined || !ts.isStringLiteralLike(node)) return null;
+    const name = node.text.trim().toLowerCase();
+    return FORWARDING_HEADERS.has(name) || (readPosition && READ_ONLY_HEADERS.has(name))
+      ? node.text
+      : null;
+  }
+
+  function isRequestHeaders(node: ts.Node): boolean {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'headers') return false;
+    const owner = node.expression;
+    const ownerName = ts.isIdentifier(owner)
+      ? owner.text
+      : ts.isPropertyAccessExpression(owner)
+        ? owner.name.text
+        : null;
+    return ownerName === 'request' || ownerName === 'req';
+  }
+
+  function forwardingHeaderReads(file: string, text: string): string[] {
+    const production = !TEST_FILE.test(file);
+    const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+    const found: string[] = [];
+    const report = (node: ts.Node, what: string): void => {
+      const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+      found.push(`${file}:${line}: ${what}`);
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+        const method = node.expression.name.text;
+        const read = HEADER_READS.has(method) ? headerName(node.arguments[0], true) : null;
+        if (read !== null && !production) report(node.arguments[0]!, read);
+        if (
+          production &&
+          HEADER_ITERATION.has(method) &&
+          isRequestHeaders(node.expression.expression)
+        ) {
+          report(node, `iterates request headers (${method})`);
+        }
+        if (
+          production &&
+          ts.isIdentifier(node.expression.expression) &&
+          ((node.expression.expression.text === 'Object' && method === 'fromEntries') ||
+            (node.expression.expression.text === 'Array' && method === 'from')) &&
+          node.arguments[0] !== undefined &&
+          isRequestHeaders(node.arguments[0])
+        ) {
+          report(node, `iterates request headers (${method})`);
+        }
+      }
+      if (ts.isElementAccessExpression(node) && !production) {
+        const read = headerName(node.argumentExpression, true);
+        if (read !== null) report(node.argumentExpression, read);
+      }
+      if (production) {
+        const parent = node.parent as ts.Node | undefined;
+        const readPosition =
+          parent !== undefined &&
+          ((ts.isCallExpression(parent) &&
+            ts.isPropertyAccessExpression(parent.expression) &&
+            HEADER_READS.has(parent.expression.name.text) &&
+            parent.arguments[0] === node) ||
+            (ts.isElementAccessExpression(parent) && parent.argumentExpression === node));
+        const name = headerName(node, readPosition);
+        if (name !== null) report(node, name);
+        if (
+          (ts.isForOfStatement(node) && isRequestHeaders(node.expression)) ||
+          (ts.isSpreadElement(node) && isRequestHeaders(node.expression))
+        ) {
+          report(node, 'iterates request headers');
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return found;
+  }
+
+  it('flags forwarding header names in a production file', () => {
+    const file = 'packages/core/src/auth/a.ts';
+    expect(
+      forwardingHeaderReads(
+        file,
+        [
+          "const a = request.headers.get('cf-connecting-ip');",
+          'const b = request.headers.get(`X-Forwarded-For`);',
+          "const NAME = 'x-real-ip';",
+          "const c = headers['Forwarded'];",
+          "const d = request.headers.get('user-agent');",
+          "const e = request.headers.get('X-Client-IP') ?? request.headers.get('true-client-ip');",
+          "const f = ['x-cluster-client-ip', 'fastly-client-ip', 'x-forwarded', 'client-ip'];",
+          "const g = request.headers.has('forwarded');",
+          "const status = 'forwarded';",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${file}:1: cf-connecting-ip`,
+      `${file}:2: X-Forwarded-For`,
+      `${file}:3: x-real-ip`,
+      `${file}:4: Forwarded`,
+      `${file}:6: X-Client-IP`,
+      `${file}:6: true-client-ip`,
+      `${file}:7: x-cluster-client-ip`,
+      `${file}:7: fastly-client-ip`,
+      `${file}:7: x-forwarded`,
+      `${file}:7: client-ip`,
+      `${file}:8: forwarded`,
+    ]);
+  });
+
+  it('flags iteration over request headers in a production file', () => {
+    const file = 'packages/db-sqlite/src/repositories/a.ts';
+    expect(
+      forwardingHeaderReads(
+        file,
+        [
+          'for (const [name, value] of request.headers) use(name, value);',
+          'ctx.request.headers.forEach((value, name) => use(name, value));',
+          'const all = [...req.headers.entries()];',
+          'const copy = Object.fromEntries(ctx.request.headers);',
+          'const list = [...request.headers];',
+          'for (const name of [...outbound.headers.keys()]) use(name);',
+          'const secrets = [...applied.headers.values()];',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      `${file}:1: iterates request headers`,
+      `${file}:2: iterates request headers (forEach)`,
+      `${file}:3: iterates request headers (entries)`,
+      `${file}:4: iterates request headers (fromEntries)`,
+      `${file}:5: iterates request headers`,
+    ]);
+  });
+
+  it('lets tests send forwarding headers but not read them', () => {
+    for (const file of [
+      'packages/core/src/auth/a.test.ts',
+      'packages/core/src/auth/a.test.tsx',
+      'packages/core/src/auth/a.spec.ts',
+    ]) {
+      expect(
+        forwardingHeaderReads(
+          file,
+          [
+            "const request = new Request('https://x.test', { headers: { 'cf-connecting-ip': '1.2.3.4' } });",
+            "request.headers.set('x-forwarded-for', '1.2.3.4');",
+            "const read = request.headers.get('x-client-ip');",
+            "const seen = request.headers.has('forwarded');",
+            'for (const entry of request.headers) use(entry);',
+          ].join('\n'),
+        ),
+      ).toEqual([`${file}:3: x-client-ip`, `${file}:4: forwarded`]);
+    }
+  });
+
+  it('no core source file reads a forwarding header', () => {
+    const violations = sourceFiles('core').flatMap((file) =>
+      forwardingHeaderReads(file, readFileSync(path.join(REPO_ROOT, file), 'utf8')),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it('no db-sqlite production file reads a forwarding header', () => {
+    const violations = sourceFiles('db-sqlite')
+      .filter(
+        (file) => !TEST_FILE.test(file) && !file.startsWith('packages/db-sqlite/src/testing/'),
+      )
+      .flatMap((file) =>
+        forwardingHeaderReads(file, readFileSync(path.join(REPO_ROOT, file), 'utf8')),
+      );
     expect(violations).toEqual([]);
   });
 });

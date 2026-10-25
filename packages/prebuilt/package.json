@@ -1,0 +1,25 @@
+{
+  "name": "@package-broker/dist",
+  "version": "2.0.0-rc.0",
+  "description": "Prebuilt Package Broker node distribution",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "node",
+    "prebuilt.json"
+  ],
+  "dependencies": {
+    "better-sqlite3": "catalog:"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/package-broker/broker.git",
+    "directory": "packages/prebuilt"
+  }
+}

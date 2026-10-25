@@ -23,5 +23,10 @@
   },
   "devDependencies": {
     "@package-broker/core": "workspace:^"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/package-broker/broker.git",
+    "directory": "packages/ui-assets"
   }
 }

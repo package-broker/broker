@@ -5977,6 +5977,7 @@ export interface operations {
                 }
             )[];
             next: string | null;
+            vcsProviders: ('github' | 'git' | 'ssh')[];
           };
         };
       };
@@ -8367,6 +8368,7 @@ export interface operations {
               url: string | null;
             }[];
             next: string | null;
+            vcsProviders: ('github' | 'git' | 'ssh')[];
           };
         };
       };

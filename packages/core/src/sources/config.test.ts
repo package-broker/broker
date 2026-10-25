@@ -4,6 +4,8 @@ import {
   UPSTREAM_DEFAULTS,
   checkRetentionOverride,
   parseSourceConfig,
+  reportedVcsProviders,
+  servedVcsProviders,
   type SourceType,
 } from './config.js';
 
@@ -929,5 +931,57 @@ describe('broad selection pattern warnings', () => {
     const r = repo({ patterns: ['zzsentinel*'] });
     expect(r.ok && r.warnings).toHaveLength(1);
     expect(JSON.stringify(r.ok && r.warnings)).not.toContain('zzsentinel');
+  });
+});
+
+describe('served VCS providers', () => {
+  const repositories = {
+    github: 'acme/widgets',
+    git: 'https://git.example.com/acme/widgets.git',
+    ssh: 'ssh://git@git.example.com/acme/widgets.git',
+  } as const;
+  const vcs = (provider: keyof typeof repositories, runtime: 'node' | 'cloudflare') =>
+    parse('vcs', 'composer', null, { provider, repository: repositories[provider] }, { runtime });
+
+  it('reports github and git on node and only github on cloudflare', () => {
+    expect(servedVcsProviders('node')).toEqual(['github', 'git']);
+    expect(servedVcsProviders('cloudflare')).toEqual(['github']);
+  });
+
+  it.each(['node', 'cloudflare'] as const)('accepts every provider %s reports', (runtime) => {
+    for (const provider of servedVcsProviders(runtime)) {
+      expect(vcs(provider, runtime).ok, provider).toBe(true);
+    }
+  });
+
+  it('refuses git and ssh on cloudflare on the same provider field', () => {
+    for (const provider of ['git', 'ssh'] as const) {
+      const result = vcs(provider, 'cloudflare');
+      expect(result.ok, provider).toBe(false);
+      expect(problems(result), provider).toEqual(['provider']);
+    }
+  });
+
+  it('accepts git on node, where its archives are built and served', () => {
+    expect(vcs('git', 'node')).toMatchObject({
+      ok: true,
+      config: { provider: 'git', repository: repositories.git },
+    });
+  });
+});
+
+describe('reported VCS providers', () => {
+  const vcs = (id: string) => ({ id, sourceTypes: ['vcs'] });
+  it('reports only served providers that are registered for vcs', () => {
+    expect(reportedVcsProviders('node', [vcs('git'), vcs('github'), vcs('ssh')])).toEqual([
+      'github',
+      'git',
+    ]);
+    expect(reportedVcsProviders('node', [vcs('git')])).toEqual(['git']);
+    expect(reportedVcsProviders('cloudflare', [vcs('git'), vcs('github')])).toEqual(['github']);
+    expect(
+      reportedVcsProviders('node', [{ id: 'github', sourceTypes: ['composer_repository'] }]),
+    ).toEqual([]);
+    expect(reportedVcsProviders('cloudflare', [])).toEqual([]);
   });
 });

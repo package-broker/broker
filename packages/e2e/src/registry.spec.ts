@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -22,6 +23,11 @@ const PRIVATE_KEY = generateKeyPairSync('rsa', {
 const INSTALLATION_TOKEN = 'ghs_step7FixtureInstallationToken';
 const PERSONAL_TOKEN = 'github_pat_fixturePersonalAccessToken';
 const PASSWORD = 'step7-fixture-password';
+const GENERIC_GIT_TOKEN = 'generic-git-fixture-token';
+const GENERIC_GIT_ORIGIN = 'https://git.example.test';
+const GENERIC_GIT_PATH = '/acme/generic.git';
+const REDIRECTING_GIT_PATH = '/acme/redirecting.git';
+const REDIRECT_TARGET = 'https://github.com/acme/redirect-target.git';
 const ZIP = new Uint8Array([0x50, 0x4b, 3, 4, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
 function tokenArchive(): Uint8Array {
   const name = Buffer.from('acme-token/composer.json');
@@ -369,9 +375,104 @@ export function createRegistryFixture() {
   };
 }
 
+async function genericGitRepository(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'pb-generic-git-'));
+  const work = join(root, 'work');
+  const env = {
+    PATH: process.env['PATH'],
+    HOME: root,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@example.test',
+    GIT_AUTHOR_DATE: '2026-01-02T03:04:05Z',
+    GIT_COMMITTER_NAME: 'Fixture',
+    GIT_COMMITTER_EMAIL: 'fixture@example.test',
+    GIT_COMMITTER_DATE: '2026-01-02T03:04:05Z',
+  };
+  const git = (args: string[], cwd = root) =>
+    promisify(execFile)('git', args, { cwd, env, timeout: 30_000 });
+  await mkdir(work);
+  await git(['init', '-q', '-b', 'main', work]);
+  await mkdir(join(work, 'src'));
+  await writeFile(
+    join(work, 'composer.json'),
+    JSON.stringify({
+      name: 'acme/generic',
+      type: 'library',
+      autoload: { 'psr-4': { 'Acme\\Generic\\': 'src/' } },
+    }),
+  );
+  await writeFile(
+    join(work, 'src/Generic.php'),
+    '<?php\nnamespace Acme\\Generic;\nfinal class Generic {}\n',
+  );
+  await git(['add', '.'], work);
+  await git(['commit', '-q', '-m', 'Generic fixture'], work);
+  await git(['tag', '1.0.0'], work);
+  await git(['clone', '-q', '--bare', work, join(root, 'generic.git')]);
+  for (const [key, value] of [
+    ['uploadpack.allowFilter', 'true'],
+    ['uploadpack.allowAnySHA1InWant', 'true'],
+    ['http.receivepack', 'false'],
+  ] as const)
+    await git(['config', key, value], join(root, 'generic.git'));
+  await rm(work, { recursive: true, force: true });
+  return root;
+}
+
+async function gitHttpBackend(
+  root: string,
+  request: { path: string; query: string; method: string; headers: Headers; body: Buffer },
+): Promise<{ status: number; headers: Headers; body: Buffer }> {
+  const child = spawn('git', ['http-backend'], {
+    env: {
+      PATH: process.env['PATH'],
+      HOME: root,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_PROJECT_ROOT: root,
+      GIT_HTTP_EXPORT_ALL: '1',
+      PATH_INFO: request.path,
+      QUERY_STRING: request.query,
+      REQUEST_METHOD: request.method,
+      CONTENT_TYPE: request.headers.get('content-type') ?? '',
+      CONTENT_LENGTH: String(request.body.length),
+      HTTP_CONTENT_ENCODING: request.headers.get('content-encoding') ?? '',
+      HTTP_GIT_PROTOCOL: request.headers.get('git-protocol') ?? '',
+      GIT_PROTOCOL: request.headers.get('git-protocol') ?? '',
+    },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const exited = once(child, 'close');
+  child.stdin.end(request.body);
+  const chunks: Buffer[] = [];
+  for await (const chunk of child.stdout) chunks.push(Buffer.from(chunk));
+  const [code] = (await exited) as [number | null];
+  assert.equal(code, 0, 'GitHttpBackendFailed');
+  const output = Buffer.concat(chunks);
+  const crlf = output.indexOf('\r\n\r\n');
+  const end = crlf >= 0 ? crlf : output.indexOf('\n\n');
+  assert(end >= 0, 'GitHttpBackendHeaders');
+  const headers = new Headers();
+  let status = 200;
+  for (const line of output.subarray(0, end).toString('latin1').split(/\r?\n/)) {
+    const colon = line.indexOf(':');
+    const name = line.slice(0, colon).trim();
+    const value = line.slice(colon + 1).trim();
+    if (name.toLowerCase() === 'status') status = Number.parseInt(value, 10);
+    else headers.append(name, value);
+  }
+  return { status, headers, body: output.subarray(end + (crlf >= 0 ? 4 : 2)) };
+}
+
 async function startRegistryFixture() {
   const fixture = createRegistryFixture();
   let invalid = false;
+  const generic = {
+    root: null as string | null,
+    requests: [] as { origin: string; path: string; authorization: string | null }[],
+  };
   const server = createServer(async (incoming, outgoing) => {
     try {
       const url = new URL(incoming.url ?? '/', 'http://127.0.0.1');
@@ -390,6 +491,47 @@ async function startRegistryFixture() {
         if (value !== undefined && name !== 'host') headers.set(name, String(value));
       }
       const method = incoming.method ?? 'GET';
+      const upstream = new URL(target);
+      const record = () =>
+        generic.requests.push({
+          origin: upstream.origin,
+          path: upstream.pathname,
+          authorization: headers.get('authorization'),
+        });
+      if (
+        upstream.origin === GENERIC_GIT_ORIGIN &&
+        upstream.pathname.startsWith(`${REDIRECTING_GIT_PATH}/`)
+      ) {
+        record();
+        outgoing.writeHead(302, {
+          location: `${REDIRECT_TARGET}${upstream.pathname.slice(REDIRECTING_GIT_PATH.length)}${upstream.search}`,
+        });
+        outgoing.end();
+        return;
+      }
+      if (upstream.href.startsWith(`${REDIRECT_TARGET}/`)) {
+        record();
+        outgoing.writeHead(404);
+        outgoing.end();
+        return;
+      }
+      if (
+        generic.root !== null &&
+        upstream.origin === GENERIC_GIT_ORIGIN &&
+        upstream.pathname.startsWith(`${GENERIC_GIT_PATH}/`)
+      ) {
+        record();
+        const response = await gitHttpBackend(generic.root, {
+          path: upstream.pathname.slice('/acme'.length),
+          query: upstream.search.slice(1),
+          method,
+          headers,
+          body: Buffer.concat(chunks),
+        });
+        outgoing.writeHead(response.status, Object.fromEntries(response.headers));
+        outgoing.end(response.body);
+        return;
+      }
       const response = await fixture.transport(target, {
         method,
         headers,
@@ -411,6 +553,7 @@ async function startRegistryFixture() {
   assert(address && typeof address !== 'string');
   return {
     ...fixture,
+    generic,
     origin: `http://127.0.0.1:${address.port}`,
     assertHealthy() {
       assert(!invalid, 'FixtureProtocolFailure');
@@ -592,7 +735,27 @@ export async function registryScenario(
       200,
       'source-list',
     );
-    const { items } = (await listed.json()) as { items: { id: string; name: string }[] };
+    const { items, vcsProviders } = (await listed.json()) as {
+      items: { id: string; name: string }[];
+      vcsProviders: string[];
+    };
+    assert.deepEqual(
+      vcsProviders,
+      runtime === 'node' ? ['github', 'git'] : ['github'],
+      `vcs-providers:${vcsProviders.join(',')}`,
+    );
+    if (runtime === 'cloudflare')
+      await status(
+        await admin.request('/_pb/sources', {
+          name: 'generic-refused',
+          ecosystem: 'composer',
+          type: 'vcs',
+          url: null,
+          config: { provider: 'git', repository: 'https://github.com/acme/generic.git' },
+        }),
+        400,
+        'generic-git-refused',
+      );
     const source = items.find((item) => item.name === 'mirror')!.id;
     const attach = (slug: string, name: string, precedence: number) =>
       api(
@@ -914,6 +1077,156 @@ export async function registryScenario(
     }
     assert(remote.count('/repos/acme/token/tags') > 0, 'TokenTagsMissing');
     assert(remote.count('/repos/acme/token/zipball/') > 0, 'TokenDistMissing');
+    if (runtime === 'node') {
+      stage = 'generic-git';
+      const gitRoot = await genericGitRepository();
+      try {
+        remote.generic.root = gitRoot;
+        const created = await api(
+          '/_pb/sources',
+          {
+            name: 'generic',
+            ecosystem: 'composer',
+            type: 'vcs',
+            url: null,
+            config: {
+              provider: 'git',
+              repository: `${GENERIC_GIT_ORIGIN}${GENERIC_GIT_PATH}`,
+              refs: { tags: true, branches: [] },
+            },
+          },
+          201,
+        );
+        const { id: genericSource } = (await created.json()) as { id: string };
+        await api(
+          `/_pb/sources/${genericSource}/credential`,
+          { kind: 'bearer', material: JSON.stringify({ token: GENERIC_GIT_TOKEN }) },
+          204,
+          'PUT',
+        );
+        await api(`/_pb/sources/${genericSource}/names`, { pattern: 'acme/generic' }, 201);
+        await api(`/_pb/sources/${genericSource}/enable`, undefined);
+        await api(
+          `/_pb/projects/alpha/sources/${genericSource}/attachment`,
+          { precedence: 20 },
+          204,
+          'PUT',
+        );
+        await api(`/_pb/sources/${genericSource}/sync`, undefined, 202);
+        await local.pollTick(orgId);
+        type Metadata = {
+          packages: Record<
+            string,
+            { version: string; dist: { url: string; type: string; reference: string } }[]
+          >;
+        };
+        let generic: Metadata['packages'][string] | undefined;
+        await until(
+          async () => {
+            await local.tick();
+            const response = await get('/alpha/p2/acme/generic.json');
+            if (response.status !== 200) return false;
+            generic = ((await response.json()) as Metadata).packages['acme/generic'];
+            return generic?.some((version) => version.version === '1.0.0') === true;
+          },
+          'generic-git-metadata',
+          90_000,
+        );
+        const release = generic!.find((version) => version.version === '1.0.0')!;
+        assert.equal(release.dist.type, 'zip', 'GenericDistType');
+        assert.match(release.dist.reference, /^[0-9a-f]{40}$/, 'GenericDistReference');
+        const distUrl = new URL(release.dist.url);
+        assert.equal(distUrl.origin, local.origin, `generic-dist-origin:${distUrl.origin}`);
+        const archive = new Uint8Array(
+          await (await status(await get(distUrl.pathname), 200, 'generic-archive')).arrayBuffer(),
+        );
+        assert.deepEqual([...archive.subarray(0, 4)], [0x50, 0x4b, 3, 4], 'GenericArchiveZip');
+        const builtRequests = remote.generic.requests.length;
+        const again = new Uint8Array(
+          await (
+            await status(await get(distUrl.pathname), 200, 'generic-archive-stored')
+          ).arrayBuffer(),
+        );
+        assert.deepEqual(again, archive, 'GenericArchiveStable');
+        assert.equal(remote.generic.requests.length, builtRequests, 'GenericArchiveRebuilt');
+        assert(
+          remote.generic.requests.some((request) => request.path.endsWith('/git-upload-pack')),
+          'GenericUploadPackMissing',
+        );
+        assert(
+          remote.generic.requests.every(
+            (request) =>
+              request.origin === GENERIC_GIT_ORIGIN &&
+              request.authorization === `Bearer ${GENERIC_GIT_TOKEN}`,
+          ),
+          'GenericCredentialNotBound',
+        );
+        if (!composerAvailable && process.env['CI'] === 'true')
+          throw new Error('ComposerUnavailableInCi');
+        if (composerAvailable) {
+          const clientDirectory = await mkdtemp(join(tmpdir(), 'pb-generic-git-'));
+          try {
+            await writeFile(
+              join(clientDirectory, 'composer.json'),
+              JSON.stringify({
+                repositories: [
+                  { type: 'composer', url: `${local.origin}/alpha` },
+                  { 'packagist.org': false },
+                ],
+                config: { 'secure-http': false },
+              }),
+            );
+            try {
+              await promisify(execFile)(
+                'composer',
+                [
+                  'require',
+                  'acme/generic:1.0.0',
+                  '--no-interaction',
+                  '--no-plugins',
+                  '--no-scripts',
+                  '--prefer-dist',
+                ],
+                {
+                  cwd: clientDirectory,
+                  timeout: 60_000,
+                  env: {
+                    ...process.env,
+                    COMPOSER_HOME: join(clientDirectory, '.composer'),
+                    COMPOSER_CACHE_DIR: join(clientDirectory, '.cache'),
+                    COMPOSER_AUTH: JSON.stringify({
+                      'http-basic': {
+                        [new URL(local.origin).host]: { username: token, password: '' },
+                      },
+                    }),
+                  },
+                },
+              );
+            } catch (error) {
+              const { stdout = '', stderr = '' } = error as { stdout?: string; stderr?: string };
+              composerFailure = redactComposerOutput(`${stderr}${stdout}`, [
+                token,
+                GENERIC_GIT_TOKEN,
+                PASSWORD,
+              ]).slice(-1500);
+              throw new Error('ComposerRequireFailed', { cause: error });
+            }
+            assert.equal(
+              JSON.parse(
+                await readFile(join(clientDirectory, 'vendor/acme/generic/composer.json'), 'utf8'),
+              ).name,
+              'acme/generic',
+            );
+            await readFile(join(clientDirectory, 'vendor/acme/generic/src/Generic.php'), 'utf8');
+          } finally {
+            await rm(clientDirectory, { recursive: true, force: true });
+          }
+        }
+      } finally {
+        remote.generic.root = null;
+        await rm(gitRoot, { recursive: true, force: true });
+      }
+    }
     const proxy = await composer('acme/proxy');
     const packument = await status(await get('/alpha/npm/widget'), 200, 'npm-packument');
     const npm = (await packument.json()) as {
@@ -991,6 +1304,74 @@ export async function registryScenario(
       'updated-sync',
     );
     assert.deepEqual((await composer('acme/mirror', '2.0.0')).versions, ['1.0.0', '2.0.0']);
+    if (runtime === 'node') {
+      stage = 'generic-git-redirect';
+      const redirecting = await api(
+        '/_pb/sources',
+        {
+          name: 'generic-redirecting',
+          ecosystem: 'composer',
+          type: 'vcs',
+          url: null,
+          config: {
+            provider: 'git',
+            repository: `${GENERIC_GIT_ORIGIN}${REDIRECTING_GIT_PATH}`,
+            packageName: 'acme/redirecting',
+            refs: { tags: true, branches: [] },
+          },
+        },
+        201,
+      );
+      const { id: redirectingSource } = (await redirecting.json()) as { id: string };
+      await api(
+        `/_pb/sources/${redirectingSource}/credential`,
+        { kind: 'bearer', material: JSON.stringify({ token: GENERIC_GIT_TOKEN }) },
+        204,
+        'PUT',
+      );
+      await api(`/_pb/sources/${redirectingSource}/names`, { pattern: 'acme/redirecting' }, 201);
+      await api(`/_pb/sources/${redirectingSource}/enable`, undefined);
+      await api(`/_pb/sources/${redirectingSource}/sync`, undefined, 202);
+      await local.pollTick(orgId);
+      const redirected = () =>
+        remote.generic.requests.filter((request) => request.path.startsWith(REDIRECTING_GIT_PATH));
+      await until(
+        async () => {
+          await local.tick();
+          return redirected().length > 0;
+        },
+        'generic-git-redirect-attempted',
+        60_000,
+      );
+      await until(
+        async () => {
+          await local.tick();
+          const settled = await rows<{ state: string }>(
+            // eslint-disable-next-line no-restricted-syntax -- Scoped infrastructure observation of the redirecting source sync.
+            "SELECT state FROM job WHERE org_id = ? AND type = 'core:source-sync:v1' AND json_extract(payload_json, '$.sourceId') = ?",
+            [redirectingSource],
+          );
+          return settled.length > 0 && settled.every((job) => job.state !== 'running');
+        },
+        'generic-git-redirect-settled',
+        60_000,
+      );
+      assert(
+        redirected().every((request) => request.authorization === `Bearer ${GENERIC_GIT_TOKEN}`),
+        'RedirectingSourceCredentialNotBound',
+      );
+      const crossOrigin = remote.generic.requests.filter(
+        (request) => request.origin !== GENERIC_GIT_ORIGIN,
+      );
+      assert(
+        crossOrigin.some((request) => request.path.startsWith('/acme/redirect-target.git/')),
+        'RedirectTargetNotReached',
+      );
+      assert(
+        crossOrigin.every((request) => request.authorization === null),
+        'BearerForwardedAcrossOrigins',
+      );
+    }
     await local.loseBlob(orgId, hash(ZIP));
     remote.state.corrupt = true;
     await status(await get(proxy.path), 502, 'digest-mismatch');
@@ -1025,6 +1406,7 @@ export async function registryScenario(
       SECRET,
       INSTALLATION_TOKEN,
       PERSONAL_TOKEN,
+      GENERIC_GIT_TOKEN,
       PASSWORD,
       'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
       token,

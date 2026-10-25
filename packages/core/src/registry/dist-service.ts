@@ -1,7 +1,7 @@
 import type { ProjectActor } from '../authz/project-actor.js';
 import type { NameEcosystem } from '../catalogue/names.js';
 import type { PackageAccess } from '../catalogue/package-access.js';
-import type { CatalogueWriteGuard, DistTarget, DistType } from '../db/catalogue.js';
+import type { CatalogueWriteGuard, DistBlob, DistTarget, DistType } from '../db/catalogue.js';
 import type { OrgContext } from '../db/port.js';
 import {
   createCoalescer,
@@ -18,6 +18,7 @@ import {
 import type { Clock } from '../ids.js';
 import type { BlobRead, BlobStore, Sha256 } from '../platform/blob.js';
 import type { Observability } from '../platform/observability.js';
+import { ProviderBusyError } from '../sources/provider.js';
 import type { AccessRecorder } from './access-recorder.js';
 
 export const DIST_BUSY_RETRY_AFTER_SECONDS = 5;
@@ -43,6 +44,7 @@ export type DistServeResult =
     }
   | { readonly kind: 'not_found' }
   | { readonly kind: 'refused' }
+  | { readonly kind: 'gone' }
   | { readonly kind: 'busy'; readonly retryAfterSeconds: number };
 
 export interface DistFetchPlan {
@@ -83,6 +85,11 @@ export interface DistService {
 
 const NOT_FOUND: DistServeResult = Object.freeze({ kind: 'not_found' });
 const REFUSED: DistServeResult = Object.freeze({ kind: 'refused' });
+const GONE: DistServeResult = Object.freeze({ kind: 'gone' });
+const BUSY: DistServeResult = Object.freeze({
+  kind: 'busy',
+  retryAfterSeconds: DIST_BUSY_RETRY_AFTER_SECONDS,
+});
 
 function parseRevision(value: unknown): number | null {
   if (typeof value === 'number') {
@@ -93,16 +100,46 @@ function parseRevision(value: unknown): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+type StoredRead = BlobRead | 'absent' | 'failed';
+
+async function readStored(
+  store: Pick<BlobStore, 'get'>,
+  ctx: OrgContext,
+  sha256: Sha256,
+): Promise<StoredRead> {
+  try {
+    return (await store.get(ctx, sha256)) ?? 'absent';
+  } catch {
+    return 'failed';
+  }
+}
+
 async function readable(
   store: Pick<BlobStore, 'get'>,
   ctx: OrgContext,
   sha256: Sha256,
 ): Promise<BlobRead | null> {
-  try {
-    return await store.get(ctx, sha256);
-  } catch {
-    return null;
-  }
+  const read = await readStored(store, ctx, sha256);
+  return typeof read === 'string' ? null : read;
+}
+
+function hasUpstream(target: DistTarget): boolean {
+  return target.fetch.upstreamDistUrl !== null || target.fetch.sourceRef !== null;
+}
+
+/** A lost blob that cannot be rebuilt from its upstream location. */
+function unrefetchable(target: DistTarget): target is DistTarget & { blob: DistBlob } {
+  return target.blob !== null && !target.blob.refetchable && hasUpstream(target);
+}
+
+function logGone(observability: Observability | undefined, target: DistTarget): void {
+  observability?.log({
+    level: 'error',
+    event: 'dist.unrefetchable_blob_missing',
+    version_id: target.versionId,
+    revision: target.revision,
+    sha256_prefix: target.blob?.sha256.slice(0, 12) ?? null,
+  });
 }
 
 export function createDistService(deps: DistServiceDeps): DistService {
@@ -169,29 +206,46 @@ export function createDistService(deps: DistServiceDeps): DistService {
     signal: AbortSignal,
     isDone: () => Promise<DoneState>,
     onRefused: () => void,
+    onGone: () => void,
     observability?: Observability,
   ): Promise<DoneState> {
     const handle = handles.get(scoped(ctx, key));
     if (handle === undefined) return 'pending';
+    if (unrefetchable(target)) {
+      try {
+        if ((await deps.store.head(ctx, target.blob.sha256)) !== null) return 'filled';
+      } catch {
+        return 'pending';
+      }
+      logGone(observability, target);
+      onGone();
+      return 'negative';
+    }
     const plan = await deps.planFetch(ctx, target, observability);
     if (plan === null) return 'negative';
-    const outcome: DistFetchOutcome = await fetchAndVerifyDist(
-      {
-        ...plan.deps,
-        providerContext: { ...plan.deps.providerContext, signal },
-      },
-      ctx,
-      deps.writeGuard(ctx, handle),
-      {
-        versionId: target.versionId,
-        revision: target.revision,
-        packageName: plan.packageName,
-        version: plan.version,
-        fetch: target.fetch,
-        previousBlob:
-          target.blob === null ? null : { id: target.blob.id, sha256: target.blob.sha256 },
-      },
-    );
+    let outcome: DistFetchOutcome;
+    try {
+      outcome = await fetchAndVerifyDist(
+        {
+          ...plan.deps,
+          providerContext: { ...plan.deps.providerContext, signal },
+        },
+        ctx,
+        deps.writeGuard(ctx, handle),
+        {
+          versionId: target.versionId,
+          revision: target.revision,
+          packageName: plan.packageName,
+          version: plan.version,
+          fetch: target.fetch,
+          previousBlob:
+            target.blob === null ? null : { id: target.blob.id, sha256: target.blob.sha256 },
+        },
+      );
+    } catch (error) {
+      if (error instanceof ProviderBusyError) return 'pending';
+      throw error;
+    }
     if (outcome === 'quarantined') {
       onRefused();
       return 'negative';
@@ -213,16 +267,19 @@ export function createDistService(deps: DistServiceDeps): DistService {
       if (target === null) return NOT_FOUND;
 
       if (target.blob !== null) {
-        const read = await readable(deps.store, ctx, target.blob.sha256);
-        if (read !== null) return file(ctx, target, read);
+        const read = await readStored(deps.store, ctx, target.blob.sha256);
+        if (typeof read !== 'string') return file(ctx, target, read);
+        if (unrefetchable(target)) {
+          if (read === 'failed') return BUSY;
+          logGone(options?.observability, target);
+          return GONE;
+        }
       }
-      const { fetch } = target;
-      if (!target.current || (fetch.upstreamDistUrl === null && fetch.sourceRef === null)) {
-        return NOT_FOUND;
-      }
+      if (!target.current || !hasUpstream(target)) return NOT_FOUND;
 
       const key = await deps.leaseKey([ctx.orgId, 'dist', versionId, String(revision)]);
       let refused = false;
+      let gone = false;
       let latest: DistTarget | null = null;
       const isDone = async (): Promise<DoneState> => {
         latest = await resolve(actor, request, versionId, revision);
@@ -251,15 +308,16 @@ export function createDistService(deps: DistServiceDeps): DistService {
                 () => {
                   refused = true;
                 },
+                () => {
+                  gone = true;
+                },
                 options?.observability,
               ),
         { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
       );
 
-      if (outcome === 'busy') {
-        return { kind: 'busy', retryAfterSeconds: DIST_BUSY_RETRY_AFTER_SECONDS };
-      }
-      if (outcome === 'negative') return refused ? REFUSED : NOT_FOUND;
+      if (outcome === 'busy') return BUSY;
+      if (outcome === 'negative') return refused ? REFUSED : gone ? GONE : NOT_FOUND;
       return serveStored(ctx, await resolve(actor, request, versionId, revision));
     },
   };

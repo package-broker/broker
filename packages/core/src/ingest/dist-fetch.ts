@@ -118,10 +118,7 @@ function publishedDigestsMatch(target: DistFetchTarget, first: FirstPass): boole
 }
 
 function refetchable(source: ProviderSource): boolean {
-  return !(
-    source.type === 'vcs' &&
-    (source.config.provider === 'git' || source.config.provider === 'ssh')
-  );
+  return !(source.type === 'vcs' && source.config.provider === 'ssh');
 }
 
 export async function fetchAndVerifyDist(
@@ -185,7 +182,16 @@ export async function fetchAndVerifyDist(
       newSha256: parseSha256(sha256),
       reason: 'refetch_changed',
     });
-    return effect.changed ? 'replaced' : 'stale';
+    if (!effect.changed) return 'stale';
+    deps.providerContext.observability.log({
+      level: 'warn',
+      event: 'dist.refetch_changed',
+      version_id: target.versionId,
+      revision: target.revision,
+      previous_sha256_prefix: target.previousBlob.sha256.slice(0, 12),
+      sha256_prefix: sha256.slice(0, 12),
+    });
+    return 'replaced';
   }
   const effect = await deps.writer.attachDist(ctx, guard, {
     versionId: target.versionId,

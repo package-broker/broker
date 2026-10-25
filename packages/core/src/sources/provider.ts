@@ -172,6 +172,14 @@ export interface ProviderDistTarget extends Pick<FetchDescriptor, 'distType' | '
   readonly url: string | null;
 }
 
+/** A provider cannot open a dist right now; the caller answers busy and the client retries. */
+export class ProviderBusyError extends Error {
+  override readonly name = 'ProviderBusyError';
+  constructor() {
+    super('provider busy');
+  }
+}
+
 export interface DistStream {
   readonly body: ReadableStream<Uint8Array>;
   readonly size: number | null;

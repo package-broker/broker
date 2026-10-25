@@ -154,7 +154,9 @@ import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
 import { nodeClientIp } from './client-ip.js';
 import { nodeCodecs } from './codec/node-codec.js';
+import { reportedVcsProviders, type VcsProvider } from '@package-broker/core/sources/config';
 import { createDnsGuard } from './sources/dns-guard.js';
+import { nodeGitProviderFor } from './sources/git-provider.js';
 import { createGuardedFetch } from './sources/guarded-fetch.js';
 import { createFilesystemArchiveStore } from './sources/ssh-archive-store.js';
 import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provider.js';
@@ -319,6 +321,8 @@ export interface NodeRegistryOptions {
   readonly config: RegistryConfig;
   /** Registers the SSH git provider with archives kept under this directory. */
   readonly sshArchiveRoot?: string;
+  /** Registers the generic Git provider with archives staged under this directory. */
+  readonly gitArchiveRoot?: string;
 }
 
 export interface NodeRegistryServices {
@@ -658,7 +662,8 @@ interface RegistryAssembly {
   readonly services: NodeRegistryServices;
   readonly sourceProviderContext: SourceProviderContext;
   bindJobs(factory: JobsFactory): void;
-  bindSourceProviders(providers: Iterable<SourceProvider>): void;
+  bindSourceProviders(providers: Iterable<SourceProvider>): Promise<void>;
+  vcsProviders(): readonly VcsProvider[];
   drain(): Promise<void>;
 }
 
@@ -721,6 +726,7 @@ function assembleRegistry(input: {
   };
 
   const providers: SourceProvider[] = [];
+  const gitStagingRoot = options.gitArchiveRoot;
   const providerRegistry = createProviderRegistry();
   providerRegistry.register(createComposerRepositoryProvider(policy));
   const bindSourceProviders = (sourceProviders: Iterable<SourceProvider>): void => {
@@ -890,7 +896,18 @@ function assembleRegistry(input: {
             );
       },
     },
-    bindSourceProviders,
+    async bindSourceProviders(pluginProviders) {
+      const bound = [...pluginProviders];
+      bindSourceProviders(bound);
+      if (
+        gitStagingRoot === undefined ||
+        bound.some((provider) => provider.id === 'git' && provider.sourceTypes.includes('vcs'))
+      )
+        return;
+      const git = await nodeGitProviderFor(gitStagingRoot, (record) => observability.log(record));
+      if (git !== null) bindSourceProviders([git]);
+    },
+    vcsProviders: () => reportedVcsProviders('node', providers),
     bindJobs: (factory) => {
       jobsFactory = factory;
     },
@@ -1124,7 +1141,7 @@ export function createNodeServer(
             ],
     });
     if (registry !== undefined && options.platformServices !== undefined) {
-      registry.bindSourceProviders(registration.sourceProviders.values());
+      await registry.bindSourceProviders(registration.sourceProviders.values());
       registry.bindJobs(
         createRepositoryJobs({
           store: options.platformServices.jobStore,
@@ -1190,6 +1207,9 @@ export function createNodeServer(
             lifetime,
             log,
             blob: options.platformServices?.blob,
+            vcsProviders: () => registry?.vcsProviders() ?? [],
+            refuseVcsProvider: (provider) =>
+              provider === 'git' && !(registry?.vcsProviders() ?? []).includes('git'),
           });
     const authorization = options.authorization ?? access?.module.authorization;
     const assets = await createNodeAssets(

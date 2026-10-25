@@ -11,6 +11,7 @@ import {
   sourceFieldErrors,
   validateSourceForm,
   focusSourceError,
+  vcsProviderOptions,
 } from './source-form.js';
 
 function data(fields: Record<string, string> = {}) {
@@ -521,4 +522,80 @@ it('leaves the shared dialog layout unchanged unless the source variant is reque
   expect(html).toContain('max-h-[90dvh]');
   expect(html).not.toContain('h-dvh');
   expect(html).not.toContain('open:flex');
+});
+
+describe('repository provider choices', () => {
+  it('lists only the providers the broker reports, in display order', () => {
+    expect(vcsProviderOptions(['github'])).toEqual([['github', 'GitHub']]);
+    expect(vcsProviderOptions(['git', 'github'])).toEqual([
+      ['github', 'GitHub'],
+      ['git', 'Git over HTTP(S)'],
+    ]);
+    expect(vcsProviderOptions(['github', 'git', 'ssh'])).toEqual([
+      ['github', 'GitHub'],
+      ['git', 'Git over HTTP(S)'],
+      ['ssh', 'Git over SSH'],
+    ]);
+  });
+
+  it('omits git and ssh when they are not reported, and unknown providers always', () => {
+    const offered = vcsProviderOptions(['github', 'svn']).map(([provider]) => provider);
+    expect(offered).toEqual(['github']);
+    expect(offered).not.toContain('git');
+    expect(offered).not.toContain('ssh');
+  });
+});
+
+describe('source types without repository providers', () => {
+  it('offers the Git repository type only when a provider is reported', () => {
+    const render = (vcsProviders: readonly ('github' | 'git' | 'ssh')[]) =>
+      renderToString(
+        createElement(SourceForm, {
+          source: null,
+          busy: false,
+          errors: {},
+          alert: null,
+          onSubmit: vi.fn(),
+          onClose: vi.fn(),
+          vcsProviders,
+        }),
+      );
+    expect(render(['github'])).toContain('value="vcs"');
+    expect(render([])).not.toContain('value="vcs"');
+    expect(render([])).toContain('value="composer_repository"');
+  });
+});
+
+describe('editing a Git repository source the broker no longer serves', () => {
+  const editing = (vcsProviders: readonly ('github' | 'git' | 'ssh')[]) =>
+    renderToString(
+      createElement(SourceForm, {
+        source: {
+          id: 'vcs',
+          name: 'Repository',
+          ecosystem: 'composer',
+          type: 'vcs',
+          pollIntervalSeconds: 300,
+          removalPolicy: 'flag',
+        } as Source,
+        busy: false,
+        errors: {},
+        alert: null,
+        onSubmit: vi.fn(),
+        onClose: vi.fn(),
+        vcsProviders,
+      }),
+    );
+
+  it('keeps the saved type visible read-only and offers no configuration replacement', () => {
+    const html = editing([]);
+    expect(html).toContain('Source type: Git repository');
+    expect(html).not.toContain('Replace type-specific configuration');
+  });
+
+  it('offers the configuration replacement when a provider is served', () => {
+    const html = editing(['github']);
+    expect(html).not.toContain('Source type: Git repository');
+    expect(html).toContain('Replace type-specific configuration');
+  });
 });

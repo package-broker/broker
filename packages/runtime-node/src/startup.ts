@@ -802,6 +802,8 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
               config: registry,
               sshArchiveRoot:
                 options.env['PB_SSH_ARCHIVE_ROOT'] ?? join(dirname(path), 'ssh-archives'),
+              gitArchiveRoot:
+                options.env['PB_GIT_ARCHIVE_ROOT'] ?? join(dirname(path), 'git-archives'),
             },
           }),
     });

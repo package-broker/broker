@@ -12,6 +12,7 @@ import { isUlid } from '../../ids.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import { denialResponse } from '../../kernel/denial-page.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
+import type { VcsProvider } from '../../sources/config.js';
 import { CredentialError, parseCredentialMaterial } from '../../sources/credentials.js';
 import type {
   SourceActor,
@@ -43,6 +44,10 @@ export interface SourceRouteDeps extends ApiRouteDeps {
     ): Promise<readonly { readonly sourceId: string; readonly precedence: number }[]>;
   };
   readonly sessions: Pick<SessionService, 'authenticate' | 'isReauthFresh'>;
+  /** The VCS providers this runtime has registered and serves; the source form offers only these. */
+  readonly vcsProviders?: () => readonly VcsProvider[];
+  /** True for a provider this runtime validates but has not registered; writes naming it are refused. */
+  readonly refuseVcsProvider?: (provider: VcsProvider) => boolean;
 }
 
 type Changes = z.output<(typeof SOURCE_API_SPECS)[2]['api']['body']>;
@@ -148,6 +153,19 @@ function reader(ctx: RequestContext): SourceActor {
   };
 }
 
+const UNSERVED_PROVIDER = {
+  error: 'invalid_request' as const,
+  details: [{ path: '/body/config/provider', code: 'invalid' as const }],
+};
+
+function unserved(deps: SourceRouteDeps, config: object | undefined) {
+  return (
+    config !== undefined &&
+    'provider' in config &&
+    deps.refuseVcsProvider?.(config.provider as VcsProvider) === true
+  );
+}
+
 export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] {
   async function mutationPreflight(ctx: RequestContext, id: string) {
     if (ctx.org === null || !isUlid(id)) return { error: 'not_found' as const };
@@ -238,11 +256,12 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
               });
         return {
           status: 200,
-          body: { items, next },
+          body: { items, next, vcsProviders: [...(deps.vcsProviders?.() ?? [])] },
           ...(project === null ? {} : { etag: project.revision }),
         };
       }),
       apiRoute(create, async ({ ctx, body }) => {
+        if (unserved(deps, body.config)) return UNSERVED_PROVIDER;
         const c = writeContext(ctx, deps);
         const result = await deps.service.create(c.org, c.actor, c.fence, {
           name: body.name,
@@ -258,6 +277,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
       apiRoute(update, async ({ ctx, params, body }) => {
         const denied = await mutationPreflight(ctx, params.source);
         if (denied !== null) return denied;
+        if (unserved(deps, body.config)) return UNSERVED_PROVIDER;
         const c = writeContext(ctx, deps);
         const result = await deps.service.update(
           c.org,

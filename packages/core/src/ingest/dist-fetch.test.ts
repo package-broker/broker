@@ -417,6 +417,26 @@ describe('fetchAndVerifyDist', () => {
     expect(r.quarantines).toEqual([]);
   });
 
+  it('logs one warning naming both digests when a rebuilt git archive replaces its blob', async () => {
+    const r = rig(zip, { source: { type: 'vcs', config: { provider: 'git' } } as never });
+    const old = sha(enc.encode('old bytes'));
+    const result = await fetchAndVerifyDist(r.deps, ctx, guard, {
+      ...target({ revision: 4 }),
+      previousBlob: { id: 'blob-old', sha256: old },
+    });
+    expect(result).toBe('replaced');
+    expect(r.logs).toEqual([
+      {
+        level: 'warn',
+        event: 'dist.refetch_changed',
+        version_id: 'v1',
+        revision: 4,
+        previous_sha256_prefix: old.slice(0, 12),
+        sha256_prefix: sha(zip).slice(0, 12),
+      },
+    ]);
+  });
+
   it('puts the bytes before it calls the replace', async () => {
     const r = rig(zip);
     await fetchAndVerifyDist(r.deps, ctx, guard, {
@@ -437,7 +457,7 @@ describe('fetchAndVerifyDist', () => {
     expect(r.events).toEqual(['put', 'attach']);
   });
 
-  it('marks archives built by the broker as not refetchable and others as refetchable', async () => {
+  it('marks SSH archives as not refetchable and others, including rebuildable git archives, as refetchable', async () => {
     const built = rig(zip, { source: { type: 'vcs', config: { provider: 'git' } } as never });
     await fetchAndVerifyDist(built.deps, ctx, guard, target());
     const ssh = rig(zip, { source: { type: 'vcs', config: { provider: 'ssh' } } as never });
@@ -446,7 +466,7 @@ describe('fetchAndVerifyDist', () => {
     await fetchAndVerifyDist(github.deps, ctx, guard, target());
     const proxy = rig(zip);
     await fetchAndVerifyDist(proxy.deps, ctx, guard, target());
-    expect(built.puts[0]?.refetchable).toBe(false);
+    expect(built.puts[0]?.refetchable).toBe(true);
     expect(ssh.puts[0]?.refetchable).toBe(false);
     expect(github.puts[0]?.refetchable).toBe(true);
     expect(proxy.puts[0]?.refetchable).toBe(true);

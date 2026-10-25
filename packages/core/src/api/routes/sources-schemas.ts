@@ -14,10 +14,11 @@ const type = z.enum([
   'hosted',
 ]);
 const removalPolicy = z.enum(['flag', 'exclude']);
+const vcsProvider = z.enum(['github', 'git', 'ssh']);
 const strings = z.array(z.string());
 const config = z.union([
   z.strictObject({
-    provider: z.enum(['github', 'git', 'ssh']),
+    provider: vcsProvider,
     repository: z.string(),
     installationId: z.number().int().positive().optional(),
     packageName: z.string().optional(),
@@ -89,6 +90,7 @@ const source = z.strictObject({
 const page = z.strictObject({
   items: z.array(source.extend({ attachedProjectCount: z.number().int().nonnegative() })),
   next: ulid.nullable(),
+  vcsProviders: z.array(vcsProvider),
 });
 const created = z.strictObject({ id: ulid });
 
@@ -124,6 +126,7 @@ function scopeSpecs(boundary: 'organization' | 'project') {
                   ]),
                 ),
                 next: ulid.nullable(),
+                vcsProviders: z.array(vcsProvider),
               })
             : page,
         },

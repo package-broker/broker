@@ -75,6 +75,8 @@ async function fixture(
     reauth?: boolean;
     sessionMismatch?: boolean;
     rows?: readonly SourceRecord[];
+    vcsProviders?: readonly ('github' | 'git' | 'ssh')[];
+    refuseVcsProvider?: (provider: 'github' | 'git' | 'ssh') => boolean;
   } = {},
 ) {
   const tokenBearer =
@@ -205,6 +207,12 @@ async function fixture(
       ids,
       clock,
       clientIp,
+      ...(options.vcsProviders === undefined
+        ? {}
+        : { vcsProviders: () => options.vcsProviders ?? [] }),
+      ...(options.refuseVcsProvider === undefined
+        ? {}
+        : { refuseVcsProvider: options.refuseVcsProvider }),
     }),
     ports: { organizations: { get: async () => null }, ids, clock },
     resolveOrg: async () => orgContext('org-1'),
@@ -325,6 +333,54 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
   const setup = (extra: Parameters<typeof fixture>[0] = {}) =>
     fixture({ sourceProject: project ? PROJECT : null, ...extra });
   describe(base, () => {
+    it('lists the VCS providers the runtime reports', async () => {
+      const f = await setup({ vcsProviders: ['github', 'git'] });
+      const response = await f.request('GET', base);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ vcsProviders: ['github', 'git'] });
+    });
+    it('refuses to create or reconfigure a source for a provider the runtime has not registered', async () => {
+      const f = await setup({ refuseVcsProvider: (provider) => provider === 'git' });
+      const git = {
+        provider: 'git',
+        repository: 'https://git.example.com/acme/lib.git',
+        refs: { tags: true, branches: [] },
+      };
+      const refused = {
+        error: {
+          code: 'invalid_request',
+          details: [{ path: '/body/config/provider', code: 'invalid' }],
+        },
+      };
+      const created = await f.request('POST', base, {
+        name: 'git',
+        ecosystem: 'composer',
+        type: 'vcs',
+        url: null,
+        config: git,
+      });
+      expect(created.status).toBe(400);
+      expect(await created.json()).toMatchObject(refused);
+      expect(f.sources.create).not.toHaveBeenCalled();
+      const updated = await f.request('PATCH', `${base}/${SOURCE}`, { config: git });
+      expect(updated.status).toBe(400);
+      expect(await updated.json()).toMatchObject(refused);
+      expect(f.sources.update).not.toHaveBeenCalled();
+      const github = await f.request('POST', base, {
+        name: 'github',
+        ecosystem: 'composer',
+        type: 'vcs',
+        url: null,
+        config: { provider: 'github', repository: 'acme/lib', installationId: 1 },
+      });
+      expect(github.status).not.toBe(400);
+    });
+    it('lists no VCS providers when the runtime reports none', async () => {
+      const f = await setup();
+      const response = await f.request('GET', base);
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { vcsProviders: unknown }).vcsProviders).toEqual([]);
+    });
     it('requests a sync with 202 using the source write fence and audit context', async () => {
       const f = await setup();
       const response = await f.request('POST', `${base}/${SOURCE}/sync`);

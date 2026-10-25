@@ -22,6 +22,7 @@ export interface VcsConfig {
   readonly packageName?: string;
   readonly refs: { readonly tags: boolean; readonly branches: readonly string[] };
 }
+export type VcsProvider = VcsConfig['provider'];
 export interface ComposerRepositoryConfig {
   readonly selection: {
     readonly packages: readonly string[];
@@ -64,6 +65,34 @@ export interface ParseSourceConfigOptions {
   readonly runtime: 'node' | 'cloudflare';
   readonly policy: OutboundPolicy;
   readonly hasCredential: boolean;
+}
+
+// SSH sources validate on Node, but their built archives cannot be served as dists yet.
+const SERVED_VCS_PROVIDERS: Readonly<
+  Record<ParseSourceConfigOptions['runtime'], readonly VcsProvider[]>
+> = Object.freeze({
+  node: Object.freeze(['github', 'git'] as const),
+  cloudflare: Object.freeze(['github'] as const),
+});
+
+/** The VCS providers whose sources this runtime both syncs and serves as installable dists. */
+export function servedVcsProviders(
+  runtime: ParseSourceConfigOptions['runtime'],
+): readonly VcsProvider[] {
+  return SERVED_VCS_PROVIDERS[runtime];
+}
+
+/** The served VCS providers that have a registered provider among `registered`, in served order. */
+export function reportedVcsProviders(
+  runtime: ParseSourceConfigOptions['runtime'],
+  registered: Iterable<{ readonly id: string; readonly sourceTypes: readonly string[] }>,
+): readonly VcsProvider[] {
+  const ids = new Set(
+    [...registered]
+      .filter((provider) => provider.sourceTypes.includes('vcs'))
+      .map((provider) => provider.id),
+  );
+  return servedVcsProviders(runtime).filter((provider) => ids.has(provider));
 }
 
 const MAX_ENTRIES = 64;

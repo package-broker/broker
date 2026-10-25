@@ -179,6 +179,10 @@ export class BlobValidationError extends Error {
   }
 }
 
+export class BlobTooLargeError extends BlobValidationError {
+  override name = 'BlobTooLargeError';
+}
+
 export class BlobRangeError extends Error {
   override name = 'BlobRangeError';
   constructor() {
@@ -427,11 +431,18 @@ function boundedStream(
 
 function validatePutInput(input: BlobPutInput, maxBytes: number): void {
   if (
+    input !== null &&
+    typeof input === 'object' &&
+    Number.isSafeInteger(input.size) &&
+    input.size > maxBytes
+  ) {
+    throw new BlobTooLargeError();
+  }
+  if (
     input === null ||
     typeof input !== 'object' ||
     !Number.isSafeInteger(input.size) ||
     input.size < 0 ||
-    input.size > maxBytes ||
     typeof input.mediaType !== 'string' ||
     !BLOB_MEDIA_TYPES.has(input.mediaType) ||
     typeof input.refetchable !== 'boolean'

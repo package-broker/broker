@@ -790,6 +790,21 @@ describe('createPolicyFetch round 2', () => {
     expect(hops).toHaveLength(1);
   });
 
+  it.each([404, 503])(
+    'returns a %s with an over-cap declared Content-Length so the status wins',
+    async (status) => {
+      const { run } = make({
+        'https://a.example.com/start?x=1': new Response('error page', {
+          status,
+          headers: { 'content-length': String(2 ** 40) },
+        }),
+      });
+      const response = await run(request({ maxBytes: 10 }));
+      expect(response.status).toBe(status);
+      await response.body?.cancel();
+    },
+  );
+
   it('does not enforce Content-Length for HEAD, 204 and 304', async () => {
     for (const [method, status] of [
       ['HEAD', 200],

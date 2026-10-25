@@ -7,8 +7,8 @@ it('parses the commented observability template with invocation logs under logs'
     template.indexOf('# [observability]'),
     template.indexOf('# [assets]'),
   );
-  const sections: Record<string, Record<string, boolean>> = {};
-  let section: Record<string, boolean> | undefined;
+  const sections: Record<string, Record<string, boolean | number>> = {};
+  let section: Record<string, boolean | number> | undefined;
   for (const line of block.split('\n')) {
     const text = line.replace(/^#\s?/, '').trim();
     if (text === '') continue;
@@ -18,17 +18,19 @@ it('parses the commented observability template with invocation logs under logs'
       sections[header[1]] = section;
       continue;
     }
-    const setting = /^([a-z_]+) = (true|false)$/.exec(text);
+    const setting = /^([a-z_]+) = (true|false|[0-9]+(?:\.[0-9]+)?)$/.exec(text);
     expect(setting, text).not.toBeNull();
     expect(section, text).toBeDefined();
     const key = setting?.[1];
     if (section !== undefined && key !== undefined) {
       expect(section).not.toHaveProperty(key);
-      section[key] = setting?.[2] === 'true';
+      const value = setting?.[2];
+      section[key] = value === 'true' ? true : value === 'false' ? false : Number(value);
     }
   }
   expect(sections).toEqual({
     observability: { enabled: true },
     'observability.logs': { enabled: true, invocation_logs: false },
+    'observability.traces': { enabled: true, head_sampling_rate: 0.05 },
   });
 });

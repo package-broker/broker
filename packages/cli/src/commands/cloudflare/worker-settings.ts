@@ -1,3 +1,5 @@
+import { TRACE_FIELDS } from '@package-broker/core/platform/port-config';
+
 export function d1BindingId(binding: Record<string, unknown>): string | null {
   const id = binding.database_id ?? binding.id;
   if (
@@ -78,7 +80,7 @@ export function workerSettingsDifferences(
     if (live.some((b) => !prior.some((p) => p.name === b.name)))
       differences.push('worker_settings:bindings:unexpected');
   }
-  // Uploads declare these two fields; other observability fields are account defaults.
+  // Compare only declared fields; other observability fields are account defaults.
   const priorObservability = object(expected.observability);
   const liveObservability = object(actual.observability);
   if (
@@ -92,5 +94,15 @@ export function workerSettingsDifferences(
     priorLogs.invocation_logs !== object(liveObservability.logs).invocation_logs
   )
     differences.push('worker_settings:observability:logs:invocation_logs');
+  const priorTraces = object(priorObservability.traces);
+  const liveTraces = object(liveObservability.traces);
+  for (const key of Object.values(TRACE_FIELDS)) {
+    const normalize = key === 'destinations' ? unordered : (value: unknown) => value;
+    if (
+      Object.hasOwn(priorTraces, key) &&
+      !equal(normalize(priorTraces[key]), normalize(liveTraces[key]))
+    )
+      differences.push(`worker_settings:observability:traces:${key}`);
+  }
   return [...new Set(differences)];
 }

@@ -62,9 +62,8 @@ function isProxy(source: Source) {
   return ['packagist_proxy', 'npmjs_proxy'].includes(source.type);
 }
 
-function canTogglePause(project: string | null, source: Source) {
-  return project === null || source.status !== 'paused' || isProxy(source);
-}
+const ENABLE_ADMIN_MESSAGE = 'An organization admin must enable this source.';
+const ENABLE_CONFLICT_MESSAGE = 'Register package names, then enable the source.';
 
 interface SourcesState {
   editor: 'create' | Source | null;
@@ -92,6 +91,9 @@ interface SourcesState {
   order: string[];
   etag: string | null;
   vcsProviders: readonly VcsProvider[] | undefined;
+  canEnableProjectSource: boolean;
+  enableDenied: string[];
+  enableConflicts: string[];
 }
 
 function displayUrl(value: string | null): string | null {
@@ -141,6 +143,9 @@ export function createSourcesModel(
     preview: null,
     order: [],
     etag: null,
+    canEnableProjectSource: false,
+    enableDenied: [],
+    enableConflicts: [],
   };
   const listeners = new Set<() => void>();
   const set = (patch: Partial<SourcesState>) => {
@@ -160,6 +165,7 @@ export function createSourcesModel(
         { credential, secretFields: [] },
       );
       set({
+        enableDenied: [],
         error: credential
           ? 'Reauthenticate, then enter the credential again.'
           : 'Reauthentication is required.',
@@ -176,21 +182,37 @@ export function createSourcesModel(
     const after = more ? state.next : null;
     const previousEtag = state.etag;
     ++previewVersion;
-    set({ loading: true, listError: false, error: null, etag: null, preview: null, order: [] });
+    set({
+      loading: true,
+      listError: false,
+      error: null,
+      etag: null,
+      preview: null,
+      order: [],
+      enableDenied: [],
+      enableConflicts: [],
+      canEnableProjectSource: false,
+    });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
-    const result: ApiResult<SourcePage> =
+    const [permissions, result] = await Promise.all([
+      project === null ? null : client.request('get', '/_pb/me/permissions'),
       project === null
-        ? await client.request('get', '/_pb/sources', { query })
-        : await client.request('get', '/_pb/projects/{project}/sources', {
+        ? client.request('get', '/_pb/sources', { query })
+        : client.request('get', '/_pb/projects/{project}/sources', {
             params: { project },
             query,
-          });
+          }),
+    ]);
     if (version !== listVersion) return;
     if (failure(result) || !result.ok) {
       set({ loading: false, listError: true });
       return;
     }
-    const etag = responseHeader(result, 'etag') ?? null;
+    set({
+      canEnableProjectSource:
+        permissions?.ok === true && permissions.data.organization.includes('org:sources:write'),
+    });
+    const etag = responseHeader<SourcePage>(result, 'etag') ?? null;
     if (project !== null && more && etag !== previousEtag) {
       await load();
       return;
@@ -306,6 +328,12 @@ export function createSourcesModel(
   return {
     project,
     snapshot: () => state,
+    enableNeedsAdmin(source: Source) {
+      return (
+        project !== null &&
+        (!state.canEnableProjectSource || state.enableDenied.includes(source.id))
+      );
+    },
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => {
@@ -385,10 +413,27 @@ export function createSourcesModel(
       const prefix =
         project === null ? '/_pb/sources' : `/_pb/projects/${encodeURIComponent(project)}/sources`;
       const namesChange = /^\/_pb\/sources\/[^/]+\/names(?:\/[^/]+)?$/.test(result.path);
-      if (result.path !== prefix && !result.path.startsWith(`${prefix}/`) && !namesChange) return;
+      const enableChange = /^\/_pb\/sources\/([^/]+)\/enable$/.exec(result.path);
+      if (
+        result.path !== prefix &&
+        !result.path.startsWith(`${prefix}/`) &&
+        !namesChange &&
+        !enableChange
+      )
+        return;
       const selectedNames = state.names?.source;
+      set({ enableDenied: [], enableConflicts: [] });
       if (result.ok) set({ editor: null, fieldErrors: {}, formError: null });
       await load();
+      if (enableChange && !result.ok) {
+        if (project !== null && result.status === 403 && result.code === 'forbidden') {
+          set({ enableDenied: [enableChange[1]!] });
+        } else if (result.status === 409 && result.code === 'conflict') {
+          set({ enableConflicts: [enableChange[1]!] });
+        } else {
+          set({ error: 'The request could not be saved or loaded. Refresh and try again.' });
+        }
+      }
       if (result.ok && result.createdSourceId) await revealCreated(result.createdSourceId);
       if (selectedNames !== undefined) await names(selectedNames);
     },
@@ -506,16 +551,41 @@ export function createSourcesModel(
         },
       );
     },
-    togglePause(source: Source) {
-      if (!canTogglePause(project, source)) return Promise.resolve();
+    async togglePause(source: Source) {
+      if (project !== null && source.projectId === null) return;
       if (source.status === 'paused' && !isProxy(source)) {
-        return mutate(
-          () =>
-            client.request('post', '/_pb/sources/{source}/enable', {
-              params: { source: source.id },
-            }),
-          () => load(),
-        );
+        if (
+          state.busy ||
+          (project !== null &&
+            (!state.canEnableProjectSource || state.enableDenied.includes(source.id)))
+        )
+          return;
+        set({
+          busy: true,
+          error: null,
+          notice: null,
+          enableConflicts: state.enableConflicts.filter((id) => id !== source.id),
+        });
+        try {
+          const result = await client.request('post', '/_pb/sources/{source}/enable', {
+            params: { source: source.id },
+          });
+          if (
+            project !== null &&
+            !result.ok &&
+            result.status === 403 &&
+            result.code === 'forbidden'
+          ) {
+            set({ enableDenied: [...new Set([...state.enableDenied, source.id])] });
+          } else if (!result.ok && result.status === 409 && result.code === 'conflict') {
+            set({ enableConflicts: [...new Set([...state.enableConflicts, source.id])] });
+          } else if (!failure(result)) {
+            await load();
+          }
+        } finally {
+          set({ busy: false });
+        }
+        return;
       }
       const action = source.status === 'paused' ? 'resume' : 'pause';
       return mutate(
@@ -776,7 +846,7 @@ export function SourceCard({
         <div className="flex flex-wrap gap-2">
           {owned ? (
             <>
-              {canTogglePause(model.project, source) ? (
+              {source.status !== 'paused' || isProxy(source) || !model.enableNeedsAdmin(source) ? (
                 source.status === 'paused' ? (
                   <Button
                     type="button"
@@ -797,6 +867,11 @@ export function SourceCard({
                     onConfirm={() => void model.togglePause(source)}
                   />
                 )
+              ) : (
+                <p role="status">{ENABLE_ADMIN_MESSAGE}</p>
+              )}
+              {model.snapshot().enableConflicts.includes(source.id) ? (
+                <p role="status">{ENABLE_CONFLICT_MESSAGE}</p>
               ) : null}
               <Button
                 type="button"
@@ -928,10 +1003,11 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       {created?.status === 'paused' && !isProxy(created) ? (
         <p role="status">
           Next steps for {created.name}:{' '}
-          {state.names?.source === created.id && state.names.items.length > 0
-            ? 'Enable the source.'
-            : 'Register names, then Enable the source.'}
-          {model.project !== null ? ' Ask an organization admin.' : ''}
+          {model.enableNeedsAdmin(created)
+            ? ENABLE_ADMIN_MESSAGE
+            : state.names?.source === created.id && state.names.items.length > 0
+              ? 'Enable the source.'
+              : 'Register names, then Enable the source.'}
         </p>
       ) : null}
       {state.error ? <ListState kind="error" title={state.error} /> : null}

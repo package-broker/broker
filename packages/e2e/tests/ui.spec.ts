@@ -536,6 +536,87 @@ test.describe('Node management UI', () => {
     await assertSecretAbsent(page, material);
   });
 
+  test('creates, enables and requests sync for a project-owned Composer source', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await page
+      .getByRole('combobox', { name: 'Scope', exact: true })
+      .selectOption('browser-fixture');
+    await go(page, 'sources', 'project=browser-fixture');
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await create.getByRole('radio', { name: 'Composer', exact: true }).check();
+    await create.getByRole('radio', { name: /^Composer repository/ }).check();
+    await create
+      .getByLabel('Source name (required)', { exact: true })
+      .fill('Browser project Composer repository');
+    await create
+      .getByLabel('Repository URL (required)', { exact: true })
+      .fill('https://composer.example.test');
+    await create
+      .getByLabel('Package names (one per line)', { exact: true })
+      .fill('browser/project-package');
+    const created = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === '/_pb/projects/browser-fixture/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    const { id } = (await response.json()) as { id: string };
+    await expect(create).toHaveCount(0);
+    const sourceRow = () =>
+      page.getByRole('row').filter({ hasText: 'Browser project Composer repository' });
+    await expect(sourceRow().getByText('Paused', { exact: true }).first()).toBeVisible();
+    await sourceRow().locator('summary').click();
+    await expect(sourceRow().getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+    await sourceRow().getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByLabel('Registered pattern', { exact: true }).fill('browser/project-package');
+    const registered = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' && new URL(r.url()).pathname === `/_pb/sources/${id}/names`,
+    );
+    await page.getByRole('button', { name: 'Add name', exact: true }).click();
+    expect((await registered).status()).toBe(201);
+    const enabled = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === `/_pb/sources/${id}/enable`,
+    );
+    await sourceRow().getByRole('button', { name: 'Enable', exact: true }).click();
+    expect((await enabled).status()).toBe(204);
+    await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
+    await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
+    if ((await sourceRow().locator('details').getAttribute('open')) === null)
+      await sourceRow().locator('summary').click();
+    const nextPoll = () =>
+      sourceRow()
+        .getByText(/^Next poll:/)
+        .first()
+        .locator('time');
+    const previousPoll = await nextPoll().getAttribute('datetime');
+    const synced = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        new URL(r.url()).pathname === `/_pb/projects/browser-fixture/sources/${id}/sync`,
+    );
+    const refreshed = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'GET' &&
+        new URL(r.url()).pathname === '/_pb/projects/browser-fixture/sources',
+    );
+    await sourceRow().getByRole('button', { name: 'Sync now', exact: true }).click();
+    expect((await synced).status()).toBe(202);
+    expect((await refreshed).status()).toBe(200);
+    await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
+    await expect(nextPoll()).toHaveAttribute('datetime', /\d{4}-\d{2}-\d{2}T/);
+    await expect(nextPoll()).not.toHaveAttribute('datetime', previousPoll!);
+    await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
+  });
+
   test('creates a GitHub token source and saves its bearer credential', async ({ page, admin }) => {
     await confirmIdentity(page, admin);
     await go(page, 'sources');

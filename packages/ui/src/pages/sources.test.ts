@@ -1,6 +1,7 @@
-import { createElement, isValidElement, type ReactNode } from 'react';
+import { createElement, isValidElement, type ReactNode, type ReactElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import { DropdownMenu } from '../components/ui/dropdown-menu.js';
 import { createApiClient } from '../api.js';
 import type { paths } from '../api-types.js';
 import { createReauthFlow, type ShellServices } from '../auth.js';
@@ -9,7 +10,7 @@ import {
   createSourcesModel,
   filterSources,
   sourceCredentialKind,
-  SourceCard,
+  SourceActions,
   CredentialFields,
   SourcesView,
   submitCredential,
@@ -243,7 +244,8 @@ describe('sources and registered names', () => {
       'acme',
     );
     await model.load();
-    expect(html()).toMatch(/Attached to this project: (?:<!-- -->)?Yes/);
+    expect(html()).toContain('Attached to this project');
+    expect(html()).not.toContain('Not attached to this project');
     expect(html()).not.toMatch(/Attached to \d+ projects/);
     expect(html()).not.toContain('undefined');
   });
@@ -278,6 +280,7 @@ describe('sources and registered names', () => {
       ),
     );
     await model.load();
+    model.openEditor(model.snapshot().items[0]!);
     expect(html()).toContain('https://registry.example/path');
     for (const hidden of ['url-user', 'url-password', 'url-query', 'url-fragment']) {
       expect(html()).not.toContain(hidden);
@@ -810,23 +813,14 @@ describe('round 2 regressions', () => {
             next: null,
           }),
         );
-      const { model } = setup(fetch);
-      function settings(
-        node: ReactNode,
-      ): { key: unknown; props: { children?: ReactNode } } | undefined {
-        if (Array.isArray(node)) return node.map(settings).find(Boolean);
-        if (!isValidElement<{ children?: ReactNode }>(node)) return;
-        return node.type === 'form' ? node : settings(node.props.children);
-      }
+      const { model, html } = setup(fetch);
       await model.load();
-      const before = settings(
-        SourceCard({ source: model.snapshot().items[0]!, model, busy: false }),
-      );
+      model.openEditor(model.snapshot().items[0]!);
+      expect(html()).toContain('value="300"');
+      model.closeEditor();
       await model.load();
-      const after = settings(
-        SourceCard({ source: model.snapshot().items[0]!, model, busy: false }),
-      );
-      expect(after?.key).not.toBe(before?.key);
+      model.openEditor(model.snapshot().items[0]!);
+      expect(html()).toContain(`value="${changed ? 600 : 300}"`);
       expect(renderToString(createElement(SourcesView, { model }))).toContain(
         `<option value="${changed ? 'exclude' : 'flag'}" selected="">`,
       );
@@ -1594,7 +1588,7 @@ describe('source sync', () => {
     const paused = { ...source, status: 'paused' as const };
     const { model, fetch } = setup();
     const markup = renderToString(
-      createElement(SourceCard, { model, source: paused, busy: false }),
+      createElement(SourceActions, { model, source: paused, busy: false }),
     );
     expect(markup).toMatch(/disabled="" aria-describedby="sync-paused-/);
     expect(markup).toContain('Enable before syncing.');
@@ -1604,7 +1598,7 @@ describe('source sync', () => {
     await inherited.model.syncNow(source);
     expect(inherited.fetch).not.toHaveBeenCalled();
     expect(
-      renderToString(createElement(SourceCard, { model: inherited.model, source, busy: false })),
+      renderToString(createElement(SourceActions, { model: inherited.model, source, busy: false })),
     ).not.toContain('Sync now');
   });
 
@@ -1660,7 +1654,7 @@ describe('source sync', () => {
     ['future_error', 'future_error'],
     ['<script>unknown</script>', '&lt;script&gt;unknown&lt;/script&gt;'],
     ['toString', 'toString'],
-  ])('renders error code %s in rows and details', async (code, label) => {
+  ])('renders error code %s in responsive rows', async (code, label) => {
     const { model, html } = setup(
       vi.fn().mockResolvedValueOnce(
         json({
@@ -1670,15 +1664,16 @@ describe('source sync', () => {
       ),
     );
     await model.load();
-    expect(html().split(label).length).toBeGreaterThanOrEqual(3);
+    expect(html().split(label)).toHaveLength(2);
     expect(html()).toContain(`<code>${code.startsWith('<') ? label : code}</code>`);
     expect(html()).toContain('Next poll:');
     expect(html()).toContain('Last success:');
   });
 
-  it('shows empty sync history explicitly', () => {
-    const { model } = setup();
-    const markup = renderToString(createElement(SourceCard, { model, source, busy: false }));
+  it('shows empty sync history explicitly', async () => {
+    const { model, html } = setup(vi.fn().mockResolvedValue(json({ items: [source], next: null })));
+    await model.load();
+    const markup = html();
     expect(markup).toContain('Never');
     expect(markup).toContain('None');
     expect(markup).toContain('Next poll:');
@@ -1727,4 +1722,142 @@ it.each([
       config,
     }),
   ).toBe(kind);
+});
+
+describe('source row action controls', () => {
+  function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
+    if (Array.isArray(node)) return node.flatMap(elements);
+    if (!isValidElement<Record<string, unknown>>(node)) return [];
+    return [node, ...elements(node.props.children as ReactNode)];
+  }
+
+  it.each([
+    ['Sync now', 'syncNow'],
+    ['Set credential', 'chooseCredential'],
+    ['Registered names', 'names'],
+  ] as const)('connects %s to the selected source', (label, method) => {
+    const { model } = setup();
+    const action = vi.spyOn(model, method).mockImplementation(vi.fn());
+    const controls = elements(SourceActions({ source, model, busy: false }));
+    const button = controls.find((node) => node.props.children === label);
+    expect(button).toBeDefined();
+    (button!.props.onClick as () => void)();
+    expect(action).toHaveBeenCalledWith(method === 'syncNow' ? source : SOURCE);
+  });
+
+  it.each(['active', 'paused'] as const)(
+    'connects the %s state control with pause or enable',
+    (status) => {
+      const { model } = setup();
+      const selected = { ...source, status };
+      const action = vi.spyOn(model, 'togglePause').mockResolvedValue();
+      const controls = elements(SourceActions({ source: selected, model, busy: false }));
+      const button = controls.find((node) =>
+        status === 'paused' ? node.props.children === 'Enable' : node.props.action === 'Pause',
+      );
+      expect(button).toBeDefined();
+      ((status === 'paused' ? button!.props.onClick : button!.props.onConfirm) as () => void)();
+      expect(action).toHaveBeenCalledWith(selected);
+    },
+  );
+
+  it('closes More with Escape and restores focus to its trigger', () => {
+    const { model } = setup();
+    const menu = elements(SourceActions({ source, model, busy: false })).find(
+      (node) => node.type === DropdownMenu,
+    )!;
+    const focus = vi.fn();
+    const details = {
+      open: true,
+      contains: vi.fn(() => true),
+      querySelector: vi.fn(() => ({ focus })),
+    };
+    const preventDefault = vi.fn();
+    (menu.props.onKeyDown as (event: unknown) => void)({
+      key: 'Escape',
+      currentTarget: details,
+      preventDefault,
+    });
+    expect(details.open).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    details.open = true;
+    details.contains.mockReturnValue(false);
+    preventDefault.mockClear();
+    (menu.props.onKeyDown as (event: unknown) => void)({
+      key: 'Escape',
+      currentTarget: details,
+      preventDefault,
+    });
+    expect(details.open).toBe(true);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('keeps row settings exclusively in Edit and includes the read-only identity summary', async () => {
+    const { model, html } = setup(vi.fn().mockResolvedValue(json({ items: [source], next: null })));
+    await model.load();
+    expect(html()).not.toContain('Edit source</summary>');
+    expect(html()).not.toContain('Save settings');
+    expect(html()).not.toContain('source-pollIntervalSeconds');
+    model.openEditor(model.snapshot().items[0]!);
+    expect(html()).toContain('aria-label="Source identity"');
+    expect(html()).toContain('https://registry.example/packages');
+    expect(html()).toContain('No credential set');
+    expect(html()).toContain('source-pollIntervalSeconds');
+    expect(html()).toContain('source-removalPolicy');
+    expect(html().match(/id="source-pollIntervalSeconds"/g)).toHaveLength(1);
+  });
+
+  it('uses dismissible source dialogs for credentials and names without retaining closed credentials', async () => {
+    const { model, html } = setup(vi.fn().mockResolvedValue(json({ items: [], next: null })));
+    model.chooseCredential(SOURCE);
+    expect(html()).toContain('Set credential</h2>');
+    expect(html()).toContain('<dialog');
+    expect(html()).toContain('h-dvh');
+    model.closeCredential();
+    expect(html()).not.toContain('credential-kind');
+    await model.names(SOURCE);
+    expect(html()).toContain('Registered names</h2>');
+    expect(html()).toContain('<dialog');
+    model.closeNames();
+    expect(html()).not.toContain('registered-pattern');
+  });
+});
+
+describe('source action dialog identity and switching', () => {
+  it.each([true, false])('shows attachment %s in the Edit identity summary', async (attached) => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(
+        json({
+          items: [{ ...source, projectId: 'project-id', attached, hasCredential: true }],
+          next: null,
+        }),
+      ),
+      'acme',
+    );
+    await model.load();
+    model.openEditor(model.snapshot().items[0]!);
+    expect(html()).toContain(
+      `<dt>Attached to this project</dt><dd>${attached ? 'Yes' : 'No'}</dd>`,
+    );
+    expect(html()).toContain('<dt>Credential</dt><dd>credential set · write-only</dd>');
+  });
+
+  it('does not reopen names over credential setup when a previous names request finishes', async () => {
+    let finish!: (response: Response) => void;
+    const { model } = setup(
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    );
+    const pending = model.names(SOURCE);
+    model.chooseCredential(SOURCE);
+    finish(json({ items: [], next: null }));
+    await pending;
+    expect(model.snapshot().names).toBeNull();
+    expect(model.snapshot().credentialSource).toBe(SOURCE);
+  });
 });

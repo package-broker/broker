@@ -7,14 +7,13 @@ import {
   SESSION_IDLE_MS,
   SESSION_TOUCH_MS,
   authCallMetaOf,
-  clientIpOf,
   createSessionService,
   newSessionSecrets,
   sessionMetaOf,
 } from './session.js';
 import type { AuthenticatedSession } from './session.js';
 import * as auditActions from '../audit/actions.js';
-import { isIpLiteral, type AuditEvent } from '../audit/actions.js';
+import type { AuditEvent } from '../audit/actions.js';
 import { orgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { fixedClock } from '../ids.js';
@@ -90,6 +89,8 @@ function requestWith(cookie: string | null, headers: Record<string, string> = {}
   return new Request(`${ORIGIN}/_pb/auth/me`, { headers: all });
 }
 
+const noClientIp = (): string | null => null;
+
 function sessionCookie(value: string): string {
   return `${SESSION_NAME}=${value}`;
 }
@@ -126,60 +127,18 @@ describe('newSessionSecrets', () => {
 });
 
 describe('sessionMetaOf', () => {
-  it('prefers cf-connecting-ip over x-forwarded-for', async () => {
-    const meta = await sessionMetaOf(
-      requestWith(null, { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }),
-      'test-request-id',
-    );
-    expect(meta.ip).toBe('203.0.113.7');
-  });
-
-  it('takes the first x-forwarded-for entry', async () => {
-    const meta = await sessionMetaOf(
-      requestWith(null, { 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9, 192.0.2.10' }),
-      'test-request-id',
-    );
-    expect(meta.ip).toBe('198.51.100.1');
-  });
-
-  it('returns null ip when no header gives an address', async () => {
-    expect((await sessionMetaOf(requestWith(null), 'test-request-id')).ip).toBeNull();
-    expect(
-      (
-        await sessionMetaOf(
-          requestWith(null, { 'x-forwarded-for': ' , 192.0.2.9' }),
-          'test-request-id',
-        )
-      ).ip,
-    ).toBeNull();
-    expect(
-      (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': '  ' }), 'test-request-id')).ip,
-    ).toBeNull();
-  });
-
-  it('keeps only IP literals', async () => {
-    const accepted = ['203.0.113.7', '2001:db8::1', '::ffff:192.0.2.1'];
-    for (const ip of accepted) {
-      expect(
-        (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }), 'test-request-id')).ip,
-      ).toBe(ip);
-    }
-    const rejected = [
-      'a'.repeat(64),
-      'a'.repeat(65),
-      'unknown',
-      '1.2.3.4<script>',
-      '203.0.113.7:80x',
-      '1.2.3.4 5',
-    ];
-    for (const ip of rejected) {
-      expect(
-        (await sessionMetaOf(requestWith(null, { 'cf-connecting-ip': ip }), 'test-request-id')).ip,
-      ).toBeNull();
-      expect(
-        (await sessionMetaOf(requestWith(null, { 'x-forwarded-for': ip }), 'test-request-id')).ip,
-      ).toBeNull();
-    }
+  it('takes the client address only from the resolver, never from request headers', async () => {
+    const spoofed = requestWith(null, {
+      'cf-connecting-ip': '203.0.113.7',
+      'x-forwarded-for': '198.51.100.1',
+      'x-real-ip': '192.0.2.9',
+      forwarded: 'for=192.0.2.10',
+    });
+    expect(authCallMetaOf(spoofed, 'test-request-id', noClientIp).ip).toBeNull();
+    expect((await sessionMetaOf(spoofed, 'test-request-id', noClientIp)).ip).toBeNull();
+    const resolved = (): string | null => '2001:db8::7';
+    expect(authCallMetaOf(spoofed, 'test-request-id', resolved).ip).toBe('2001:db8::7');
+    expect((await sessionMetaOf(spoofed, 'test-request-id', resolved)).ip).toBe('2001:db8::7');
   });
 
   it('keeps only an IP literal from a custom client IP resolver', async () => {
@@ -196,25 +155,28 @@ describe('sessionMetaOf', () => {
     }
   });
 
-  it('does not fall back to x-forwarded-for when cf-connecting-ip is present but invalid', async () => {
-    const meta = await sessionMetaOf(
-      requestWith(null, { 'cf-connecting-ip': 'unknown', 'x-forwarded-for': '198.51.100.1' }),
-      'test-request-id',
-    );
-    expect(meta.ip).toBeNull();
-  });
-
   it('returns the user agent or null', async () => {
     expect(
-      (await sessionMetaOf(requestWith(null, { 'user-agent': 'TestAgent/1.0' }), 'test-request-id'))
-        .userAgent,
+      (
+        await sessionMetaOf(
+          requestWith(null, { 'user-agent': 'TestAgent/1.0' }),
+          'test-request-id',
+          noClientIp,
+        )
+      ).userAgent,
     ).toBe('TestAgent/1.0');
-    expect((await sessionMetaOf(requestWith(null), 'test-request-id')).userAgent).toBeNull();
+    expect(
+      (await sessionMetaOf(requestWith(null), 'test-request-id', noClientIp)).userAgent,
+    ).toBeNull();
   });
 
   it('returns the hash of a well-formed session cookie', async () => {
     const secret = randomToken(32);
-    const meta = await sessionMetaOf(requestWith(sessionCookie(secret)), 'test-request-id');
+    const meta = await sessionMetaOf(
+      requestWith(sessionCookie(secret)),
+      'test-request-id',
+      noClientIp,
+    );
     expect(meta.previousSecretHash).toBe(await sha256Hex(secret));
   });
 
@@ -229,7 +191,8 @@ describe('sessionMetaOf', () => {
     ];
     for (const cookie of cookies) {
       expect(
-        (await sessionMetaOf(requestWith(cookie), 'test-request-id')).previousSecretHash,
+        (await sessionMetaOf(requestWith(cookie), 'test-request-id', noClientIp))
+          .previousSecretHash,
       ).toBeNull();
     }
   });
@@ -712,43 +675,5 @@ describe('createSessionService', () => {
         publicOrigin: ORIGIN,
       }),
     ).not.toThrow();
-  });
-});
-
-describe('clientIpOf', () => {
-  const cases = [
-    ['1.2', null],
-    ['abc', null],
-    ['::::', null],
-    ['999.1.1.1', null],
-    ['a'.repeat(8192), null],
-    ['', null],
-    ['203.0.113.7', '203.0.113.7'],
-    ['2001:db8::1', '2001:db8::1'],
-    ['::1', '::1'],
-    ['2001:0DB8:0:0::1', '2001:0DB8:0:0::1'],
-    ['::ffff:192.0.2.7', '::ffff:192.0.2.7'],
-    ['fe80::1%eth0', null],
-    ['[::1]', null],
-    ['192.0.2.1:80', null],
-    ['01.2.3.4', null],
-  ] as const;
-
-  it.each(cases)('returns only audit-compatible literals for case %#', (value, expected) => {
-    for (const header of ['cf-connecting-ip', 'x-forwarded-for']) {
-      const result = clientIpOf(requestWith(null, { [header]: value }));
-      expect(result).toBe(expected);
-      if (result !== null) expect(isIpLiteral(result)).toBe(true);
-    }
-  });
-
-  it.each([
-    [{ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }, '203.0.113.7'],
-    [{ 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9' }, '198.51.100.1'],
-    [{ 'cf-connecting-ip': 'unknown', 'x-forwarded-for': '198.51.100.1' }, null],
-    [{ 'x-forwarded-for': 'unknown' }, null],
-    [{}, null],
-  ])('resolves client address from %j', (headers, expected) => {
-    expect(clientIpOf(requestWith(null, headers))).toBe(expected);
   });
 });

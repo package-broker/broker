@@ -41,6 +41,7 @@ const foreignTokens: ContractCase = {
       log: () => undefined,
       dispatch: () => undefined,
       publicOrigin: 'https://broker.example.test',
+      clientIp: () => null,
       registration,
       tokens: { lifetime: resolveTokenLifetimePolicy(undefined), offboarding: {} },
     });

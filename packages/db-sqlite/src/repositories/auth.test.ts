@@ -171,6 +171,7 @@ async function build(
     clock,
     ids,
     publicOrigin: ORIGIN,
+    clientIp: () => null,
     providers: new Map([['dex', fakeProvider(state)]]),
     hooks,
     log: (entry) => {
@@ -994,6 +995,7 @@ describe('module construction', () => {
         clock: { now: () => new Date(START) },
         ids: { ulid: () => ulid() },
         publicOrigin: 'https://broker.test/',
+        clientIp: () => null,
         providers: new Map(),
         hooks: { 'access.check': [], 'auth.mapGroups': [], 'auth.resolveIdentity': [] },
         log: () => undefined,

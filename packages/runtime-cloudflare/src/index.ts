@@ -1,4 +1,3 @@
-import { clientIpOf } from '@package-broker/core/auth/session';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
@@ -143,6 +142,7 @@ import {
   rewriteSetupRequest,
 } from '@package-broker/core/kernel/ui-routes';
 import { createWorkersAssets } from './assets.js';
+import { clientIpOf } from './client-ip.js';
 import {
   mcpEnabled,
   brokerObservabilityProblems,
@@ -453,6 +453,7 @@ async function buildAuth(
     ids: { ulid },
     log,
     dispatch,
+    clientIp: clientIpOf,
     registration,
     tokens,
   });

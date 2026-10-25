@@ -1,10 +1,10 @@
 # Composite org foreign keys for catalogue child tables
 
-Status: recommendation, decision needed from the orchestrator before rc.1. No migration is added by T716.
+Status: recommendation, pending a decision before rc.1. No migration is added as part of the org-consistent predicate changes.
 
 ## Problem
 
-Child tables carry `org_id` plus single-column foreign keys to their parents (`dist_tag`, `project_package_pattern`, `project_source`, `project_package`, `version`, `registered_name`, `dist_tag_history`). Ids are global ULIDs, so nothing in the schema stops a row whose `org_id` disagrees with its parent's. No writer produces such rows; T716 makes every read and write predicate org-consistent so such a row has no effect, but the schema still permits it.
+Child tables carry `org_id` plus single-column foreign keys to their parents (`dist_tag`, `project_package_pattern`, `project_source`, `project_package`, `version`, `registered_name`, `dist_tag_history`). Ids are global ULIDs, so nothing in the schema stops a row whose `org_id` disagrees with its parent's. No writer produces such rows; every read and write predicate is org-consistent so such a row has no effect, but the schema still permits it.
 
 ## Recommendation
 
@@ -26,8 +26,8 @@ Parents need `UNIQUE (org_id, id)` first (a unique index on `package`, `source`,
 
 - SQLite cannot add a constraint to an existing table. Each child table is rebuilt: create new table, copy rows, drop old, rename, recreate indexes. `dist_tag` is `WITHOUT ROWID`, keep that.
 - Foreign keys are off by default in SQLite connections and must be switched on with `PRAGMA foreign_keys = ON` per connection; `migration-contract.ts` already asserts this for the test executor. D1 enforces foreign keys on every connection and exposes `PRAGMA defer_foreign_keys` for the duration of a migration batch, so the rebuild order in the migration must either follow parent-first order or defer checks. Verify both on a D1 preview database before merge; this note has not been run against D1.
-- Existing data must be checked first: a pre-flight `SELECT` per child table joined to its parent on `id` where `org_id` differs must return zero rows, otherwise the migration aborts. The worker for this migration should emit that query as a migration-contract test.
-- Failure mode after the change: a mismatched insert fails with a foreign key error (`DbError` kind `foreign_key`) instead of being silently ignored by predicates. The T716 predicates stay as defence in depth.
+- Existing data must be checked first: a pre-flight `SELECT` per child table joined to its parent on `id` where `org_id` differs must return zero rows, otherwise the migration aborts. The migration implementation should include that query as a migration-contract test.
+- Failure mode after the change: a mismatched insert fails with a foreign key error (`DbError` kind `foreign_key`) instead of being silently ignored by predicates. The org-consistent predicates stay as defence in depth.
 
 ## Cost
 
@@ -39,9 +39,9 @@ Parents need `UNIQUE (org_id, id)` first (a unique index on `package`, `source`,
 ## Decision requested
 
 1. Tier 1 now (before rc.1), tier 2 after: yes or no.
-2. If yes, assign migration `0011` and a worker with D1 preview access.
+2. If yes, assign migration `0011` to a maintainer with D1 preview access.
 
-## T741b follow-ups
+## Attachment and pattern follow-ups
 
 Tier 1 also covers these two remaining paths:
 
@@ -52,6 +52,6 @@ These are decision-bearing attachment and pattern tables, so they belong in tier
 
 For D1 rebuilds, use `PRAGMA defer_foreign_keys = ON` at the start of the migration batch when intermediate states temporarily violate references, and verify `PRAGMA foreign_key_check` before completion. D1 keeps `foreign_keys` enabled; attempting to disable it inside a transaction is not a rebuild strategy. Deferral does not disable `ON DELETE` actions, so inventory cascades before dropping a referenced table. An alternative is a dependency-aware drop/rename order that avoids dangling references and cascading data loss throughout the rebuild.
 
-`ALTER TABLE ... RENAME TO ...` rewrites foreign-key references to the renamed table. Renaming the old parent to a temporary name can therefore redirect child references to that temporary name; dropping it later does not automatically retarget them to the replacement parent. Prefer create replacement, copy, drop old, rename replacement, with deferral and explicit handling of referencing children/cascades; otherwise rebuild the affected children in a verified dependency order. Recreate every index, trigger and constraint and test populated parent/child rows on both node:sqlite and Miniflare D1. No migration or D1 rebuild experiment is included in T741b.
+`ALTER TABLE ... RENAME TO ...` rewrites foreign-key references to the renamed table. Renaming the old parent to a temporary name can therefore redirect child references to that temporary name; dropping it later does not automatically retarget them to the replacement parent. Prefer create replacement, copy, drop old, rename replacement, with deferral and explicit handling of referencing children/cascades; otherwise rebuild the affected children in a verified dependency order. Recreate every index, trigger and constraint and test populated parent/child rows on both node:sqlite and Miniflare D1. No migration or D1 rebuild experiment is included in these follow-ups.
 
 Migrations may not set `PRAGMA defer_foreign_keys`; a future table rebuild orders its statements instead.

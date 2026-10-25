@@ -11,7 +11,7 @@ Build a broker image, keep its data in a volume, create an administrator and a p
 - The repository's build prerequisites are Node 24 and pnpm (`corepack enable`; the version is pinned in `package.json`). The Dockerfile supplies Node and pnpm inside the build container. <!-- source: README.md:9 --> <!-- source: Dockerfile:1 -->
 - A checkout of this repository and a running Docker daemon. The image build downloads the pinned base image, system packages and package dependencies. <!-- source: Dockerfile:1 --> <!-- source: Dockerfile:7 --> <!-- source: Dockerfile:80 -->
 - A POSIX shell, a browser, and an authenticator app. Use a private terminal with shell tracing disabled for credential setup. <!-- source: packages/ui/src/setup.tsx:406 -->
-- Composer 2 and PHP on the host for the final install. <!-- source: scripts/docker-smoke.mjs:811 --> <!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:6 — Docker 29.9.2, Composer 2.10.3, PHP 8.5.12; composer/semver 3.4.3 installed without extra PHP extensions. -->
+- Composer 2 and PHP on the host for the final install. <!-- source: scripts/docker-smoke.mjs:811 --> <!-- verified 2026-10-25 on Node 24 / Docker: Docker 29.9.2, Composer 2.10.3, PHP 8.5.12; composer/semver 3.4.3 installed without extra PHP extensions. -->
 
 The README's Workers Paid plan and `nodejs_compat` prerequisites apply to the [Cloudflare quickstart](quickstart-cloudflare.md). This tutorial uses the Node runtime in Docker. <!-- source: README.md:10 --> <!-- source: Dockerfile:11 -->
 
@@ -26,7 +26,7 @@ Use the repository's default build configuration. `pb:tutorial` below is a local
 <!-- source: Dockerfile:6 -->
 <!-- source: Dockerfile:10 -->
 <!-- source: scripts/docker-smoke.mjs:1090 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:7 — Image built; native SQLite loading passed. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Image built; native SQLite loading passed. -->
 
 ```sh
 docker build --tag pb:tutorial .
@@ -50,7 +50,7 @@ Generate the key once inside the volume. The key is written to a private file, n
 <!-- source: packages/cli/src/commands/admin.ts:68 -->
 <!-- source: Dockerfile:90 -->
 <!-- source: scripts/docker-smoke.mjs:1023 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:8 — Original key recipe: UID/GID 1000:1000, mode 600, 52 bytes; repeat refused overwrite. Revised temporary-file recipe checked offline in Round 1. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Original key recipe: UID/GID 1000:1000, mode 600, 52 bytes; repeat refused overwrite. Temporary-file recipe checked offline; live rerun pending. -->
 
 ```sh
 set +x
@@ -58,15 +58,21 @@ umask 077
 docker volume create pb-tutorial-data
 docker run --rm --volume pb-tutorial-data:/data --entrypoint sh pb:tutorial \
   -c 'set -e; umask 077
-    test ! -e /data/master.key
+    if test -e /data/master.key; then
+      echo "Master key already exists; keeping the existing file and skipping generation."
+      exit 0
+    fi
     key_tmp=$(mktemp /data/master.key.XXXXXX)
     trap "rm -f \"$key_tmp\"" 0
     pb secrets generate-master-key > "$key_tmp"
     test -s "$key_tmp"
-    mv -n "$key_tmp" /data/master.key'
+    mv -n "$key_tmp" /data/master.key
+    if test -e "$key_tmp"; then
+      echo "Master key already exists; keeping the existing file and discarding the temporary key."
+    fi'
 ```
 
-Expected result: the volume name is printed; the key-generation command exits successfully without displaying the key. It also prints a storage notice to stderr: `store this key in a secret manager and set PB_MASTER_KEY; it is not shown again`.
+Expected result: the volume name is printed; the key-generation command exits successfully without displaying the key. If the key file already exists, the recipe prints a message that it is keeping the existing key and exits successfully. When generating a key, it also prints a storage notice to stderr: `store this key in a secret manager and set PB_MASTER_KEY; it is not shown again`.
 
 ```text
 pb-tutorial-data
@@ -81,7 +87,7 @@ The runtime reads the master key from a file. Set the public origin and create t
 <!-- source: Dockerfile:92 -->
 <!-- source: scripts/docker-smoke.mjs:1023 -->
 <!-- source: scripts/docker-smoke.mjs:1029 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:9 — Container bound to 127.0.0.1:8787; readiness returned HTTP 200. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Container bound to 127.0.0.1:8787; readiness returned HTTP 200. -->
 
 ```sh
 docker run --detach --name pb-tutorial \
@@ -105,7 +111,7 @@ Wait for startup, then check the readiness route. A 503 means the broker is not 
 <!-- source: Dockerfile:107 -->
 <!-- source: packages/core/src/kernel/health.ts:26 -->
 <!-- source: packages/core/src/kernel/health.ts:68 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:9 — Readiness returned HTTP 200 and {"status":"ready"}. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Readiness returned HTTP 200 and {"status":"ready"}. -->
 
 ```sh
 curl --silent --show-error --fail http://localhost:8787/health/ready
@@ -125,7 +131,7 @@ Create a private host directory for delivery of the one-time setup token. Replac
 
 <!-- source: Dockerfile:90 -->
 <!-- source: packages/cli/src/cli.ts:40 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:10 — Original /data token delivery passed; host copy mode 600 and token absent from logs. Round 1 moves the delivery file to /tmp and adds cleanup. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Original /data token delivery passed; host copy mode 600 and token absent from logs. The recipe below uses /tmp and adds cleanup; live rerun pending. -->
 
 ```sh
 private_dir="$HOME/.package-broker-quickstart-docker"
@@ -214,7 +220,7 @@ Create an empty directory outside the broker checkout and save this as `composer
 }
 ```
 
-Create `auth.json` in that directory with your private editor, replacing `<read-token>` with the token from step 6. Keep it out of version control and run logs. The credential key includes both hostname and port, matching the repository URL; never put a token in that URL. <!-- source: packages/ui/src/pages/tokens/client-config.ts:5 --> <!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:11 -->
+Create `auth.json` in that directory with your private editor, replacing `<read-token>` with the token from step 6. Keep it out of version control and run logs. The credential key includes both hostname and port, matching the repository URL; never put a token in that URL. <!-- source: packages/ui/src/pages/tokens/client-config.ts:5 --> <!-- verified 2026-10-25 on Node 24 / Docker. -->
 
 ```json
 { "bearer": { "localhost:8787": "<read-token>" } }
@@ -224,7 +230,7 @@ Run in the install directory:
 
 <!-- source: packages/e2e/src/registry.spec.ts:930 -->
 <!-- source: scripts/docker-smoke.mjs:837 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:11 — Bearer auth and composer/semver 3.4.3 installation passed; lock dist URL used the broker. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Bearer auth and composer/semver 3.4.3 installation passed; lock dist URL used the broker. -->
 
 ```sh
 chmod 600 auth.json

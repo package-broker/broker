@@ -12,7 +12,7 @@ Deploy a broker, create an administrator and a project, then install `composer/s
 - A Cloudflare account on the **Workers Paid plan**. The Worker needs `nodejs_compat`; the deployment command supplies it. See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/). <!-- source: README.md:10 --> <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:42 --> <!-- verify: owner (Cloudflare): Confirm current Workers Paid pricing and account capabilities against Cloudflare before the hosted run. -->
 - R2 enabled, Queues and Analytics Engine available, and a registered `workers.dev` subdomain. Load `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` into your operator environment. The token must be able to provision and inspect these resources, query D1, and upload and deploy Workers. <!-- source: packages/cli/src/commands/cloudflare/provision.ts:100 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:204 --> <!-- source: packages/cli/src/commands/cloudflare/api.ts:66 --> <!-- verify: owner (Cloudflare): Confirm the exact Cloudflare dashboard permission names and least required token grants for this command sequence on the Mac. -->
 - A checkout of this repository, a POSIX shell, a browser, and an authenticator app. Use a private terminal with shell tracing disabled for credential setup. <!-- source: packages/ui/src/setup.tsx:406 -->
-- Composer 2 and PHP on the machine where you will install the test package. <!-- source: scripts/docker-smoke.mjs:811 --> <!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:6 — Docker 29.9.2, Composer 2.10.3, PHP 8.5.12; composer/semver 3.4.3 installed without extra PHP extensions. -->
+- Composer 2 and PHP on the machine where you will install the test package. <!-- source: scripts/docker-smoke.mjs:811 --> <!-- verified 2026-10-25 on Node 24 / Docker: Docker 29.9.2, Composer 2.10.3, PHP 8.5.12; composer/semver 3.4.3 installed without extra PHP extensions. -->
 
 Review [what you operate](#what-you-operate) before creating resources. Run the following commands from the repository root, in the same shell. Replace quoted angle-bracket placeholders with your values; never put credential values into command history or a run log.
 
@@ -103,7 +103,7 @@ Create a private directory outside the checkout. Generate the master key once an
 
 <!-- source: packages/cli/src/cli.ts:39 -->
 <!-- source: packages/cli/src/commands/admin.ts:68 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:17 — Original private key-file recipe passed; revised temporary-file recipe checked offline in Round 1. Deployment environment loading remains in the owner Cloudflare check below. -->
+<!-- verified 2026-10-25 on Node 24 / Docker: Original private key-file recipe passed; temporary-file recipe checked offline; live rerun pending. Deployment environment loading remains in the owner Cloudflare check below. -->
 
 ```sh
 set +x
@@ -113,16 +113,22 @@ mkdir -p "$private_dir"
 chmod 700 "$private_dir"
 (
   set -e
-  test ! -e "$private_dir/master.key"
+  if test -e "$private_dir/master.key"; then
+    printf '%s\n' 'Master key already exists; keeping the existing file and skipping generation.'
+    exit 0
+  fi
   key_tmp=$(mktemp "$private_dir/master.key.XXXXXX")
   trap 'rm -f "$key_tmp"' 0
   pnpm --silent pb secrets generate-master-key > "$key_tmp"
   test -s "$key_tmp"
   mv -n "$key_tmp" "$private_dir/master.key"
+  if test -e "$key_tmp"; then
+    printf '%s\n' 'Master key already exists; keeping the existing file and discarding the temporary key.'
+  fi
 )
 ```
 
-Expected result: a nonempty private key file and no key in terminal output. The command prints `store this key in a secret manager and set PB_MASTER_KEY; it is not shown again` to stderr. Continue only after key generation succeeds or you have retained the existing key.
+Expected result: a nonempty private key file and no key in terminal output. If the file already exists, the recipe prints a message that it is keeping the existing key and exits successfully. When generating a key, the command prints `store this key in a secret manager and set PB_MASTER_KEY; it is not shown again` to stderr. Continue only after key generation succeeds or you have retained the existing key.
 
 ```sh
 export PB_MASTER_KEY="$(cat "$private_dir/master.key")"

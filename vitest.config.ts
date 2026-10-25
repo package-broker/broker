@@ -64,6 +64,8 @@ export default defineConfig({
             }
           : {}),
         ...(loadTolerantProjects.has(name) ? { testTimeout: 20_000, hookTimeout: 30_000 } : {}),
+        // e2e files build and bundle the production runtimes into shared .pb outputs.
+        ...(name === 'e2e' ? { fileParallelism: false } : {}),
       },
     })),
   },

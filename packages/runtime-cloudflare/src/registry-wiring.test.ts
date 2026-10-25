@@ -922,6 +922,79 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     },
   );
 
+  it.each([
+    ['over the blob store cap', 'store'],
+    ['declared over the policy fetch cap', 'declared'],
+  ] as const)(
+    'refuses a Composer dist %s with 502, quarantines the version and stores nothing',
+    async (_label, mode) => {
+      const { fetch, cookie, orgId, events, seed, bucket, executor } = await boot();
+      const version = `${VERSION_PREFIX}2`;
+      await seed(
+        "UPDATE source SET type = 'packagist_proxy', url = 'https://repo.packagist.org' WHERE org_id = ? AND id = 'S1'",
+        [orgId],
+      );
+      await seed(
+        "UPDATE version SET metadata_json = json_set(metadata_json, '$.dist.url', ?), dist_type = 'zip' WHERE org_id = ? AND id = ?",
+        ['https://codeload.github.com/acme/lib/legacy.zip/r2', orgId, version],
+      );
+      const archives: string[] = [];
+      const normal = globalThis.fetch;
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new Request(input, init).url;
+        if (!url.startsWith('https://codeload.github.com/')) return normal(input, init);
+        archives.push(url);
+        return mode === 'store'
+          ? new Response(new Uint8Array(1024 * 1024 + 1).fill(7))
+          : new Response(new TextEncoder().encode('zip bytes'), {
+              headers: { 'content-length': String(64 * 1024 * 1024 + 1) },
+            });
+      });
+      const keys = [...bucket.objects.keys()];
+      const blobs = async () =>
+        executor.all<{ id: string }>({
+          sql: 'SELECT id FROM blob WHERE org_id = ? ORDER BY id',
+          params: [orgId],
+        });
+      const blobsBefore = await blobs();
+      const before = events.length;
+      const path = `/p1/dist/acme/lib/${version}.1.zip`;
+
+      const response = await fetch(request(path, { headers: { cookie } }));
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({ error: { code: 'bad_gateway' } });
+      expect(archives.length).toBeGreaterThan(0);
+      expect(
+        await executor.all({
+          sql: 'SELECT status, blob_id FROM version WHERE org_id = ? AND id = ?',
+          params: [orgId, version],
+        }),
+      ).toEqual([{ status: 'quarantined', blob_id: null }]);
+      expect(await blobs()).toEqual(blobsBefore);
+      expect([...bucket.objects.keys()]).toEqual(keys);
+      const quarantined = events
+        .slice(before)
+        .map((entry) =>
+          typeof entry === 'string'
+            ? (JSON.parse(entry) as Record<string, unknown>)
+            : (entry as Record<string, unknown>),
+        )
+        .filter((entry) => entry['event'] === 'dist.quarantined');
+      expect(quarantined).toEqual([
+        expect.objectContaining({
+          level: 'warn',
+          reason_code: 'archive_too_large',
+          source_id: 'S1',
+          package_key: 'acme/lib',
+        }),
+      ]);
+
+      const fetched = archives.length;
+      expect((await fetch(request(path, { headers: { cookie } }))).status).not.toBe(200);
+      expect(archives).toHaveLength(fetched);
+    },
+  );
+
   it('refuses sources that point at loopback, link-local and the broker itself without fetching', async () => {
     const { stub } = stubUpstream();
     const hosts = ['https://127.0.0.1', 'https://169.254.169.254', PUBLIC_URL];

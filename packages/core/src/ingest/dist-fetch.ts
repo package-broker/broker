@@ -6,9 +6,15 @@ import type {
   WriteEffect,
 } from '../db/catalogue.js';
 import type { OrgContext } from '../db/port.js';
-import { parseSha256, type BlobStore, type Sha256 } from '../platform/blob.js';
+import { BlobTooLargeError, parseSha256, type BlobStore, type Sha256 } from '../platform/blob.js';
+import { UpstreamError } from '../sources/policy-fetch.js';
 import type { ProviderContext, ProviderSource, SourceProvider } from '../sources/provider.js';
-import { twoPassPut, type FirstPass } from './two-pass-put.js';
+import {
+  TwoPassLimitError,
+  twoPassPut,
+  type FirstPass,
+  type TwoPassResult,
+} from './two-pass-put.js';
 
 export interface ReplaceBlobRequest {
   readonly versionId: string;
@@ -43,6 +49,7 @@ export interface DistFetchTarget {
   readonly version: string;
   readonly fetch: FetchDescriptor;
   readonly previousBlob: { readonly id: string; readonly sha256: Sha256 } | null;
+  readonly packageKey?: string;
 }
 
 export type DistFetchOutcome = 'attached' | 'replaced' | 'quarantined' | 'stale';
@@ -117,6 +124,37 @@ function publishedDigestsMatch(target: DistFetchTarget, first: FirstPass): boole
   return true;
 }
 
+function overSizeCap(error: unknown): boolean {
+  return (
+    error instanceof TwoPassLimitError ||
+    error instanceof BlobTooLargeError ||
+    (error instanceof UpstreamError && error.code === 'too_large')
+  );
+}
+
+async function quarantine(
+  deps: DistFetchDeps,
+  ctx: OrgContext,
+  guard: CatalogueWriteGuard,
+  target: DistFetchTarget,
+  reasonCode: 'digest_mismatch' | 'archive_too_large',
+): Promise<DistFetchOutcome> {
+  const effect = await deps.writer.quarantine(ctx, guard, {
+    versionId: target.versionId,
+    reason: 'digest_mismatch',
+  });
+  if (!effect.changed) return 'stale';
+  deps.providerContext.observability.log({
+    level: 'warn',
+    event: 'dist.quarantined',
+    reason_code: reasonCode,
+    ...(target.packageKey === undefined
+      ? { source_id: deps.source.id }
+      : { source_id: deps.source.id, package_key: target.packageKey }),
+  });
+  return 'quarantined';
+}
+
 function refetchable(source: ProviderSource): boolean {
   return !(
     source.type === 'vcs' &&
@@ -135,46 +173,46 @@ export async function fetchAndVerifyDist(
     throw new Error('dist has no upstream location to fetch from');
   }
   let declaredSize: number | null = null;
-  const result = await twoPassPut(
-    ctx,
-    async () => {
-      const opened = await deps.provider.openDist(deps.providerContext, deps.source, {
-        packageName: target.packageName,
-        version: target.version,
-        distType: fetch.distType,
-        sourceRef: fetch.sourceRef,
-        url: fetch.upstreamDistUrl,
-      });
-      declaredSize = opened.size;
-      return opened.body;
-    },
-    deps.store,
-    {
-      mediaType: fetch.distType === null ? 'application/octet-stream' : MEDIA_TYPES[fetch.distType],
-      refetchable: refetchable(deps.source),
-      maxBytes: deps.maxBytes,
-      codecs: deps.providerContext.codecs,
-      signal: deps.providerContext.signal,
-      verifyFirstPass: (first) => {
-        if (declaredSize !== null && declaredSize !== first.size) throw new DistSizeMismatchError();
-        return publishedDigestsMatch(target, first);
+  let result: TwoPassResult;
+  try {
+    result = await twoPassPut(
+      ctx,
+      async () => {
+        const opened = await deps.provider.openDist(deps.providerContext, deps.source, {
+          packageName: target.packageName,
+          version: target.version,
+          distType: fetch.distType,
+          sourceRef: fetch.sourceRef,
+          url: fetch.upstreamDistUrl,
+        });
+        declaredSize = opened.size;
+        if (opened.size !== null && opened.size > deps.maxBytes) {
+          await opened.body.cancel().catch(() => undefined);
+          throw new TwoPassLimitError(deps.maxBytes);
+        }
+        return opened.body;
       },
-    },
-  );
-
-  if (result.status === 'rejected') {
-    const effect = await deps.writer.quarantine(ctx, guard, {
-      versionId: target.versionId,
-      reason: 'digest_mismatch',
-    });
-    if (!effect.changed) return 'stale';
-    deps.providerContext.observability.log({
-      level: 'warn',
-      event: 'dist.quarantined',
-      reason_code: 'digest_mismatch',
-    });
-    return 'quarantined';
+      deps.store,
+      {
+        mediaType:
+          fetch.distType === null ? 'application/octet-stream' : MEDIA_TYPES[fetch.distType],
+        refetchable: refetchable(deps.source),
+        maxBytes: deps.maxBytes,
+        codecs: deps.providerContext.codecs,
+        signal: deps.providerContext.signal,
+        verifyFirstPass: (first) => {
+          if (declaredSize !== null && declaredSize !== first.size)
+            throw new DistSizeMismatchError();
+          return publishedDigestsMatch(target, first);
+        },
+      },
+    );
+  } catch (error) {
+    if (deps.providerContext.signal.aborted || !overSizeCap(error)) throw error;
+    return quarantine(deps, ctx, guard, target, 'archive_too_large');
   }
+
+  if (result.status === 'rejected') return quarantine(deps, ctx, guard, target, 'digest_mismatch');
 
   const sha256 = result.info.sha256;
   if (target.previousBlob !== null && target.previousBlob.sha256 !== sha256) {

@@ -239,7 +239,13 @@ export function createComposerRepositoryProvider(policy: OutboundPolicy): Source
           ctx.signal.aborted
         )
           throw error;
-        const root = await upstream(bound.root);
+        let root: Awaited<ReturnType<typeof bound.root>>;
+        try {
+          root = await upstream(bound.root);
+        } catch (rootFailure) {
+          if (rootFailure instanceof UpstreamError && rootFailure.code === 'too_large') throw error;
+          throw rootFailure;
+        }
         for (const mirror of root.mirrors) {
           const url = mirror.distUrl
             .replaceAll(

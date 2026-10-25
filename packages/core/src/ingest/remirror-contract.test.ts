@@ -327,6 +327,8 @@ describe('re-mirror and quarantine contract', () => {
       level: 'warn',
       event: 'dist.quarantined',
       reason_code: 'digest_mismatch',
+      source_id: 'source1',
+      package_key: 'acme/pkg',
     });
     expect(r.bytes.size).toBe(0);
     expect(r.attaches).not.toHaveBeenCalled();

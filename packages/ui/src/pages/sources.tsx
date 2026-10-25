@@ -9,6 +9,19 @@ import { Badge } from '../components/ui/badge.js';
 import { LoadedListFilters } from '../components/ui/toolbar.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '../components/ui/dialog.js';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '../components/ui/dropdown-menu.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Input } from '../components/ui/input.js';
@@ -94,7 +107,7 @@ interface SourcesState {
   enableConflicts: string[];
 }
 
-function displayUrl(value: string | null): string | null {
+export function displayUrl(value: string | null): string | null {
   if (value === null) return null;
   try {
     const url = new URL(value);
@@ -293,6 +306,7 @@ export function createSourcesModel(
 
   async function names(source: string, more = false) {
     const previous = state.names;
+    if (!more) set({ credentialSource: null, error: null });
     if (more && (previous?.source !== source || previous.next === null)) return;
     const version = ++namesVersion;
     const after = more ? previous?.next : null;
@@ -471,9 +485,20 @@ export function createSourcesModel(
         set({ busy: false });
       }
     },
+    closeCredential() {
+      if (!state.busy) set({ credentialSource: null });
+    },
+    closeNames() {
+      if (state.busy) return;
+      ++namesVersion;
+      set({ names: null });
+    },
     chooseCredential(source: string) {
+      ++namesVersion;
       set({
         credentialSource: source,
+        names: null,
+        savedCredential: null,
         credentialVersion: state.credentialVersion + 1,
         credentialKind: 'bearer',
         error: null,
@@ -771,7 +796,7 @@ function SyncStatus({ source }: { source: Source }) {
   );
 }
 
-export function SourceCard({
+export function SourceActions({
   source,
   model,
   busy,
@@ -782,64 +807,34 @@ export function SourceCard({
 }) {
   const owned = model.project === null || source.projectId !== null;
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{source.name}</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        <IdText value={source.id} label="source ID" />
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">
-            {source.ecosystem === 'composer' ? 'Composer' : 'npm'} ·{' '}
-            {SOURCE_TYPE_LABELS[source.type]}
-          </Badge>
-          <StatusBadge status={source.status} />
-        </div>
-        <SyncStatus source={source} />
-        <p className="break-all">{displayUrl(source.url) ?? 'No displayable URL'}</p>
-        <p>{source.hasCredential ? 'credential set · write-only' : 'No credential set'}</p>
-        {model.project !== null && 'attached' in source ? (
-          <p>Attached to this project: {source.attached ? 'Yes' : 'No'}</p>
-        ) : null}
-        {owned ? (
-          <form
-            key={model.snapshot().settingsVersion}
-            className="grid gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const form = event.currentTarget;
-              void model.edit(
-                source.id,
-                Number(formValue(form, 'interval')),
-                formValue(form, 'policy') as Source['removalPolicy'],
-              );
-            }}
+    <>
+      {owned ? (
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy || source.status === 'paused'}
+            aria-describedby={source.status === 'paused' ? `sync-paused-${source.id}` : undefined}
+            onClick={() => void model.syncNow(source)}
           >
-            <div>
-              <Label htmlFor={`interval-${source.id}`}>Polling interval (seconds)</Label>
-              <Input
-                id={`interval-${source.id}`}
-                name="interval"
-                type="number"
-                min={1}
-                step={1}
-                required
-                defaultValue={source.pollIntervalSeconds}
-              />
-            </div>
-            <div>
-              <Label htmlFor={`policy-${source.id}`}>Removal policy</Label>
-              <Select id={`policy-${source.id}`} name="policy" defaultValue={source.removalPolicy}>
-                <option value="flag">Flag</option>
-                <option value="exclude">Exclude</option>
-              </Select>
-            </div>
-            <Button disabled={busy}>Save settings</Button>
-          </form>
-        ) : (
-          <p>Manage this organization source in organization scope.</p>
-        )}
-        <div className="flex flex-wrap gap-2">
+            Sync now
+          </Button>
+          {source.status === 'paused' ? (
+            <p id={`sync-paused-${source.id}`}>Enable before syncing.</p>
+          ) : null}
+        </>
+      ) : null}
+      <DropdownMenu
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && event.currentTarget.contains(event.target as Node)) {
+            event.preventDefault();
+            event.currentTarget.open = false;
+            event.currentTarget.querySelector('summary')?.focus();
+          }
+        }}
+      >
+        <DropdownMenuTrigger>More</DropdownMenuTrigger>
+        <DropdownMenuContent className="grid gap-1">
           {owned ? (
             <>
               {source.status !== 'paused' || isProxy(source) || !model.enableNeedsAdmin(source) ? (
@@ -869,43 +864,20 @@ export function SourceCard({
               {model.snapshot().enableConflicts.includes(source.id) ? (
                 <p role="status">{ENABLE_CONFLICT_MESSAGE}</p>
               ) : null}
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy || source.status === 'paused'}
-                aria-describedby={
-                  source.status === 'paused' ? `sync-paused-${source.id}` : undefined
-                }
-                onClick={() => void model.syncNow(source)}
-              >
-                Sync now
-              </Button>
-              {source.status === 'paused' ? (
-                <p id={`sync-paused-${source.id}`}>Enable before syncing.</p>
-              ) : null}
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy}
-                onClick={() => model.chooseCredential(source.id)}
-              >
+
+              <DropdownMenuItem disabled={busy} onClick={() => model.chooseCredential(source.id)}>
                 Set credential
-              </Button>
+              </DropdownMenuItem>
             </>
-          ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            disabled={busy}
-            onClick={() => {
-              void model.names(source.id);
-            }}
-          >
+          ) : (
+            <p>Manage this organization source in organization scope.</p>
+          )}
+          <DropdownMenuItem disabled={busy} onClick={() => void model.names(source.id)}>
             Registered names
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
   );
 }
 
@@ -1184,12 +1156,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                         </Button>
                       )
                     ) : null}
-                    <details>
-                      <summary className="cursor-pointer underline">Edit source</summary>
-                      <div className="mt-3">
-                        <SourceCard source={source} model={model} busy={state.busy} />
-                      </div>
-                    </details>
+                    <SourceActions source={source} model={model} busy={state.busy} />
                   </div>
                 ),
               },
@@ -1216,76 +1183,113 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         </Button>
       ) : null}
       {state.credentialSource !== null ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Set credential</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <IdText value={state.credentialSource} label="source ID" />
-            <CredentialEditor
-              key={state.credentialVersion}
-              model={model}
-              source={state.credentialSource}
-              initialKind={state.credentialKind}
-              busy={state.busy}
-            />
-          </CardContent>
-        </Card>
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) model.closeCredential();
+          }}
+        >
+          <DialogContent
+            variant="source"
+            onCancel={(event) => {
+              if (state.busy) event.preventDefault();
+            }}
+          >
+            <DialogHeader className="shrink-0 p-6 pr-16">
+              <DialogTitle>Set credential</DialogTitle>
+              <DialogDescription>
+                Credentials are write-only. Save a new credential to rotate a secret.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
+              <IdText value={state.credentialSource} label="source ID" />
+              <CredentialEditor
+                key={state.credentialVersion}
+                model={model}
+                source={state.credentialSource}
+                initialKind={state.credentialKind}
+                busy={state.busy}
+              />
+              {state.error ? <p role="alert">{state.error}</p> : null}
+              {state.savedCredential?.source === state.credentialSource ? (
+                <p role="status">
+                  credential set · <Time value={state.savedCredential.at} />
+                </p>
+              ) : null}
+            </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
-      {state.savedCredential ? (
+      {state.savedCredential && state.credentialSource === null ? (
         <p role="status">
           credential set · {state.savedCredential.source} ·{' '}
           <Time value={state.savedCredential.at} />
         </p>
       ) : null}
       {state.names ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Registered names</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            <IdText value={state.names.source} label="source ID" />
-            <ul>
-              {state.names.items.map((name) => (
-                <li key={name.id} className="flex items-center gap-3">
-                  <span>{name.pattern}</span>
-                  <ConfirmAction
-                    action={`Remove ${name.pattern}`}
-                    target={name.pattern}
-                    scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
-                    description="Removing this registered pattern can stop the source from resolving matching packages. Add the pattern again to restore it."
-                    disabled={state.busy}
-                    onConfirm={() => void model.removeName(name.sourceId, name.id)}
-                  />
-                </li>
-              ))}
-            </ul>
-            {state.names.next !== null ? (
-              <Button
-                disabled={state.busy}
-                onClick={() => {
-                  void model.names(state.names!.source, true);
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) model.closeNames();
+          }}
+        >
+          <DialogContent
+            variant="source"
+            onCancel={(event) => {
+              if (state.busy) event.preventDefault();
+            }}
+          >
+            <DialogHeader className="shrink-0 p-6 pr-16">
+              <DialogTitle>Registered names</DialogTitle>
+              <DialogDescription>
+                Manage the package patterns registered for this source.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
+              {state.error ? <p role="alert">{state.error}</p> : null}
+              <IdText value={state.names.source} label="source ID" />
+              <ul>
+                {state.names.items.map((name) => (
+                  <li key={name.id} className="flex items-center gap-3">
+                    <span>{name.pattern}</span>
+                    <ConfirmAction
+                      action={`Remove ${name.pattern}`}
+                      target={name.pattern}
+                      scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
+                      description="Removing this registered pattern can stop the source from resolving matching packages. Add the pattern again to restore it."
+                      disabled={state.busy}
+                      onConfirm={() => void model.removeName(name.sourceId, name.id)}
+                    />
+                  </li>
+                ))}
+              </ul>
+              {state.names.next !== null ? (
+                <Button
+                  disabled={state.busy}
+                  onClick={() => {
+                    void model.names(state.names!.source, true);
+                  }}
+                >
+                  Load more names
+                </Button>
+              ) : null}
+              <form
+                className="grid gap-3"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const pattern = formValue(form, 'pattern');
+                  form.reset();
+                  void model.addName(state.names!.source, pattern);
                 }}
               >
-                Load more names
-              </Button>
-            ) : null}
-            <form
-              className="grid gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = event.currentTarget;
-                const pattern = formValue(form, 'pattern');
-                form.reset();
-                void model.addName(state.names!.source, pattern);
-              }}
-            >
-              <Label htmlFor="registered-pattern">Registered pattern</Label>
-              <Input id="registered-pattern" name="pattern" maxLength={50} required />
-              <Button disabled={state.busy}>Add name</Button>
-            </form>
-          </CardContent>
-        </Card>
+                <Label htmlFor="registered-pattern">Registered pattern</Label>
+                <Input id="registered-pattern" name="pattern" maxLength={50} required />
+                <Button disabled={state.busy}>Add name</Button>
+              </form>
+            </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
       {model.project !== null ? (
         <Card>

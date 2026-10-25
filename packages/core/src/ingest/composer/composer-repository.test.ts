@@ -10,6 +10,9 @@ import { bindCredential, parseCredentialMaterial } from '../../sources/credentia
 import { createPolicyFetch } from '../../sources/policy-fetch.js';
 import type { ProviderContext, ProviderSource } from '../../sources/provider.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
+import type { CatalogueWriteGuard } from '../../db/catalogue.js';
+import type { BlobStore } from '../../platform/blob.js';
+import { fetchAndVerifyDist, type DistFetchDeps } from '../dist-fetch.js';
 import { createComposerRepositoryProvider } from './composer-repository.js';
 
 const BASE = 'https://composer.example.com';
@@ -516,6 +519,73 @@ describe('Composer repository provider', () => {
       }),
     ).rejects.toMatchObject({ code: 'refused', reason: 'destination' });
     expect(t.calls).toHaveLength(0);
+  });
+
+  it('keeps the archive failure when the mirror fallback root is over its cap, and quarantines nothing', async () => {
+    const t = setup(new Response('{}', { headers: { 'content-length': String(2 ** 40) } }), {
+      [`${DIST}/widget.zip`]: new Response('unavailable', { status: 503 }),
+    });
+    t.source = { ...t.source, config: { ...t.source.config, mirrorsFallback: true } };
+    const target = {
+      packageName: NAME,
+      version: '1.0.0',
+      url: `${DIST}/widget.zip`,
+      distType: 'zip' as const,
+      sourceRef: 'abc',
+    };
+    await expect(t.provider.openDist(t.ctx, t.source, target)).rejects.toMatchObject({
+      code: 'http_status',
+      status: 503,
+    });
+    expect(t.calls.some((call) => call.url === `${BASE}/packages.json`)).toBe(true);
+
+    const writes: string[] = [];
+    const deps: DistFetchDeps = {
+      provider: t.provider,
+      providerContext: t.ctx,
+      source: t.source,
+      store: {
+        put: async () => {
+          writes.push('put');
+          throw new Error('unreachable');
+        },
+      } as unknown as BlobStore,
+      writer: {
+        attachDist: async () => {
+          writes.push('attach');
+          return { changed: true, statements: 1 };
+        },
+        quarantine: async () => {
+          writes.push('quarantine');
+          return { changed: true, statements: 1 };
+        },
+      },
+      blobReplacer: {
+        replaceBlob: async () => {
+          writes.push('replace');
+          return { changed: true, statements: 1 };
+        },
+      },
+      maxBytes: 1024,
+    };
+    await expect(
+      fetchAndVerifyDist(deps, orgContext('org'), [] as unknown as CatalogueWriteGuard, {
+        versionId: 'v1',
+        revision: 1,
+        packageName: NAME,
+        version: '1.0.0',
+        previousBlob: null,
+        fetch: {
+          sourceRef: 'abc',
+          upstreamDistUrl: `${DIST}/widget.zip`,
+          distType: 'zip',
+          composerShasum: null,
+          npmIntegrity: null,
+          npmShasum: null,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'http_status', status: 503 });
+    expect(writes).toEqual([]);
   });
 
   it.each([false, true])('uses root mirrors only with mirrorsFallback=%s', async (enabled) => {

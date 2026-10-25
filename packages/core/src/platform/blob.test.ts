@@ -14,6 +14,7 @@ import {
   BlobConflictError,
   BlobRangeError,
   BlobSizeMismatchError,
+  BlobTooLargeError,
   BlobValidationError,
   blobStorageKey,
   createBlobProbe,
@@ -1301,6 +1302,49 @@ describe('upload admission', () => {
     await expect(
       store.put(ctx, bigKey, streamOf([]), { size: 64 * MIB + 1, ...input }),
     ).rejects.toThrow(BlobValidationError);
+  });
+});
+
+describe('size cap', () => {
+  it('refuses a size over maxBytes as BlobTooLargeError before admission or any write', async () => {
+    const f = fixture();
+    const admission = createBlobUploadAdmission();
+    const store = createBlobStore(f.byteStore, f.metadata, { admission, maxBytes: 4 });
+    const data = enc.encode('12345');
+    const error = await store
+      .put(ctx, sha(data), streamOf([data]), {
+        size: data.length,
+        ...input,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(error).toBeInstanceOf(BlobTooLargeError);
+    expect(error).toBeInstanceOf(BlobValidationError);
+    expect((error as Error).name).toBe('BlobTooLargeError');
+    expect(admission.inFlightBytes()).toBe(0);
+    expect(f.objects.size).toBe(0);
+    expect(f.publishCalls).toHaveLength(0);
+    expect(await store.head(ctx, sha(data))).toBeNull();
+  });
+
+  it('keeps other invalid input a plain BlobValidationError', async () => {
+    const f = fixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts({ maxBytes: 4 }));
+    const data = enc.encode('1234');
+    const error = await store
+      .put(ctx, sha(data), streamOf([data]), {
+        size: data.length,
+        mediaType: 'text/html',
+        refetchable: true,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(error).toBeInstanceOf(BlobValidationError);
+    expect(error).not.toBeInstanceOf(BlobTooLargeError);
   });
 });
 

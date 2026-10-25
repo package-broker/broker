@@ -169,6 +169,7 @@ export function createDistService(deps: DistServiceDeps): DistService {
     signal: AbortSignal,
     isDone: () => Promise<DoneState>,
     onRefused: () => void,
+    packageKey: string,
     observability?: Observability,
   ): Promise<DoneState> {
     const handle = handles.get(scoped(ctx, key));
@@ -190,6 +191,7 @@ export function createDistService(deps: DistServiceDeps): DistService {
         fetch: target.fetch,
         previousBlob:
           target.blob === null ? null : { id: target.blob.id, sha256: target.blob.sha256 },
+        packageKey,
       },
     );
     if (outcome === 'quarantined') {
@@ -251,6 +253,7 @@ export function createDistService(deps: DistServiceDeps): DistService {
                 () => {
                   refused = true;
                 },
+                request.key,
                 options?.observability,
               ),
         { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },

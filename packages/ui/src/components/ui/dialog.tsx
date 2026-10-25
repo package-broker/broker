@@ -160,9 +160,7 @@ export function DialogContent({
           const candidate = menu?.querySelector<HTMLElement>('summary') ?? opener;
           const fallback = document.querySelector<HTMLElement>('#page-heading');
           const target =
-            !candidate?.isConnected || (!candidate.getClientRects().length && expired)
-              ? fallback
-              : candidate;
+            !candidate?.isConnected || (expired && !visible(candidate)) ? fallback : candidate;
           if (!target || !visible(target)) return;
           restoring = true;
           target.focus();
@@ -201,6 +199,10 @@ export function DialogContent({
           event.preventDefault();
           context?.setOpen(false);
         }
+      }}
+      onClose={(event) => {
+        props.onClose?.(event);
+        if (open && !event.currentTarget.open) context?.setOpen(false);
       }}
       className={cn(
         'fixed inset-0 m-auto w-[calc(100%_-_2rem)] min-w-0 max-w-lg max-h-[90dvh] overflow-y-auto gap-4 rounded-lg border border-neutral-200 bg-white p-6 text-neutral-900 shadow-lg open:grid backdrop:bg-black/50',

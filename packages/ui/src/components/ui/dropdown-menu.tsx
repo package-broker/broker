@@ -14,17 +14,9 @@ export function DropdownMenu({ className, onKeyDown, ...props }: ComponentProps<
           event.currentTarget.open &&
           event.currentTarget.contains(event.target as Node)
         ) {
+          // A cancelled Escape keydown is not turned into a close request for the enclosing modal dialog.
           event.preventDefault();
           event.stopPropagation();
-          const dialog = event.currentTarget.closest('dialog');
-          if (dialog) {
-            const ignoreCancel = (cancel: Event) => {
-              cancel.preventDefault();
-              cancel.stopImmediatePropagation();
-            };
-            dialog.addEventListener('cancel', ignoreCancel, { once: true, capture: true });
-            setTimeout(() => dialog.removeEventListener('cancel', ignoreCancel, true), 0);
-          }
           event.currentTarget.open = false;
           event.currentTarget.querySelector('summary')?.focus();
         }

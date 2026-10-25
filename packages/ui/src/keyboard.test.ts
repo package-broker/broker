@@ -219,13 +219,7 @@ it('consumes Escape in a DropdownMenu rendered inside a Dialog', () => {
   const v = mountDialog([], wrapper);
   expect(find(v.tree, 'details')).toBeDefined();
   const cancel = find(v.tree, 'dialog')!.onCancel as (event: unknown) => void;
-  let nativeCancel: ((event: Event) => void) | undefined;
-  const nativeDialog = {
-    addEventListener: vi.fn((_type: string, callback: (event: Event) => void) => {
-      nativeCancel = callback;
-    }),
-    removeEventListener: vi.fn(),
-  };
+  const nativeDialog = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
   const summary = { focus: vi.fn() };
   const menu = {
     open: true,
@@ -244,12 +238,9 @@ it('consumes Escape in a DropdownMenu rendered inside a Dialog', () => {
   expect(menu.open).toBe(false);
   expect(summary.focus).toHaveBeenCalledOnce();
   expect(event.preventDefault).toHaveBeenCalledOnce();
-  const native = new Event('cancel', { cancelable: true });
-  nativeCancel!(native);
-  expect(native.defaultPrevented).toBe(true);
+  expect(event.stopPropagation).toHaveBeenCalledOnce();
+  expect(nativeDialog.addEventListener).not.toHaveBeenCalled();
   expect(v.setOpen).not.toHaveBeenCalled();
-  vi.runOnlyPendingTimers();
-  expect(nativeDialog.removeEventListener).toHaveBeenCalledWith('cancel', nativeCancel, true);
   cancel({ defaultPrevented: false, preventDefault: vi.fn() });
   expect(v.setOpen).toHaveBeenCalledWith(false);
 });
@@ -332,6 +323,16 @@ it('bounds restoration for an unrendered opener to five seconds', async () => {
   vi.advanceTimersByTime(5000);
   expect(v.heading.focus).toHaveBeenCalledOnce();
   expect(v.disconnect).toHaveBeenCalled();
+});
+
+it('falls back to the heading when the opener stays disabled past five seconds', async () => {
+  const v = mountDialog();
+  v.opener.disabled = true;
+  v.cleanup();
+  await Promise.resolve();
+  vi.advanceTimersByTime(5000);
+  expect(v.opener.focus).not.toHaveBeenCalled();
+  expect(v.heading.focus).toHaveBeenCalledOnce();
 });
 
 it('cancels the stale restore during StrictMode effect/cleanup/effect replay', async () => {

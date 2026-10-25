@@ -13,7 +13,7 @@ Connect a vendor Composer repository to a project, store that project's vendor c
 - A Composer project and a vendor package/version that the first project's vendor account may download. Composer 1 requests to the broker are refused. <!-- source: packages/core/src/registry/composer/routes.ts:80 -->
 - For the Magento Marketplace example, credentials for `repo.magento.com` that entitle the first project to the chosen package. In the examples, `<vendor>/<package>`, `<version>` and `<broker-host>` are placeholders. Vendor credential placeholders are `<magento-public-key>` and `<magento-private-key>`; broker service tokens use `pb_svc_<selector>_<secret>`. Vendor keys do not use a broker token prefix. <!-- source: packages/core/src/sources/credentials.ts:110 --> <!-- source: packages/core/src/secrets/token-format.ts:74 -->
 
-<!-- verify: Magento credentials (Node) and owner (Cloudflare): confirm the current Magento Marketplace public-key/username and private-key/password mapping, package entitlement and repository URL with the vendor. Run this walkthrough on both deployed runtimes with authorized test credentials and capture redacted results before publication. -->
+<!-- verify: owner with Magento credentials (Node and Cloudflare): confirm the current Magento Marketplace public-key/username and private-key/password mapping, package entitlement and repository URL with the vendor. Run this walkthrough on both deployed runtimes with authorized test credentials and capture redacted results before publication. -->
 
 ## 1. Add a project-owned source
 
@@ -38,7 +38,7 @@ Select project `client-a` in the UI, open **Sources**, then **Add source**. Set 
 <!-- source: packages/core/src/sources/policy-fetch.ts:309 -->
 <!-- source: packages/core/src/catalogue/visibility.ts:71 -->
 <!-- source: packages/db-sqlite/src/repositories/catalogue-write-package.ts:104 -->
-<!-- verify: Magento credentials: confirm Magento's current archive hosts from the vendor and the redacted install trace before adding any host. -->
+<!-- verify: owner with Magento credentials: confirm Magento's current archive hosts from the vendor and the redacted install trace before adding any host. -->
 
 Save the source. It starts paused. Keep it paused while setting its credential and registering package names. Empty package and pattern selections select no packages. <!-- source: packages/db-sqlite/src/repositories/source.ts:655 --> <!-- source: packages/ui/src/pages/sources/source-form.tsx:123 -->
 
@@ -97,22 +97,21 @@ Keep `client-b` without this package for the isolation check below. If it later 
 
 ## 4. Install as the first project
 
-In a disposable Composer project directory, configure the broker URL and the first project's token. Replace all angle-bracket placeholders. The bearer credential is a broker service token, separate from the vendor keys saved in step 2. The authentication command writes local Composer credentials; keep that file out of version control. <!-- source: packages/ui/src/pages/tokens/client-config.ts:1 -->
+In a disposable Composer project directory, configure the broker URL and the first project's token. Replace all angle-bracket placeholders and supply the first project’s service token through the `BROKER_TOKEN` environment variable. The bearer credential is a broker service token, separate from the vendor keys saved in step 2. The authentication command writes local Composer credentials; keep that file out of version control. <!-- source: packages/ui/src/pages/tokens/client-config.ts:1 -->
 
 ```sh
 composer config repositories.client-a composer 'https://<broker-host>/client-a'
-composer config --auth 'bearer.<broker-host>' 'pb_svc_<selector>_<secret>'
+composer config --auth 'bearer.<broker-host>' "$BROKER_TOKEN"
 composer require '<vendor>/<package>:<version>' --no-interaction --no-plugins --no-scripts --prefer-dist
 ```
 
 <!-- source: packages/ui/src/pages/tokens/client-config.ts:5 -->
 <!-- source: packages/e2e/src/registry.spec.ts:946 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:22 -->
-<!-- source: /Users/lbajsarowicz/lbajsarowicz/package-broker/v2-research/40-tasks/DOC-verify-report.md:26 -->
+<!-- verified 2026-10-25 on Node 24 / Docker -->
 
 Composer writes a repository entry with `"name": "client-a"`; repositories are canonical by default. In an existing project, move chosen locked packages to broker URLs with `composer update <vendor>/<package>` (name each package to re-resolve). `composer update --lock` leaves existing dist URLs unchanged. A full `composer update` re-resolves all dependencies and can change versions across the project.
 
-<!-- verify: Magento credentials (Node) and owner (Cloudflare): run the three Composer commands with real placeholders substituted in a disposable project on the Mac. Record Composer version, broker revision, runtime and redacted successful install output; confirm that the archive is served by the broker. -->
+<!-- verify: owner with Magento credentials (Node and Cloudflare): run the three Composer commands with real placeholders substituted in a disposable project on the Mac. Record Composer version, broker revision, runtime and redacted successful install output; confirm that the archive is served by the broker. -->
 
 ## Verify isolation
 
@@ -128,7 +127,7 @@ Use an HTTP client to request the following metadata and archive URLs with the i
 
 Copy a version's `dist.url` from the first successful metadata response as `<client-a-dist-url>`. Fetch it with the first project's token to warm the archive cache (expect 200), then run both negative archive requests above. For the last request, replace only the `/client-a/` project segment with `/client-b/`, keeping the package and archive filename. <!-- source: packages/core/src/registry/composer/routes.ts:164 --> <!-- source: packages/core/src/registry/dist-service.ts:272 -->
 
-<!-- verify: Magento credentials (Node) and owner (Cloudflare): execute all three metadata requests and both negative dist/archive requests with separate project-bound read service tokens after the successful install. Warm the archive with the first token (200), then repeat the metadata and negative archive checks. Capture only status codes and redacted metadata. -->
+<!-- verify: owner with Magento credentials (Node and Cloudflare): execute all three metadata requests and both negative dist/archive requests with separate project-bound read service tokens after the successful install. Warm the archive with the first token (200), then repeat the metadata and negative archive checks. Capture only status codes and redacted metadata. -->
 
 A 401 means authentication failed and does not prove project isolation. A 403 can mean the principal sees the project but lacks the requested operation; check its permissions before interpreting the result. Do not remove the source ownership boundary to resolve a denial. <!-- source: packages/core/src/authz/token-use.ts:48 --> <!-- source: packages/core/src/authz/engine.ts:210 -->
 
@@ -150,11 +149,11 @@ If sync or install fails, check the source's last error and whether it has a cre
 
 | Symptom                                      | Check                                                                                   | Action                                                                                                                                                                                                                                                                                                                                                                                              |
 | -------------------------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Vendor authentication or entitlement failure | Confirm the keys belong to the purchasing project and the selected package is entitled. | Replace the credential in that project's source, then sync again. <!-- source: packages/core/src/api/routes/sources.ts:320 --> <!-- verify: Magento credentials: confirm current vendor authentication and entitlement failure responses with Magento Marketplace. -->                                                                                                                              |
+| Vendor authentication or entitlement failure | Confirm the keys belong to the purchasing project and the selected package is entitled. | Replace the credential in that project's source, then sync again. <!-- source: packages/core/src/api/routes/sources.ts:320 --> <!-- verify: owner with Magento credentials: confirm current vendor authentication and entitlement failure responses with Magento Marketplace. -->                                                                                                                   |
 | Reauthentication required when saving        | Check whether the UI asks you to sign in again.                                         | Reauthenticate and re-enter the credential; the UI does not replay the secret. <!-- source: packages/ui/src/pages/sources.tsx:184 -->                                                                                                                                                                                                                                                               |
 | Metadata works, archive fails                | Check whether the archive host differs from the repository host.                        | Add only a vendor-confirmed hostname to Additional archive hosts; the source credential is sent there too. <!-- source: packages/core/src/sources/credential-origins.ts:62 --> <!-- source: packages/core/src/ingest/composer/composer-repository.ts:208 --> <!-- source: packages/core/src/sources/policy-fetch.ts:309 -->                                                                         |
 | No packages after sync                       | Check the package selection, attachment, source state and **Visible to new projects**.  | Select the exact package name, attach to the owner project, register names, enable and sync. With the empty attachment body above, discovered packages need **Visible to new projects** selected; an explicit project package selection can also grant visibility. <!-- source: packages/ui/src/pages/sources/source-form.tsx:123 --> <!-- source: packages/core/src/catalogue/visibility.ts:86 --> |
 
 ## Next
 
-Use [Access model](../reference/access-model.md) to check roles and token scopes, [Composer](../clients/composer.md) for client setup, or return to [Troubleshoot credentials](#troubleshoot-credentials) for vendor credential failures.
+Use [Access model](../reference/access-model.md) to check roles and token scopes, [Composer](../clients/composer.md) for client setup, or return to [Troubleshoot credentials](#troubleshoot-credentials) for vendor credential failures. A separate troubleshooting page is planned.

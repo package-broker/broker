@@ -1,4 +1,5 @@
-<!-- Shared by the access-model reference and client setup pages. Edit this table once. -->
+<!-- Shared token-kind source for client setup pages; available to the access-model owning ticket. Edit this table once. -->
+<!-- verify: docs-render — CI (hosted runners): build the documentation site; confirm the shared table renders in both client pages and the partial has no sidebar entry. -->
 <!-- source: packages/core/src/secrets/token-format.ts:3 -->
 <!-- source: packages/core/src/secrets/token-format.ts:59 -->
 <!-- source: packages/core/src/authz/pat-service.ts:228 -->

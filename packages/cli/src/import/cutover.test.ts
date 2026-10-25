@@ -334,7 +334,7 @@ it.each(['source absent', 'source null', 'source empty', 'source equal', 'source
         await writeFile(join(context.cwd, 'composer.lock'), packages(changed));
       return base(args, context);
     };
-    const informational = kind === 'source equal';
+    const informational = kind === 'source equal' || kind === 'source empty';
     const result = await runCutoverCheck(options);
     expect(result).toMatchObject({
       exitCode: informational ? 0 : 1,
@@ -707,25 +707,31 @@ it('reports old-host downloads and resolution differences before a broker instal
   });
 });
 
-it('distinguishes a source reference from an equal dist fallback reference', async () => {
-  const original = pkg();
-  original.dist.reference = original.source.reference;
-  await writeFile(join(projectDir, 'composer.lock'), lock([original]));
-  const base = composer;
-  composer = async (args, context) => {
-    if (args[0] === 'update' && context.env.COMPOSER_AUTH === newAuth)
-      await writeFile(
-        join(context.cwd, 'composer.lock'),
-        JSON.stringify({ packages: [{ ...original, source: null }] }),
-      );
-    return base(args, context);
-  };
-  expect(await runCutoverCheck(options)).toMatchObject({
-    exitCode: 1,
-    code: 'resolution_difference',
-    differences: ['acme/library'],
-  });
-});
+it.each(['absent', 'null', 'different source SHA'])(
+  'accepts a broker-side dropped source with equal dist SHA (%s)',
+  async (kind) => {
+    const original = pkg();
+    if (kind !== 'different source SHA') original.dist.reference = original.source.reference;
+    await writeFile(join(projectDir, 'composer.lock'), lock([original]));
+    const base = composer;
+    composer = async (args, context) => {
+      if (args[0] === 'update' && context.env.COMPOSER_AUTH === newAuth)
+        await writeFile(
+          join(context.cwd, 'composer.lock'),
+          JSON.stringify({
+            packages: [{ ...original, source: kind === 'null' ? null : undefined }],
+          }),
+        );
+      return base(args, context);
+    };
+    expect(await runCutoverCheck(options)).toMatchObject({
+      exitCode: 0,
+      code: 'passed',
+      differences: [],
+      distOnly: [],
+    });
+  },
+);
 
 it.each([
   'acme/missing does not match the constraint',
@@ -837,3 +843,28 @@ it.each([17, 'ENOENT'])('retains safe diagnostics from thrown runner errors (%s)
   });
   expect(JSON.stringify(result)).not.toContain(SENTINEL);
 });
+
+it.each([
+  ['https://same.test/org/old', 'https://same.test/org/new'],
+  ['https://same.test/', 'https://same.test/new/'],
+  ['https://same.test/old/', 'https://same.test/'],
+  ['https://same.test//old', 'https://same.test/new/'],
+])('refuses ambiguous same-host organizations (%s → %s)', async (oldRepository, newRepository) => {
+  await writeFile(join(projectDir, 'composer.json'), manifest.replaceAll(OLD, oldRepository));
+  expect(await runCutoverCheck({ ...options, oldRepository, newRepository })).toMatchObject({
+    exitCode: 2,
+    code: 'invalid_input',
+  });
+  expect(calls).toEqual([]);
+});
+
+it.each([0, -1, 7201, 1.5, NaN, Infinity])(
+  'refuses invalid timeout before running Composer (%s)',
+  async (timeoutSeconds) => {
+    expect(await runCutoverCheck({ ...options, timeoutSeconds })).toMatchObject({
+      exitCode: 2,
+      code: 'invalid_input',
+    });
+    expect(calls).toEqual([]);
+  },
+);

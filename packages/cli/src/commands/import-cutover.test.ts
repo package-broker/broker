@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,8 +8,8 @@ import { run } from '../cli.js';
 import * as cutover from '../import/cutover.js';
 import { runImportCutover } from './import-cutover.js';
 
-const execFileMock = vi.hoisted(() => vi.fn());
-vi.mock('node:child_process', () => ({ execFile: execFileMock }));
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
 const OLD = 'https://old.example.test/repository/';
 const NEW = 'https://broker.example.test/project/';
@@ -54,6 +55,7 @@ afterEach(async () => {
   expect(JSON.stringify(output.mock.calls)).not.toContain(SENTINEL);
   expect(JSON.stringify(errors.mock.calls)).not.toContain(SENTINEL);
   for (const cwd of directories) await expect(stat(cwd)).rejects.toMatchObject({ code: 'ENOENT' });
+  spawnMock.mockReset();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await rm(projectDir, { recursive: true, force: true });
@@ -188,6 +190,7 @@ it('routes the CLI flags, repeated historic locks and JSON output to the checker
     oldAuthEnv: 'OLD_CUTOVER_AUTH',
     newAuthEnv: 'NEW_CUTOVER_AUTH',
     historicLocks: [first, second],
+    timeoutSeconds: 1800,
     json: true,
   });
   expect(output).toHaveBeenCalledTimes(1);
@@ -230,106 +233,81 @@ it('returns local validation exit 2 in JSON for unreadable project files', async
   });
 });
 
-it.each([false, true])(
-  'defaults to execFile without a shell and handles a missing binary (missing=%s)',
-  async (missing) => {
-    execFileMock.mockImplementation(
-      (
-        binary: string,
-        args: string[],
-        context: { cwd: string; shell: boolean; env: NodeJS.ProcessEnv },
-        callback: (error: unknown, stdout: string, stderr: string) => void,
-      ) => {
-        expect(binary).toBe('composer');
-        expect(context.shell).toBe(false);
-        expect(context.cwd).not.toBe(projectDir);
-        directories.add(context.cwd);
-        callback(
-          missing ? new Error(SENTINEL) : null,
-          args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL,
-          SENTINEL,
-        );
-      },
-    );
-    const { composer: _composer, ...defaultOptions } = options;
-    expect(_composer).toBeDefined();
-    expect(await runImportCutover(defaultOptions)).toBe(missing ? 2 : 0);
-    expect(execFileMock).toHaveBeenCalledTimes(missing ? 1 : 5);
-    if (missing)
-      expect(output).toHaveBeenCalledWith(
-        'Composer v2 is required; install Composer v2 and make it available on PATH.',
-      );
-    execFileMock.mockReset();
-  },
-);
+function fakeChild(pid = 12345) {
+  return Object.assign(new EventEmitter(), {
+    pid,
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+}
 
-it.each(['update', 'install'])(
-  'bounds Composer output/time and maps a %s timeout without leaking child text',
-  async (step) => {
-    execFileMock.mockImplementation((_: string, args: string[], context, callback) => {
-      directories.add(context.cwd);
-      expect(context.maxBuffer).toBe(64 * 1024 * 1024);
-      expect(context.timeout).toBe(300_000);
-      callback(
-        args[0] === step
-          ? Object.assign(new Error(SENTINEL), { killed: true, signal: 'SIGTERM', code: null })
-          : null,
-        args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL,
-        SENTINEL,
-      );
+it.each([false, true])('spawns Composer without a shell (missing=%s)', async (missing) => {
+  spawnMock.mockImplementation((binary: string, args: string[], context) => {
+    expect(binary).toBe('composer');
+    expect(context.shell).toBe(false);
+    expect(context.detached).toBe(process.platform !== 'win32');
+    directories.add(context.cwd);
+    const child = fakeChild();
+    queueMicrotask(() => {
+      if (missing) child.emit('error', Object.assign(new Error(SENTINEL), { code: 'ENOENT' }));
+      else child.stdout.write(args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL);
+      child.stderr.write(SENTINEL);
+      child.emit('close', missing ? null : 0, null);
     });
-    const { composer: _, ...input } = options;
-    expect(_).toBeDefined();
-    expect(await runImportCutover({ ...input, json: true })).toBe(1);
-    expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
-      code: `${step}_failed`,
-      diagnostics: [{ step, exitCode: null, errorCode: 'ETIMEDOUT', signal: 'SIGTERM' }],
-    });
-    execFileMock.mockReset();
-  },
-);
+    return child;
+  });
+  const { composer: _, ...input } = options;
+  expect(_).toBeDefined();
+  expect(await runImportCutover(input)).toBe(missing ? 2 : 0);
+  expect(spawnMock).toHaveBeenCalledTimes(missing ? 1 : 5);
+  if (missing) expect(output).toHaveBeenCalledWith('Composer version: exit=none error=ENOENT');
+});
 
-it.each([17, 'ENOENT', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'unsafe-secret-code'])(
+it.each([17, 'ENOENT', 'unsafe-secret-code'])(
   'retains only safe process diagnostics (%s)',
   async (code) => {
-    execFileMock.mockImplementation((_: string, args: string[], context, callback) => {
+    spawnMock.mockImplementation((_: string, args: string[], context) => {
       directories.add(context.cwd);
-      callback(
-        args[0] === 'install' ? Object.assign(new Error(SENTINEL), { code }) : null,
-        args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL,
-        SENTINEL,
-      );
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.write(args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL);
+        child.stderr.write(SENTINEL);
+        if (args[0] === 'install' && typeof code === 'string')
+          child.emit('error', Object.assign(new Error(SENTINEL), { code }));
+        child.emit(
+          'close',
+          args[0] === 'install' ? (typeof code === 'number' ? code : null) : 0,
+          null,
+        );
+      });
+      return child;
     });
     const { composer: _, ...input } = options;
     expect(_).toBeDefined();
     expect(await runImportCutover({ ...input, json: true })).toBe(1);
     const result = JSON.parse(String(output.mock.calls[0]?.[0]));
     expect(result).toMatchObject({
-      code: 'install_failed',
       diagnostics: [{ step: 'install', exitCode: typeof code === 'number' ? code : null }],
     });
-    if (code === 'ENOENT' || code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-      expect(result.diagnostics[0].errorCode).toBe(code);
+    if (code === 'ENOENT') expect(result.diagnostics[0].errorCode).toBe(code);
     expect(JSON.stringify(result)).not.toContain('unsafe-secret-code');
-    execFileMock.mockReset();
   },
 );
 
 it.each(['SIGINT', 'SIGTERM'] as const)(
-  'terminates the active Composer child before deleting copies on %s',
+  'terminates the Composer group before deleting copies on %s',
   async (signal) => {
-    let callback!: (error: unknown, stdout: string, stderr: string) => void;
     let context!: { cwd: string };
     let enter!: () => void;
     const entered = new Promise<void>((resolve) => {
       enter = resolve;
     });
-    const child = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) });
+    const child = fakeChild();
     const listeners = process.listeners(signal);
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
-    execFileMock.mockImplementation((_: string, __: string[], input, done) => {
+    spawnMock.mockImplementation((_: string, __: string[], input) => {
       context = input;
-      callback = done;
       directories.add(context.cwd);
       enter();
       return child;
@@ -341,18 +319,15 @@ it.each(['SIGINT', 'SIGTERM'] as const)(
       await entered;
       const handler = process.listeners(signal).find((fn) => !listeners.includes(fn))!;
       handler(signal);
-      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(kill).toHaveBeenCalledWith(-child.pid, 'SIGKILL');
       await stat(context.cwd);
-      expect(kill).not.toHaveBeenCalled();
-      callback(Object.assign(new Error(SENTINEL), { code: 'ABORT_ERR' }), '', '');
+      child.emit('error', Object.assign(new Error(SENTINEL), { code: 'ABORT_ERR' }));
       await new Promise((resolve) => setTimeout(resolve, 10));
       await stat(context.cwd);
-      expect(kill).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalledWith(process.pid, signal);
     } finally {
-      callback(Object.assign(new Error(SENTINEL), { code: 'ABORT_ERR' }), '', '');
       child.emit('close', null, 'SIGKILL');
       await check;
-      execFileMock.mockReset();
     }
     expect(kill).toHaveBeenCalledWith(process.pid, signal);
   },
@@ -364,4 +339,148 @@ it('prints a fixed missing-binary diagnostic alongside the Composer v2 requireme
   };
   expect(await runImportCutover(options)).toBe(2);
   expect(output).toHaveBeenCalledWith('Composer version: exit=none error=ENOENT');
+});
+
+it.each([undefined, '1', '1800', '7200'])('routes timeout seconds (%s)', async (value) => {
+  const real = cutover.runCutoverCheck;
+  const checker = vi
+    .spyOn(cutover, 'runCutoverCheck')
+    .mockImplementation((input) => real({ ...input, composer: options.composer! }));
+  expect(
+    await run([
+      'import',
+      'cutover-check',
+      ...flags(),
+      ...(value ? ['--timeout-seconds', value] : []),
+    ]),
+  ).toBe(0);
+  expect(checker).toHaveBeenCalledWith(
+    expect.objectContaining({ timeoutSeconds: value ? Number(value) : 1800 }),
+  );
+});
+
+it.each(['0', '-1', '7201', '1.5', 'NaN', 'Infinity', ''])(
+  'rejects invalid timeout seconds (%s)',
+  async (value) => {
+    expect(await run(['import', 'cutover-check', ...flags(), '--timeout-seconds', value])).toBe(2);
+    expect(spawnMock).not.toHaveBeenCalled();
+  },
+);
+
+it.each([undefined, 1, 7200])(
+  'kills the Composer process group on timeout (%s)',
+  async (timeoutSeconds) => {
+    const child = fakeChild();
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    spawnMock.mockImplementation((_: string, __: string[], context) => {
+      directories.add(context.cwd);
+      expect(context.detached).toBe(true);
+      enter();
+      return child;
+    });
+    vi.useFakeTimers();
+    const { composer: _, ...input } = options;
+    expect(_).toBeDefined();
+    const check = runImportCutover({
+      ...input,
+      ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+      json: true,
+    });
+    try {
+      await entered;
+      await vi.advanceTimersByTimeAsync((timeoutSeconds ?? 1800) * 1000 - 1);
+      expect(kill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(kill).toHaveBeenCalledWith(-child.pid, 'SIGKILL');
+      for (const cwd of directories) await stat(cwd);
+      child.emit('error', Object.assign(new Error(SENTINEL), { code: 'ABORT_ERR' }));
+      for (const cwd of directories) await stat(cwd);
+    } finally {
+      child.emit('close', null, 'SIGKILL');
+      vi.useRealTimers();
+      await check;
+    }
+    expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
+      diagnostics: [{ errorCode: 'ETIMEDOUT', signal: 'SIGKILL' }],
+    });
+  },
+);
+
+it.each(['stdout', 'stderr'] as const)(
+  'bounds Composer %s at 64 MiB and waits for close',
+  async (stream) => {
+    const child = fakeChild();
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    spawnMock.mockImplementation((_: string, __: string[], context) => {
+      directories.add(context.cwd);
+      enter();
+      return child;
+    });
+    const { composer: _, ...input } = options;
+    expect(_).toBeDefined();
+    const check = runImportCutover({ ...input, json: true });
+    try {
+      await entered;
+      const chunk = Buffer.alloc(1024 * 1024, 'x');
+      for (let i = 0; i < 64; i++) child[stream].write(chunk);
+      expect(kill).not.toHaveBeenCalled();
+      child[stream].write(SENTINEL);
+      expect(kill).toHaveBeenCalledWith(-child.pid, 'SIGKILL');
+      for (const cwd of directories) await stat(cwd);
+    } finally {
+      child.emit('close', null, 'SIGKILL');
+      await check;
+    }
+    expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
+      diagnostics: [{ errorCode: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }],
+    });
+  },
+);
+
+it.each(['update', 'install'])('maps a %s timeout to a fixed diagnostic', async (step) => {
+  let blocked!: ReturnType<typeof fakeChild>;
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  spawnMock.mockImplementation((_: string, args: string[], context) => {
+    directories.add(context.cwd);
+    const child = fakeChild();
+    if (args[0] === step) {
+      blocked = child;
+      enter();
+    } else
+      queueMicrotask(() => {
+        child.stdout.write(args[0] === '--version' ? 'Composer version 2.8.1' : SENTINEL);
+        child.emit('close', 0, null);
+      });
+    return child;
+  });
+  vi.useFakeTimers();
+  const { composer: _, ...input } = options;
+  expect(_).toBeDefined();
+  const check = runImportCutover({ ...input, timeoutSeconds: 1, json: true });
+  try {
+    await entered;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(kill).toHaveBeenCalledExactlyOnceWith(-blocked.pid, 'SIGKILL');
+    for (const cwd of directories) await stat(cwd);
+  } finally {
+    blocked.emit('close', null, 'SIGKILL');
+    vi.useRealTimers();
+    await check;
+  }
+  expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
+    code: `${step}_failed`,
+    diagnostics: [{ step, exitCode: null, errorCode: 'ETIMEDOUT', signal: 'SIGKILL' }],
+  });
 });

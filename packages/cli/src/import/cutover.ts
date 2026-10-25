@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +18,7 @@ export type ComposerRunner = (
     readonly env: NodeJS.ProcessEnv;
     readonly shell: false;
     readonly signal?: AbortSignal;
+    readonly timeout?: number;
   },
 ) => Promise<ComposerResult>;
 
@@ -29,6 +30,7 @@ export interface CutoverOptions {
   readonly newAuthEnv: string;
   readonly historicLocks?: readonly string[];
   readonly composer?: ComposerRunner;
+  readonly timeoutSeconds?: number;
 }
 
 const MESSAGES = {
@@ -77,38 +79,65 @@ class CutoverError extends Error {
 
 const defaultComposer: ComposerRunner = (args, options) =>
   new Promise((resolve) => {
-    const { signal, ...executionOptions } = options;
-    let closed = false;
-    let abortedResult: ComposerResult | undefined;
-    const child = execFile(
-      'composer',
-      [...args],
-      { ...executionOptions, maxBuffer: 64 * 1024 * 1024, timeout: 300_000, killSignal: 'SIGKILL' },
-      (error, stdout, stderr) => {
-        const result: ComposerResult = {
-          exitCode: error ? (typeof error.code === 'number' ? error.code : null) : 0,
-          ...(typeof error?.code === 'string' ? { errorCode: error.code } : {}),
-          ...(error?.killed && !signal?.aborted && error.code == null
-            ? { errorCode: 'ETIMEDOUT' }
-            : {}),
-          ...(error?.signal ? { signal: error.signal } : {}),
-          stdout,
-          stderr,
-        };
-        // Abort callbacks can precede child exit; cleanup must wait for close.
-        if (signal?.aborted && !closed) abortedResult = result;
-        else resolve(result);
-      },
-    );
+    const { signal, timeout = 1_800_000, ...executionOptions } = options;
+    const child = spawn('composer', [...args], {
+      ...executionOptions,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let errorCode: string | undefined;
+    let timedOut = false;
+    let terminated = false;
     const terminate = () => {
-      child?.kill('SIGKILL');
+      if (terminated) return;
+      terminated = true;
+      if (process.platform !== 'win32' && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch (error) {
+          if (!object(error) || error.code !== 'ESRCH') child.kill('SIGKILL');
+        }
+      } else child.kill('SIGKILL');
     };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeout);
+    const output = () => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      return {
+        append: (chunk: Buffer) => {
+          if (terminated) return;
+          size += chunk.length;
+          if (size > 64 * 1024 * 1024) {
+            errorCode = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+            terminate();
+          } else chunks.push(chunk);
+        },
+        text: () => Buffer.concat(chunks).toString('utf8'),
+      };
+    };
+    const stdout = output();
+    const stderr = output();
+    child.stdout.on('data', stdout.append);
+    child.stderr.on('data', stderr.append);
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      errorCode = error.code;
+    });
     signal?.addEventListener('abort', terminate, { once: true });
     if (signal?.aborted) terminate();
-    child?.once('close', () => {
+    // Close follows process exit and drained streams, before temporary-file cleanup.
+    child.once('close', (code, exitSignal) => {
+      clearTimeout(timer);
       signal?.removeEventListener('abort', terminate);
-      closed = true;
-      if (abortedResult) resolve(abortedResult);
+      resolve({
+        exitCode: errorCode || timedOut ? null : code,
+        ...(timedOut ? { errorCode: 'ETIMEDOUT' } : errorCode ? { errorCode } : {}),
+        ...(exitSignal ? { signal: exitSignal } : {}),
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+      });
     });
   });
 
@@ -188,7 +217,7 @@ function rewriteRepository(text: string, oldUrl: string, newUrl: string): string
 
 interface LockedPackage {
   readonly name: string;
-  readonly tuple: string;
+  readonly identity: string;
   readonly sourceReference: string | null;
   readonly distReference: string | null;
   readonly distUrl: string | undefined;
@@ -212,7 +241,7 @@ function packages(text: string): LockedPackage[] {
         if (!object(value)) throw new Error();
         const ref = value.reference ?? null;
         if (ref !== null && typeof ref !== 'string') throw new Error();
-        return ref || null;
+        return ref;
       };
       if (pkg.dist !== undefined && pkg.dist !== null && !object(pkg.dist)) throw new Error();
       const distUrl = object(pkg.dist) ? (pkg.dist.url ?? undefined) : undefined;
@@ -221,12 +250,7 @@ function packages(text: string): LockedPackage[] {
       const distReference = reference(pkg.dist);
       result.push({
         name: pkg.name,
-        tuple: JSON.stringify([
-          pkg.name,
-          pkg.version,
-          sourceReference,
-          sourceReference ?? distReference,
-        ]),
+        identity: JSON.stringify([pkg.name, pkg.version]),
         sourceReference,
         distReference,
         distUrl,
@@ -345,10 +369,23 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
     let oldAuth: string;
     let newAuth: string;
     try {
-      if (!options.projectDir || options.oldRepository === options.newRepository) throw new Error();
+      if (
+        !options.projectDir ||
+        options.oldRepository === options.newRepository ||
+        !Number.isInteger(options.timeoutSeconds ?? 1800) ||
+        (options.timeoutSeconds ?? 1800) < 1 ||
+        (options.timeoutSeconds ?? 1800) > 7200
+      )
+        throw new Error();
       const oldHost = repositoryHost(options.oldRepository);
       sameHost = oldHost === repositoryHost(options.newRepository);
       oldRepository = new URL(options.oldRepository);
+      if (sameHost) {
+        const oldOrganization = oldRepository.pathname.split('/')[1];
+        const newOrganization = new URL(options.newRepository).pathname.split('/')[1];
+        if (!oldOrganization || !newOrganization || oldOrganization === newOrganization)
+          throw new Error();
+      }
       oldAuth = auth(options.oldAuthEnv);
       newAuth = auth(options.newAuthEnv);
     } catch {
@@ -399,7 +436,13 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
           COMPOSER_NO_INTERACTION: '1',
         });
         ensureRunning();
-        return { cwd, env, shell: false as const, signal: controller.signal };
+        return {
+          cwd,
+          env,
+          shell: false as const,
+          signal: controller.signal,
+          timeout: (options.timeoutSeconds ?? 1800) * 1000,
+        };
       })());
     const oldCopy = await prepare(original, lock, oldAuth);
     const newCopy = await prepare(rewritten, lock, newAuth);
@@ -470,24 +513,28 @@ export async function runCutoverCheck(options: CutoverOptions): Promise<CutoverR
     if ((await execute(newCopy, update)).exitCode !== 0) throw new CutoverError('update_failed');
     const oldPackages = packages(await readFile(join(oldCopy.cwd, 'composer.lock'), 'utf8'));
     const newPackages = packages(await readFile(join(newCopy.cwd, 'composer.lock'), 'utf8'));
-    const oldSet = new Set(oldPackages.map((pkg) => pkg.tuple));
-    const newSet = new Set(newPackages.map((pkg) => pkg.tuple));
+    const oldByIdentity = new Map(oldPackages.map((pkg) => [pkg.identity, pkg]));
+    const newByIdentity = new Map(newPackages.map((pkg) => [pkg.identity, pkg]));
+    const resolutionKey = (pkg: LockedPackage, peers: ReadonlyMap<string, LockedPackage>) => {
+      const peer = peers.get(pkg.identity);
+      const useSource = pkg.sourceReference !== null && peer?.sourceReference != null;
+      return JSON.stringify([pkg.identity, useSource ? pkg.sourceReference : pkg.distReference]);
+    };
+    const oldSet = new Set(oldPackages.map((pkg) => resolutionKey(pkg, newByIdentity)));
+    const newSet = new Set(newPackages.map((pkg) => resolutionKey(pkg, oldByIdentity)));
     const differences = names([
-      ...oldPackages.filter((pkg) => !newSet.has(pkg.tuple)),
-      ...newPackages.filter((pkg) => !oldSet.has(pkg.tuple)),
+      ...oldPackages.filter((pkg) => !newSet.has(resolutionKey(pkg, newByIdentity))),
+      ...newPackages.filter((pkg) => !oldSet.has(resolutionKey(pkg, oldByIdentity))),
     ]);
-    const newSources = new Map(
-      newPackages
-        .filter((pkg) => pkg.sourceReference !== null)
-        .map((pkg) => [pkg.tuple, pkg.distReference]),
-    );
     const distOnly = names(
-      oldPackages.filter(
-        (pkg) =>
+      oldPackages.filter((pkg) => {
+        const peer = newByIdentity.get(pkg.identity);
+        return (
           pkg.sourceReference !== null &&
-          newSources.has(pkg.tuple) &&
-          newSources.get(pkg.tuple) !== pkg.distReference,
-      ),
+          peer?.sourceReference === pkg.sourceReference &&
+          peer.distReference !== pkg.distReference
+        );
+      }),
     );
     const oldHosts = oldHostPackages(newPackages, oldRepository, sameHost);
     result = {

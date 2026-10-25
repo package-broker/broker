@@ -1797,6 +1797,24 @@ describe('GET /_pb/session', () => {
 
     expect(response.status).toBe(401);
   });
+
+  it('touches an old live session, unlike logout', async () => {
+    const app = await build();
+    const { cookie, id } = await app.seed();
+    const row = [...app.rows.values()].find((row) => row.session.id === id)!;
+    const lastSeenAt = row.session.lastSeenAt;
+    app.advance(SESSION_TOUCH_MS + 1);
+    const touch = vi.spyOn(app.repository, 'touch');
+
+    const response = await app.kernel.fetch(
+      new Request(`${ORIGIN}/_pb/session`, { headers: { cookie } }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(touch).toHaveBeenCalledTimes(1);
+    expect(row.session.lastSeenAt).not.toBe(lastSeenAt);
+    expect(row.revoked).toBe(false);
+  });
 });
 
 describe('no refusal text leaks', () => {

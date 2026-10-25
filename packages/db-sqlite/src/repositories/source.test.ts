@@ -10,8 +10,14 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import type { ProtectedHolderProvider } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCredentialRepository } from './credential.js';
-import { SOURCE_ERROR_CODES, createSourceRepository, dueStatement } from './source.js';
+import {
+  SOURCE_ERROR_CODES,
+  createSourceRepository,
+  dueStatement,
+  listSourcesStatement,
+} from './source.js';
 import type { NewSource, SourceRepository } from './source.js';
+import type { AuditAction, AuditEvent } from '@package-broker/core/audit/actions';
 
 const ANCHORS: readonly ProtectedHolderProvider[] = [
   {
@@ -161,6 +167,7 @@ function seedSource(
   id: string,
   name: string,
   overrides: Partial<{
+    org_id: string;
     project_id: string | null;
     type: string;
     status: string;
@@ -175,7 +182,7 @@ function seedSource(
     `INSERT INTO source (id, org_id, project_id, name, ecosystem, type, url, credential_id, status,
       next_poll_at, poll_interval_seconds, consecutive_failures) VALUES (?, ?, ?, ?, 'composer', ?, ?, ?, ?, ?, ?, ?)`,
     id,
-    a.orgId,
+    overrides.org_id ?? a.orgId,
     overrides.project_id ?? null,
     name,
     type,
@@ -270,6 +277,22 @@ afterEach(async () => {
   await database.close();
 });
 
+let stagedAudits = 0;
+function stagedAudit(action: AuditAction): AuditEvent {
+  stagedAudits += 1;
+  return {
+    id: `01ARZ3NDEKTSV4RRFG${String(stagedAudits).padStart(8, '0')}`,
+    occurredAt: '2026-10-25T12:00:00.000Z',
+    action,
+    actor: { type: 'user', id: ORG_ADMIN },
+    tokenSelector: null,
+    sourceIp: null,
+    target: { type: 'source', id: null },
+    projectId: null,
+    payloadJson: '{}',
+  };
+}
+
 function newSource(overrides: Partial<NewSource> = {}): NewSource {
   return {
     id: SRC_NEW,
@@ -281,6 +304,7 @@ function newSource(overrides: Partial<NewSource> = {}): NewSource {
     configJson: '{}',
     credential: null,
     providerAnchors: ANCHORS,
+    audit: stagedAudit('source.create'),
     ...overrides,
   };
 }
@@ -439,6 +463,7 @@ describe('source update', () => {
     ]);
     expect(
       await repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: '01J0SOURCE0000000000000021',
         providerAnchors: ANCHORS,
         changes: { configJson: '{"scopes":["@acme","@other"]}' },
@@ -462,6 +487,7 @@ describe('source update', () => {
     });
     expect(
       await createSourceRepository(racing).update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_ORG,
         providerAnchors: ANCHORS,
         changes: { configJson: '{"scopes":["@new"]}' },
@@ -474,6 +500,7 @@ describe('source update', () => {
     await executor.batch([stmt("UPDATE source SET status = 'failing' WHERE id = ?", SRC_ORG)]);
     expect(
       await repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_ORG,
         providerAnchors: ANCHORS,
         changes: { url: 'https://moved.example.test' },
@@ -486,6 +513,7 @@ describe('source update', () => {
     await executor.batch([stmt("UPDATE source SET status = 'active' WHERE id = ?", SRC_ORG)]);
     expect(
       await repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_ORG,
         providerAnchors: ANCHORS,
         changes: { pollIntervalSeconds: 600 },
@@ -503,6 +531,7 @@ describe('source update', () => {
     ]);
     expect(
       await repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_PROXY,
         providerAnchors: ANCHORS,
         changes: { url: 'https://repo.packagist.org' },
@@ -514,6 +543,7 @@ describe('source update', () => {
   it('changes the allowed fields', async () => {
     expect(
       await repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_ORG,
         providerAnchors: ANCHORS,
         changes: {
@@ -545,6 +575,7 @@ describe('source update', () => {
     const before = await snapshot();
     expect(
       await repository.update(a, p1Fence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_P1,
         providerAnchors: ANCHORS,
         changes: { credentialId: CRED_ORG },
@@ -556,6 +587,7 @@ describe('source update', () => {
   it('refuses another project actor and a missing source', async () => {
     expect(
       await repository.update(a, fenceFor(P2_MAINTAINER, S_P2), {
+        audit: [stagedAudit('source.update')],
         id: SRC_P1,
         providerAnchors: ANCHORS,
         changes: { pollIntervalSeconds: 5 },
@@ -563,6 +595,7 @@ describe('source update', () => {
     ).toBe('forbidden');
     expect(
       await repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_NEW,
         providerAnchors: ANCHORS,
         changes: { pollIntervalSeconds: 5 },
@@ -573,6 +606,7 @@ describe('source update', () => {
   it('cannot reach the status or other fields through update', async () => {
     await expect(
       repository.update(a, orgFence(), {
+        audit: [stagedAudit('source.update')],
         id: SRC_ORG,
         providerAnchors: ANCHORS,
         changes: { status: 'active' } as never,
@@ -586,7 +620,11 @@ describe('source resume', () => {
   it('activates a proxy', async () => {
     await executor.batch([seedSource(SRC_PROXY, 'proxy', { type: 'packagist_proxy' })]);
     expect(
-      await repository.resume(a, orgFence(), { id: SRC_PROXY, providerAnchors: ANCHORS }),
+      await repository.resume(a, orgFence(), {
+        audit: stagedAudit('source.resume'),
+        id: SRC_PROXY,
+        providerAnchors: ANCHORS,
+      }),
     ).toBe('resumed');
     expect(await sourceRow(SRC_PROXY)).toMatchObject({ status: 'active' });
   });
@@ -594,23 +632,36 @@ describe('source resume', () => {
   it('refuses a non-proxy source and writes nothing', async () => {
     await executor.batch([seedSource(SRC_ORG, 'org-src')]);
     const before = await snapshot();
-    expect(await repository.resume(a, orgFence(), { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'activation_requires_registered_names',
-    );
+    expect(
+      await repository.resume(a, orgFence(), {
+        audit: stagedAudit('source.resume'),
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+      }),
+    ).toBe('activation_requires_registered_names');
     expect(await snapshot()).toBe(before);
   });
 
   it('answers forbidden before the type or existence is revealed', async () => {
     await executor.batch([seedSource(SRC_ORG, 'org-src')]);
     const outsider = fenceFor(P2_MAINTAINER, S_P2);
-    expect(await repository.resume(a, outsider, { id: SRC_ORG, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
-    expect(await repository.resume(a, outsider, { id: SRC_NEW, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
+    expect(
+      await repository.resume(a, outsider, {
+        audit: stagedAudit('source.resume'),
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+      }),
+    ).toBe('forbidden');
+    expect(
+      await repository.resume(a, outsider, {
+        audit: stagedAudit('source.resume'),
+        id: SRC_NEW,
+        providerAnchors: ANCHORS,
+      }),
+    ).toBe('forbidden');
     expect(
       await repository.update(a, outsider, {
+        audit: [stagedAudit('source.update')],
         id: SRC_NEW,
         providerAnchors: ANCHORS,
         changes: { pollIntervalSeconds: 5 },
@@ -623,9 +674,13 @@ describe('source resume', () => {
 
   it('refuses an unauthorised actor', async () => {
     await executor.batch([seedSource(SRC_PROXY, 'proxy', { type: 'packagist_proxy' })]);
-    expect(await repository.resume(a, p1Fence(), { id: SRC_PROXY, providerAnchors: ANCHORS })).toBe(
-      'forbidden',
-    );
+    expect(
+      await repository.resume(a, p1Fence(), {
+        audit: stagedAudit('source.resume'),
+        id: SRC_PROXY,
+        providerAnchors: ANCHORS,
+      }),
+    ).toBe('forbidden');
   });
 });
 
@@ -1068,9 +1123,19 @@ describe('other organizations', () => {
     const before = await snapshot();
     const target = { id: SRC_ORG, providerAnchors: ANCHORS };
     expect(
-      await repository.update(b, orgFence(), { ...target, changes: { pollIntervalSeconds: 5 } }),
+      await repository.update(b, orgFence(), {
+        audit: [stagedAudit('source.update')],
+        ...target,
+        changes: { pollIntervalSeconds: 5 },
+      }),
     ).toBe('forbidden');
-    expect(await repository.resume(b, orgFence(), { ...target, id: SRC_PROXY })).toBe('forbidden');
+    expect(
+      await repository.resume(b, orgFence(), {
+        audit: stagedAudit('source.resume'),
+        ...target,
+        id: SRC_PROXY,
+      }),
+    ).toBe('forbidden');
     expect(await repository.delete(b, orgFence(), target)).toBe('forbidden');
     expect(await snapshot()).toBe(before);
   });
@@ -1462,6 +1527,166 @@ describe('source paginated list and pause', () => {
     expect(await repository.list(a, { projectId: P1, after: null, limit: 100 })).toEqual([]);
   });
 
+  it.each(['organization', 'project', 'all'] as const)(
+    'paginates %s ownership within the organization',
+    async (ownership) => {
+      await executor.batch([
+        seedSource('foreign-source', 'foreign', { org_id: b.orgId }),
+        seedSource(SRC_ORG, 'shared'),
+        seedSource(SRC_P1, 'owned', { project_id: P1 }),
+        seedSource(SRC_NEW, 'other', { project_id: P2 }),
+      ]);
+      const expected =
+        ownership === 'organization'
+          ? [SRC_ORG]
+          : ownership === 'project'
+            ? [SRC_P1, SRC_NEW]
+            : [SRC_ORG, SRC_P1, SRC_NEW];
+      const ids: string[] = [];
+      let after: string | null = null;
+      for (;;) {
+        const page = await repository.list(a, { projectId: null, ownership, after, limit: 1 });
+        if (!page[0]) break;
+        ids.push(page[0].id);
+        expect(page[0].projectName).toBe(
+          page[0].projectId === null ? null : page[0].projectId === P1 ? 'one' : 'two',
+        );
+        after = page[0].id;
+      }
+      expect(ids).toEqual(expected);
+      expect(
+        (await repository.list(b, { projectId: null, ownership, after: null, limit: 100 })).map(
+          (row) => row.id,
+        ),
+      ).toEqual(ownership === 'project' ? [] : ['foreign-source']);
+    },
+  );
+
+  it.each(['project', 'all'] as const)(
+    'applies caller project visibility before %s pagination',
+    async (ownership) => {
+      await executor.batch([
+        seedSource(SRC_ORG, 'shared'),
+        seedSource(SRC_P1, 'one', { project_id: P1 }),
+        seedSource(SRC_PROXY, 'archived', { project_id: P_ARCHIVED }),
+        seedSource(SRC_NEW, 'two', { project_id: P2 }),
+      ]);
+      const service = createSourceService({
+        sources: repository,
+        providerAnchors: ANCHORS,
+      } as unknown as Parameters<typeof createSourceService>[0]);
+      const cases = [
+        { userId: P1_MAINTAINER, admin: false, inherited: false, expected: [SRC_P1] },
+        { userId: ORG_ADMIN, admin: false, inherited: false, expected: [] },
+        { userId: ORG_ADMIN, admin: false, inherited: true, expected: [SRC_P1, SRC_NEW] },
+        {
+          userId: ORG_ADMIN,
+          admin: true,
+          inherited: false,
+          expected: [SRC_P1, SRC_PROXY, SRC_NEW],
+        },
+        { userId: ORG_ADMIN, admin: true, inherited: false, restrictTo: [P2], expected: [SRC_NEW] },
+        { userId: ORG_ADMIN, admin: true, inherited: false, restrictTo: [], expected: [] },
+      ];
+      for (const scenario of cases) {
+        const ids: string[] = [];
+        let cursor: string | null = null;
+        do {
+          const result = await service.list(
+            a,
+            {
+              kind: 'org',
+              ...('restrictTo' in scenario ? { restrictTo: scenario.restrictTo } : {}),
+              actor: {
+                kind: 'organization',
+                userId: scenario.userId,
+                isOrganizationAdmin: scenario.admin,
+                permissions: new Set([
+                  'org:sources:read',
+                  ...(scenario.inherited ? ['project:read'] : []),
+                ]),
+              },
+            },
+            { ownership, cursor, limit: 1 },
+          );
+          if (!result.ok) throw new Error('expected source page');
+          ids.push(...result.value.items.map((row) => row.id));
+          cursor = result.value.next;
+        } while (cursor !== null);
+        expect(ids).toEqual(
+          ownership === 'all' ? [SRC_ORG, ...scenario.expected] : scenario.expected,
+        );
+      }
+    },
+  );
+
+  it('uses stored service project read authority for project-owned source rows', async () => {
+    await executor.batch([
+      seedSource(SRC_P1, 'one', { project_id: P1 }),
+      seedSource(SRC_NEW, 'two', { project_id: P2 }),
+      stmt(
+        'INSERT INTO service_principal (id, org_id, name, project_id, created_by_user_id, status) VALUES (?, ?, ?, ?, ?, ?)',
+        'source-service',
+        a.orgId,
+        'source-reader',
+        P2,
+        ORG_ADMIN,
+        'active',
+      ),
+    ]);
+    const query = {
+      projectId: null,
+      ownership: 'project' as const,
+      after: null,
+      limit: 100,
+      projectVisibility: {
+        userId: 'source-service',
+        servicePrincipalId: 'source-service',
+        allProjects: true,
+        includeArchived: false,
+        providerAnchors: ANCHORS,
+      },
+    };
+    expect(await repository.list(a, query)).toEqual([]);
+    await executor.batch([
+      stmt(
+        'INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, ?)',
+        a.orgId,
+        'source-service',
+        'project:read',
+      ),
+    ]);
+    expect((await repository.list(a, query)).map((row) => row.id)).toEqual([SRC_NEW]);
+    expect(await repository.list(b, query)).toEqual([]);
+    await executor.batch([
+      stmt("UPDATE service_principal SET status = 'suspended' WHERE id = ?", 'source-service'),
+    ]);
+    expect(await repository.list(a, query)).toEqual([]);
+  });
+
+  it.each(['organization', 'project', 'all'] as const)(
+    'keeps %s list statements under the parameter limit',
+    (ownership) => {
+      for (const projectId of [null, P1]) {
+        expect(
+          listSourcesStatement(a, {
+            projectId,
+            ownership,
+            after: SRC_ORG,
+            limit: 100,
+            projectVisibility: {
+              userId: P1_MAINTAINER,
+              allProjects: false,
+              includeArchived: false,
+              restrictTo: Array.from({ length: 150 }, (_, index) => `project-${index}`),
+              providerAnchors: ANCHORS,
+            },
+          }).params.length,
+        ).toBeLessThanOrEqual(100);
+      }
+    },
+  );
+
   it.each([0, 101, 1.5])('rejects repository list limit %s', async (limit) => {
     await expect(repository.list(a, { projectId: null, after: null, limit })).rejects.toThrow(
       RangeError,
@@ -1502,7 +1727,11 @@ describe('source paginated list and pause', () => {
       expect(await invoke()).toBe('paused');
       expect(await find(saved)).toEqual(saved);
       expect(
-        await repository.resume(a, p1Fence(), { id: SRC_PROXY, providerAnchors: ANCHORS }),
+        await repository.resume(a, p1Fence(), {
+          audit: stagedAudit('source.resume'),
+          id: SRC_PROXY,
+          providerAnchors: ANCHORS,
+        }),
       ).toBe('resumed');
       const before = await state();
       expect(

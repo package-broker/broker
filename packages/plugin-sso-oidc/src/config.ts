@@ -53,6 +53,21 @@ export function copyList(value: unknown): unknown {
   return value.length > MAX_LIST_LENGTH ? OVER_CAP : Array.from(value as unknown[]);
 }
 
+/** The over-cap verifiedDomains list is never read, so membership in it cannot be checked. */
+function authoritativeProblemsWithoutMembership(authoritative: unknown): string[] {
+  if (authoritative === OVER_CAP) {
+    return [];
+  }
+  const verifiedDomains = Array.isArray(authoritative)
+    ? authoritative.filter((domain): domain is string => typeof domain === 'string')
+    : [];
+  return domainPolicyProblems({
+    verifiedDomains,
+    emailAuthoritativeDomains: authoritative,
+    autoJoin: false,
+  } as DomainPolicy).filter((problem) => problem.startsWith('emailAuthoritativeDomains'));
+}
+
 export interface PolicyCheck {
   readonly snapshot: unknown;
   readonly problems: readonly string[];
@@ -90,6 +105,7 @@ export function checkPolicy(raw: unknown): PolicyCheck {
     if (typeof snapshot.autoJoin !== 'boolean') {
       problems.push('autoJoin must be a boolean');
     }
+    problems.push(...authoritativeProblemsWithoutMembership(snapshot.emailAuthoritativeDomains));
   } else {
     problems.push(
       ...domainPolicyProblems({

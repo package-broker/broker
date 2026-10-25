@@ -566,7 +566,7 @@ function setupUnblock(
     },
   };
   const log = vi.fn();
-  const service = createUnblockService({ blocks, sessions, log });
+  const service = createUnblockService({ blocks, sessions, clock, log });
   return { service, calls, log };
 }
 
@@ -604,6 +604,21 @@ describe('unblockIdentity success', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.fence).toBe(f);
     expect(calls[0]?.request).toEqual(UNBLOCK);
+  });
+
+  it('stamps the audit row with the injected clock', async () => {
+    const now = '2026-10-16T12:03:04.567Z';
+    const { service, calls } = setupUnblock({ now });
+    await service.unblockIdentity(
+      ctx,
+      authenticated({ reauthAt: now }),
+      snapshot(),
+      fence(),
+      UNBLOCK,
+      call,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.audit.occurredAt).toBe(now);
   });
 
   it('emits exactly one info event with ids only', async () => {

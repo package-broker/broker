@@ -7,7 +7,7 @@ import {
 } from '../../authz/access-context.js';
 import type { Permission } from '../../authz/administration.js';
 import type { OrgContext } from '../../db/port.js';
-import type { SourceRepository } from '../../db/source.js';
+import type { SourceOwnership, SourceRepository } from '../../db/source.js';
 import { isUlid } from '../../ids.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import { denialResponse } from '../../kernel/denial-page.js';
@@ -207,6 +207,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
           return { error: 'not_found' };
         const result = await deps.service.list(org, reader(ctx), {
           ...(ctx.projectId === null ? {} : { projectId: ctx.projectId }),
+          ...('ownership' in query ? { ownership: query.ownership as SourceOwnership } : {}),
           limit: query.limit === undefined ? 50 : Number(query.limit),
           cursor:
             query.after === undefined
@@ -244,15 +245,21 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
       }),
       apiRoute(create, async ({ ctx, body }) => {
         const c = writeContext(ctx, deps);
-        const result = await deps.service.create(c.org, c.actor, c.fence, {
-          name: body.name,
-          ecosystem: body.ecosystem,
-          type: body.type,
-          ...changes(body),
-          projectId: ctx.projectId,
-          url: body.url ?? null,
-          configJson: JSON.stringify(body.config ?? {}),
-        });
+        const result = await deps.service.create(
+          c.org,
+          c.actor,
+          c.fence,
+          {
+            name: body.name,
+            ecosystem: body.ecosystem,
+            type: body.type,
+            ...changes(body),
+            projectId: ctx.projectId,
+            url: body.url ?? null,
+            configJson: JSON.stringify(body.config ?? {}),
+          },
+          c.call,
+        );
         return result.ok ? { status: 201, body: { id: result.value.id } } : failure(result);
       }),
       apiRoute(update, async ({ ctx, params, body }) => {
@@ -265,6 +272,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
           c.fence,
           params.source,
           changes(body),
+          c.call,
         );
         return result.ok ? { status: 204 } : failure(result);
       }),
@@ -279,7 +287,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
         const denied = await mutationPreflight(ctx, params.source);
         if (denied !== null) return denied;
         const c = writeContext(ctx, deps);
-        const result = await deps.service.resume(c.org, c.actor, c.fence, params.source);
+        const result = await deps.service.resume(c.org, c.actor, c.fence, params.source, c.call);
         return result.ok ? { status: 204 } : failure(result);
       }),
       apiRoute(sync, async ({ ctx, params }) => {
@@ -311,9 +319,14 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
             details: [{ path: '/body/material', code: 'invalid' }],
           };
         }
-        const result = await deps.service.update(c.org, c.actor, c.fence, params.source, {
-          credential: { kind: body.kind, plaintext: body.material },
-        });
+        const result = await deps.service.update(
+          c.org,
+          c.actor,
+          c.fence,
+          params.source,
+          { credential: { kind: body.kind, plaintext: body.material } },
+          c.call,
+        );
         return result.ok ? { status: 204 } : failure(result);
       }),
     ];

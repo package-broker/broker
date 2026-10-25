@@ -64,6 +64,13 @@ export default defineConfig({
             }
           : {}),
         ...(loadTolerantProjects.has(name) ? { testTimeout: 20_000, hookTimeout: 30_000 } : {}),
+        ...(name === 'e2e'
+          ? {
+              globalSetup: [
+                fileURLToPath(new URL('./packages/e2e/src/global-setup.ts', import.meta.url)),
+              ],
+            }
+          : {}),
       },
     })),
   },

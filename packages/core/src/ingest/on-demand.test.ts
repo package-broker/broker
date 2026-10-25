@@ -29,6 +29,7 @@ import { setResolvedPackage } from '../internal/package-context.js';
 import type { RequestContext } from '../plugin.js';
 import { composerRoutes } from '../registry/composer/routes.js';
 import { PackagistBusyError } from './composer/packagist-proxy.js';
+import { SourceUnavailableError } from '../sources/source-unavailable.js';
 
 vi.mock('./apply-description.js', async (original) => ({
   ...(await original<typeof import('./apply-description.js')>()),
@@ -1311,6 +1312,17 @@ describe('T430n review round 3', () => {
     expect(h.describePackage).toHaveBeenCalledTimes(25);
     expect(markers(h.service)).toBe(0);
   });
+
+  it.each(['credential_unavailable', 'config_invalid', 'provider_unavailable'] as const)(
+    'answers an unbindable source (%s) as busy for a minute and caches nothing',
+    async (reason) => {
+      const h = setup();
+      vi.mocked(h.deps.planFill).mockRejectedValue(new SourceUnavailableError(reason));
+      expect(await h.ensure()).toEqual({ kind: 'busy', retryAfterSeconds: 60 });
+      expect(h.cache.set).not.toHaveBeenCalled();
+      expect(markers(h.service)).toBe(0);
+    },
+  );
 
   it('never caches a missing plan for a coalesced joiner', async () => {
     const h = setup();

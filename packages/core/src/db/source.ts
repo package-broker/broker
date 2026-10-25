@@ -96,6 +96,7 @@ export interface NewSource {
       }
     | null;
   readonly providerAnchors: readonly ProtectedHolderProvider[];
+  readonly audit: AuditEvent;
 }
 
 export interface SourceChanges {
@@ -114,7 +115,11 @@ export interface SourceTarget {
   readonly providerAnchors: readonly ProtectedHolderProvider[];
 }
 
+export type SourceOwnership = 'organization' | 'project' | 'all';
+
 export interface SourceListQuery {
+  readonly ownership?: SourceOwnership;
+  readonly projectVisibility?: Omit<SourceAttachmentCountQuery, 'sourceIds'>;
   readonly projectId: string | null;
   readonly after: string | null;
   readonly limit: number;
@@ -136,6 +141,8 @@ export interface SourceUpdate extends SourceTarget {
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
   readonly preparedCredential?: { readonly id: string; readonly statement: Statement };
+  /** Staged in order with the update: `source.update`, `source.credential_set`, or both. */
+  readonly audit: readonly [AuditEvent, ...AuditEvent[]];
 }
 
 interface PollValidators {
@@ -177,10 +184,14 @@ export interface SourceRepository {
     ctx: OrgContext,
     input: { readonly projectId: string; readonly sourceId: string },
   ): Promise<SourceRecord | null>;
-  /** Organization sources, or project-owned and attached organization sources of an active project.
+  /** Organization list defaults to organization ownership; ownership can include project sources.
+   * A project list includes owned and attached organization sources of an active project.
    * Returns up to limit + 1 rows in id order; limit is an integer from 1 to 100.
    */
-  list(ctx: OrgContext, input: SourceListQuery): Promise<SourceRecord[]>;
+  list(
+    ctx: OrgContext,
+    input: SourceListQuery,
+  ): Promise<(SourceRecord & { readonly projectName?: string | null })[]>;
   /** One grouped read for the supplied page of organization sources; absent entries mean zero.
    * allProjects requires organization project:read or admin authority; only admins include archives.
    */
@@ -231,7 +242,7 @@ export interface SourceRepository {
   resume(
     ctx: OrgContext,
     fence: MutationFence,
-    input: SourceTarget,
+    input: SourceTarget & { readonly audit: AuditEvent },
   ): Promise<
     | 'resumed'
     | 'activation_requires_registered_names'
@@ -272,6 +283,13 @@ export interface SourceRepository {
    * it still equals `expectedNextPollAt`, so a finished sync that already wrote the real value wins.
    */
   deferPoll(ctx: OrgContext, id: string, expectedNextPollAt: string): Promise<boolean>;
+  /**
+   * Sets `last_error = 'credential_unavailable'` on one organization source only while it holds
+   * null or a transient code (`CREDENTIAL_UNAVAILABLE_REPLACES`), so repeated callers change the row
+   * at most once per state change and specific codes are kept. Leaves status, failure counters and
+   * poll timers alone.
+   */
+  markCredentialUnavailable(ctx: OrgContext, id: string): Promise<void>;
   /** `stale` when the job guard no longer holds; nothing is written then. */
   pollState(
     ctx: OrgContext,

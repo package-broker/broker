@@ -1,6 +1,11 @@
 import type { ApiCall } from '../api/idempotency.js';
 import { redactValue } from '../audit/redact.js';
-import { auditEvent, type AuditAction } from '../audit/actions.js';
+import {
+  auditEvent,
+  type AuditAction,
+  type AuditEventInput,
+  type AuditValue,
+} from '../audit/actions.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 import type { ActorContext, AdminLog } from '../authz/administration.js';
 import type { MutationFence } from '../authz/fence.js';
@@ -40,7 +45,10 @@ export interface SourceCredentialInput {
   readonly plaintext: string | Uint8Array;
 }
 
-export type SourceCreateInput = Omit<NewSource, 'id' | 'credential' | 'providerAnchors'> & {
+export type SourceCreateInput = Omit<
+  NewSource,
+  'id' | 'credential' | 'providerAnchors' | 'audit'
+> & {
   readonly credential?: SourceCredentialInput | null;
   readonly credentialId?: string | null;
 };
@@ -97,7 +105,10 @@ export type SourceDto = Pick<
   readonly removalAcceptanceArmed: boolean;
 };
 
-export type SourceListDto = SourceDto & { readonly attachedProjectCount?: number };
+export type SourceListDto = SourceDto & {
+  readonly projectName?: string | null;
+  readonly attachedProjectCount?: number;
+};
 
 export interface SourceService {
   syncNow(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
@@ -119,19 +130,24 @@ export interface SourceService {
   list(
     ctx: OrgContext,
     actor: SourceActor,
-    input: { readonly projectId?: string; readonly cursor: string | null; readonly limit: number },
+    input: {
+      readonly ownership?: 'organization' | 'project' | 'all';
+      readonly projectId?: string;
+      readonly cursor: string | null;
+      readonly limit: number;
+    },
   ): Promise<
     SourceServiceResult<{ readonly items: readonly SourceListDto[]; readonly next: string | null }>
   >;
   pause(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   create(
-    ...args: [...WriteArgs, input: SourceCreateInput]
+    ...args: [...WriteArgs, input: SourceCreateInput, call: ApiCall]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
   update(
-    ...args: [...WriteArgs, id: string, input: SourceUpdateInput]
+    ...args: [...WriteArgs, id: string, input: SourceUpdateInput, call: ApiCall]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
   delete(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
-  resume(...args: [...WriteArgs, id: string]): Promise<SourceServiceResult<null>>;
+  resume(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   enable(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
   addRegisteredName(
     ...args: [
@@ -518,22 +534,6 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     return warnings === undefined ? { ok: true, value } : { ok: true, value, warnings };
   }
 
-  async function transition(
-    ctx: OrgContext,
-    who: SourceActor,
-    fence: MutationFence,
-    id: string,
-    action: 'delete' | 'resume',
-  ): Promise<SourceServiceResult<null>> {
-    if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
-      return fail('forbidden');
-    requireFence(who, fence);
-    if ((await owned(ctx, who, id)) === null) return fail('not_found');
-    const target = { id, providerAnchors: deps.providerAnchors };
-    const answer = await deps.sources[action](ctx, fence, target);
-    return answer === 'deleted' || answer === 'resumed' ? success(null) : fail(answer);
-  }
-
   function mutationAudit(
     call: ApiCall,
     who: SourceActor,
@@ -541,6 +541,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     type: string,
     id: string,
     projectId: string | null = null,
+    changes?: AuditEventInput['changes'],
   ) {
     const result = auditEvent({
       id: deps.ids.ulid(),
@@ -550,12 +551,86 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       context: call.audit,
       target: { type, id },
       projectId,
+      ...(changes === undefined ? {} : { changes }),
     });
     if (!result.ok) throw new TypeError('Invalid source audit event');
     return {
       audit: result.event,
       ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
     };
+  }
+
+  function createAudit(call: ApiCall, who: SourceActor, id: string, input: SourceCreateInput) {
+    const base: AuditEventInput = {
+      id: deps.ids.ulid(),
+      now: new Date().toISOString(),
+      action: 'source.create',
+      actor: { type: 'user', id: who.actor.userId },
+      context: call.audit,
+      target: { type: 'source', id },
+      projectId: input.projectId,
+    };
+    const fields = {
+      type: { new: input.type },
+      ecosystem: { new: input.ecosystem },
+      project_id: { new: input.projectId },
+    };
+    const named = auditEvent({ ...base, changes: { name: { new: input.name }, ...fields } });
+    if (named.ok) return named.event;
+    // The audit sanitizer refuses some valid source names (long, e-mail-like, token-like); the row omits them.
+    const unnamed = auditEvent({ ...base, changes: fields });
+    if (!unnamed.ok) throw new TypeError('Invalid source audit event');
+    return unnamed.event;
+  }
+
+  function updateAudits(
+    call: ApiCall,
+    who: SourceActor,
+    source: SourceRecord,
+    input: SourceUpdateInput,
+  ): SourceUpdate['audit'] {
+    const changes: NonNullable<AuditEventInput['changes']> = {};
+    const record = (field: string, value: AuditValue | undefined) => {
+      if (value !== undefined) changes[field] = { new: value };
+    };
+    record('removal_policy', input.removalPolicy);
+    record('poll_interval_seconds', input.pollIntervalSeconds);
+    record('retention_days_override', input.retentionDaysOverride);
+    record('default_visible_to_new_projects', input.defaultVisibleToNewProjects);
+    const { credential, ...fields } = input;
+    const updatesFields =
+      credential === null || Object.values(fields).some((value) => value !== undefined);
+    const rows = [
+      ...(updatesFields
+        ? [
+            mutationAudit(
+              call,
+              who,
+              'source.update',
+              'source',
+              source.id,
+              source.projectId,
+              Object.keys(changes).length === 0 ? undefined : changes,
+            ).audit,
+          ]
+        : []),
+      ...(credential == null
+        ? []
+        : [
+            mutationAudit(
+              call,
+              who,
+              'source.credential_set',
+              'source',
+              source.id,
+              source.projectId,
+              { credential_kind: { new: credential.kind } },
+            ).audit,
+          ]),
+    ];
+    const [first, ...others] = rows;
+    if (first === undefined) throw new TypeError('source update stages no audit row');
+    return [first, ...others];
   }
 
   return {
@@ -672,12 +747,9 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
           return invalid('cursor', 'invalid');
         }
       }
-      const rows = await deps.sources.list(ctx, { projectId, after, limit: input.limit });
-      const page = rows.slice(0, input.limit);
-      const counts =
-        projectId === null && who.kind === 'org' && page.length > 0
-          ? await deps.sources.countAttachedProjects(ctx, {
-              sourceIds: page.map((source) => source.id),
+      const projectVisibility =
+        projectId === null && who.kind === 'org'
+          ? {
               userId: who.actor.userId,
               ...(who.servicePrincipalId === undefined
                 ? {}
@@ -687,10 +759,30 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
                 who.actor.isOrganizationAdmin || who.actor.permissions.has('project:read'),
               includeArchived: who.actor.isOrganizationAdmin,
               providerAnchors: deps.providerAnchors,
+            }
+          : undefined;
+      const rows = await deps.sources.list(ctx, {
+        projectId,
+        after,
+        limit: input.limit,
+        ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
+        ...(projectVisibility === undefined ||
+        input.ownership === undefined ||
+        input.ownership === 'organization'
+          ? {}
+          : { projectVisibility }),
+      });
+      const page = rows.slice(0, input.limit);
+      const counts =
+        projectVisibility !== undefined && page.length > 0
+          ? await deps.sources.countAttachedProjects(ctx, {
+              ...projectVisibility,
+              sourceIds: page.map((source) => source.id),
             })
           : null;
       const items = page.map((source) => ({
         ...sourceDto(source),
+        ...(projectId === null ? { projectName: source.projectName ?? null } : {}),
         ...(counts === null ? {} : { attachedProjectCount: counts.get(source.id) ?? 0 }),
       }));
       const last = items.at(-1);
@@ -715,7 +807,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
       return answer === 'paused' ? success(null) : fail(answer);
     },
-    async create(ctx, who, fence, input) {
+    async create(ctx, who, fence, input, call) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       requireFence(who, fence);
       const bounds = validateBounds(input);
@@ -758,16 +850,18 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
           plaintext.fill(0);
         }
       }
+      const audit = createAudit(call, who, id, input);
       const answer = await deps.sources.create(ctx, fence, {
         ...rest,
         ...validated.value,
         id,
         credential,
         providerAnchors: deps.providerAnchors,
+        audit,
       });
       return answer === 'created' ? success({ id }, validated.warnings) : fail(answer);
     },
-    async update(ctx, who, fence, id, input) {
+    async update(ctx, who, fence, id, input, call) {
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -822,6 +916,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       }
       const changes = { ...input };
       delete changes.credential;
+      const audit = updateAudits(call, who, source, input);
       const answer = await deps.sources.update(ctx, fence, {
         id,
         changes: {
@@ -832,13 +927,36 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         },
         ...(preparedCredential === undefined ? {} : { preparedCredential }),
         providerAnchors: deps.providerAnchors,
+        audit,
       });
       return answer === 'updated' || answer === 'paused_for_reactivation'
         ? success({ id }, validated.warnings)
         : fail(answer);
     },
-    delete: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'delete'),
-    resume: (ctx, who, fence, id) => transition(ctx, who, fence, id, 'resume'),
+    async delete(ctx, who, fence, id) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      if ((await owned(ctx, who, id)) === null) return fail('not_found');
+      const answer = await deps.sources.delete(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+      });
+      return answer === 'deleted' ? success(null) : fail(answer);
+    },
+    async resume(ctx, who, fence, id, call) {
+      if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
+        return fail('forbidden');
+      requireFence(who, fence);
+      const source = await owned(ctx, who, id);
+      if (source === null) return fail('not_found');
+      const answer = await deps.sources.resume(ctx, fence, {
+        id,
+        providerAnchors: deps.providerAnchors,
+        audit: mutationAudit(call, who, 'source.resume', 'source', id, source.projectId).audit,
+      });
+      return answer === 'resumed' ? success(null) : fail(answer);
+    },
     async enable(ctx, who, fence, id, call) {
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');

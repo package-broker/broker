@@ -17,7 +17,8 @@ const ERROR_TEXT = {
   org_mismatch: 'Private Packagist organization does not match.',
   org_unverified: 'Private Packagist organization could not be verified.',
   invalid_input: 'Invalid Private Packagist fetch options.',
-  credential_file: 'Credential files must be regular files with mode 0600 or stricter.',
+  credential_file:
+    'Credential files must be owned by the current user, regular, with mode 0600 or stricter.',
   ambiguous_credentials: 'Choose either a credential file flag or its environment variable.',
   output_exists: 'Snapshot output already exists.',
   output_unwritable: 'Snapshot output could not be written.',
@@ -114,7 +115,12 @@ export class PackagistApi {
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    if (!/^[a-zA-Z0-9_-]+$/.test(options.key) || !options.secret || /[\r\n]/.test(options.secret))
+    if (
+      options.key.length < 8 ||
+      options.secret.length < 8 ||
+      !/^[a-zA-Z0-9_-]+$/.test(options.key) ||
+      /[\r\n]/.test(options.secret)
+    )
       throw new PackagistError('invalid_input');
   }
 
@@ -221,7 +227,12 @@ export class PackagistApi {
         }
         throw new PackagistError('packagist_request');
       } catch (error) {
-        throw error instanceof PackagistError ? error : new PackagistError('packagist_request');
+        if (error instanceof PackagistError) throw error;
+        const redirect =
+          error instanceof TypeError &&
+          error.cause instanceof Error &&
+          error.cause.message === 'unexpected redirect';
+        throw new PackagistError(redirect ? 'redirect_refused' : 'packagist_request');
       }
     });
   }

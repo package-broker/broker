@@ -26,6 +26,16 @@
       "cnonce": "ffeeddcc-bbaa-4988-8766-554433221100",
       "nextLink": true,
       "authorization": "PACKAGIST-HMAC-SHA256 Key=example_key, Timestamp=1700000010, Cnonce=ffeeddcc-bbaa-4988-8766-554433221100, Version=2, Signature=3nvi6I/i1xG0iw0w4qxD8PzmcHM0uAbSh1jGG7VuiLs="
+    },
+    {
+      "name": "empty-query-bare-path",
+      "path": "/api/packages/1/",
+      "key": "acme_key",
+      "secret": "example_secret",
+      "timestamp": 1700000020,
+      "cnonce": "11223344-5566-4788-99aa-bbccddeeff00",
+      "nextLink": false,
+      "authorization": "PACKAGIST-HMAC-SHA256 Key=acme_key, Timestamp=1700000020, Cnonce=11223344-5566-4788-99aa-bbccddeeff00, Version=2, Signature=w7TnKZ4nIi6Yu3nTmbHTg/8asLMoaC3csdLu6LnVQOA="
     }
   ]
 }

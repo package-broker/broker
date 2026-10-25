@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { unlinkSync } from 'node:fs';
 import { link, open, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { PackagistApi, PackagistError } from './api.js';
@@ -26,21 +27,25 @@ const array =
   (schema: Schema): Schema =>
   (value) =>
     Array.isArray(value) ? value.map(schema) : invalid();
-const choice =
-  (...values: string[]): Schema =>
-  (value) =>
-    typeof value === 'string' && values.includes(value) ? value : invalid();
 function shape(required: Record<string, Schema>, optional: Record<string, Schema> = {}): Schema {
   return (value) => {
     const input = record(value);
     const output: Row = {};
     for (const [key, schema] of Object.entries(required)) output[key] = schema(input[key]);
     for (const [key, schema] of Object.entries(optional))
-      if (Object.hasOwn(input, key)) output[key] = schema(input[key]);
+      if (Object.hasOwn(input, key) && input[key] !== null) output[key] = schema(input[key]);
     return output;
   };
 }
 const safeName: Schema = (value) => {
+  const text = string(value) as string;
+  const withoutReferences = text
+    .replace(/(?:^|\s)git@[a-zA-Z0-9.-]+:[^\s@]+(?=\s|$)/g, '')
+    .replace(/^[a-zA-Z0-9._-]+@\d+(?:\.\d+)+\.(?:zip|tar|gz|tgz|bz2|xz)$/, '');
+  if (/[\r\n]/.test(text) || /[^\s@]+@[^\s@]+\.[^\s@]+/.test(withoutReferences)) return invalid();
+  return text;
+};
+const accountName: Schema = (value) => {
   const text = string(value) as string;
   if (/[\r\n]|[^\s@]+@[^\s@]+\.[^\s@]+/.test(text)) return invalid();
   return text;
@@ -64,9 +69,38 @@ const url: Schema = (value) => {
     return invalid();
   }
 };
+class RepositoryUrlError extends Error {}
+const repositoryUrl: Schema = (value) => {
+  if (typeof value !== 'string') throw new RepositoryUrlError();
+  const text = value;
+  if (!text) return text;
+  if (/^git@[a-zA-Z0-9.-]+:[^\s?#@]+$/.test(text)) return text;
+  try {
+    const parsed = new URL(text);
+    const ssh = ['ssh:', 'git+ssh:', 'svn+ssh:'].includes(parsed.protocol);
+    if (
+      !['https:', 'http:', 'git:', 'ssh:', 'git+ssh:', 'svn:', 'svn+ssh:'].includes(
+        parsed.protocol,
+      ) ||
+      !parsed.hostname ||
+      parsed.password ||
+      parsed.hash ||
+      /[\s\r\n]/.test(text) ||
+      (parsed.username && !(ssh && /^[a-zA-Z0-9_-]+$/.test(parsed.username))) ||
+      // Retain public routing queries; credential-bearing query parameters are never persisted.
+      [...parsed.searchParams.keys()].some((key) =>
+        /token|key|secret|password|passwd|auth|signature|credential/i.test(key),
+      )
+    )
+      throw new RepositoryUrlError();
+    return text;
+  } catch {
+    throw new RepositoryUrlError();
+  }
+};
 const reference: Schema = (value) => (value === '' || value === null ? value : id(value));
-const permission = choice('owner', 'admin', 'edit', 'view', 'billing');
-const behavior = choice('add_on_use', 'manual', 'admin_managed', 'disabled');
+const permission = safeName;
+const behavior = safeName;
 const version = shape(
   { version: string, versionNormalized: string },
   {
@@ -79,24 +113,24 @@ const packageSchema = shape(
   {
     id,
     name: safeName,
-    origin: choice('public-mirror', 'private-mirror', 'private', 'public-proxy', 'private-proxy'),
+    origin: safeName,
     config: shape(
       {},
       {
-        type: string,
-        url: nullable(url),
+        type: safeName,
+        url: nullable(repositoryUrl),
         customJson: nullable(string),
         credentialsId: reference,
         mirroredRepositoryId: reference,
         artifactIds: array(id),
-        defaultSuborganizationAccess: choice('active', 'no-access'),
+        defaultSuborganizationAccess: safeName,
       },
     ),
   },
   { abandoned: boolean, replacementPackage: nullable(safeName) },
 );
 const mirror = shape(
-  { id, name: safeName, url },
+  { id, name: safeName, url: repositoryUrl },
   { mirroringBehavior: behavior, credentials: reference },
 );
 const team = shape(
@@ -104,14 +138,14 @@ const team = shape(
   {
     members: array(
       shape(
-        { id, username: safeName },
+        { id, username: accountName },
         {
           remoteIds: (value) => {
             const input = record(value);
             const output: Row = {};
             for (const [key, value] of Object.entries(input)) {
               if (!/^[a-zA-Z0-9_-]+$/.test(key)) return invalid();
-              output[key] = typeof value === 'number' ? id(value) : safeName(value);
+              output[key] = typeof value === 'number' ? id(value) : accountName(value);
             }
             return output;
           },
@@ -124,7 +158,7 @@ const token = shape(
   { id },
   {
     description: safeName,
-    access: string,
+    access: safeName,
     expiresAt: nullable(string),
     url,
     lastUsed: nullable(string),
@@ -145,29 +179,19 @@ const suborganization = shape(
 const credential = shape(
   {
     id,
-    type: choice(
-      'bitbucket-api',
-      'bitbucket-app-pw',
-      'github-oauth',
-      'gitlab-token',
-      'gitlab-oauth',
-      'http-basic',
-      'magento',
-      'bearer-token',
-      'ssh-key',
-    ),
+    type: safeName,
   },
   {
     description: safeName,
     domain: safeName,
-    username: safeName,
+    username: accountName,
   },
 );
 const synchronization = shape(
   {
     name: safeName,
     isPrimary: boolean,
-    integration: shape({ target: string }, { url }),
+    integration: shape({ target: safeName }, { url }),
   },
   { id },
 );
@@ -218,6 +242,7 @@ export async function fetchSnapshot(
     suborganizationTokens: [],
   };
   let verified = false;
+  const notices = new Set<string>();
   const evidence = (value: Json): void => {
     if (typeof value !== 'string' || !value) return;
     let parsed: URL;
@@ -249,12 +274,18 @@ export async function fetchSnapshot(
     scope: Row = {},
   ): Promise<Row[]> => {
     objects[kind] ??= [];
-    const rows = (await api.list(path)).map((row) => schema(row) as Row);
+    const rows: Row[] = [];
+    for (const input of await api.list(path)) {
+      try {
+        rows.push(schema(input) as Row);
+      } catch (error) {
+        if (!(error instanceof RepositoryUrlError)) throw error;
+        notices.add('repository_url_refused');
+      }
+    }
     for (const row of rows) {
       if (kind === 'tokens' || kind === 'suborganizationTokens') evidence(row.url ?? null);
       if (kind === 'suborganizations' && row.links) evidence((row.links as Row).repository ?? null);
-      if (kind === 'mirroredRepositories' || kind === 'suborganizationMirroredRepositories')
-        evidence(row.url ?? null);
       add(kind, { ...row, ...scope });
     }
     return rows;
@@ -372,12 +403,23 @@ export async function fetchSnapshot(
     objects,
   };
   api.assertNoCredentials(snapshot);
-  return { snapshot, notices: verified ? [] : ['org_unverified'] };
+  if (!verified) notices.add('org_unverified');
+  return { snapshot, notices: [...notices].sort() };
 }
 
 export async function writeSnapshot(path: string, snapshot: PackagistSnapshot): Promise<void> {
   const temporary = join(dirname(path), `.pb-packagist-${randomUUID()}.tmp`);
   let created = false;
+  const interrupt = (signal: NodeJS.Signals): never => {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // The temporary file may not have been created yet.
+    }
+    return process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.once('SIGINT', interrupt);
+  process.once('SIGTERM', interrupt);
   try {
     const handle = await open(temporary, 'wx', 0o600);
     created = true;
@@ -394,5 +436,7 @@ export async function writeSnapshot(path: string, snapshot: PackagistSnapshot): 
     );
   } finally {
     if (created) await unlink(temporary).catch(() => undefined);
+    process.removeListener('SIGINT', interrupt);
+    process.removeListener('SIGTERM', interrupt);
   }
 }

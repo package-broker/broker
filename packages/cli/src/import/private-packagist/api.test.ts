@@ -75,7 +75,7 @@ it('always includes the empty canonical query in a signature', async () => {
   );
 });
 
-it('matches both pinned PHP RequestSignature vectors, including the next-link request', async () => {
+it('matches all pinned PHP RequestSignature vectors, including the next-link request', async () => {
   const fixture = JSON.parse(
     await readFile(
       new URL('../fixtures/private-packagist/signature-vectors.json', import.meta.url),
@@ -92,7 +92,8 @@ it('matches both pinned PHP RequestSignature vectors, including the next-link re
       nextLink: boolean;
     }[];
   };
-  expect(fixture.vectors).toHaveLength(2);
+  expect(fixture.vectors).toHaveLength(3);
+  expect(fixture.vectors.some((vector) => !vector.path.includes('?'))).toBe(true);
   for (const vector of fixture.vectors) {
     let calls = 0;
     const fetch = vi.fn<typeof globalThis.fetch>(async () => {
@@ -250,7 +251,7 @@ it.each([
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
-it('sanitizes a native fetch redirect rejection or credential-bearing network error', async () => {
+it('sanitizes a credential-bearing network error', async () => {
   const api = new PackagistApi({
     key,
     secret,
@@ -385,3 +386,53 @@ it.each([
     await expect(api.request('/api/packages/')).rejects.toMatchObject({ code });
   },
 );
+
+it('maps the native fetch redirect rejection to a fixed redirect_refused error', async () => {
+  const dispatch = vi.fn(
+    (
+      _options: unknown,
+      handler: {
+        onConnect: (abort: () => void) => void;
+        onHeaders: (
+          status: number,
+          headers: string[],
+          resume: () => void,
+          statusText: string,
+        ) => void;
+        onComplete: (trailers: string[]) => void;
+      },
+    ) => {
+      handler.onConnect(() => undefined);
+      handler.onHeaders(
+        302,
+        ['location', 'https://redirect.example.test/'],
+        () => undefined,
+        'Found',
+      );
+      handler.onComplete([]);
+      return true;
+    },
+  );
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+    const dispatcher = { dispatch } as unknown as NonNullable<RequestInit['dispatcher']>;
+    return globalThis.fetch(input, { ...init, dispatcher });
+  });
+  const api = new PackagistApi({ key, secret, fetch });
+  await expect(api.request('/api/packages/')).rejects.toMatchObject({
+    code: 'redirect_refused',
+    message: 'Private Packagist redirect refused.',
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(dispatch).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  { key: 'a', secret },
+  { key, secret: 'a' },
+])('refuses short credentials before fetch', (credentials) => {
+  const fetch = vi.fn<typeof globalThis.fetch>();
+  expect(() => new PackagistApi({ ...credentials, fetch })).toThrow(
+    expect.objectContaining({ code: 'invalid_input' }),
+  );
+  expect(fetch).not.toHaveBeenCalled();
+});

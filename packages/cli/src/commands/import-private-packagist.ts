@@ -23,12 +23,18 @@ async function readCredential(path: string | undefined): Promise<string> {
     );
     try {
       const info = await handle.stat();
-      if (!info.isFile() || (info.mode & 0o177) !== 0 || info.size > 4096)
+      if (
+        !info.isFile() ||
+        typeof process.getuid !== 'function' ||
+        info.uid !== process.getuid() ||
+        (info.mode & 0o177) !== 0 ||
+        info.size > 4096
+      )
         throw new PackagistError('credential_file');
       const bytes = Buffer.alloc(4097);
       const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
       const value = bytes.subarray(0, bytesRead).toString('utf8').trim();
-      if (bytesRead > 4096 || !value || /[\r\n]/.test(value))
+      if (bytesRead > 4096 || value.length < 8 || /[\r\n]/.test(value))
         throw new PackagistError('credential_file');
       return value;
     } finally {

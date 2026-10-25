@@ -210,3 +210,36 @@ it('dispatches credential file flags and --require-org-match', async () => {
   expect(stderr).toHaveBeenCalledWith(expect.stringContaining('org_unverified'));
   expect(await run(args)).toBe(0);
 });
+
+it.each(['key', 'secret'])(
+  'refuses the %s file when its owner differs from the current uid',
+  async (name) => {
+    const uid = process.getuid!();
+    const getuid = vi.spyOn(process, 'getuid');
+    if (name === 'secret') getuid.mockReturnValueOnce(uid);
+    getuid.mockReturnValue(uid + 1);
+    try {
+      expect(
+        await runImportPrivatePackagistFetch({
+          ...options,
+          [name === 'key' ? 'apiKeyFile' : 'apiSecretFile']: join(dir, name),
+        }),
+      ).toBe(2);
+      expect(options.fetch).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('credential_file'));
+      expect(await readdir(dir)).not.toContain('snapshot.json');
+    } finally {
+      getuid.mockRestore();
+    }
+  },
+);
+
+it.each(['key', 'secret'])(
+  'refuses a short %s before network or snapshot serialization',
+  async (name) => {
+    await writeFile(join(dir, name), 'a');
+    expect(await runImportPrivatePackagistFetch(options)).toBe(2);
+    expect(options.fetch).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('credential_file'));
+  },
+);

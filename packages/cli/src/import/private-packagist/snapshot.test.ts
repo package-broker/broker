@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { open, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -168,13 +168,11 @@ it.each(['token', 'repository', 'suborganization-token'])(
   },
 );
 
-it.each(['/api/tokens/', '/api/suborganizations/acme/tokens/', '/api/mirrored-repositories/'])(
+it.each(['/api/tokens/', '/api/suborganizations/acme/tokens/'])(
   'refuses organization mismatches in %s',
   async (endpoint) => {
     const pages = await fixture();
-    pages[endpoint] = endpoint.includes('mirrored')
-      ? [{ id: 1, name: 'Example', url: 'https://repo.packagist.com/example/' }]
-      : [{ id: 1, url: 'https://repo.packagist.com/example/' }];
+    pages[endpoint] = [{ id: 1, url: 'https://repo.packagist.com/example/' }];
     await expect(fetchSnapshot(client(pages).api, { org: 'acme', now })).rejects.toMatchObject({
       code: 'org_mismatch',
     });
@@ -209,7 +207,6 @@ it('strips unknown secret, token and email fields recursively', async () => {
 
 it.each([
   ['/api/packages/', [{ id: 'bad', name: 'Acme', origin: 'private', config: {} }]],
-  ['/api/teams/', [{ id: 1, name: 'Acme', permission: 'unexpected' }]],
   ['/api/tokens/', [{ id: 1, url: 'https://key:secret@repo.example.test/acme' }]],
   ['/api/tokens/', [{ id: 1, url: 'https://repo.example.test/acme?token=secret' }]],
   [
@@ -285,3 +282,204 @@ it('refuses mismatching suborganization repository evidence', async () => {
     code: 'org_mismatch',
   });
 });
+
+it.each(['acme', 'example'])(
+  'does not use upstream mirror organization %s as evidence',
+  async (org) => {
+    const pages = await fixture();
+    const mirror = { id: 90, name: 'Example', url: `https://repo.packagist.com/${org}/` };
+    pages['/api/mirrored-repositories/'] = [mirror];
+    pages['/api/suborganizations/acme/mirrored-repositories/'] = [
+      { mirroringBehavior: 'manual', mirroredRepository: mirror },
+    ];
+    expect((await fetchSnapshot(client(pages).api, { org: 'acme', now })).notices).toEqual([
+      'org_unverified',
+    ]);
+    await expect(
+      fetchSnapshot(client(pages).api, { org: 'acme', now, requireOrgMatch: true }),
+    ).rejects.toMatchObject({ code: 'org_unverified' });
+    pages['/api/tokens/'] = [{ id: 1, url: 'https://repo.packagist.com/acme/' }];
+    expect(
+      (await fetchSnapshot(client(pages).api, { org: 'acme', now, requireOrgMatch: true })).notices,
+    ).toEqual([]);
+  },
+);
+
+it('retains unknown enum values as safe strings for offline planning', async () => {
+  const pages = await fixture();
+  pages['/api/packages/'] = [
+    {
+      id: 80,
+      name: 'acme/future',
+      origin: 'future-origin',
+      config: { defaultSuborganizationAccess: 'future-access' },
+    },
+  ];
+  pages['/api/teams/'] = [{ id: 81, name: 'Acme', permission: 'future-permission' }];
+  pages['/api/credentials/'] = [{ id: 82, type: 'future-credential' }];
+  pages['/api/mirrored-repositories/'] = [
+    {
+      id: 83,
+      name: 'Acme',
+      url: 'https://mirror.example.test/',
+      mirroringBehavior: 'future-behavior',
+    },
+  ];
+  pages['/api/suborganizations/acme/mirrored-repositories/'] = [
+    {
+      mirroringBehavior: 'future-sub-behavior',
+      mirroredRepository: { id: 84, name: 'Acme', url: 'https://mirror.example.test/' },
+    },
+  ];
+  const { snapshot } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.packages?.[0]?.data).toMatchObject({
+    origin: 'future-origin',
+    config: { defaultSuborganizationAccess: 'future-access' },
+  });
+  expect(snapshot.objects.teams?.[0]?.data.permission).toBe('future-permission');
+  expect(snapshot.objects.credentials?.[0]?.data.type).toBe('future-credential');
+  expect(snapshot.objects.mirroredRepositories?.[0]?.data.mirroringBehavior).toBe(
+    'future-behavior',
+  );
+  expect(snapshot.objects.suborganizationMirroredRepositories?.[0]?.data.mirroringBehavior).toBe(
+    'future-sub-behavior',
+  );
+});
+
+it('ignores null optional metadata without weakening required schemas', async () => {
+  const pages = await fixture();
+  pages['/api/credentials/'] = [
+    { id: 40, type: 'http-basic', username: null, domain: null, description: null },
+  ];
+  pages['/api/packages/'] = [
+    {
+      id: 11,
+      name: 'acme/artifact',
+      origin: 'private',
+      config: { type: 'artifact', artifactIds: null, defaultSuborganizationAccess: null },
+      abandoned: null,
+    },
+  ];
+  pages['/api/tokens/'] = [{ id: 1, description: null, url: null }];
+  pages['/api/teams/'] = [
+    {
+      id: 1,
+      name: 'Acme',
+      permission: 'view',
+      members: [{ id: 1, username: 'acme', remoteIds: null }],
+    },
+  ];
+  pages['/api/synchronizations/'] = [
+    { name: 'Acme', isPrimary: true, integration: { target: 'example', url: null } },
+  ];
+  pages['/api/packages/11/artifacts/'] = [
+    { id: 101, version: '1.0.0', originalFileName: 'acme.zip', composerJson: null },
+  ];
+  const { snapshot } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.credentials?.[0]?.data).toEqual({ id: 40, type: 'http-basic' });
+  expect(snapshot.objects.artifacts?.[0]?.data).toEqual({
+    id: 101,
+    packageId: 11,
+    version: '1.0.0',
+    originalFileName: 'acme.zip',
+  });
+  pages['/api/teams/'] = [{ id: 1, name: null, permission: 'view' }];
+  await expect(fetchSnapshot(client(pages).api, { org: 'acme', now })).rejects.toMatchObject({
+    code: 'invalid_response',
+  });
+});
+
+it('accepts versioned filenames and SSH descriptions while refusing account emails', async () => {
+  const pages = await fixture();
+  pages['/api/packages/11/artifacts/'] = [
+    { id: 101, version: '1.0.0', originalFileName: 'pkg@1.0.0.zip' },
+  ];
+  pages['/api/tokens/'] = [{ id: 1, description: 'Deploy git@git.example.test:acme/repo' }];
+  pages['/api/credentials/'] = [
+    { id: 40, type: 'ssh-key', description: 'git@git.example.test:acme/repo' },
+  ];
+  pages['/api/synchronizations/'] = [
+    { name: 'git@git.example.test:acme/repo', isPrimary: true, integration: { target: 'example' } },
+  ];
+  const { snapshot } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.artifacts?.[0]?.data.originalFileName).toBe('pkg@1.0.0.zip');
+  expect(snapshot.objects.tokens?.[0]?.data.description).toBe(
+    'Deploy git@git.example.test:acme/repo',
+  );
+  pages['/api/tokens/'] = [{ id: 1, description: 'Contact acme@example.test' }];
+  await expect(fetchSnapshot(client(pages).api, { org: 'acme', now })).rejects.toMatchObject({
+    code: 'invalid_response',
+  });
+});
+
+it.each([
+  'git://git.example.test/acme/repo',
+  'git+ssh://git@git.example.test/acme/repo',
+  'ssh://acme@git.example.test/acme/repo',
+  'svn://svn.example.test/acme/repo',
+  'svn+ssh://acme@svn.example.test/acme/repo',
+  'https://git.example.test/acme/repo?ref=main',
+  'git@git.example.test:acme/repo',
+])('retains Composer VCS URL %s', async (url) => {
+  const pages = await fixture();
+  pages['/api/packages/'] = [
+    { id: 80, name: 'acme/vcs', origin: 'private', config: { type: 'vcs', url } },
+  ];
+  const { snapshot } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.packages?.[0]?.data.config).toMatchObject({ url });
+});
+
+it.each([
+  'file:///private/repo',
+  'https://key:secret@git.example.test/repo',
+  'https://git.example.test/repo?token=secret',
+  'not a url',
+])('drops only the repository row with a notice for URL %s', async (url) => {
+  const pages = await fixture();
+  pages['/api/packages/']!.push({
+    id: 80,
+    name: 'acme/unsafe',
+    origin: 'private',
+    config: { type: 'vcs', url },
+  });
+  pages['/api/mirrored-repositories/']!.push({ id: 90, name: 'Acme unsafe', url });
+  const { snapshot, notices } = await fetchSnapshot(client(pages).api, { org: 'acme', now });
+  expect(snapshot.objects.packages).toHaveLength(4);
+  expect(snapshot.objects.mirroredRepositories).toHaveLength(2);
+  expect(notices).toContain('repository_url_refused');
+  expect(canonical(snapshot)).not.toContain(url);
+});
+
+it.each(['SIGINT', 'SIGTERM'] as const)(
+  'unlinks the temporary snapshot on %s and removes its signal handlers',
+  async (signal) => {
+    const dir = await mkdtemp(join(tmpdir(), 'pb-pp-signal-'));
+    dirs.push(dir);
+    const path = join(dir, 'snapshot.json');
+    const probe = await open(join(dir, 'probe'), 'w');
+    const prototype = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+    await probe.close();
+    const listeners = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('test exit');
+    });
+    const sync = vi.spyOn(prototype, 'sync').mockImplementation(async () => {
+      expect((await readdir(dir)).some((name) => name.startsWith('.pb-packagist-'))).toBe(true);
+      process.emit(signal, signal);
+    });
+    try {
+      const { snapshot } = await fetchSnapshot(client(await fixture()).api, { org: 'acme', now });
+      await expect(writeSnapshot(path, snapshot)).rejects.toMatchObject({
+        code: 'output_unwritable',
+      });
+      expect(exit).toHaveBeenCalledWith(signal === 'SIGINT' ? 130 : 143);
+      expect(await readdir(dir)).toEqual(['probe']);
+      expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(
+        listeners,
+      );
+    } finally {
+      sync.mockRestore();
+      exit.mockRestore();
+    }
+  },
+);

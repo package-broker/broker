@@ -170,6 +170,7 @@ describe('resolveRegistryConfig', () => {
       upstreamContact: 'https://github.com/package-broker/broker',
       timers: { metadataTtlSeconds: 300, negativeTtlSeconds: 30, waitBudgetMs: 8000 },
       caps: { metadataBytes, archiveBytes: 67108864 },
+      npmAudit: { enabled: true },
     };
     expect(resolveRegistryConfig(undefined, target, PUBLIC_URL)).toEqual(expected);
     expect(resolveRegistryConfig({}, target, PUBLIC_URL)).toEqual(expected);
@@ -509,6 +510,90 @@ describe('resolveRegistryConfig', () => {
     expect(resolveRegistryConfig(undefined, 'node', PUBLIC_URL).outbound.allowPrivateHosts).toEqual(
       [],
     );
+  });
+});
+
+describe('registry.npmAudit', () => {
+  it.each(['cloudflare', 'node'] as const)('defaults to enabled on %s', (target) => {
+    expect(resolveRegistryConfig(undefined, target, PUBLIC_URL).npmAudit).toEqual({
+      enabled: true,
+    });
+    expect(resolveRegistryConfig({ npmAudit: {} }, target, PUBLIC_URL).npmAudit.enabled).toBe(true);
+    expect(
+      resolveRegistryConfig({ npmAudit: { enabled: undefined } }, target, PUBLIC_URL).npmAudit
+        .enabled,
+    ).toBe(true);
+    expect(REGISTRY_DEFAULTS.npmAudit).toEqual({ enabled: true });
+    expect(Object.isFrozen(REGISTRY_DEFAULTS.npmAudit)).toBe(true);
+  });
+
+  it.each(['cloudflare', 'node'] as const)('respects an explicit false on %s', (target) => {
+    expect(validateRegistryConfig({ npmAudit: { enabled: false } }, target)).toEqual([]);
+    expect(
+      resolveRegistryConfig({ npmAudit: { enabled: false } }, target, PUBLIC_URL).npmAudit,
+    ).toEqual({ enabled: false });
+  });
+
+  it.each([
+    ['no', ['registry.npmAudit.enabled: must be a boolean']],
+    [1, ['registry.npmAudit.enabled: must be a boolean']],
+    [0, ['registry.npmAudit.enabled: must be a boolean']],
+    [null, ['registry.npmAudit.enabled: must be a boolean']],
+    ['true', ['registry.npmAudit.enabled: must be a boolean']],
+  ] as const)('refuses enabled=%j with a fixed message', (value, expected) => {
+    expect(validateRegistryConfig({ npmAudit: { enabled: value } }, 'node')).toEqual(expected);
+    expect(() =>
+      resolveRegistryConfig({ npmAudit: { enabled: value } } as never, 'cloudflare', PUBLIC_URL),
+    ).toThrow(RegistryConfigError);
+  });
+
+  it('refuses an unknown key and a non-object section', () => {
+    expect(validateRegistryConfig({ npmAudit: { enable: false } }, 'node')).toEqual([
+      'registry.npmAudit.enable: unknown key',
+    ]);
+    expect(validateRegistryConfig({ npmAudit: { enabled: true, mode: 'bulk' } }, 'node')).toEqual([
+      'registry.npmAudit.mode: unknown key',
+    ]);
+    expect(validateRegistryConfig({ npmAudit: false }, 'node')).toEqual([
+      'registry.npmAudit: must be an object',
+    ]);
+    expect(validateRegistryConfig({ npmAudit: [] }, 'node')).toEqual([
+      'registry.npmAudit: must be an object',
+    ]);
+  });
+
+  it('never resolves an invalid value to enabled', () => {
+    try {
+      resolveRegistryConfig({ npmAudit: { enabled: 'no' } } as never, 'node', PUBLIC_URL);
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(RegistryConfigError);
+      expect((error as RegistryConfigError).problems).toEqual([
+        'registry.npmAudit.enabled: must be a boolean',
+      ]);
+    }
+  });
+
+  it('ignores an enabled value inherited from the prototype', () => {
+    const section = Object.create({ enabled: false }) as Record<string, unknown>;
+    expect(validateRegistryConfig({ npmAudit: section }, 'node')).toEqual([
+      'registry.npmAudit: must be an object',
+    ]);
+    const polluted = Object.prototype as Record<string, unknown>;
+    polluted.enabled = false;
+    try {
+      expect(resolveRegistryConfig({ npmAudit: {} }, 'node', PUBLIC_URL).npmAudit.enabled).toBe(
+        true,
+      );
+    } finally {
+      delete polluted.enabled;
+    }
+  });
+
+  it('leaves the other sections unchanged when only npmAudit is set', () => {
+    const base = resolveRegistryConfig(undefined, 'node', PUBLIC_URL);
+    const off = resolveRegistryConfig({ npmAudit: { enabled: false } }, 'node', PUBLIC_URL);
+    expect({ ...off, npmAudit: base.npmAudit }).toEqual(base);
   });
 });
 

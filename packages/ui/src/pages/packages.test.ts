@@ -792,3 +792,23 @@ describe('version advisory integration', () => {
     expect(panel(own, reader)).toContain('Not checked: private package');
   });
 });
+
+it('explains proxy demand fill in the packages empty state', async () => {
+  const f = fixture({ items: [] });
+  await f.controller.load(query);
+  const html = renderToString(
+    createElement(PackagesView, {
+      state: f.controller.snapshot(),
+      onOpen: vi.fn(),
+      onAction: vi.fn(),
+      onNext: vi.fn(),
+      onVersionNext: vi.fn(),
+      onRefresh: vi.fn(),
+      onConfirm: vi.fn(),
+      onCancel: vi.fn(),
+    }),
+  );
+  expect(html).toContain('No packages yet');
+  expect(html).toContain('For proxy sources, packages appear when a client first requests them.');
+  expect(html).not.toContain('run a sync');
+});

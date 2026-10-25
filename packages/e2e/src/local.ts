@@ -132,11 +132,116 @@ async function files(directory: string): Promise<string[]> {
   return result;
 }
 
+export interface SqlPort {
+  run(sql: string, params: (string | number | null)[]): Promise<void>;
+  all<T extends Record<string, unknown>>(
+    sql: string,
+    params: (string | number | null)[],
+  ): Promise<T[]>;
+}
+
+export type AuditRow = Record<string, string | number | null> & { seq: number; org_id: string };
+
+const auditColumns = [
+  'id',
+  'org_id',
+  'seq',
+  'prev_hash',
+  'hash',
+  'created_at',
+  'actor_type',
+  'actor_id',
+  'token_selector',
+  'source_ip',
+  'action',
+  'target_type',
+  'target_id',
+  'project_id',
+  'payload_json',
+] as const;
+const alterableAuditFields = ['action', 'payload_json', 'target_id', 'created_at'] as const;
+const enqueueableJobs = ['core:audit-seal:v1', 'core:audit-verify:v1'] as const;
+
+/* eslint-disable no-restricted-syntax -- Fixed statements; the pinned organization id is bound by the harness, never by callers. */
+export function infrastructureOperations(db: SqlPort, orgId: string) {
+  const seqOf = (value: number) => {
+    assert(Number.isSafeInteger(value) && value > 0, 'InvalidAuditSeq');
+    return value;
+  };
+  const snapshot = () =>
+    db.all<AuditRow>(
+      `SELECT ${auditColumns.join(', ')} FROM audit_event WHERE org_id = ? ORDER BY seq`,
+      [orgId],
+    );
+  return {
+    audit: {
+      snapshot,
+      async restore(rows: readonly AuditRow[]) {
+        assert(
+          rows.every((row) => row.org_id === orgId),
+          'ForeignAuditSnapshot',
+        );
+        await db.run('DELETE FROM audit_event WHERE org_id = ?', [orgId]);
+        for (const row of rows)
+          await db.run(
+            `INSERT INTO audit_event (${auditColumns.join(', ')}) VALUES (${auditColumns.map(() => '?').join(', ')})`,
+            auditColumns.map((column) => (column === 'org_id' ? orgId : (row[column] ?? null))),
+          );
+      },
+      async alter(seq: number, field: (typeof alterableAuditFields)[number], value: string) {
+        assert(alterableAuditFields.includes(field), 'AuditFieldNotAlterable');
+        await db.run(`UPDATE audit_event SET ${field} = ? WHERE org_id = ? AND seq = ?`, [
+          value,
+          orgId,
+          seqOf(seq),
+        ]);
+      },
+      async delete(seq: number) {
+        await db.run('DELETE FROM audit_event WHERE org_id = ? AND seq = ?', [orgId, seqOf(seq)]);
+      },
+      async truncateFrom(seq: number) {
+        await db.run('DELETE FROM audit_event WHERE org_id = ? AND seq >= ?', [orgId, seqOf(seq)]);
+      },
+      async reorder(first: number, second: number) {
+        const [top] = await db.all<{ seq: number | null }>(
+          'SELECT MAX(seq) AS seq FROM audit_event WHERE org_id = ?',
+          [orgId],
+        );
+        const park = Number(top?.seq ?? 0) + 1_000_000;
+        for (const [from, to] of [
+          [seqOf(first), park],
+          [seqOf(second), first],
+          [park, second],
+        ] as const)
+          await db.run('UPDATE audit_event SET seq = ? WHERE org_id = ? AND seq = ?', [
+            to,
+            orgId,
+            from,
+          ]);
+      },
+    },
+    jobs: {
+      async enqueue(type: (typeof enqueueableJobs)[number]) {
+        assert(enqueueableJobs.includes(type), 'JobTypeNotEnqueueable');
+        const id = '01' + randomBytes(12).toString('hex').toUpperCase();
+        await db.run('INSERT INTO job (id, org_id, type) VALUES (?, ?, ?)', [id, orgId, type]);
+        return id;
+      },
+    },
+  };
+}
+/* eslint-enable no-restricted-syntax */
+
+export type InfrastructureOperations = ReturnType<typeof infrastructureOperations>;
+
 export interface LocalBroker {
   origin: string;
   setupToken: string;
+  readerSetupToken?: string;
   logs: () => string;
   read<T extends Record<string, unknown>>(sql: string, params?: (string | number)[]): Promise<T[]>;
+  audit: InfrastructureOperations['audit'];
+  jobs: InfrastructureOperations['jobs'];
   loseBlob(orgId: string, sha256: string): Promise<void>;
   moduleEvidence(): Promise<void>;
   pollTick(orgId: string): Promise<void>;
@@ -147,7 +252,7 @@ export interface LocalBroker {
 export async function startLocal(
   runtime: Runtime,
   fixtureOrigin: string,
-  options: { removeWebhook?: boolean } = {},
+  options: { removeWebhook?: boolean; reader?: boolean } = {},
 ): Promise<LocalBroker> {
   fixtureDestination(upstreamOrigins[0], fixtureOrigin);
   const fixture = new URL(fixtureOrigin);
@@ -318,6 +423,32 @@ export async function startLocal(
       ],
       env,
     );
+    const organizations = (() => {
+      const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
+      try {
+        // eslint-disable-next-line no-restricted-syntax -- Pin infrastructure writes to the single bootstrapped organization.
+        return db.prepare('SELECT id FROM organization').all() as { id: string }[];
+      } finally {
+        db.close();
+      }
+    })();
+    assert.equal(organizations.length, 1, 'SingleOrganizationExpected');
+    const pinnedOrgId = organizations[0]!.id;
+    const readerTokenFile = join(directory, 'reader-setup-token');
+    if (options.reader)
+      await command(
+        [
+          'admin',
+          'bootstrap',
+          '--email',
+          'reader@example.test',
+          '--sqlite',
+          database,
+          '--token-file',
+          readerTokenFile,
+        ],
+        env,
+      );
     const moduleFile = join(directory, 'modules.json');
     if (runtime === 'node') {
       const require = createRequire(join(repository, 'packages/runtime-node/package.json'));
@@ -415,11 +546,54 @@ syncBuiltinESMExports();
         db.close();
       }
     };
+    const sqlPort: SqlPort = {
+      async run(sql, params) {
+        if (worker) {
+          await (
+            await worker.getD1Database('DB')
+          )
+            .prepare(sql)
+            .bind(...params)
+            .all();
+          return;
+        }
+        const db = new DatabaseSync(database, { timeout: 5000 });
+        try {
+          db.prepare(sql).run(...params);
+        } finally {
+          db.close();
+        }
+      },
+      async all<T extends Record<string, unknown>>(
+        sql: string,
+        params: (string | number | null)[],
+      ) {
+        if (worker)
+          return (
+            await (
+              await worker.getD1Database('DB')
+            )
+              .prepare(sql)
+              .bind(...params)
+              .all()
+          ).results as T[];
+        const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
+        try {
+          return db.prepare(sql).all(...params) as T[];
+        } finally {
+          db.close();
+        }
+      },
+    };
     return {
       origin,
       setupToken: (await readFile(tokenFile, 'utf8')).trim(),
+      ...(options.reader
+        ? { readerSetupToken: (await readFile(readerTokenFile, 'utf8')).trim() }
+        : {}),
       logs: () => logs,
       read,
+      ...infrastructureOperations(sqlPort, pinnedOrgId),
       async loseBlob(orgId, sha256) {
         assert(/^[a-f0-9]{64}$/.test(sha256), 'InvalidBlobDigest');
         const rows = await read<{ storage_key: string }>(

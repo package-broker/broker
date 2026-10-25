@@ -3,7 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { constants } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
@@ -20,18 +20,31 @@ async function missingPrerequisites(): Promise<string[]> {
     ['composer', 'composer', ['--version']],
     ['git', 'git', ['--version']],
     ['ssh', 'ssh', ['-V']],
-    ['ssh-keygen', 'sh', ['-c', 'command -v ssh-keygen']],
-    ['git-upload-pack', 'sh', ['-c', 'command -v git-upload-pack']],
   ] as const) {
     try {
       await exec(file, [...args], { timeout: 30_000 });
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       missing.push(label);
     }
   }
+  for (const tool of ['ssh-keygen', 'git-upload-pack']) {
+    let found = false;
+    for (const directory of (process.env['PATH'] ?? '').split(delimiter)) {
+      try {
+        await access(join(directory, tool), constants.X_OK);
+        found = true;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    if (!found) missing.push(tool);
+  }
   try {
     await access(sshd, constants.X_OK);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     missing.push(`sshd (${sshd}; set PB_E2E_SSHD)`);
   }
   return missing;
@@ -75,7 +88,21 @@ leg(
     const stop = async () => {
       if (upstream && upstream.exitCode === null && upstream.signalCode === null) {
         upstream.kill('SIGTERM');
-        await exited;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            exited,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, 2000);
+            }),
+          ]);
+          if (upstream.exitCode === null && upstream.signalCode === null) {
+            upstream.kill('SIGKILL');
+            await exited;
+          }
+        } finally {
+          clearTimeout(timer);
+        }
       }
     };
     try {
@@ -120,7 +147,15 @@ leg(
       for (const name of ['client', 'host'])
         await exec('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(root, name)]);
       const publicKey = (await readFile(join(root, 'client.pub'), 'utf8')).trim();
-      await writeFile(join(root, 'authorized_keys'), `restrict ${publicKey}\n`, { mode: 0o600 });
+      const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+      const upload = `git-upload-pack ${quote(join(root, 'repo.git'))}`;
+      const forced = `test "$SSH_ORIGINAL_COMMAND" = ${quote(upload)} && ${upload}`;
+      const keyCommand = forced.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+      await writeFile(
+        join(root, 'authorized_keys'),
+        `restrict,command="${keyCommand}" ${publicKey}\n`,
+        { mode: 0o600 },
+      );
       const port = await reserveLoopbackPort();
       await writeFile(
         join(root, 'sshd_config'),
@@ -174,8 +209,8 @@ leg(
       ];
       const remote = `ssh://${userInfo().username}@${sshHost}:${port}${join(root, 'repo.git')}`;
       const sshCommand = sshArgs.map((arg) => "'" + arg.replaceAll("'", "'\"'\"'") + "'").join(' ');
-      const listRemote = () =>
-        exec('git', ['-c', `core.sshCommand=ssh ${sshCommand}`, 'ls-remote', remote], {
+      const listRemote = (url = remote) =>
+        exec('git', ['-c', `core.sshCommand=ssh ${sshCommand}`, 'ls-remote', url], {
           timeout: 2000,
         });
       await until(
@@ -191,6 +226,7 @@ leg(
         'ssh-upstream',
         10_000,
       );
+      await expect(listRemote(`${remote}-wrong-path`)).rejects.toBeDefined();
       broker = await startLocal('node', `http://127.0.0.1:${port}`, {
         nodeTransport: pinSshHost,
         nodeEnv: { PB_SSH_ARCHIVE_ROOT: join(archives, 'store') },

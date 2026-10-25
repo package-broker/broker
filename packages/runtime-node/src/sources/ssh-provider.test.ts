@@ -421,17 +421,30 @@ describe('createSshGitProvider', () => {
 
   it('opens a numeric branch using its normalized archive version', async () => {
     const store = await createFilesystemArchiveStore(join(await realpath(root), 'dist-branch'), {
-      maxZipBytes: 1024,
+      maxZipBytes: 4 * 1024 * 1024,
     });
-    const zip = new Uint8Array([80, 75, 1, 2]);
-    await store.store(ctx.org, source(), 'acme/lib', {
-      version: 'v1.x-dev',
-      versionNormalized: '1.9999999.9999999.9999999-dev',
-      commit: commits['main']!,
-      zip,
-      sha1: createHash('sha1').update(zip).digest('hex'),
-      time: null,
-    });
+    const numericBare = join(root, 'numeric.git');
+    git(root, ['clone', '-q', '--bare', bare, numericBare]);
+    git(numericBare, ['branch', 'v1.x', commits['main']!]);
+    const src = source({ tags: false, branches: ['v1.x'] });
+    const result = await provider(store, false, undefined, { target: numericBare }).describe(
+      ctx,
+      src,
+      'acme/lib',
+      {},
+    );
+    if (result.kind !== 'found') throw new Error('expected found');
+    const versions: string[] = [];
+    for await (const member of result.description.members) versions.push(member.version);
+    expect(versions).toContain('v1.x-dev');
+    const zip = await store.readZip(
+      ctx.org,
+      src,
+      'acme/lib',
+      '1.9999999.9999999.9999999-dev',
+      commits['main']!,
+    );
+    expect(zip).not.toBeNull();
     const opened = await provider(store, true).openDist(ctx, source(), {
       packageName: 'acme/lib',
       version: 'v1.x-dev',
@@ -440,7 +453,7 @@ describe('createSshGitProvider', () => {
       url: null,
     });
     expect(new Uint8Array(await new Response(opened.body).arrayBuffer())).toEqual(zip);
-    expect(opened.size).toBe(zip.byteLength);
+    expect(opened.size).toBe(zip!.byteLength);
   });
 
   it('refuses absent and foreign archive tuples without falling back to upstream', async () => {
@@ -504,6 +517,10 @@ describe('createSshGitProvider', () => {
         .catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(UpstreamError);
       expect(error).toMatchObject({ code: 'network', message: 'upstream network' });
+      expect(log.mock.calls).toEqual([
+        [{ level: 'warn', event: 'dist.archive_store_error', reason_code: failure }],
+      ]);
+      log.mockClear();
     }
     vi.spyOn(store, 'readZip').mockRejectedValueOnce(new RangeError('programming error'));
     await expect(provider(store, true).openDist(observed, source(), target)).rejects.toThrow(

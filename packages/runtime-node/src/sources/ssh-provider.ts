@@ -522,7 +522,14 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
       try {
         zip = await options.archives.readZip(ctx.org, source, name, version, target.sourceRef);
       } catch (error) {
-        if (error instanceof SshArchiveStoreError) throw new UpstreamError('network');
+        if (error instanceof SshArchiveStoreError) {
+          ctx.observability.log({
+            level: 'warn',
+            event: 'dist.archive_store_error',
+            reason_code: error.reason,
+          });
+          throw new UpstreamError('network');
+        }
         throw error;
       }
       ctx.signal.throwIfAborted();

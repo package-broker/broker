@@ -288,7 +288,15 @@ export function safeBuildInfo(raw: unknown): BuildInfo {
   if (
     Object.keys(v).some(
       (k) =>
-        !['schemaVersion', 'target', 'core', 'plugins', 'lockfileSha256', 'gitSha'].includes(k),
+        ![
+          'schemaVersion',
+          'target',
+          'core',
+          'plugins',
+          'lockfileSha256',
+          'gitSha',
+          'dirty',
+        ].includes(k),
     ) ||
     v.schemaVersion !== 1 ||
     v.target !== 'cloudflare' ||
@@ -315,6 +323,7 @@ export function safeBuildInfo(raw: unknown): BuildInfo {
     return bad();
   if (v.gitSha !== null && (typeof v.gitSha !== 'string' || !/^[a-f0-9]{40,64}$/.test(v.gitSha)))
     return bad();
+  if (v.dirty !== undefined && v.dirty !== null && typeof v.dirty !== 'boolean') return bad();
   return raw as BuildInfo;
 }
 function deploymentValid(raw: unknown): boolean {

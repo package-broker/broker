@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -146,6 +147,24 @@ export async function readNodeDriverVersion(
 
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const cwd = options.cwd ?? process.cwd();
+  let gitSha: string | null;
+  let dirty: boolean | null = null;
+  try {
+    gitSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    dirty =
+      execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim().length > 0;
+  } catch {
+    gitSha = null;
+  }
+  gitSha = process.env.GITHUB_SHA ?? gitSha;
   const configPath = path.resolve(cwd, options.configPath);
   const config = await loadConfig(configPath, cwd);
   const target = options.target ?? config.platform;
@@ -294,7 +313,8 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       core: coreVersion,
       plugins: Object.fromEntries(versions),
       lockfileSha256,
-      gitSha: process.env.GITHUB_SHA ?? null,
+      gitSha,
+      dirty,
     }),
   );
 

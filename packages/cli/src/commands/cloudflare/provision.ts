@@ -310,6 +310,8 @@ async function selectedBuild(
       (typeof info.gitSha !== 'string' || !/^[a-f0-9]{40,64}$/.test(info.gitSha))
     )
       throw new Error();
+    if (info.dirty !== undefined && info.dirty !== null && typeof info.dirty !== 'boolean')
+      throw new Error();
     return {
       required: {
         r2: selected?.blob.adapter === 'r2',
@@ -324,6 +326,7 @@ async function selectedBuild(
         plugins: plugins as Record<string, string>,
         lockfileSha256: info.lockfileSha256 as string | null,
         gitSha: info.gitSha as string | null,
+        ...(info.dirty === undefined ? {} : { dirty: info.dirty as boolean | null }),
       },
     };
   } catch (error) {

@@ -1,3 +1,4 @@
+import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import { DbError } from '@package-broker/core/db/errors';
@@ -36,21 +37,6 @@ const MAX_BACKOFF_EXPONENT = 20;
 const FAILING_AFTER = 5;
 const DB_NOW = sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
 const PROXY_TYPES = ['packagist_proxy', 'npmjs_proxy'] as const;
-
-export const SOURCE_ERROR_CODES = [
-  'network',
-  'timeout',
-  'http_error',
-  'unauthorized',
-  'rate_limited',
-  'not_found',
-  'invalid_response',
-  'mass_absence',
-  'too_large',
-  'policy_denied',
-  'credential_unavailable',
-  'internal',
-] as const;
 
 const CREDENTIAL_REPLACEABLE_ERRORS = [
   'network',
@@ -517,7 +503,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         executor,
         ctx,
         fence,
-        assertGuard(allOf([held, owned]), ctx),
+        assertGuard(allOf([held, owned]), ctx, sql<SqlBool>`${isProxy(current.type) ? 1 : 0}`),
         [
           ...assertCheck(active),
           compile(

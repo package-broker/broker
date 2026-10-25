@@ -39,5 +39,10 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "catalog:"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/package-broker/broker.git",
+    "directory": "packages/runtime-node"
   }
 }

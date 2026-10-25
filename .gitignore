@@ -10,3 +10,7 @@ coverage/
 .DS_Store
 packages/e2e/test-results/
 packages/e2e/playwright-report/
+packages/prebuilt/node/
+packages/prebuilt/prebuilt.json
+packages/prebuilt-cloudflare/cloudflare/
+packages/prebuilt-cloudflare/prebuilt.json

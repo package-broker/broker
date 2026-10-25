@@ -11,6 +11,7 @@ const ERROR_TEXT = {
   snapshot_limit_exceeded: 'Private Packagist snapshot limit exceeded.',
   clock_skew: 'Check the local clock before retrying Private Packagist.',
   packagist_auth: 'Private Packagist authentication failed.',
+  packagist_signature: 'Private Packagist signature failed.',
   packagist_request: 'Private Packagist request failed.',
   redirect_refused: 'Private Packagist redirect refused.',
   org_mismatch: 'Private Packagist organization does not match.',
@@ -80,7 +81,7 @@ function authorization(url: URL, key: string, secret: string, timestamp: number)
     query: query(params),
   })}`;
   const signature = createHmac('sha256', secret).update(canonical).digest('base64');
-  return `PACKAGIST-HMAC-SHA256 Key=${key},Timestamp=${timestamp},Cnonce=${cnonce},Version=2,Signature=${signature}`;
+  return `PACKAGIST-HMAC-SHA256 Key=${key}, Timestamp=${timestamp}, Cnonce=${cnonce}, Version=2, Signature=${signature}`;
 }
 
 function nextLink(header: string | null, base: string): string | null {
@@ -204,8 +205,10 @@ export class PackagistApi {
             continue;
           }
           const text = await this.body(response);
-          if (response.status === 400 && /timestamp/i.test(text))
-            throw new PackagistError('clock_skew');
+          if (response.status === 400)
+            throw new PackagistError(
+              /timestamp/i.test(text) ? 'clock_skew' : 'packagist_signature',
+            );
           if (!response.ok) throw new PackagistError('packagist_request');
           let data: unknown;
           try {

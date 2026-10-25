@@ -72,7 +72,13 @@ export async function runImportPrivatePackagistFetch(
         : 'private_packagist_fetch_failed',
     );
     return error instanceof PackagistError &&
-      ['packagist_request', 'packagist_auth', 'clock_skew', 'redirect_refused'].includes(error.code)
+      [
+        'packagist_request',
+        'packagist_auth',
+        'packagist_signature',
+        'clock_skew',
+        'redirect_refused',
+      ].includes(error.code)
       ? 1
       : 2;
   }

@@ -1,6 +1,12 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import { MAX_OBJECTS, MAX_PAGE_BYTES, MAX_PAGES, PackagistApi } from './api.js';
+
+vi.mock('node:crypto', async (importOriginal) => {
+  const crypto = await importOriginal<typeof import('node:crypto')>();
+  return { ...crypto, randomUUID: vi.fn(crypto.randomUUID) };
+});
 
 const key = 'SENTINEL_KEY';
 const secret = 'SENTINEL_SECRET';
@@ -67,6 +73,71 @@ it('always includes the empty canonical query in a signature', async () => {
   expect(header).toContain(
     `Signature=${createHmac('sha256', secret).update(canonical).digest('base64')}`,
   );
+});
+
+it('matches both pinned PHP RequestSignature vectors, including the next-link request', async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL('../fixtures/private-packagist/signature-vectors.json', import.meta.url),
+      'utf8',
+    ),
+  ) as {
+    vectors: {
+      path: string;
+      key: string;
+      secret: string;
+      timestamp: number;
+      cnonce: ReturnType<typeof randomUUID>;
+      authorization: string;
+      nextLink: boolean;
+    }[];
+  };
+  expect(fixture.vectors).toHaveLength(2);
+  for (const vector of fixture.vectors) {
+    let calls = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      calls++;
+      return json(
+        [],
+        vector.nextLink && calls === 1 ? { link: `<${vector.path}>; rel="next"` } : {},
+      );
+    });
+    const api = new PackagistApi({
+      key: vector.key,
+      secret: vector.secret,
+      now: () => vector.timestamp * 1000,
+      fetch,
+    });
+    if (vector.nextLink) {
+      vi.mocked(randomUUID).mockReturnValueOnce(vector.cnonce).mockReturnValueOnce(vector.cnonce);
+      await api.list('/api/packages/');
+    } else {
+      vi.mocked(randomUUID).mockReturnValueOnce(vector.cnonce);
+      await api.request(vector.path);
+    }
+    const last = fetch.mock.calls.at(-1)!;
+    expect(new URL(String(last[0])).pathname + new URL(String(last[0])).search).toBe(vector.path);
+    expect(new Headers(last[1]?.headers).get('authorization')).toBe(vector.authorization);
+  }
+});
+
+it('uses comma-space Authorization separators and signs an unsorted Link query in sorted order', async () => {
+  const { api, fetch } = harness([
+    () => json([1], { link: '</api/packages/?page=2&limit=500>; rel="next"' }),
+    () => json([2]),
+  ]);
+  expect(await api.list('/api/packages/')).toEqual([1, 2]);
+  expect(new URL(String(fetch.mock.calls[1]![0])).search).toBe('?page=2&limit=500');
+  for (const [index, [, init]] of fetch.mock.calls.entries()) {
+    const header = new Headers(init?.headers).get('authorization')!;
+    const nonce = /Cnonce=([^,]+)/.exec(header)![1];
+    const sortedQuery = index === 0 ? 'limit%3D500' : 'limit%3D500%26page%3D2';
+    const canonical = `GET\npackagist.com\n/api/packages/\ncnonce=${nonce}&key=SENTINEL_KEY&query=${sortedQuery}&timestamp=1700000000&version=2`;
+    const signature = createHmac('sha256', secret).update(canonical).digest('base64');
+    expect(header).toBe(
+      `PACKAGIST-HMAC-SHA256 Key=${key}, Timestamp=1700000000, Cnonce=${nonce}, Version=2, Signature=${signature}`,
+    );
+  }
 });
 
 it('rejects non-GET before fetch', async () => {
@@ -169,8 +240,8 @@ it.each([
   [
     400,
     `Invalid signature ${key} ${secret}`,
-    'packagist_request',
-    'Private Packagist request failed.',
+    'packagist_signature',
+    'Private Packagist signature failed.',
   ],
   [302, '', 'redirect_refused', 'Private Packagist redirect refused.'],
 ] as const)('stops on %s with fixed safe text (%s)', async (status, body, code, message) => {

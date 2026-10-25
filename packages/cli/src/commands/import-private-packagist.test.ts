@@ -114,6 +114,34 @@ it('does not write an unverified snapshot when --require-org-match is set', asyn
   expect(await readdir(dir)).not.toContain('snapshot.json');
 });
 
+it.each([
+  [400, 'packagist_signature', 1],
+  [401, 'packagist_auth', 1],
+  [200, 'invalid_response', 2],
+] as const)(
+  'fails the entire fetch without partial output when a detail returns %s',
+  async (status, code, exit) => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/api/packages/')
+        return Response.json([
+          { id: 10, name: 'acme/first', origin: 'private', config: {} },
+          { id: 11, name: 'acme/second', origin: 'private', config: {} },
+        ]);
+      if (path === '/api/packages/10/') return Response.json({ id: 10, versions: [] });
+      if (path === '/api/packages/11/') return new Response(`${key} ${secret}`, { status });
+      return Response.json([]);
+    });
+    expect(await runImportPrivatePackagistFetch({ ...options, versions: true, fetch })).toBe(exit);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(code));
+    expect(stdout).not.toHaveBeenCalled();
+    expect(fetch.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual(
+      expect.arrayContaining(['/api/packages/10/', '/api/packages/11/']),
+    );
+    expect((await readdir(dir)).sort()).toEqual(['key', 'secret']);
+  },
+);
+
 it('dispatches fetch with flag and environment paths and rejects incomplete or unrelated flags', async () => {
   vi.stubGlobal('fetch', options.fetch);
   vi.stubEnv('PP_API_KEY_FILE', join(dir, 'key'));

@@ -127,6 +127,22 @@ it('skips package detail requests without --versions', async () => {
   ).toBe(false);
 });
 
+it.each([undefined, false, true])('persists an explicit versions flag for %s', async (versions) => {
+  const { snapshot } = await fetchSnapshot(client(await fixture()).api, {
+    org: 'acme',
+    ...(versions === undefined ? {} : { versions }),
+    now,
+  });
+  const dir = await mkdtemp(join(tmpdir(), 'pb-pp-'));
+  dirs.push(dir);
+  const path = join(dir, 'snapshot.json');
+  await writeSnapshot(path, snapshot);
+  expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+    version: 1,
+    versions: versions === true,
+  });
+});
+
 it.each(['token', 'repository', 'suborganization-token'])(
   'verifies organization from %s URLs',
   async (source) => {

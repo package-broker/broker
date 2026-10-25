@@ -184,6 +184,7 @@ export interface SnapshotObject {
 }
 export interface PackagistSnapshot {
   readonly version: 1;
+  readonly versions: boolean;
   readonly fetchedAt: string;
   readonly org: string;
   readonly objects: Readonly<Record<string, readonly SnapshotObject[]>>;
@@ -365,6 +366,7 @@ export async function fetchSnapshot(
   if (!verified && options.requireOrgMatch) throw new PackagistError('org_unverified');
   const snapshot: PackagistSnapshot = {
     version: 1,
+    versions: options.versions === true,
     fetchedAt: (options.now ?? (() => new Date()))().toISOString(),
     org: options.org,
     objects,

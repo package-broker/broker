@@ -3,7 +3,7 @@ import { auditEvent, type AuditEvent, type AuditAction } from '../audit/actions.
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
-import { isoTimestamp, ulid, systemClock } from '../ids.js';
+import { isoTimestamp, ulid } from '../ids.js';
 import { isValidProviderId, isValidSubject, isValidTrustAnchor } from '../identity/port.js';
 import { buildOrganizationActor, type ActorAccessSnapshot } from './actor.js';
 import type { AdminLog } from './administration.js';
@@ -249,6 +249,7 @@ export type UnblockResult =
 export interface UnblockServiceDeps {
   readonly blocks: IdentityBlockStore;
   readonly sessions: Pick<SessionService, 'isReauthFresh'>;
+  readonly clock: Clock;
   readonly log: AdminLog;
 }
 
@@ -285,7 +286,7 @@ function copyUnblockRequest(request: unknown): UnblockIdentityRequest | null {
 }
 
 export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
-  const { blocks, sessions } = deps;
+  const { blocks, sessions, clock } = deps;
   const emit = emitter(deps.log);
 
   function denied(
@@ -317,7 +318,7 @@ export function createUnblockService(deps: UnblockServiceDeps): UnblockService {
         ctx,
         fence,
         input,
-        identityAudit('identity.unblock', fence, call, isoTimestamp(systemClock.now())),
+        identityAudit('identity.unblock', fence, call, isoTimestamp(clock.now())),
       );
       switch (outcome) {
         case 'unblocked':

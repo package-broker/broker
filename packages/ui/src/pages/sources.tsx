@@ -78,7 +78,10 @@ function isProxy(source: Source) {
 const ENABLE_ADMIN_MESSAGE = 'An organization admin must enable this source.';
 const ENABLE_CONFLICT_MESSAGE = 'Register package names, then enable the source.';
 
+type Ownership = 'organization' | 'project' | 'all';
+
 interface SourcesState {
+  ownership: Ownership;
   editor: 'create' | Source | null;
   fieldErrors: Record<string, string>;
   formError: string | null;
@@ -131,6 +134,7 @@ export function createSourcesModel(
 ) {
   const { client } = services;
   let state: SourcesState = {
+    ownership: 'organization',
     editor: null,
     fieldErrors: {},
     formError: null,
@@ -208,9 +212,16 @@ export function createSourcesModel(
     });
     const query = { limit: '100', ...(after === null ? {} : { after }) };
     const [permissions, result] = await Promise.all([
-      project === null ? null : client.request('get', '/_pb/me/permissions'),
+      project !== null || state.ownership !== 'organization'
+        ? client.request('get', '/_pb/me/permissions')
+        : null,
       project === null
-        ? client.request('get', '/_pb/sources', { query })
+        ? client.request('get', '/_pb/sources', {
+            query: {
+              ...query,
+              ...(state.ownership === 'organization' ? {} : { ownership: state.ownership }),
+            },
+          })
         : client.request('get', '/_pb/projects/{project}/sources', {
             params: { project },
             query,
@@ -344,7 +355,7 @@ export function createSourcesModel(
     snapshot: () => state,
     enableNeedsAdmin(source: Source) {
       return (
-        project !== null &&
+        source.projectId !== null &&
         (!state.canEnableProjectSource || state.enableDenied.includes(source.id))
       );
     },
@@ -355,6 +366,11 @@ export function createSourcesModel(
       };
     },
     load,
+    async setOwnership(ownership: Ownership) {
+      if (project !== null || state.busy) return;
+      set({ ownership, items: [], next: null });
+      await load();
+    },
     loadAvailable,
     names,
     openEditor(source: Source | null = null) {
@@ -399,7 +415,14 @@ export function createSourcesModel(
           set({ fieldErrors: sourceFieldErrors(result.details), formError: state.error });
           return;
         }
-        set({ editor: null, fieldErrors: {}, formError: null });
+        set({
+          editor: null,
+          fieldErrors: {},
+          formError: null,
+          ...(editor === 'create' && project === null && state.ownership === 'project'
+            ? { ownership: 'organization' as const }
+            : {}),
+        });
         await load();
         if (editor === 'create' && result.data && 'id' in result.data) {
           await revealCreated(result.data.id, body as CreateSource);
@@ -437,10 +460,22 @@ export function createSourcesModel(
         return;
       const selectedNames = state.names?.source;
       set({ enableDenied: [], enableConflicts: [] });
-      if (result.ok) set({ editor: null, fieldErrors: {}, formError: null });
+      if (result.ok)
+        set({
+          editor: null,
+          fieldErrors: {},
+          formError: null,
+          ...(result.createdSourceId && project === null && state.ownership === 'project'
+            ? { ownership: 'organization' as const }
+            : {}),
+        });
       await load();
       if (enableChange && !result.ok) {
-        if (project !== null && result.status === 403 && result.code === 'forbidden') {
+        if (
+          result.status === 403 &&
+          result.code === 'forbidden' &&
+          state.items.some((source) => source.id === enableChange[1] && source.projectId !== null)
+        ) {
           set({ enableDenied: [enableChange[1]!] });
         } else if (result.status === 409 && result.code === 'conflict') {
           set({ enableConflicts: [enableChange[1]!] });
@@ -581,7 +616,7 @@ export function createSourcesModel(
       if (source.status === 'paused' && !isProxy(source)) {
         if (
           state.busy ||
-          (project !== null &&
+          (source.projectId !== null &&
             (!state.canEnableProjectSource || state.enableDenied.includes(source.id)))
         )
           return;
@@ -596,7 +631,7 @@ export function createSourcesModel(
             params: { source: source.id },
           });
           if (
-            project !== null &&
+            source.projectId !== null &&
             !result.ok &&
             result.status === 403 &&
             result.code === 'forbidden'
@@ -809,7 +844,8 @@ export function SourceActions({
   model: SourcesModel;
   busy: boolean;
 }) {
-  const owned = model.project === null || source.projectId !== null;
+  const owned = model.project === null ? source.projectId === null : source.projectId !== null;
+  const organizationProject = model.project === null && source.projectId !== null;
   return (
     <>
       {owned ? (
@@ -839,9 +875,12 @@ export function SourceActions({
       >
         <DropdownMenuTrigger>More</DropdownMenuTrigger>
         <DropdownMenuContent className="grid gap-1">
-          {owned ? (
+          {owned || organizationProject ? (
             <>
-              {source.status !== 'paused' || isProxy(source) || !model.enableNeedsAdmin(source) ? (
+              {organizationProject &&
+              (source.status !== 'paused' || isProxy(source)) ? null : source.status !== 'paused' ||
+                isProxy(source) ||
+                !model.enableNeedsAdmin(source) ? (
                 source.status === 'paused' ? (
                   <Button
                     type="button"
@@ -869,9 +908,11 @@ export function SourceActions({
                 <p role="status">{ENABLE_CONFLICT_MESSAGE}</p>
               ) : null}
 
-              <DropdownMenuItem disabled={busy} onClick={() => model.chooseCredential(source.id)}>
-                Set credential
-              </DropdownMenuItem>
+              {owned ? (
+                <DropdownMenuItem disabled={busy} onClick={() => model.chooseCredential(source.id)}>
+                  Set credential
+                </DropdownMenuItem>
+              ) : null}
             </>
           ) : (
             <p>Manage this organization source in organization scope.</p>
@@ -950,6 +991,20 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         Credentials are write-only. The broker never shows them again; set a new credential to
         rotate a secret.
       </p>
+      {model.project === null ? (
+        <Label>
+          Ownership
+          <Select
+            value={state.ownership}
+            disabled={state.busy}
+            onChange={(event) => void model.setOwnership(event.target.value as Ownership)}
+          >
+            <option value="organization">Organization</option>
+            <option value="project">Project-owned</option>
+            <option value="all">All</option>
+          </Select>
+        </Label>
+      ) : null}
       <LoadedListFilters
         values={{ ...filters, type: SOURCE_TYPE_LABELS[filters.type as Source['type']] ?? '' }}
         fields={[
@@ -959,11 +1014,14 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             label: 'Type',
             options: [...new Set(combined.map((item) => SOURCE_TYPE_LABELS[item.type]))].sort(),
           },
-          { key: 'scope', label: 'Source scope', options: ['organization', 'project'] },
+          ...(model.project === null
+            ? []
+            : [{ key: 'scope', label: 'Source scope', options: ['organization', 'project'] }]),
         ]}
         onChange={(next) =>
           setFilters({
-            ...next,
+            q: next.q ?? '',
+            scope: model.project === null ? '' : (next.scope ?? ''),
             type:
               Object.keys(SOURCE_TYPE_LABELS).find(
                 (key) => SOURCE_TYPE_LABELS[key as Source['type']] === next.type,
@@ -1032,6 +1090,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 render: (source) => (
                   <div className="grid gap-1">
                     <strong>{source.name}</strong>
+                    {'projectName' in source && source.projectName !== null ? (
+                      <span>{`Project: ${source.projectName}`}</span>
+                    ) : null}
                     <span className="text-xs text-neutral-600">
                       {source.ecosystem === 'composer' ? 'Composer' : 'npm'} ·{' '}
                       {SOURCE_TYPE_LABELS[source.type]}
@@ -1128,7 +1189,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 sortable: false,
                 render: (source) => (
                   <div className="flex flex-wrap items-start gap-2">
-                    {model.project === null || source.projectId !== null ? (
+                    {(
+                      model.project === null ? source.projectId === null : source.projectId !== null
+                    ) ? (
                       <Button
                         type="button"
                         size="sm"

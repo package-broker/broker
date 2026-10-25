@@ -116,6 +116,24 @@ repository metadata request), and the tag and configured branch requests. Large
 tag histories can therefore consume thousands of API requests per sync; GitHub
 rate limits pause the sync with a bounded retry time.
 
+Each package sync step has a ceiling on manifest text and on GitHub API requests
+(every request of the step, including repository metadata and tag pages):
+
+| Runtime            | Manifest text (sum over winning refs) | GitHub API requests |
+| ------------------ | ------------------------------------- | ------------------- |
+| Cloudflare Workers | 64 MiB                                | 1,000               |
+| Node               | 256 MiB                               | 5,000               |
+
+Manifests above 1 MiB are skipped and do not count. The text check runs after
+the size requests and before any text is read. A source over either ceiling
+fails with the stable `too_large` code and is retried like other upstream
+failures; it does not publish a partial version list. Manifest texts are read
+one batch at a time, so memory stays bounded below the ceiling. The Workers
+request ceiling assumes the Workers Paid limit of 1,000 subrequests per
+invocation, still to be verified on hosted Workers. See
+[Workers fill limits](docs/reference/workers-fill-limits.md) for the
+measurements.
+
 ### Accepting a refused source removal
 
 A source sync refuses to remove packages when the removal would exceed the share guard (25% of the

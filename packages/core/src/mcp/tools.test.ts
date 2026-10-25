@@ -108,6 +108,7 @@ function postTool(
   const route = createMcpRoutes({
     handlers: f.handlers,
     publicOrigin: ORIGIN,
+    limiter: { check: async () => true },
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   }).find((route) => route.method === 'POST')!;
   return Promise.resolve(route.handler(postCtx));
@@ -429,7 +430,14 @@ async function mounted(permissions = ['project:read', 'project:packages:read']) 
     resolveOrg: async () => orgContext('org-a'),
     health: async () => true,
     log: () => {},
-    coreRoutes: [...routes, ...createMcpRoutes({ handlers, publicOrigin: ORIGIN })],
+    coreRoutes: [
+      ...routes,
+      ...createMcpRoutes({
+        handlers,
+        publicOrigin: ORIGIN,
+        limiter: { check: async () => true },
+      }),
+    ],
     authorization: createAuthorizationEngine({
       access: {
         lookupSession: async () => null,

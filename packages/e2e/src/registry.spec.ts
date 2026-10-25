@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
-import { setTimeout as delay } from 'node:timers/promises';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -13,6 +12,7 @@ import { startLocal, until, LocalUnavailable, fixtureDestination } from './local
 import type { LocalBroker, Runtime } from './local.js';
 import type { ScenarioResult } from './runner.js';
 import { composerAvailable as checkComposer, redactComposerOutput } from './composer-output.js';
+import { FIXTURE_PASSWORD as PASSWORD, session } from './evidence.js';
 
 const SECRET = 'step7-fixture-webhook-secret';
 const PRIVATE_KEY = generateKeyPairSync('rsa', {
@@ -22,7 +22,6 @@ const PRIVATE_KEY = generateKeyPairSync('rsa', {
 }).privateKey;
 const INSTALLATION_TOKEN = 'ghs_step7FixtureInstallationToken';
 const PERSONAL_TOKEN = 'github_pat_fixturePersonalAccessToken';
-const PASSWORD = 'step7-fixture-password';
 const GENERIC_GIT_TOKEN = 'generic-git-fixture-token';
 const GENERIC_GIT_ORIGIN = 'https://git.example.test';
 const GENERIC_GIT_PATH = '/acme/generic.git';
@@ -566,19 +565,6 @@ async function startRegistryFixture() {
   };
 }
 
-function totp(secret: string, step: number): string {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  let bits = '';
-  for (const character of secret.replace(/=+$/, ''))
-    bits += alphabet.indexOf(character).toString(2).padStart(5, '0');
-  const bytes = Buffer.from(bits.match(/.{8}/g)!.map((byte) => Number.parseInt(byte, 2)));
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(step));
-  const digest = createHmac('sha1', bytes).update(counter).digest();
-  const offset = digest[digest.length - 1]! & 15;
-  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, '0');
-}
-
 async function status(response: Response, expected: number, label: string): Promise<Response> {
   assert.equal(response.status, expected, `${label}:HTTP:${response.status}`);
   return response;
@@ -587,81 +573,6 @@ async function status(response: Response, expected: number, label: string): Prom
 function cause(error: unknown): string {
   const message = (error instanceof Error ? error.message : '').split('\n')[0]!.slice(0, 200);
   return /^[\w:./,@ -]+$/.test(message) ? ` (${message})` : ` (${error?.constructor?.name})`;
-}
-
-async function session(broker: LocalBroker) {
-  let cookie = '';
-  let csrf = '';
-  const request = async (path: string, body?: unknown, method = 'POST') => {
-    const response = await fetch(broker.origin + path, {
-      method,
-      headers: {
-        'content-type': 'application/json',
-        origin: broker.origin,
-        cookie,
-        'x-csrf-token': csrf,
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      redirect: 'manual',
-      signal: AbortSignal.timeout(10_000),
-    });
-    const cookies = response.headers.getSetCookie();
-    if (cookies.length) {
-      cookie = cookies.map((line) => line.split(';')[0]).join('; ');
-      csrf = /(?:^|; )__Host-pb_csrf=([^;]+)/.exec(cookie)?.[1] ?? '';
-    }
-    return response;
-  };
-  const started = await status(
-    await request('/_pb/auth/local/setup/start', { token: broker.setupToken }),
-    200,
-    'setup-start',
-  );
-  const { secret } = (await started.json()) as { secret: string };
-  let lastStep = -1;
-  const nextCode = async (): Promise<string> => {
-    for (;;) {
-      const clock = Math.floor(Date.now() / 30_000);
-      const step = Math.max(lastStep + 1, clock);
-      if (step <= clock + 1) {
-        lastStep = step;
-        return totp(secret, step);
-      }
-      await delay(Math.max(lastStep * 30_000 - Date.now(), 0) + 100);
-    }
-  };
-  await status(
-    await request('/_pb/auth/local/setup/finish', {
-      token: broker.setupToken,
-      password: PASSWORD,
-      code: await nextCode(),
-    }),
-    204,
-    'setup-finish',
-  );
-  await status(
-    await request('/_pb/auth/local/login', {
-      email: 'admin@example.test',
-      password: PASSWORD,
-      code: await nextCode(),
-    }),
-    204,
-    'login',
-  );
-  await status(
-    await request('/_pb/auth/local/reauth', { password: PASSWORD, code: await nextCode() }),
-    204,
-    'reauth',
-  );
-  return {
-    request,
-    secrets: () => [
-      cookie,
-      csrf,
-      secret,
-      /(?:^|; )__Host-pb_session=([^;]+)/.exec(cookie)?.[1] ?? '',
-    ],
-  };
 }
 
 export async function registryScenario(

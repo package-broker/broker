@@ -69,6 +69,68 @@ fills sharing an isolate, and hosted telemetry remain unmeasured. Operators
 should check those conditions before raising the cap and may lower it for more
 headroom.
 
+## GitHub token source sizing
+
+A GitHub token source reads every winning ref's `composer.json` through the
+GitHub API on each package sync step. Per step, the sum of manifest sizes and
+the number of GitHub API requests (repository metadata, tag pages, branch
+lookups and GraphQL size and text reads) are capped:
+
+| Runtime            | Manifest text | GitHub API requests |
+| ------------------ | ------------- | ------------------- |
+| Cloudflare Workers | 64 MiB        | 1,000               |
+| Node               | 256 MiB       | 5,000               |
+
+Manifests above 1 MiB are skipped and not counted. A source over either ceiling
+fails with `too_large` before any manifest text is read, and the sync is retried
+like other upstream failures. Below the ceiling, texts are read one batch (at
+most 8 MiB of escaped response) at a time while versions are applied.
+
+The catalogue stores at most 256 KiB of metadata per version, so a manifest
+larger than that is read but its version is refused. Every continuation of a
+package sync reads the manifests again. With 250 KB manifests one step applies
+about 33 versions, so a full sync of N such refs takes about
+`ceil(N / 33) × (N / 5 + N / 50 + 3)` API requests: about 480 for 256 refs
+(64 MB). The 1,000-request Workers ceiling assumes the Workers Paid limit of
+1,000 subrequests per invocation; verify it on hosted Workers (T855) before
+changing it.
+
+Run the GitHub fill measurement without building:
+
+```sh
+cd packages/e2e
+node src/github-fill-measure.mjs
+GH_MEASURE_TAGS=256 GH_MEASURE_BYTES=250000 node src/github-fill-measure.mjs
+```
+
+It runs one provider describe in workerd for token and App sources against a
+synthetic local GitHub (REST, GraphQL and git smart HTTP with real packfiles).
+It drains the versions the way the apply window does, converting and retaining
+admitted versions, and records outcome, subrequests, workerd process CPU and
+RSS. By default V8 old space is capped at 128 MiB (`GH_MEASURE_HEAP_MIB`, `0`
+for no cap) as a local stand-in for the isolate limit.
+`GH_MEASURE_UNBOUNDED=1` disables the token ceiling, and
+`GH_MEASURE_SOURCE_ROOT` points at another checkout's `packages/*/src` to
+measure a different revision.
+
+Host measurements (Darwin arm64, Apple M5 Pro, Node v24.19.0, workerd
+1.20261006.1; baseline RSS 58 MiB; N tags plus one branch; 128 MiB V8 cap):
+
+| Source | Manifests                | Outcome                          | Subrequests | Process CPU (ms) | RSS growth (MiB) |
+| ------ | ------------------------ | -------------------------------- | ----------- | ---------------- | ---------------- |
+| Token  | 256 × 250 KB             | complete, 33 versions per step   | 60          | 230              | 127              |
+| Token  | 63 × 1 MiB               | complete, versions refused       | 68          | 260              | 100–102          |
+| Token  | 200 × 1 MiB              | `too_large` before any text read | 8           | 10               | 8–9              |
+| Token  | 200 × 1 MiB, no ceiling  | complete, versions refused       | 209         | 810              | 105–110          |
+| Token  | 200 × 4 KiB              | complete                         | 11          | 20–30            | 19               |
+| App    | 63 × 1 MiB, 256 × 250 KB | `too_large`                      | 7–8         | 160–220          | 125–151          |
+| App    | 200 × 4 KiB              | complete                         | 5           | 50–60            | 51–53            |
+
+App sources read manifests over git and are bounded by the 24 MiB retained pack
+budget on Workers instead of these ceilings; repositories whose manifests and
+packs exceed it fail with `too_large`. As with npm, these are process figures
+from a local simulator, not hosted isolate memory or billed CPU.
+
 ## Deny every hostname serving the broker
 
 The outbound policy automatically denies the origin of `PB_PUBLIC_URL`. When a

@@ -105,7 +105,10 @@ export type SourceDto = Pick<
   readonly removalAcceptanceArmed: boolean;
 };
 
-export type SourceListDto = SourceDto & { readonly attachedProjectCount?: number };
+export type SourceListDto = SourceDto & {
+  readonly projectName?: string | null;
+  readonly attachedProjectCount?: number;
+};
 
 export interface SourceService {
   syncNow(...args: [...WriteArgs, id: string, call: ApiCall]): Promise<SourceServiceResult<null>>;
@@ -127,7 +130,12 @@ export interface SourceService {
   list(
     ctx: OrgContext,
     actor: SourceActor,
-    input: { readonly projectId?: string; readonly cursor: string | null; readonly limit: number },
+    input: {
+      readonly ownership?: 'organization' | 'project' | 'all';
+      readonly projectId?: string;
+      readonly cursor: string | null;
+      readonly limit: number;
+    },
   ): Promise<
     SourceServiceResult<{ readonly items: readonly SourceListDto[]; readonly next: string | null }>
   >;
@@ -739,12 +747,9 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
           return invalid('cursor', 'invalid');
         }
       }
-      const rows = await deps.sources.list(ctx, { projectId, after, limit: input.limit });
-      const page = rows.slice(0, input.limit);
-      const counts =
-        projectId === null && who.kind === 'org' && page.length > 0
-          ? await deps.sources.countAttachedProjects(ctx, {
-              sourceIds: page.map((source) => source.id),
+      const projectVisibility =
+        projectId === null && who.kind === 'org'
+          ? {
               userId: who.actor.userId,
               ...(who.servicePrincipalId === undefined
                 ? {}
@@ -754,10 +759,30 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
                 who.actor.isOrganizationAdmin || who.actor.permissions.has('project:read'),
               includeArchived: who.actor.isOrganizationAdmin,
               providerAnchors: deps.providerAnchors,
+            }
+          : undefined;
+      const rows = await deps.sources.list(ctx, {
+        projectId,
+        after,
+        limit: input.limit,
+        ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
+        ...(projectVisibility === undefined ||
+        input.ownership === undefined ||
+        input.ownership === 'organization'
+          ? {}
+          : { projectVisibility }),
+      });
+      const page = rows.slice(0, input.limit);
+      const counts =
+        projectVisibility !== undefined && page.length > 0
+          ? await deps.sources.countAttachedProjects(ctx, {
+              ...projectVisibility,
+              sourceIds: page.map((source) => source.id),
             })
           : null;
       const items = page.map((source) => ({
         ...sourceDto(source),
+        ...(projectId === null ? { projectName: source.projectName ?? null } : {}),
         ...(counts === null ? {} : { attachedProjectCount: counts.get(source.id) ?? 0 }),
       }));
       const last = items.at(-1);

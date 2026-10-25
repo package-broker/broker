@@ -1,14 +1,28 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
 export const repository = fileURLToPath(new URL('../../../', import.meta.url));
 const masterKey = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
@@ -97,6 +111,156 @@ export async function reserveLoopbackPort(): Promise<number> {
     throw error;
   } finally {
     if (server.listening) await new Promise<void>((accept) => server.close(() => accept()));
+  }
+}
+
+const bundleEntries = ['.pb/node/server.js', '.pb/cloudflare/worker.js'];
+const bundleStaleMs = 480_000;
+const bundleBudgetMs = 570_000;
+
+async function vitestRunId(): Promise<string> {
+  const main = String(process.ppid);
+  try {
+    const { stdout } = await promisify(execFile)('ps', ['-o', 'lstart=', '-p', main]);
+    return `${main}@${stdout.trim()}`;
+  } catch {
+    return main;
+  }
+}
+
+export async function bundleSourceFingerprint(): Promise<string> {
+  const hash = createHash('sha256');
+  const visit = async (path: string): Promise<void> => {
+    const info = await stat(path).catch(() => undefined);
+    if (!info) return;
+    if (!info.isDirectory()) {
+      hash.update(`${path.slice(repository.length)}:${info.size}:${info.mtimeMs}\n`);
+      return;
+    }
+    for (const entry of (await readdir(path)).sort())
+      if (entry !== 'node_modules' && entry !== 'dist') await visit(join(path, entry));
+  };
+  for (const name of (await readdir(join(repository, 'packages'))).sort())
+    if (name !== 'e2e') {
+      await visit(join(repository, 'packages', name, 'src'));
+      await visit(join(repository, 'packages', name, 'package.json'));
+    }
+  for (const file of ['broker.config.ts', 'pnpm-lock.yaml']) await visit(join(repository, file));
+  return hash.digest('hex');
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+interface LockOwner {
+  pid: number;
+  run: string;
+  token: string;
+  started: number;
+}
+
+const readOwner = (directory: string) =>
+  readFile(join(directory, 'owner.json'), 'utf8')
+    .then((text) => JSON.parse(text) as LockOwner)
+    .catch(() => undefined);
+
+async function acquireBundleLock(lock: string, owner: LockOwner, deadline: number): Promise<void> {
+  for (;;) {
+    const staging = `${lock}.new-${owner.token}`;
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, 'owner.json'), JSON.stringify(owner));
+    try {
+      // Renaming a populated directory onto an existing lock fails, so exactly one waiter wins.
+      await rename(staging, lock);
+      return;
+    } catch (error) {
+      await rm(staging, { recursive: true, force: true });
+      if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? ''))
+        throw error;
+    }
+    const holder = await readOwner(lock);
+    const stale =
+      holder !== undefined &&
+      (Date.now() - holder.started > bundleStaleMs || !processAlive(holder.pid));
+    if (stale) {
+      const parked = `${lock}.stale-${process.pid}-${Date.now()}`;
+      try {
+        await rename(lock, parked);
+      } catch {
+        continue;
+      }
+      const moved = await readOwner(parked);
+      if (moved?.token === holder.token) await rm(parked, { recursive: true, force: true });
+      else await rename(parked, lock).catch(() => undefined);
+      continue;
+    }
+    assert(Date.now() < deadline, 'BundleLockTimeout');
+    await delay(250);
+  }
+}
+
+async function releaseBundleLock(lock: string, owner: LockOwner): Promise<void> {
+  if ((await readOwner(lock))?.token !== owner.token) return;
+  const parked = `${lock}.released-${owner.token}`;
+  await rename(lock, parked);
+  await rm(parked, { recursive: true, force: true });
+}
+
+// Runs from the e2e global setup before any test file starts, so no test reads .pb while it is
+// rewritten. The lock covers concurrent vitest runs sharing one checkout.
+export async function buildBundles(): Promise<void> {
+  const deadline = Date.now() + bundleBudgetMs;
+  await mkdir(join(repository, '.pb'), { recursive: true });
+  const lock = join(repository, '.pb/bundle.lock');
+  const stamp = join(repository, '.pb/bundle.stamp');
+  const run = await vitestRunId();
+  const owner: LockOwner = {
+    pid: process.pid,
+    run,
+    token: randomBytes(8).toString('hex'),
+    started: Date.now(),
+  };
+  await acquireBundleLock(lock, owner, deadline);
+  try {
+    const fingerprint = await bundleSourceFingerprint();
+    const outputs = async () =>
+      Promise.all(
+        bundleEntries.map(async (entry) => (await stat(join(repository, entry))).mtimeMs),
+      ).catch(() => undefined);
+    const recorded = await readFile(stamp, 'utf8')
+      .then((text) => JSON.parse(text) as { run: string; fingerprint: string; outputs: number[] })
+      .catch(() => undefined);
+    const current = await outputs();
+    if (
+      recorded?.run === run &&
+      recorded.fingerprint === fingerprint &&
+      current !== undefined &&
+      JSON.stringify(current) === JSON.stringify(recorded.outputs)
+    )
+      return;
+    await rm(stamp, { force: true });
+    for (const script of ['build', 'bundle']) {
+      const remaining = deadline - Date.now();
+      assert(remaining > 0, 'BundleBuildTimeout');
+      await promisify(execFile)('pnpm', [script], {
+        cwd: repository,
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: remaining,
+      }).catch((error: { killed?: boolean }) => {
+        throw error.killed ? new Error('BundleBuildTimeout') : error;
+      });
+    }
+    const built = await outputs();
+    assert(built, 'BundleOutputMissing');
+    await writeFile(stamp, JSON.stringify({ run, fingerprint, outputs: built }));
+  } finally {
+    await releaseBundleLock(lock, owner);
   }
 }
 
@@ -237,9 +401,11 @@ export type InfrastructureOperations = ReturnType<typeof infrastructureOperation
 
 export interface LocalBroker {
   origin: string;
+  publicOrigin: string;
   setupToken: string;
   readerSetupToken?: string;
   logs: () => string;
+  secrets: () => readonly string[];
   read<T extends Record<string, unknown>>(sql: string, params?: (string | number)[]): Promise<T[]>;
   audit: InfrastructureOperations['audit'];
   jobs: InfrastructureOperations['jobs'];
@@ -247,17 +413,27 @@ export interface LocalBroker {
   moduleEvidence(): Promise<void>;
   pollTick(orgId: string): Promise<void>;
   tick(): Promise<void>;
+  storageKeys(): Promise<string[]>;
+  filesystemEntries(): Promise<string[]>;
   close(): Promise<void>;
 }
 
 export async function startLocal(
   runtime: Runtime,
   fixtureOrigin: string,
-  options: { removeWebhook?: boolean; reader?: boolean } = {},
+  options: {
+    removeWebhook?: boolean;
+    reader?: boolean;
+    nodeTransport?: string;
+    outboundDestination?: (url: string, brokerOrigin: string) => string;
+    patchBundle?: (bundle: string) => string;
+    publicUrl?: string;
+  } = {},
 ): Promise<LocalBroker> {
   fixtureDestination(upstreamOrigins[0], fixtureOrigin);
   const fixture = new URL(fixtureOrigin);
   assert(Number(fixture.port) > 0, 'InvalidFixturePort');
+  assert(!options.publicUrl || runtime === 'node', 'PublicUrlIsNodeOnly');
   const port = await reserveLoopbackPort();
   const origin = `http://127.0.0.1:${port}`;
   const output = join(repository, '.pb', runtime);
@@ -296,6 +472,8 @@ export async function startLocal(
     await cp(output, copy, { recursive: true });
     const script = join(copy, entry);
     await writeFile(script, injectSourcePollClock(await readFile(script, 'utf8')));
+    if (options.patchBundle)
+      await writeFile(script, options.patchBundle(await readFile(script, 'utf8')));
     if (options.removeWebhook) {
       assert.equal(runtime, 'node');
       await writeFile(script, removeWebhookRegistration(await readFile(script, 'utf8')));
@@ -303,7 +481,7 @@ export async function startLocal(
     const env: NodeJS.ProcessEnv = {
       PATH: process.env['PATH'],
       PB_MASTER_KEY: masterKey,
-      PB_PUBLIC_URL: origin,
+      PB_PUBLIC_URL: options.publicUrl ?? origin,
       PB_BLOB_ROOT: join(directory, 'blobs'),
       PORT: String(port),
       DEPLOYMENT_ID: 'local-release',
@@ -322,8 +500,14 @@ export async function startLocal(
               };
             };
           }>;
-          getR2Bucket(name: string): Promise<{ delete(key: string): Promise<void> }>;
-          getWorker(): Promise<{ scheduled(options: { cron: string }): Promise<unknown> }>;
+          getR2Bucket(name: string): Promise<{
+            delete(key: string): Promise<void>;
+            list(options: { cursor?: string }): Promise<{
+              objects: { key: string }[];
+              truncated: boolean;
+              cursor?: string;
+            }>;
+          }>;
           dispose(): Promise<void>;
         }
       | undefined;
@@ -379,7 +563,9 @@ export async function startLocal(
             },
             handleStructuredLogs: (entry: { message: string }) => record(entry.message),
             outboundService: async (request: Request) => {
-              const destination = fixtureDestination(request.url, fixtureOrigin);
+              const destination = options.outboundDestination
+                ? options.outboundDestination(request.url, origin)
+                : fixtureDestination(request.url, fixtureOrigin);
               return fetch(destination, {
                 method: request.method,
                 headers: request.headers,
@@ -460,6 +646,8 @@ export async function startLocal(
         join(copy, 'node_modules/better-sqlite3'),
         'dir',
       );
+      const nodeTmp = join(directory, 'node-tmp');
+      await mkdir(nodeTmp);
       const preload = join(directory, 'transport.mjs');
       await writeFile(
         preload,
@@ -483,19 +671,22 @@ registerHooks({ resolve(specifier, context, next) {
   writeFileSync(${JSON.stringify(moduleFile)}, JSON.stringify(loaded));
   return result;
 } });
-https.request = (options) => {
+${
+  options.nodeTransport ??
+  `https.request = (options) => {
   const url = new URL('https://' + options.host + options.path);
   if (!origins.includes(url.origin)) throw new Error('UnexpectedUpstream');
   return http.request({ hostname: '127.0.0.1', port: ${JSON.stringify(fixture.port)},
     path: '/__upstream/' + url.hostname + url.pathname + url.search,
     method: options.method, headers: options.headers, agent: false });
-};
+};`
+}
 syncBuiltinESMExports();
 `,
       );
       const child = spawn(process.execPath, ['--import', preload, script], {
         cwd: copy,
-        env: { ...env, PB_SQLITE_PATH: database },
+        env: { ...env, PB_SQLITE_PATH: database, TMPDIR: nodeTmp },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout?.on('data', record);
@@ -588,13 +779,70 @@ syncBuiltinESMExports();
     };
     return {
       origin,
+      publicOrigin: new URL(options.publicUrl ?? origin).origin,
       setupToken: (await readFile(tokenFile, 'utf8')).trim(),
       ...(options.reader
         ? { readerSetupToken: (await readFile(readerTokenFile, 'utf8')).trim() }
         : {}),
       logs: () => logs,
+      secrets: () => [masterKey, 'admin@example.test'],
       read,
       ...infrastructureOperations(sqlPort, pinnedOrgId),
+      async storageKeys() {
+        if (!worker) {
+          return (
+            await files(env['PB_BLOB_ROOT']!).catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return [];
+              throw error;
+            })
+          )
+            .map((path) => path.slice(env['PB_BLOB_ROOT']!.length + 1))
+            .sort();
+        }
+        const bucket = await worker.getR2Bucket('STORAGE');
+        const keys: string[] = [];
+        let cursor: string | undefined;
+        for (;;) {
+          const page = await bucket.list(cursor ? { cursor } : {});
+          keys.push(...page.objects.map((object) => object.key));
+          if (!page.truncated) return keys.sort();
+          assert(page.cursor && page.cursor !== cursor, 'StorageEnumerationIncomplete');
+          cursor = page.cursor;
+        }
+      },
+      async filesystemEntries() {
+        // Runtime-managed stores that the oracles read through their own ports instead.
+        const managed = [
+          // Node SQLite database and its journal: read().
+          /^db\.sqlite(?:-wal|-shm)?$/,
+          // Node blob store: storageKeys() and blob rows.
+          /^blobs\//,
+          // Module loader recorder written by the harness preload.
+          /^modules\.json$/,
+          // D1 database file and journal: read().
+          /^state\/d1\/miniflare-D1DatabaseObject\/[a-f0-9]{64}\.sqlite(?:-wal|-shm)?$/,
+          // R2 objects and the bucket index: storageKeys().
+          /^state\/r2\/STORAGE\/blobs\/[a-f0-9]+$/,
+          /^state\/r2\/miniflare-R2BucketObject\/[a-f0-9]{64}\.sqlite(?:-wal|-shm)?$/,
+          // Cache API entries (metadata responses) and their index, written through the cache port.
+          /^state\/cache\/named_pb-metadata-v1\/blobs\/[a-f0-9]+$/,
+          /^state\/cache\/miniflare-CacheObject\/[a-f0-9]{64}\.sqlite(?:-wal|-shm)?$/,
+        ];
+        const paths = (await files(directory))
+          .map((path) => path.slice(directory.length + 1))
+          .filter((path) => !managed.some((pattern) => pattern.test(path)));
+        const entries = await Promise.all(
+          paths.map(async (path) => {
+            const absolute = join(directory, path);
+            const info = await lstat(absolute);
+            const bytes = info.isSymbolicLink()
+              ? await readlink(absolute)
+              : await readFile(absolute);
+            return `${path}:${createHash('sha256').update(bytes).digest('hex')}`;
+          }),
+        );
+        return entries.sort();
+      },
       async loseBlob(orgId, sha256) {
         assert(/^[a-f0-9]{64}$/.test(sha256), 'InvalidBlobDigest');
         const rows = await read<{ storage_key: string }>(

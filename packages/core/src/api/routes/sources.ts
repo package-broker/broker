@@ -7,7 +7,7 @@ import {
 } from '../../authz/access-context.js';
 import type { Permission } from '../../authz/administration.js';
 import type { OrgContext } from '../../db/port.js';
-import type { SourceRepository } from '../../db/source.js';
+import type { SourceOwnership, SourceRepository } from '../../db/source.js';
 import { isUlid } from '../../ids.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import { denialResponse } from '../../kernel/denial-page.js';
@@ -225,6 +225,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
           return { error: 'not_found' };
         const result = await deps.service.list(org, reader(ctx), {
           ...(ctx.projectId === null ? {} : { projectId: ctx.projectId }),
+          ...('ownership' in query ? { ownership: query.ownership as SourceOwnership } : {}),
           limit: query.limit === undefined ? 50 : Number(query.limit),
           cursor:
             query.after === undefined

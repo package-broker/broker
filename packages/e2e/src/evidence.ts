@@ -339,7 +339,7 @@ export function failureName(error: unknown): string {
   return error instanceof Error ? error.name : 'NonError';
 }
 
-const FIXTURE_PASSWORD = 'oracle-fixture-password';
+export const FIXTURE_PASSWORD = 'oracle-fixture-password';
 
 function totp(secret: string, step: number): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -367,7 +367,7 @@ export async function session(broker: LocalBroker, email = 'admin@example.test')
       method,
       headers: {
         'content-type': 'application/json',
-        origin: broker.origin,
+        origin: broker.publicOrigin,
         cookie,
         'x-csrf-token': csrf,
         ...extraHeaders,
@@ -423,6 +423,7 @@ export async function session(broker: LocalBroker, email = 'admin@example.test')
   return {
     request,
     secrets: () => [
+      FIXTURE_PASSWORD,
       cookie,
       csrf,
       secret,

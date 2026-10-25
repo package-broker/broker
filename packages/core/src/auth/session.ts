@@ -42,12 +42,10 @@ export interface AuthenticatedSession {
 }
 
 export interface SessionService {
-  /** Touches by default; a failing `touch` rejects the whole call. */
-  authenticate(
-    ctx: OrgContext,
-    request: Request,
-    options?: { readonly touch: boolean },
-  ): Promise<AuthenticatedSession | null>;
+  /** A failing `touch` rejects the whole call. */
+  authenticate(ctx: OrgContext, request: Request): Promise<AuthenticatedSession | null>;
+  /** For logout: validates the session without extending its idle window. */
+  authenticateWithoutTouch(ctx: OrgContext, request: Request): Promise<AuthenticatedSession | null>;
   assertCsrf(request: Request, session: AuthenticatedSession): Promise<void>;
   isReauthFresh(session: AuthenticatedSession): boolean;
   setCookies(secrets: SessionSecrets, expiresAt: string): readonly string[];
@@ -131,31 +129,39 @@ export function createSessionService(deps: {
     clearCookie(LOGIN_COOKIE, LOGIN_FLAGS),
   ];
 
+  const findSession = async (
+    ctx: OrgContext,
+    request: Request,
+    touch: boolean,
+  ): Promise<AuthenticatedSession | null> => {
+    const secret = sessionSecretOf(request);
+    if (secret === null) {
+      return null;
+    }
+    const now = clock.now().getTime();
+    const session = await sessions.findActive(ctx, await sha256Hex(secret), {
+      now: new Date(now).toISOString(),
+      idleSince: new Date(now - SESSION_IDLE_MS).toISOString(),
+    });
+    if (session === null) {
+      return null;
+    }
+    const lastSign = timestampMs(session.lastSeenAt ?? session.createdAt);
+    if (touch && now - lastSign > SESSION_TOUCH_MS) {
+      await sessions.touch(
+        ctx,
+        session.id,
+        new Date(now).toISOString(),
+        new Date(now - SESSION_TOUCH_MS).toISOString(),
+      );
+    }
+    return { session, principal: { kind: 'user', id: session.userId } };
+  };
+
   return {
-    async authenticate(ctx, request, options) {
-      const secret = sessionSecretOf(request);
-      if (secret === null) {
-        return null;
-      }
-      const now = clock.now().getTime();
-      const session = await sessions.findActive(ctx, await sha256Hex(secret), {
-        now: new Date(now).toISOString(),
-        idleSince: new Date(now - SESSION_IDLE_MS).toISOString(),
-      });
-      if (session === null) {
-        return null;
-      }
-      const lastSign = timestampMs(session.lastSeenAt ?? session.createdAt);
-      if (options?.touch !== false && now - lastSign > SESSION_TOUCH_MS) {
-        await sessions.touch(
-          ctx,
-          session.id,
-          new Date(now).toISOString(),
-          new Date(now - SESSION_TOUCH_MS).toISOString(),
-        );
-      }
-      return { session, principal: { kind: 'user', id: session.userId } };
-    },
+    authenticate: (ctx, request) => findSession(ctx, request, true),
+
+    authenticateWithoutTouch: (ctx, request) => findSession(ctx, request, false),
 
     async assertCsrf(request, authenticated) {
       assertSameOrigin(request, publicOrigin);

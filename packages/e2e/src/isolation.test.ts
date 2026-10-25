@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { anchoredBreak, auditHash, auditLogs, auditScenario } from './audit.spec.js';
 import type { AuditRecord, HeadAnchor } from './audit.spec.js';
 import {
@@ -14,7 +12,7 @@ import {
 } from './evidence.js';
 import { isolationScenario, readPages } from './isolation.spec.js';
 import { DatabaseSync } from 'node:sqlite';
-import { LocalUnavailable, infrastructureOperations, repository } from './local.js';
+import { LocalUnavailable, infrastructureOperations } from './local.js';
 import type { AuditRow, InfrastructureOperations, SqlPort } from './local.js';
 import * as local from './local.js';
 
@@ -324,14 +322,6 @@ describe('security scenario availability', () => {
 });
 
 describe('security oracles on production bundles', () => {
-  beforeAll(async () => {
-    for (const script of ['build', 'bundle'])
-      await promisify(execFile)('pnpm', [script], {
-        cwd: repository,
-        maxBuffer: 64 * 1024 * 1024,
-      });
-  }, 600_000);
-
   for (const runtime of ['node', 'cloudflare'] as const) {
     it(`${runtime}: project isolation and next-request revocation`, async () => {
       const result = await isolationScenario(runtime);

@@ -88,7 +88,12 @@ const source = z.strictObject({
   removalAcceptanceArmed: z.boolean(),
 });
 const page = z.strictObject({
-  items: z.array(source.extend({ attachedProjectCount: z.number().int().nonnegative() })),
+  items: z.array(
+    source.extend({
+      projectName: z.string().nullable(),
+      attachedProjectCount: z.number().int().nonnegative(),
+    }),
+  ),
   next: ulid.nullable(),
   vcsProviders: z.array(vcsProvider),
 });
@@ -115,7 +120,9 @@ function scopeSpecs(boundary: 'organization' | 'project') {
         summary: 'List sources',
         tags: ['sources'],
         params: collectionParams,
-        query: listQuery,
+        query: scoped
+          ? listQuery
+          : listQuery.extend({ ownership: z.enum(['organization', 'project', 'all']).optional() }),
         responses: {
           200: scoped
             ? z.strictObject({

@@ -13,7 +13,7 @@ export interface McpOptions {
   readonly handlers: Readonly<Record<string, McpHandler>>;
   readonly publicOrigin: string;
   readonly timeoutMs?: number;
-  readonly limiter?: McpLimiter;
+  readonly limiter: McpLimiter;
 }
 
 const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ['2025-11-25'];
@@ -88,6 +88,22 @@ function rpcError(id: RequestId | null, code: ErrorCode): Response {
   });
 }
 
+const DEFAULT_RETRY_AFTER_SECONDS = 60;
+
+function retryAfterOf(limiter: McpLimiter, selector: string): string {
+  let seconds: unknown;
+  try {
+    seconds = limiter.retryAfterSeconds?.(selector);
+  } catch {
+    seconds = undefined;
+  }
+  return String(
+    typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds >= 1
+      ? seconds
+      : DEFAULT_RETRY_AFTER_SECONDS,
+  );
+}
+
 async function withDeadline<T>(
   run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
@@ -111,8 +127,11 @@ async function withDeadline<T>(
 }
 
 export function createMcpRoutes(options: McpOptions): readonly RouteDefinition[] {
-  const { handlers, publicOrigin } = options;
+  const { handlers, publicOrigin, limiter } = options;
   const timeoutMs = options.timeoutMs ?? 10000;
+  if (typeof limiter?.check !== 'function') {
+    throw new TypeError('limiter is required');
+  }
   if (publicOrigin === 'null' || publicOrigin !== new URL(publicOrigin).origin) {
     throw new TypeError('publicOrigin must be a canonical origin');
   }
@@ -133,23 +152,21 @@ export function createMcpRoutes(options: McpOptions): readonly RouteDefinition[]
     let notification = false;
     try {
       return await withDeadline(async (signal) => {
-        if (options.limiter !== undefined) {
-          const key = accessContextOf(ctx)?.rateKey;
-          if (key?.stage !== 'authenticated' || key.tokenSelector === null) {
-            return apiError('forbidden', ctx.requestId);
-          }
-          const allowed = await options.limiter.check(key.tokenSelector);
-          signal.throwIfAborted();
-          if (!allowed) {
-            const response = envelopeResponse(
-              429,
-              'rate_limited',
-              'Rate limit exceeded',
-              ctx.requestId,
-            );
-            response.headers.set('retry-after', '60');
-            return response;
-          }
+        const key = accessContextOf(ctx)?.rateKey;
+        if (key?.stage !== 'authenticated' || key.tokenSelector === null) {
+          return apiError('forbidden', ctx.requestId);
+        }
+        const allowed = await limiter.check(key.tokenSelector);
+        signal.throwIfAborted();
+        if (!allowed) {
+          const response = envelopeResponse(
+            429,
+            'rate_limited',
+            'Rate limit exceeded',
+            ctx.requestId,
+          );
+          response.headers.set('retry-after', retryAfterOf(limiter, key.tokenSelector));
+          return response;
         }
         const request =
           ctx.request.body === null

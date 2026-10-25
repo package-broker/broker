@@ -1,6 +1,7 @@
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { createMcpTools } from '@package-broker/core/mcp/tools';
+import { createInProcessMcpLimiter } from '@package-broker/core/mcp/limit';
 import { createMcpRoutes } from '@package-broker/core/mcp/transport';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
@@ -1260,7 +1261,9 @@ export function createNodeServer(
         publicOrigin,
         kernel: { fetch: (request) => kernel.fetch(request) },
       });
-      coreRoutes.push(...createMcpRoutes({ handlers, publicOrigin }));
+      coreRoutes.push(
+        ...createMcpRoutes({ handlers, publicOrigin, limiter: createInProcessMcpLimiter() }),
+      );
     }
     const kernel = await createKernel({
       platform: 'node',

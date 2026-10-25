@@ -412,4 +412,23 @@ describe('PackBudget', () => {
     expect(() => budget.charge(-1)).toThrow(RangeError);
     expect(() => budget.charge(1.5)).toThrow(RangeError);
   });
+
+  it('returns released bytes to the budget once an object is done', () => {
+    const budget = newBudget({ maxRetainedBytes: 100 });
+    budget.chargeObject(80);
+    expect(() => budget.charge(30)).toThrow(PackBudgetError);
+    budget.release(80);
+    expect(budget.retainedBytes).toBe(0);
+    budget.charge(100);
+    expect(budget.retainedBytes).toBe(100);
+  });
+
+  it('rejects negative, fractional and over-retained releases', () => {
+    const budget = newBudget();
+    budget.charge(10);
+    expect(() => budget.release(-1)).toThrow(RangeError);
+    expect(() => budget.release(1.5)).toThrow(RangeError);
+    expect(() => budget.release(11)).toThrow(RangeError);
+    expect(budget.retainedBytes).toBe(10);
+  });
 });

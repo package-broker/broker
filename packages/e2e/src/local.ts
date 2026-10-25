@@ -32,6 +32,7 @@ export const upstreamOrigins = [
   'https://codeload.github.com',
   'https://repo.packagist.org',
   'https://registry.npmjs.org',
+  'https://git.example.test',
 ] as const;
 export type Runtime = 'node' | 'cloudflare';
 

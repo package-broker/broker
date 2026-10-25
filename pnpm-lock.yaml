@@ -323,16 +323,16 @@ importers:
   packages/cli:
     dependencies:
       '@package-broker/core':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../core
       '@package-broker/db-sqlite':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../db-sqlite
       '@package-broker/runtime-cloudflare':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../runtime-cloudflare
       '@package-broker/runtime-node':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../runtime-node
       esbuild:
         specifier: 'catalog:'
@@ -383,6 +383,14 @@ importers:
       '@package-broker/core':
         specifier: workspace:^
         version: link:../core
+
+  packages/prebuilt:
+    dependencies:
+      better-sqlite3:
+        specifier: 'catalog:'
+        version: 13.0.3
+
+  packages/prebuilt-cloudflare: {}
 
   packages/runtime-cloudflare:
     dependencies:

@@ -1,4 +1,4 @@
-import { clientIpOf } from '@package-broker/core/auth/session';
+import { isIpLiteral } from '@package-broker/core/audit/actions';
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { resolveTokenLifetimePolicy } from '@package-broker/core/authz/token-lifetime';
 import { createVisibilityService } from '@package-broker/core/catalogue/visibility-service';
@@ -13,6 +13,11 @@ import { createAccessServices } from '../repositories/access-services.js';
 import type { ApiRoutesOptions } from '../repositories/api-services.js';
 import { createCatalogueReader } from '../repositories/catalogue.js';
 import { createVisibilityStore } from '../repositories/catalogue-writer.js';
+
+function fixtureClientIp(request: Request): string | null {
+  const candidate = request.headers.get('cf-connecting-ip')?.trim() ?? null;
+  return candidate !== null && isIpLiteral(candidate) ? candidate : null;
+}
 
 export function apiOptions(executor: SqlExecutor): ApiRoutesOptions {
   const registration = collectRegistrations([]);
@@ -29,6 +34,7 @@ export function apiOptions(executor: SqlExecutor): ApiRoutesOptions {
     ids: { ulid },
     log,
     publicOrigin: 'https://broker.example.test',
+    clientIp: () => null,
     dispatch: () => undefined,
     providers: buildIdentityProviders(registration, [], {
       fetch: (request) => fetch(request),
@@ -44,7 +50,7 @@ export function apiOptions(executor: SqlExecutor): ApiRoutesOptions {
     lifetime,
     log,
     runtime: 'cloudflare',
-    clientIp: clientIpOf,
+    clientIp: fixtureClientIp,
     blob: undefined,
     packages: {
       reader: createCatalogueReader(executor),

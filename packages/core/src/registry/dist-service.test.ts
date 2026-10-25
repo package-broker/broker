@@ -16,7 +16,11 @@ import {
   type Sha256,
 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
-import type { ProviderContext, ProviderSource } from '../sources/provider.js';
+import {
+  ProviderBusyError,
+  type ProviderContext,
+  type ProviderSource,
+} from '../sources/provider.js';
 import { SourceUnavailableError } from '../sources/source-unavailable.js';
 import { createDistService, type DistService, type DistServeResult } from './dist-service.js';
 
@@ -94,6 +98,9 @@ interface Options {
   owner?: string;
   held?: boolean;
   throwOnGet?: boolean;
+  refetchable?: boolean;
+  upstream?: boolean;
+  busyProvider?: boolean;
   plan?: 'unavailable' | 'none';
 }
 
@@ -203,11 +210,12 @@ function rig(options: Options = {}) {
               sha256: blobSha,
               sizeBytes: 1,
               mediaType: 'application/zip',
-              refetchable: true,
+              refetchable: options.refetchable ?? true,
             },
       fetch: {
         sourceRef: null,
-        upstreamDistUrl: 'https://upstream.example/acme/pkg.zip',
+        upstreamDistUrl:
+          options.upstream === false ? null : 'https://upstream.example/acme/pkg.zip',
         distType: 'zip',
         composerShasum: null,
         npmIntegrity: options.integrity ?? null,
@@ -248,6 +256,7 @@ function rig(options: Options = {}) {
       async openDist(providerContext: ProviderContext) {
         state.opens += 1;
         state.signals.push(providerContext.signal);
+        if (options.busyProvider === true) throw new ProviderBusyError();
         if (gate !== null) await gate;
         return { body: streamOf(upstream), size: null };
       },
@@ -339,6 +348,9 @@ function rig(options: Options = {}) {
         open = resolve;
       });
       return open;
+    },
+    setCurrentRevision(revision: number) {
+      currentRevision = revision;
     },
     dropBytes(revision: number) {
       const id = revisions.get(revision)?.blobId;
@@ -547,6 +559,109 @@ describe('createDistService', () => {
     expect(await r.service.serve(owner, request(1))).toEqual({ kind: 'not_found' });
     expect(r.state.opens).toBe(opens);
     expect(r.state.acquireCalls).toBe(acquisitions);
+  });
+
+  describe('a non-refetchable blob', () => {
+    const observed = () => {
+      const log = vi.fn();
+      return {
+        log,
+        observability: { log, counter: vi.fn(), histogram: vi.fn() },
+      };
+    };
+    const event = (revision: number) => ({
+      level: 'error',
+      event: 'dist.unrefetchable_blob_missing',
+      version_id: VERSION,
+      revision,
+      sha256_prefix: sha(enc.encode('v1 bytes')).slice(0, 12),
+    });
+
+    it('answers gone with one event and never plans or opens an upstream dist when its bytes are missing', async () => {
+      const r = rig({ refetchable: false });
+      r.dropBytes(1);
+      const { log, observability } = observed();
+      const result = await r.service.serve(owner, request(1), { observability });
+      expect(result).toEqual({ kind: 'gone' });
+      expect(r.state.opens).toBe(0);
+      expect(r.state.planned).toEqual([]);
+      expect(r.state.acquireCalls).toBe(0);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(event(1));
+    });
+
+    it('answers busy without an event when the store throws on read', async () => {
+      const r = rig({ refetchable: false, throwOnGet: true });
+      const { log, observability } = observed();
+      expect(await r.service.serve(owner, request(1), { observability })).toEqual({
+        kind: 'busy',
+        retryAfterSeconds: 5,
+      });
+      expect(r.state.opens).toBe(0);
+      expect(r.state.acquireCalls).toBe(0);
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    it('answers gone for a historical revision whose bytes are missing', async () => {
+      const r = rig({ refetchable: false });
+      r.dropBytes(1);
+      r.setCurrentRevision(2);
+      const { log, observability } = observed();
+      expect(await r.service.serve(owner, request(1), { observability })).toEqual({
+        kind: 'gone',
+      });
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(r.state.opens).toBe(0);
+    });
+
+    it('keeps the plain 404 for a version without an upstream location', async () => {
+      const r = rig({ refetchable: false, upstream: false });
+      r.dropBytes(1);
+      const { log, observability } = observed();
+      expect(await r.service.serve(owner, request(1), { observability })).toEqual({
+        kind: 'not_found',
+      });
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    it('answers gone from the fill when the re-resolved target holds a lost non-refetchable blob', async () => {
+      const r = rig({ initial: null, refetchable: false });
+      r.attachMissingBlobOnAcquire();
+      r.bytes.clear();
+      const { log, observability } = observed();
+      expect(await r.service.serve(owner, request(1), { observability })).toEqual({
+        kind: 'gone',
+      });
+      expect(r.state.opens).toBe(0);
+      expect(r.state.planned).toEqual([]);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(event(1));
+    });
+
+    it('serves its stored bytes without logging', async () => {
+      const r = rig({ refetchable: false });
+      const { log, observability } = observed();
+      expect(await text(await r.service.serve(owner, request(1), { observability }))).toBe(
+        'v1 bytes',
+      );
+      expect(r.state.opens).toBe(0);
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    it('is still filled on first request when no blob is attached yet', async () => {
+      const r = rig({ initial: null, refetchable: false });
+      expect(await text(await r.service.serve(owner, request(1)))).toBe('v1 bytes');
+      expect(r.state.opens).toBe(2);
+    });
+  });
+
+  it('answers busy when the provider cannot open the dist yet', async () => {
+    const r = rig({ initial: null, busyProvider: true });
+    expect(await r.service.serve(owner, request(1))).toEqual({
+      kind: 'busy',
+      retryAfterSeconds: 5,
+    });
+    expect(r.state.opens).toBeGreaterThan(0);
   });
 
   it('answers 404 for a package that is not visible to the project', async () => {

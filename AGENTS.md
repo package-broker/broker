@@ -8,20 +8,22 @@ Package Broker 2.0 is a Composer and npm package registry broker, licensed under
 
 If you are changing something in the first column, read its role in the second first.
 
-| Changing                      | Role                                                                             |
-| ----------------------------- | -------------------------------------------------------------------------------- |
-| `packages/core`               | Kernel: plugin and config API, auth, access model, registry logic, database port |
-| `packages/db-sqlite`          | SQLite data layer: repositories, contract and testing helpers                    |
-| `packages/runtime-cloudflare` | Cloudflare Workers runtime: Worker entry and its smoke script                    |
-| `packages/runtime-node`       | Node runtime: HTTP entry                                                         |
-| `packages/cli`                | The `pb` command: build composition, migrations, bootstrap and admin tooling     |
-| `packages/ui`                 | Static UI assets                                                                 |
-| `packages/ui-assets`          | Build-time bridge that hands the UI assets to `pb build`                         |
-| `packages/plugin-github`      | GitHub source plugin (stub)                                                      |
-| `packages/plugin-sso-oidc`    | Generic OIDC single sign-on plugin (stub)                                        |
-| `broker.config.ts`            | Root build configuration consumed by `pnpm bundle`                               |
-| `fixtures/`                   | Minimal config used by checks and tests                                          |
-| `scripts/`                    | Repository checks: pack, tree-shake, client matrix, Node bundle smoke            |
+| Changing                       | Role                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| `packages/core`                | Kernel: plugin and config API, auth, access model, registry logic, database port |
+| `packages/db-sqlite`           | SQLite data layer: repositories, contract and testing helpers                    |
+| `packages/runtime-cloudflare`  | Cloudflare Workers runtime: Worker entry and its smoke script                    |
+| `packages/runtime-node`        | Node runtime: HTTP entry                                                         |
+| `packages/cli`                 | The `pb` command: build composition, migrations, bootstrap and admin tooling     |
+| `packages/prebuilt`            | Node prebuilt distribution shell: package metadata and README, no source         |
+| `packages/prebuilt-cloudflare` | Cloudflare prebuilt distribution shell: package metadata and README, no source   |
+| `packages/ui`                  | Static UI assets                                                                 |
+| `packages/ui-assets`           | Build-time bridge that hands the UI assets to `pb build`                         |
+| `packages/plugin-github`       | GitHub source plugin (stub)                                                      |
+| `packages/plugin-sso-oidc`     | Generic OIDC single sign-on plugin (stub)                                        |
+| `broker.config.ts`             | Root build configuration consumed by `pnpm bundle`                               |
+| `fixtures/`                    | Minimal config used by checks and tests                                          |
+| `scripts/`                     | Repository checks: pack, tree-shake, client matrix, Node bundle smoke            |
 
 ## Always
 

@@ -372,8 +372,8 @@ test.describe('Node management UI', () => {
     await confirmIdentity(page, admin);
     await go(page, 'sources');
     await openDetails(page, 'More');
-    await expect(page.getByText('Last success:', { exact: false }).first()).toBeVisible();
-    await expect(page.getByText('Last error:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Last listing:', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('Last listing error:', { exact: false }).first()).toBeVisible();
     await expect(page.getByText('Next poll:', { exact: false }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
     await expect(page.getByText('Enable before syncing.', { exact: true })).toBeVisible();

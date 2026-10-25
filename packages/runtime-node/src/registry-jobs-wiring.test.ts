@@ -10,7 +10,7 @@ import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
 import type { JobContext } from '@package-broker/core/platform/jobs';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { orgContext } from '@package-broker/core/db/port';
@@ -103,7 +103,8 @@ describe('Node registry jobs wiring', () => {
             return listing(context, source, cursor);
           },
         }));
-      const directory = await realpath(await mkdtemp(join(process.cwd(), '.pb-registry-jobs-')));
+      await mkdir(join(process.cwd(), '.pb'), { recursive: true });
+      const directory = await realpath(await mkdtemp(join(process.cwd(), '.pb', 'registry-jobs-')));
       let broker: Awaited<ReturnType<typeof startNode>> | undefined;
       let database: ReturnType<typeof openBetterSqliteExecutor> | undefined;
       try {

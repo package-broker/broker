@@ -23,7 +23,7 @@ import {
 } from '../kysely.js';
 import { sourceAttachmentCountsStatement } from './source-attachment-counts.js';
 import { acceptRemovalStatement } from './source-removal.js';
-import { permissionRows } from './access.js';
+import { holdsPermission, permissionRows } from './access.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
@@ -290,7 +290,72 @@ export function listSourcesStatement(ctx: OrgContext, input: SourceListQuery): S
     .select([...SOURCE_COLUMNS])
     .where('org_id', '=', ctx.orgId);
   if (input.projectId === null) {
-    query = query.where('project_id', 'is', null);
+    if (input.ownership === 'project') query = query.where('project_id', 'is not', null);
+    else if (input.ownership !== 'all') query = query.where('project_id', 'is', null);
+    const visibility = input.projectVisibility;
+    if (visibility !== undefined && input.ownership !== 'organization') {
+      let projects = db
+        .selectFrom('project as source_owner')
+        .select('source_owner.id')
+        .where('source_owner.org_id', '=', ctx.orgId)
+        .where('source_owner.id', '=', sql.ref<string>('source.project_id'));
+      if (visibility.restrictTo !== undefined) {
+        projects = projects.where(
+          'source_owner.id',
+          'in',
+          db
+            .selectFrom(
+              db
+                .fn<{ value: string }>('json_each', [
+                  sql.val(JSON.stringify(visibility.restrictTo)),
+                ])
+                .as('project_cap'),
+            )
+            .select('project_cap.value'),
+        );
+      }
+      if (!visibility.includeArchived)
+        projects = projects.where('source_owner.status', '=', 'active');
+      const servicePrincipalId = visibility.servicePrincipalId;
+      if (servicePrincipalId !== undefined) {
+        projects = projects.where((eb) =>
+          eb.exists(
+            db
+              .selectFrom('service_principal as source_service')
+              .innerJoin(
+                'service_principal_permission as source_permission',
+                'source_permission.service_principal_id',
+                'source_service.id',
+              )
+              .select('source_service.id')
+              .where('source_service.org_id', '=', ctx.orgId)
+              .where('source_permission.org_id', '=', ctx.orgId)
+              .where('source_service.id', '=', servicePrincipalId)
+              .where('source_service.status', '=', 'active')
+              .where('source_permission.permission', '=', 'project:read')
+              .where((service) =>
+                service.or([
+                  service('source_service.project_id', 'is', null),
+                  service('source_service.project_id', '=', sql.ref<string>('source_owner.id')),
+                ]),
+              ),
+          ),
+        );
+      } else if (!visibility.allProjects) {
+        projects = projects.where(
+          holdsPermission(ctx, {
+            userId: visibility.userId,
+            projectId: sql.ref('source_owner.id'),
+            permission: 'project:read',
+            projectState: 'any',
+            providerAnchors: visibility.providerAnchors,
+          }),
+        );
+      }
+      query = query.where((eb) =>
+        eb.or([eb('source.project_id', 'is', null), eb.exists(projects)]),
+      );
+    }
   } else {
     query = query.where(sql<SqlBool>`exists (select 1 from project as visible_project
       where visible_project.id = ${input.projectId} and visible_project.org_id = ${ctx.orgId}
@@ -300,6 +365,14 @@ export function listSourcesStatement(ctx: OrgContext, input: SourceListQuery): S
           where attachment.org_id = ${ctx.orgId} and attachment.project_id = ${input.projectId}
             and attachment.source_id = source.id)))`);
   }
+  query = query.select((eb) =>
+    eb
+      .selectFrom('project as owner_project')
+      .select('owner_project.name')
+      .where('owner_project.org_id', '=', ctx.orgId)
+      .whereRef('owner_project.id', '=', 'source.project_id')
+      .as('projectName'),
+  );
   if (input.after !== null) query = query.where('id', '>', input.after);
   return compile(query.orderBy('id').limit(input.limit + 1));
 }
@@ -506,8 +579,10 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       return row === undefined ? null : toRecord(row);
     },
     async list(ctx, input) {
-      const rows = await executor.all<SourceRow>(listSourcesStatement(ctx, input));
-      return rows.map(toRecord);
+      const rows = await executor.all<SourceRow & { projectName: string | null }>(
+        listSourcesStatement(ctx, input),
+      );
+      return rows.map((row) => ({ ...toRecord(row), projectName: row.projectName }));
     },
     async countAttachedProjects(ctx, input) {
       const rows = await executor.all<{ sourceId: string; count: number }>(

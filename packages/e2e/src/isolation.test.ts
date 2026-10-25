@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { anchoredBreak, auditHash, auditLogs, auditScenario } from './audit.spec.js';
 import type { AuditRecord, HeadAnchor } from './audit.spec.js';
 import {
@@ -322,8 +322,6 @@ describe('security scenario availability', () => {
 });
 
 describe('security oracles on production bundles', () => {
-  beforeAll(() => local.buildBundles(), 600_000);
-
   for (const runtime of ['node', 'cloudflare'] as const) {
     it(`${runtime}: project isolation and next-request revocation`, async () => {
       const result = await isolationScenario(runtime);

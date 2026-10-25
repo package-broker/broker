@@ -735,6 +735,16 @@ describe('npm tarball refusal', () => {
     expect(await response.json()).toMatchObject({ code: 'bad_gateway', error: 'Bad gateway' });
   });
 
+  it('answers 410 with the fixed gone message when a non-refetchable tarball is lost', async () => {
+    const { call } = await harness({ dist: { kind: 'gone' } });
+    const response = await call('/x/-/x-1.0.0.tgz');
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({
+      code: 'gone',
+      error: 'Archive is no longer available',
+    });
+  });
+
   it('keeps the uniform 404 for an unknown version even when the service would refuse', async () => {
     const h = await harness({ dist: { kind: 'refused' } });
     h.access.version.mockResolvedValue(null as never);

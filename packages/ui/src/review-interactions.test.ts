@@ -25,7 +25,16 @@ const components = {
       import { SourceForm } from './pages/sources/source-form';
       const source = { id: 'github', name: 'GitHub', ecosystem: 'composer', type: 'vcs', githubAuthentication: globalThis.authentication, pollIntervalSeconds: 300, removalPolicy: 'flag' };
       globalThis.submissions = [];
-      createRoot(document.getElementById('root')).render(<SourceForm source={globalThis.creating ? null : source} busy={false} errors={{}} alert={null} onSubmit={(body) => globalThis.submissions.push(body)} onClose={() => {}} />);
+      createRoot(document.getElementById('root')).render(<SourceForm source={globalThis.creating ? null : source} busy={false} errors={{}} alert={null} onSubmit={(body) => globalThis.submissions.push(body)} onClose={() => {}} vcsProviders={globalThis.vcsProviders} />);
+    `,
+  lateProviders: `
+      import { SourceForm } from './pages/sources/source-form';
+      function Late() {
+        const [vcsProviders, setProviders] = React.useState(undefined);
+        globalThis.loadProviders = (next) => setProviders(next);
+        return <SourceForm source={null} busy={false} errors={{}} alert={null} onSubmit={() => {}} onClose={() => {}} vcsProviders={vcsProviders} />;
+      }
+      createRoot(document.getElementById('root')).render(<Late />);
     `,
   sources: `
       import { SourcesView, createSourcesModel } from './pages/sources';
@@ -242,6 +251,57 @@ it('offers both GitHub authentication modes when creating a source', async (cont
   await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
   await page.getByRole('radio', { name: 'GitHub App', exact: false }).check();
   await browserExpect(authentication).toHaveValue('app');
+});
+
+it.for([
+  [['github'], ['github']],
+  [
+    ['github', 'git'],
+    ['github', 'git'],
+  ],
+  [
+    ['ssh', 'git', 'github'],
+    ['github', 'git', 'ssh'],
+  ],
+] as const)(
+  'offers only the reported repository providers %j',
+  async ([reported, offered], context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    await page.goto('about:blank');
+    await page.setContent('<div id="root"></div>');
+    await page.evaluate((vcsProviders: readonly string[]) => {
+      Object.assign(globalThis, { creating: true, vcsProviders });
+    }, reported);
+    await page.addScriptTag({ content: bundles.githubForm! });
+    await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
+    const provider = page.locator('select[name="config/provider"]');
+    await browserExpect(provider).toHaveValue('github');
+    expect(
+      await provider
+        .locator('option')
+        .evaluateAll((options: Element[]) =>
+          options.map((option) => (option as HTMLOptionElement).value),
+        ),
+    ).toEqual(offered);
+    await browserExpect(page.getByText(/Node runtime/)).toHaveCount(0);
+  },
+);
+
+it('switches to an offered provider when the reported list arrives late', async (context) => {
+  const { page, browserExpect } = await mounted(context, 'lateProviders');
+  await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
+  await browserExpect(
+    page.getByLabel('GitHub repository (required)', { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() => {
+    (globalThis as unknown as { loadProviders(next: string[]): void }).loadProviders(['git']);
+  });
+  await browserExpect(
+    page.getByLabel('Git repository URL (required)', { exact: true }),
+  ).toBeVisible();
+  await browserExpect(page.locator('select[name="config/provider"]')).toHaveValue('git');
+  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
 });
 
 it('blocks empty Composer selection and opens Advanced to focus an invalid interval', async (context) => {

@@ -160,5 +160,10 @@
     "vitest": {
       "optional": true
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/package-broker/broker.git",
+    "directory": "packages/db-sqlite"
   }
 }

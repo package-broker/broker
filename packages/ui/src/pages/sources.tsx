@@ -35,6 +35,7 @@ import {
   sourceFieldErrors,
   type CreateSource,
   type SourceChanges,
+  type VcsProvider,
 } from './sources/source-form.js';
 
 type ResponseBody<K extends keyof operations> = operations[K] extends {
@@ -105,6 +106,7 @@ interface SourcesState {
   preview: Preview | null;
   order: string[];
   etag: string | null;
+  vcsProviders: readonly VcsProvider[] | undefined;
   canEnableProjectSource: boolean;
   enableDenied: string[];
   enableConflicts: string[];
@@ -145,6 +147,7 @@ export function createSourcesModel(
     loading: true,
     listError: false,
     settingsVersion: 0,
+    vcsProviders: undefined,
     busy: false,
     error: null,
     notice: null,
@@ -252,6 +255,7 @@ export function createSourcesModel(
       items,
       settingsVersion: state.settingsVersion + 1,
       next: result.data.next,
+      vcsProviders: result.data.vcsProviders,
       loading: false,
       etag,
       order: attached.sort((a, b) => a.precedence - b.precedence).map(({ id }) => id),
@@ -976,6 +980,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             void model.saveSource(body);
           }}
           onClose={() => model.closeEditor()}
+          vcsProviders={state.vcsProviders}
         />
       ) : null}
       <p className="text-neutral-600">

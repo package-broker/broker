@@ -252,6 +252,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       return fail(ctx, 502, 'bad_gateway', API_ERROR_CODES.bad_gateway.message);
     }
     if (served.kind === 'not_found') return notFound(ctx);
+    if (served.kind === 'gone') return fail(ctx, 410, 'gone', API_ERROR_CODES.gone.message);
     if (ctx.request.method === 'HEAD') {
       await served.body.cancel();
       return new Response(null, { headers: served.headers });

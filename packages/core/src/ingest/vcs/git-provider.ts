@@ -56,10 +56,7 @@ export interface GitProviderOptions {
 }
 
 export interface GitProvider extends SourceProvider {
-  /**
-   * Builds the zip of one commit into a staged temporary file. The caller stores it with
-   * `refetchable = false` and publishes `sha1`; the bytes are never rebuilt.
-   */
+  /** Builds the deterministic zip of one commit into a staged temporary file. */
   buildArchive(ctx: ProviderContext, source: ProviderSource, commit: string): Promise<BuiltArchive>;
 }
 

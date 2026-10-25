@@ -621,6 +621,7 @@ describe('single sign-on under the UI policy', () => {
       ),
       clock,
       publicOrigin: HTTPS,
+      clientIp: () => null,
       localLoginAvailable: false,
       log: () => undefined,
     });

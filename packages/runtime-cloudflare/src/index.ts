@@ -1,4 +1,3 @@
-import { clientIpOf } from '@package-broker/core/auth/session';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
@@ -22,7 +21,7 @@ import {
   type AccessAssembly,
 } from '@package-broker/db-sqlite/repositories/access-services';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { parseSourceConfig, reportedVcsProviders } from '@package-broker/core/sources/config';
 import { sourceCredentialOrigins } from '@package-broker/core/sources/credential-origins';
 import {
   createProviderRegistry,
@@ -143,6 +142,7 @@ import {
   rewriteSetupRequest,
 } from '@package-broker/core/kernel/ui-routes';
 import { createWorkersAssets } from './assets.js';
+import { clientIpOf } from './client-ip.js';
 import {
   mcpEnabled,
   brokerObservabilityProblems,
@@ -453,6 +453,7 @@ async function buildAuth(
     ids: { ulid },
     log,
     dispatch,
+    clientIp: clientIpOf,
     registration,
     tokens,
   });
@@ -1866,6 +1867,10 @@ export function createWorker(
             lifetime,
             log,
             blob: services?.platformServices.blob,
+            vcsProviders: () =>
+              registryModule === undefined
+                ? []
+                : reportedVcsProviders('cloudflare', registration.sourceProviders.values()),
           });
     const authorization = options.authorization ?? auth?.authorization;
 

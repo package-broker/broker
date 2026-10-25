@@ -41,6 +41,7 @@ function fixture(wired = true) {
     clock,
     ids: { ulid: () => '01JA0000000000000000000000' },
     publicOrigin: origin,
+    clientIp: () => null,
     providers: new Map(),
     hooks: { 'access.check': [], 'auth.resolveIdentity': [], 'auth.mapGroups': [] },
     log: vi.fn(),

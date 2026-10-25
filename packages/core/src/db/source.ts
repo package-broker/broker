@@ -1,3 +1,4 @@
+import type { SOURCE_ERROR_CODES } from '../sources/source-error-codes.js';
 import type { IdempotencyRecord } from '../api/idempotency.js';
 import type { AuditEvent } from '../audit/actions.js';
 import type { MutationFence } from '../authz/fence.js';
@@ -15,19 +16,7 @@ interface ProtectedHolderProvider {
   readonly emailAuthoritativeDomains?: readonly string[];
 }
 
-export type SourceErrorCode =
-  | 'network'
-  | 'timeout'
-  | 'http_error'
-  | 'unauthorized'
-  | 'rate_limited'
-  | 'not_found'
-  | 'invalid_response'
-  | 'mass_absence'
-  | 'too_large'
-  | 'policy_denied'
-  | 'credential_unavailable'
-  | 'internal';
+export type SourceErrorCode = (typeof SOURCE_ERROR_CODES)[number];
 export type SourceEcosystem = 'composer' | 'npm';
 export type SourceType =
   'vcs' | 'composer_repository' | 'npm_registry' | 'packagist_proxy' | 'npmjs_proxy' | 'hosted';

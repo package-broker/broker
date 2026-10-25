@@ -707,13 +707,18 @@ syncBuiltinESMExports();
       worker = bootWorker!();
       await worker!.ready;
     }
-    await until(async () => {
-      try {
-        return (await fetch(`${origin}/health/ready`, { signal: AbortSignal.timeout(1000) })).ok;
-      } catch {
-        return false;
-      }
-    }, 'readiness');
+    try {
+      await until(async () => {
+        try {
+          return (await fetch(`${origin}/health/ready`, { signal: AbortSignal.timeout(1000) })).ok;
+        } catch {
+          return false;
+        }
+      }, 'readiness');
+    } catch (error) {
+      console.error(`broker output before readiness failure:\n${logs.slice(-4000)}`);
+      throw error;
+    }
     const read = async <T extends Record<string, unknown>>(
       sql: string,
       params: (string | number)[] = [],

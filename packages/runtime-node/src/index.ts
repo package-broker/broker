@@ -160,7 +160,7 @@ import { createDnsGuard } from './sources/dns-guard.js';
 import { nodeGitProviderFor } from './sources/git-provider.js';
 import { createGuardedFetch } from './sources/guarded-fetch.js';
 import { createFilesystemArchiveStore } from './sources/ssh-archive-store.js';
-import { createSshGitProvider, type SshArchiveStore } from './sources/ssh-provider.js';
+import { createSshGitProvider, type SshArchiveReader } from './sources/ssh-provider.js';
 import type { Kernel, KernelObservability } from '@package-broker/core/kernel/kernel';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
@@ -451,9 +451,9 @@ const INERT_CREDENTIAL: UpstreamCredential = Object.freeze({
   apply: (headers: Headers, url: URL) => ({ headers, url }),
 });
 
-function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveStore {
-  let opened: Promise<SshArchiveStore> | undefined;
-  const open = (): Promise<SshArchiveStore> => {
+function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveReader {
+  let opened: Promise<SshArchiveReader> | undefined;
+  const open = (): Promise<SshArchiveReader> => {
     opened ??= createFilesystemArchiveStore(root, { maxZipBytes }).catch((error: unknown) => {
       opened = undefined;
       throw error;
@@ -462,6 +462,7 @@ function lazyArchiveStore(root: string, maxZipBytes: number): SshArchiveStore {
   };
   return {
     find: async (...args) => (await open()).find(...args),
+    readZip: async (...args) => (await open()).readZip(...args),
     store: async (...args) => (await open()).store(...args),
   };
 }

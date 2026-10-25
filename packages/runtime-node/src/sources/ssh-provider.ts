@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { OrgContext } from '@package-broker/core/db/port';
 import { packageKey } from '@package-broker/core/catalogue/names';
+import { normalizeVersion } from '@package-broker/core/registry/composer/version-parser';
+import { UpstreamError } from '@package-broker/core/sources/policy-fetch';
 import { composerVersionInput } from '@package-broker/core/registry/composer/version-object';
 import {
   versionsFromRefs,
@@ -84,10 +86,21 @@ export interface SshArchiveStore {
   ): Promise<void>;
 }
 
+/** Reads only the full archive tuple; null means absent, with no upstream fallback. */
+export interface SshArchiveReader extends SshArchiveStore {
+  readZip(
+    ctx: OrgContext,
+    source: ProviderSource,
+    name: string,
+    versionNormalized: string,
+    commit: string,
+  ): Promise<Uint8Array | null>;
+}
+
 export interface SshGitProviderOptions {
   readonly dnsGuard: DnsGuard;
   readonly sshKey: (source: ProviderSource) => Promise<SshKeyMaterial>;
-  readonly archives: SshArchiveStore;
+  readonly archives: SshArchiveReader;
   readonly tmpRoot?: string;
   readonly timeoutMs?: number;
   readonly maxStdoutBytes?: number;
@@ -486,8 +499,36 @@ export function createSshGitProvider(options: SshGitProviderOptions): SourceProv
       };
     },
 
-    openDist() {
-      return Promise.reject(new TypeError('ssh archives are built at sync time, not fetched'));
+    async openDist(ctx, source, target) {
+      sshConfig(source);
+      ctx.signal.throwIfAborted();
+      if (
+        target.distType !== 'zip' ||
+        target.sourceRef === null ||
+        !/^[0-9a-f]{40}$/.test(target.sourceRef)
+      ) {
+        throw new UpstreamError('refused');
+      }
+      let name: string;
+      let version: string;
+      try {
+        name = packageKey(target.packageName, { ecosystem: 'composer' });
+        version = normalizeVersion(target.version);
+      } catch {
+        throw new UpstreamError('refused');
+      }
+      const zip = await options.archives.readZip(ctx.org, source, name, version, target.sourceRef);
+      ctx.signal.throwIfAborted();
+      if (zip === null) throw new UpstreamError('http_status', 404);
+      return {
+        size: zip.byteLength,
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(zip);
+            controller.close();
+          },
+        }),
+      };
     },
   };
 }

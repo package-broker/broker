@@ -1,3 +1,4 @@
+import { SOURCE_ERROR_CODES } from './source-error-codes.js';
 import type { ApiCall } from '../api/idempotency.js';
 import { redactValue } from '../audit/redact.js';
 import {
@@ -209,21 +210,7 @@ const invalid = (field: string, message: string): SourceServiceResult<never> => 
 });
 
 function safeSourceError(code: string | null): string | null {
-  const codes = [
-    'network',
-    'timeout',
-    'http_error',
-    'unauthorized',
-    'rate_limited',
-    'not_found',
-    'invalid_response',
-    'mass_absence',
-    'too_large',
-    'policy_denied',
-    'credential_unavailable',
-    'internal',
-  ];
-  return code !== null && codes.includes(code) ? code : null;
+  return code !== null && (SOURCE_ERROR_CODES as readonly string[]).includes(code) ? code : null;
 }
 
 function sourceDto(source: SourceRecord): SourceDto {

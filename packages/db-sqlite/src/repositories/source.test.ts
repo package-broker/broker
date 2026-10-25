@@ -1,3 +1,4 @@
+import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { settleIdempotent, type IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { createIdempotencyRepository, idempotencyInsertStatement } from './idempotency.js';
 import { countCalls } from '../contract/count-calls.js';
@@ -10,12 +11,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import type { ProtectedHolderProvider } from '../kysely.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createCredentialRepository } from './credential.js';
-import {
-  SOURCE_ERROR_CODES,
-  createSourceRepository,
-  dueStatement,
-  listSourcesStatement,
-} from './source.js';
+import { createSourceRepository, dueStatement, listSourcesStatement } from './source.js';
 import type { NewSource, SourceRepository } from './source.js';
 import type { AuditAction, AuditEvent } from '@package-broker/core/audit/actions';
 
@@ -1439,6 +1435,44 @@ describe('source paginated list and pause', () => {
     expect(await rows('SELECT action FROM audit_pending WHERE org_id = ?', a.orgId)).toEqual([
       { action: 'source.sync_requested' },
     ]);
+  });
+
+  it.each(['packagist_proxy', 'npmjs_proxy'])(
+    'bumps the epoch on %s Sync now to invalidate negative entries',
+    async (type) => {
+      await executor.batch([seedSource(SRC_ORG, 'proxy', { status: 'active', type })]);
+      const before = await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+      expect(before).toHaveLength(1);
+      expect(await repository.syncNow(a, orgFence(), pauseInput())).toBe('requested');
+      expect(await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId)).not.toEqual(
+        before,
+      );
+    },
+  );
+
+  it('preserves cache epoch on sync requests and changes it on served-content updates', async () => {
+    await executor.batch([seedSource(SRC_ORG, 'daily', { status: 'active' })]);
+    const epoch = () => rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+    const before = await epoch();
+    expect(before).toHaveLength(1);
+    expect(await repository.syncNow(a, orgFence(), pauseInput())).toBe('requested');
+    expect(await epoch()).toEqual(before);
+    expect(
+      await repository.syncNow(a, orgFence(), {
+        ...pauseInput(),
+        audit: { ...pauseInput().audit, id: '01ARZ3NDEKTSV4RRFFQ69G5FAW' },
+      }),
+    ).toBe('requested');
+    expect(await epoch()).toEqual(before);
+    expect(
+      await repository.update(a, orgFence(), {
+        id: SRC_ORG,
+        providerAnchors: ANCHORS,
+        audit: [stagedAudit('source.update')],
+        changes: { url: 'https://updated.example.test' },
+      }),
+    ).toBe('paused_for_reactivation');
+    expect(await epoch()).not.toEqual(before);
   });
 
   it('does not schedule paused, foreign or unauthorized sources', async () => {

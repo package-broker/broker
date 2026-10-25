@@ -18,6 +18,10 @@ import {
 import type { Clock } from '../ids.js';
 import type { BlobRead, BlobStore, Sha256 } from '../platform/blob.js';
 import type { Observability } from '../platform/observability.js';
+import {
+  SOURCE_UNAVAILABLE_RETRY_SECONDS,
+  SourceUnavailableError,
+} from '../sources/source-unavailable.js';
 import type { AccessRecorder } from './access-recorder.js';
 
 export const DIST_BUSY_RETRY_AFTER_SECONDS = 5;
@@ -238,26 +242,33 @@ export function createDistService(deps: DistServiceDeps): DistService {
         }
         return latest.current ? 'pending' : 'negative';
       };
-      const outcome = await coalescer.run(
-        ctx,
-        key,
-        (signal) =>
-          latest === null
-            ? Promise.resolve('negative')
-            : fill(
-                ctx,
-                latest,
-                key,
-                signal,
-                isDone,
-                () => {
-                  refused = true;
-                },
-                request.key,
-                options?.observability,
-              ),
-        { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
-      );
+      let outcome;
+      try {
+        outcome = await coalescer.run(
+          ctx,
+          key,
+          (signal) =>
+            latest === null
+              ? Promise.resolve('negative')
+              : fill(
+                  ctx,
+                  latest,
+                  key,
+                  signal,
+                  isDone,
+                  () => {
+                    refused = true;
+                  },
+                  request.key,
+                  options?.observability,
+                ),
+          { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
+        );
+      } catch (error) {
+        if (error instanceof SourceUnavailableError)
+          return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
+        throw error;
+      }
 
       if (outcome === 'busy') {
         return { kind: 'busy', retryAfterSeconds: DIST_BUSY_RETRY_AFTER_SECONDS };

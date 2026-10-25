@@ -695,9 +695,39 @@ describe('node registry wiring', () => {
       await boot(remote.transport);
 
       const response = await get('/alpha/npm/@acme%2Fwidget');
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('60');
       expect(await response.text()).not.toContain('tok-registry-secret-1');
       expect(remote.urls.some((url) => url.startsWith('https://npm.acme.test/'))).toBe(false);
+      expect(logged.join('\n')).not.toContain('tok-registry-secret-1');
+    });
+
+    it('records credential_unavailable once on the source and logs the reason code', async () => {
+      const remote = upstream();
+      await scopedSource(await sealed(OTHER_KEY));
+      await boot(remote.transport);
+      const state = () =>
+        sql<{ last_error: string | null; status: string; consecutive_failures: number }>(
+          "SELECT last_error, status, consecutive_failures FROM source WHERE org_id = ? AND name = 'acme-npm'",
+          [orgId],
+        );
+      const before = (await state())[0]!;
+      await sql('CREATE TEMP TABLE last_error_writes (n INTEGER)');
+      await sql(
+        'CREATE TEMP TRIGGER count_last_error AFTER UPDATE OF last_error ON source BEGIN INSERT INTO last_error_writes VALUES (1); END',
+      );
+      for (let i = 0; i < 4; i += 1)
+        expect((await get('/alpha/npm/@acme%2Fwidget')).status).toBe(503);
+      expect(await sql('SELECT count(*) AS n FROM last_error_writes')).toEqual([{ n: 1 }]);
+      expect(await state()).toEqual([{ ...before, last_error: 'credential_unavailable' }]);
+      const events = logged.map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: 'source.unavailable',
+          reason_code: 'credential_unavailable',
+        }),
+      );
+      expect(logged.join('\n')).not.toContain('npm.acme.test');
       expect(logged.join('\n')).not.toContain('tok-registry-secret-1');
     });
 

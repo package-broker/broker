@@ -1,5 +1,4 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -7,6 +6,7 @@ import { generateOpenApi } from '@package-broker/core/api/openapi';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import type { RequestContext } from '@package-broker/core/plugin';
 import { run } from '../cli.js';
+import { openApiVersion } from './openapi.js';
 import { servedApiSpecs } from './openapi-specs.js';
 
 const dirs: string[] = [];
@@ -72,9 +72,8 @@ it('writes exactly the body the openapi route serves for the same specs', async 
   dirs.push(dir);
   const out = join(dir, 'openapi.json');
   expect(await run(['openapi', '--out', out])).toBe(0);
-  const { version } = createRequire(import.meta.url)('../../package.json') as { version: string };
   const served = await openApiRoute(
-    generateOpenApi(servedApiSpecs(), { title: 'Package Broker', version }),
+    generateOpenApi(servedApiSpecs(), { title: 'Package Broker', version: openApiVersion }),
   ).handler({} as RequestContext);
   const written = await readFile(out, 'utf8');
   expect(written).toBe(await served.text());
@@ -84,15 +83,12 @@ it('writes exactly the body the openapi route serves for the same specs', async 
   );
 });
 
-it('generates the committed UI document apart from its release version', async () => {
-  const { version } = createRequire(import.meta.url)('../../package.json') as { version: string };
+it('generates the committed UI document', async () => {
   const served = await openApiRoute(
-    generateOpenApi(servedApiSpecs(), { title: 'Package Broker', version }),
+    generateOpenApi(servedApiSpecs(), { title: 'Package Broker', version: openApiVersion }),
   ).handler({} as RequestContext);
   const committed = await readFile(new URL('../../../ui/openapi.json', import.meta.url), 'utf8');
-  const document = JSON.parse(committed) as { info: { version: string } };
-  document.info.version = version;
-  expect(JSON.stringify(document)).toBe(await served.text());
+  expect(committed).toBe(await served.text());
 });
 
 it('includes optional accept-removal and excludes unmounted rebuild when constructing the full API module', () => {

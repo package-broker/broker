@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { listFiles, payloadFiles } from './stage-prebuilt.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const INSTALL_NOT_RUN = 'NOT RUN: npm install needs the registry for better-sqlite3';
@@ -68,15 +70,30 @@ function checked(program, args, options, label) {
   }
 }
 
-async function copyMetafile(root, target, outDir, entry) {
+export async function copyMetafile(root, target, outDir) {
   const built = join(root, '.pb', target);
-  if (!(await readFile(join(built, entry))).equals(await readFile(join(outDir, entry))))
-    throw new Error('Smoke metafile needs the matching local bundle');
-  // Metafiles are build diagnostics and are deliberately omitted from dist packages.
-  await copyFile(join(built, 'metafile.json'), join(outDir, 'metafile.json'));
+  const nonAsset = (name) => !name.startsWith('assets/');
+  try {
+    const sourceFiles = payloadFiles(built).filter(nonAsset);
+    // Materialization replaces the staging-only Wrangler template with its provenance record.
+    const installedFiles = listFiles(outDir).filter(
+      (name) => nonAsset(name) && !(target === 'cloudflare' && name === 'prebuilt.json'),
+    );
+    if (JSON.stringify(sourceFiles) !== JSON.stringify(installedFiles)) throw new Error();
+    for (const name of sourceFiles) {
+      if (!(await readFile(join(built, name))).equals(await readFile(join(outDir, name))))
+        throw new Error();
+    }
+    // Metafiles are build diagnostics and are deliberately omitted from dist packages.
+    await copyFile(join(built, 'metafile.json'), join(outDir, 'metafile.json'));
+  } catch {
+    throw new Error(
+      'Smoke metafile needs matching payloads; re-run pnpm bundle && pnpm stage:prebuilt',
+    );
+  }
 }
 
-export async function runPrebuiltSmoke({ root = ROOT } = {}) {
+export async function runPrebuiltSmoke({ root = ROOT, run = checked, materialize } = {}) {
   const expected = await loadExpectedRecord(join(root, 'packages/cli/dist/prebuilt-expected.json'));
   await mkdir(join(root, '.pb'), { recursive: true });
   const temporary = await mkdtemp(join(root, '.pb', 'prebuilt-smoke-'));
@@ -85,7 +102,7 @@ export async function runPrebuiltSmoke({ root = ROOT } = {}) {
     for (const pkg of ['prebuilt', 'prebuilt-cloudflare']) {
       const destination = join(temporary, pkg);
       await mkdir(destination);
-      checked(
+      run(
         'pnpm',
         ['pack', '--pack-destination', destination],
         {
@@ -108,7 +125,7 @@ export async function runPrebuiltSmoke({ root = ROOT } = {}) {
     await writeFile(manifest, JSON.stringify({ private: true, type: 'module' }));
     const installEnv = { ...process.env, npm_config_cache: join(temporary, 'npm-cache') };
     console.log('smoke:prebuilt installing local dist tarballs');
-    checked(
+    run(
       'npm',
       [
         'install',
@@ -124,9 +141,9 @@ export async function runPrebuiltSmoke({ root = ROOT } = {}) {
     );
 
     const resolve = createRequire(manifest).resolve;
-    const { materializePrebuilt } = await import('../packages/cli/dist/prebuilt.js');
+    materialize ??= (await import('../packages/cli/dist/prebuilt.js')).materializePrebuilt;
     console.log('smoke:prebuilt materializing installed Worker');
-    const materialized = await materializePrebuilt({ project, resolve, expected });
+    const materialized = await materialize({ project, resolve, expected });
     const record = JSON.parse(
       await readFile(resolve('@package-broker/dist-cloudflare/prebuilt.json'), 'utf8'),
     );
@@ -138,23 +155,16 @@ export async function runPrebuiltSmoke({ root = ROOT } = {}) {
 
     const nodePackage = dirname(resolve('@package-broker/dist/package.json'));
     const nodeDir = join(nodePackage, 'node');
-    const { dependencies } = JSON.parse(await readFile(join(nodePackage, 'package.json'), 'utf8'));
-    await writeFile(
-      join(nodeDir, 'package.json'),
-      JSON.stringify({ private: true, type: 'module', dependencies }),
-    );
-    // The Node smoke copies its runtime before starting it, so carry the installed driver with it.
-    const modules = join(project, 'node_modules');
-    for (const name of await readdir(modules)) {
-      if (name !== '@package-broker')
-        await cp(join(modules, name), join(nodeDir, 'node_modules', name), { recursive: true });
-    }
-    await copyMetafile(root, 'node', nodeDir, 'server.js');
-    await copyMetafile(root, 'cloudflare', materialized.outDir, 'worker.js');
+    await copyMetafile(root, 'node', nodeDir);
+    await copyMetafile(root, 'cloudflare', materialized.outDir);
 
-    const smokeEnv = { ...installEnv, npm_config_offline: 'true', SMOKE_OFFLINE: '0' };
+    const smokeEnv = {
+      ...installEnv,
+      npm_config_offline: 'true',
+      SMOKE_PREBUILT: '1',
+    };
     console.log('smoke:prebuilt Node leg');
-    checked(
+    run(
       process.execPath,
       [join(root, 'scripts/node-bundle-smoke.mjs')],
       {
@@ -165,7 +175,7 @@ export async function runPrebuiltSmoke({ root = ROOT } = {}) {
       'smoke:prebuilt Node leg',
     );
     console.log('smoke:prebuilt Worker leg');
-    checked(
+    run(
       process.execPath,
       [join(root, 'packages/runtime-cloudflare/scripts/worker-smoke.mjs')],
       {
@@ -179,7 +189,9 @@ export async function runPrebuiltSmoke({ root = ROOT } = {}) {
       },
       'smoke:prebuilt Worker leg',
     );
-    console.log('smoke:prebuilt ok (Node and Worker)');
+    console.log(
+      'smoke:prebuilt ok (installed Node: server.js in place with hoisted dependencies, readiness, OpenAPI, auth, UI, blobs, audit jobs, shutdown; materialized installed Worker: readiness/liveness, OpenAPI, auth, UI, D1 foreign keys, blobs, audit jobs/queue; installed bundles: vitest scan with payload-matched local metafiles; repository helpers: cache adapter checks)',
+    );
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

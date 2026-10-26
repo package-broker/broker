@@ -17,7 +17,7 @@ import {
 } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { checkHeldBatch } from './held-batch-smoke.mjs';
@@ -30,7 +30,8 @@ import {
 import { checkUiBundle } from '../packages/runtime-cloudflare/scripts/ui-bundle-regression.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SOURCE = process.env.SMOKE_NODE_DIR ?? join(REPO_ROOT, '.pb', 'node');
+const SOURCE = resolve(REPO_ROOT, process.env.SMOKE_NODE_DIR ?? '.pb/node');
+const PREBUILT = process.env.SMOKE_PREBUILT === '1';
 const READY_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 200;
 const REQUEST_TIMEOUT_MS = 2_000;
@@ -366,10 +367,17 @@ async function startBundle(source) {
   childStderr = '';
   step = 'copying the bundle';
   copy = await realpath(await mkdtemp(join(tmpdir(), 'pb-node-smoke-')));
-  await cp(join(source, '.'), copy, { recursive: true });
-  console.log(`smoke:node copied ${source} to ${copy}`);
+  const runtimeDir = PREBUILT ? source : copy;
+  if (!PREBUILT) {
+    await cp(join(source, '.'), copy, { recursive: true });
+    console.log(`smoke:node copied ${source} to ${copy}`);
+  } else {
+    console.log('smoke:node using installed server.js in place (hoisted dependencies)');
+  }
 
-  if (process.env['SMOKE_OFFLINE'] === '1') {
+  if (PREBUILT) {
+    if (BREAK) throw new Error('--break is unavailable for installed prebuilt packages');
+  } else if (process.env['SMOKE_OFFLINE'] === '1') {
     step = 'copying installed production dependencies';
     const require = createRequire(join(REPO_ROOT, 'packages/runtime-node/package.json'));
     const driverManifest = require.resolve('better-sqlite3/package.json');
@@ -421,7 +429,7 @@ async function startBundle(source) {
     if (name.startsWith('PB_MASTER_KEY_PREVIOUS')) delete env[name];
   }
   child = spawn(nodeBin, ['server.js'], {
-    cwd: copy,
+    cwd: runtimeDir,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -665,7 +673,8 @@ async function checkPlatformPorts(base, cookie, env) {
   const files = (await readdir(SOURCE, { withFileTypes: true, recursive: true }))
     .filter((entry) => entry.isFile() && /\.(?:m?js|json)$/.test(entry.name))
     .map((entry) => join(entry.parentPath, entry.name))
-    .filter((path) => !path.startsWith(join(SOURCE, 'assets') + '/'));
+    .filter((path) => !path.startsWith(join(SOURCE, 'assets') + '/'))
+    .filter((path) => !PREBUILT || !path.startsWith(join(SOURCE, 'node_modules') + '/'));
   assert.ok(files.includes(join(SOURCE, 'server.js')), 'the server entry was not scanned');
   for (const path of files) {
     assert.ok(!/vitest/i.test(await readFile(path, 'utf8')), `${path} references vitest`);
@@ -718,7 +727,7 @@ async function run() {
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
 
   step = 'checking the public UI mount';
-  const assetsDir = join(copy, 'assets');
+  const assetsDir = join(PREBUILT ? SOURCE : copy, 'assets');
   await checkUiBundle({
     assetsDir,
     https: false,
@@ -803,9 +812,14 @@ async function run() {
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
   console.log('smoke:node SIGTERM exit code 0');
 
-  await checkPackageRoute();
-  await checkHeldBatch('node');
-  await checkTraceparent();
+  if (PREBUILT) {
+    for (const leg of ['package-route', 'traceparent', 'held-batch'])
+      console.log(`NOT RUN (source-only fixture): Node ${leg}`);
+  } else {
+    await checkPackageRoute();
+    await checkHeldBatch('node');
+    await checkTraceparent();
+  }
 
   console.log('smoke:node ok');
 }

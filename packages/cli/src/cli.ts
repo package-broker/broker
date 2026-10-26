@@ -21,6 +21,7 @@ import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudf
 import { runImport } from './commands/import.js';
 import { runImportCutover } from './commands/import-cutover.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
+import { runImportPrivatePackagistFetch } from './commands/import-private-packagist.js';
 import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
 import { runBootstrapSqlite, runMigrateSqlite } from './commands/sqlite.js';
@@ -43,6 +44,7 @@ const USAGE =
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb import cutover-check --project-dir <dir> --old-repository <url> --new-repository <url> --old-auth-env <VAR> --new-auth-env <VAR> [--lock <file>]... [--timeout-seconds <seconds>] [--json]\n' +
+  '       pb import private-packagist fetch --org <short-name> --snapshot <out.json> [--api-key-file <path>] [--api-secret-file <path>] [--versions] [--require-org-match] (or PP_API_KEY_FILE/PP_API_SECRET_FILE)\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb import submit --manifest <file> --receipt <file> --principal <label> --broker <origin> [--resume] [--token-file <path>]\n' +
   '       pb import status <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
@@ -74,6 +76,12 @@ function parseCliArgs(argv: string[]) {
         'new-auth-env': { type: 'string' },
         'timeout-seconds': { type: 'string' },
         lock: { type: 'string', multiple: true },
+        org: { type: 'string' },
+        snapshot: { type: 'string' },
+        'api-key-file': { type: 'string' },
+        'api-secret-file': { type: 'string' },
+        versions: { type: 'boolean' },
+        'require-org-match': { type: 'boolean' },
         manifest: { type: 'string' },
         receipt: { type: 'string' },
         principal: { type: 'string' },
@@ -293,6 +301,14 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'baseline',
     'mode',
   ],
+  'import private-packagist fetch': [
+    'org',
+    'snapshot',
+    'api-key-file',
+    'api-secret-file',
+    'versions',
+    'require-org-match',
+  ],
   'import submit': ['manifest', 'receipt', 'principal', 'broker', 'resume', 'token-file'],
   'import status': ['broker', 'token-file', 'wait', 'wait-seconds'],
   'import credentials': ['broker', 'token-file', 'manifest', 'credentials'],
@@ -447,6 +463,21 @@ export async function run(argv: readonly string[]): Promise<number> {
       timeoutSeconds:
         values['timeout-seconds'] === undefined ? 1800 : Number(values['timeout-seconds']),
       json: values.json ?? false,
+    });
+  }
+
+  if (command === 'import' && subcommand === 'private-packagist') {
+    if (!values.org || !values.snapshot) return usageError();
+    return runImportPrivatePackagistFetch({
+      org: values.org,
+      snapshot: values.snapshot,
+      env: process.env,
+      ...(values['api-key-file'] === undefined ? {} : { apiKeyFile: values['api-key-file'] }),
+      ...(values['api-secret-file'] === undefined
+        ? {}
+        : { apiSecretFile: values['api-secret-file'] }),
+      versions: values.versions ?? false,
+      requireOrgMatch: values['require-org-match'] ?? false,
     });
   }
 

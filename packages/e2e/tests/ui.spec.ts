@@ -888,7 +888,11 @@ test.describe('Node management UI', () => {
     const create = activeDialog(page, 'Add source');
     await create.getByRole('radio', { name: /^Git repository/ }).check();
     const provider = create.getByLabel('Repository provider', { exact: true });
-    await expect(provider.locator('option')).toHaveText(['GitHub', 'Git over HTTP(S)', 'Git over SSH']);
+    await expect(provider.locator('option')).toHaveText([
+      'GitHub',
+      'Git over HTTP(S)',
+      'Git over SSH',
+    ]);
     await expect(create.getByText(/Node runtime/)).toHaveCount(0);
     await provider.selectOption('git');
     await expect(create.getByLabel('Git repository URL (required)', { exact: true })).toBeVisible();

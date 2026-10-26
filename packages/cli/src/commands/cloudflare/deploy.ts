@@ -1381,7 +1381,33 @@ export async function deploy(
       !['binding_pending', 'bound'].includes(journal.resources.analytics?.state ?? '')
     )
       return invalid();
-    assertMigrationsApplied(artifact.migrations, journal.migrations.ledger);
+    const appliedIds = new Set(journal.migrations.ledger.map(({ id }) => id));
+    const pendingMigrations = artifact.migrations.filter(({ id }) => !appliedIds.has(id));
+    assertMigrationsApplied(
+      o.dryRun ? artifact.migrations.filter(({ id }) => appliedIds.has(id)) : artifact.migrations,
+      journal.migrations.ledger,
+      'pb cloudflare migrate',
+    );
+    output.pending_migrations = pendingMigrations.map(({ id }) => id);
+    for (const migration of pendingMigrations) {
+      if (migration.phase === 'contract')
+        output.checks.push({
+          name: migration.id,
+          status: 'warning',
+          source: `Pending contract migration requires pb cloudflare migrate --allow-contract ${migration.id}.`,
+        });
+      if (o.dryRun)
+        output.plan.push({
+          stage: 'migrate',
+          action: 'apply',
+          name: migration.id,
+          kind: migration.phase,
+        });
+    }
+    if (o.dryRun && pendingMigrations.some(({ phase }) => phase === 'expand')) {
+      output.status = 'planned';
+      return succeed();
+    }
     const ledgerHash = digest(canonical(journal.migrations.ledger));
     const contract = o.contract ?? cloudflareDeployContract;
     api = new CloudflareApi({

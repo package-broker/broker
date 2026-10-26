@@ -450,8 +450,8 @@ function options(h: ReturnType<typeof harness>, extra: Partial<DeployOptions> = 
 }
 const mutations = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.method !== 'GET');
 
-it.each([false, true])(
-  'refuses pending migrations before provider calls (dry run: %s)',
+it.each([false])(
+  'refuses pending expand migrations before provider calls (dry run: %s)',
   async (dryRun) => {
     const j = (await store.read())!;
     j.migrations.ledger = [];
@@ -476,7 +476,75 @@ it.each([false, true])(
   },
 );
 
-it.each(['pending', 'checksum drift'])(
+it('plans pending expand migrations on dry run without provider calls or state changes', async () => {
+  const j = (await store.read())!;
+  j.migrations.ledger = [];
+  await store.write(j);
+  const before = await readFile(store.path, 'utf8');
+  const h = harness();
+  expect(await deploy(options(h, { dryRun: true }))).toMatchObject({
+    exitCode: 0,
+    output: {
+      status: 'planned',
+      error: null,
+      pending_migrations: ['core:0001_init'],
+      plan: expect.arrayContaining([
+        { stage: 'migrate', action: 'apply', name: 'core:0001_init', kind: 'expand' },
+      ]),
+    },
+  });
+  expect(h.calls).toHaveLength(0);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it.each(['pending', 'drift', 'dry-run drift', 'dry-run pending'])(
+  'handles contract migrations: %s',
+  async (mode) => {
+    const sql = '-- pb:phase contract\n-- contract fixture\n';
+    const file = join(out, 'generated/manifest.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.migrations.push({
+      id: 'core:0002_contract',
+      name: '0002_contract.sql',
+      checksum: digest(sql),
+      phase: 'contract',
+    });
+    await writeFile(join(out, 'migrations/core/0002_contract.sql'), sql);
+    await writeFile(file, JSON.stringify(manifest));
+    if (mode.includes('drift')) {
+      const j = (await store.read())!;
+      j.migrations.ledger.push({
+        id: 'core:0002_contract',
+        checksum: digest('different'),
+        phase: 'contract',
+      });
+      await store.write(j);
+    }
+    const before = await readFile(store.path, 'utf8');
+    const h = harness();
+    const result = await deploy(options(h, { dryRun: mode.startsWith('dry-run') }));
+    if (mode.includes('drift')) {
+      expect(result).toMatchObject({
+        exitCode: 2,
+        output: { error: { code: 'migrations_pending' } },
+      });
+      expect(h.calls).toHaveLength(0);
+      expect(await readFile(store.path, 'utf8')).toBe(before);
+    } else {
+      expect(result).toMatchObject({ exitCode: 0, output: { error: null } });
+      expect(result.output.checks).toContainEqual({
+        name: 'core:0002_contract',
+        status: 'warning',
+        source:
+          'Pending contract migration requires pb cloudflare migrate --allow-contract core:0002_contract.',
+      });
+      if (mode === 'pending') expect(mutations(h).length).toBeGreaterThan(0);
+      else expect(await readFile(store.path, 'utf8')).toBe(before);
+    }
+  },
+);
+
+it.each(['pending', 'checksum drift', 'dry-run checksum drift'])(
   'refuses a later plugin migration with %s even when the core migration is applied',
   async (mode) => {
     const sql = '-- plugin migration\n';
@@ -491,7 +559,7 @@ it.each(['pending', 'checksum drift'])(
     await mkdir(join(out, 'migrations/example'), { recursive: true });
     await writeFile(join(out, 'migrations/example/0001_init.sql'), sql);
     await writeFile(file, JSON.stringify(manifest));
-    if (mode === 'checksum drift') {
+    if (mode.includes('checksum drift')) {
       const j = (await store.read())!;
       j.migrations.ledger.push({
         id: 'example:0001_init',
@@ -502,7 +570,7 @@ it.each(['pending', 'checksum drift'])(
     }
     const before = await readFile(store.path, 'utf8');
     const h = harness();
-    const result = await deploy(options(h));
+    const result = await deploy(options(h, { dryRun: mode.startsWith('dry-run') }));
     expect(result).toMatchObject({
       exitCode: 2,
       output: {

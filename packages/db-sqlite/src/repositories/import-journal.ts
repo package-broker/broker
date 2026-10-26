@@ -367,6 +367,9 @@ export function createImportJournalStore(options: {
               poll_last_modified: null,
               root_hash: null,
               listing_hash: null,
+              sync_generation: null,
+              sync_counts:
+                '{"listing":true,"queued":0,"running":0,"failed":0,"completed":0,"errors":{}}',
               consecutive_failures: 0,
               last_error: null,
               listing_open_stamp: null,

@@ -97,6 +97,7 @@ export type SourceDto = Pick<
   | 'pollIntervalSeconds'
   | 'lastSuccessAt'
   | 'lastError'
+  | 'sync'
   | 'lastPolledAt'
   | 'nextPollAt'
 > & {
@@ -243,6 +244,7 @@ function sourceDto(source: SourceRecord): SourceDto {
     pollIntervalSeconds: source.pollIntervalSeconds,
     lastSuccessAt: source.lastSuccessAt,
     lastError: safeSourceError(source.lastError),
+    ...(source.sync === undefined ? {} : { sync: source.sync }),
     lastPolledAt: source.lastPolledAt,
     nextPollAt: source.nextPollAt,
     hasCredential: source.credentialId !== null,

@@ -542,6 +542,12 @@
     },
     {
       "type": "index",
+      "name": "source_sync_package_job",
+      "tbl_name": "source_sync_package",
+      "sql": "CREATE INDEX source_sync_package_job ON source_sync_package (org_id, job_id)"
+    },
+    {
+      "type": "index",
       "name": "token_binding_project",
       "tbl_name": "token",
       "sql": "CREATE INDEX token_binding_project ON token (project_id)"
@@ -850,7 +856,7 @@
       "type": "table",
       "name": "job",
       "tbl_name": "job",
-      "sql": "CREATE TABLE job (\n  id              TEXT NOT NULL PRIMARY KEY,\n  org_id          TEXT NOT NULL REFERENCES organization (id),\n  type            TEXT NOT NULL,\n  payload_json    TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json) AND length(payload_json) <= 131072),\n  resource_key    TEXT,\n  idempotency_key TEXT,\n  state           TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'succeeded', 'dead')),\n  attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\n  max_attempts    INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts >= 1),\n  lease_owner     TEXT,\n  lease_until     TEXT,\n  fence           INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),\n  run_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  last_error      TEXT,\n  finished_at     TEXT,\n  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), project_id TEXT REFERENCES project (id), initiator_token_id TEXT,\n  CHECK (state <> 'running' OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL))\n) STRICT"
+      "sql": "CREATE TABLE job (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  type               TEXT NOT NULL,\n  payload_json       TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json) AND length(payload_json) <= 131072),\n  resource_key       TEXT,\n  idempotency_key    TEXT,\n  state              TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'succeeded', 'dead')),\n  attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\n  max_attempts       INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts >= 1),\n  lease_owner        TEXT,\n  lease_until        TEXT,\n  fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),\n  run_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  last_error         TEXT,\n  sync_error         TEXT,\n  finished_at        TEXT,\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  project_id         TEXT REFERENCES project (id),\n  initiator_token_id TEXT,\n  CHECK (state <> 'running' OR (lease_owner IS NOT NULL AND lease_until IS NOT NULL))\n) STRICT"
     },
     {
       "type": "table",
@@ -970,7 +976,13 @@
       "type": "table",
       "name": "source",
       "tbl_name": "source",
-      "sql": "CREATE TABLE source (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  org_id                          TEXT NOT NULL REFERENCES organization (id),\n  project_id                      TEXT REFERENCES project (id),\n  name                            TEXT NOT NULL,\n  ecosystem                       TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  type                            TEXT NOT NULL CHECK (type IN ('vcs', 'composer_repository', 'npm_registry', 'packagist_proxy', 'npmjs_proxy', 'hosted')),\n  url                             TEXT,\n  credential_id                   TEXT REFERENCES credential (id),\n  config_json                     TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),\n  protocol_mode                   TEXT CHECK (protocol_mode IS NULL OR protocol_mode IN ('v2', 'v1-providers', 'v1-lazy', 'v1-includes', 'npm-packument')),\n  has_available_packages          INTEGER NOT NULL DEFAULT 0 CHECK (has_available_packages IN (0, 1)),\n  user_agent                      TEXT,\n  default_visible_to_new_projects INTEGER NOT NULL DEFAULT 1 CHECK (default_visible_to_new_projects IN (0, 1)),\n  removal_policy                  TEXT NOT NULL DEFAULT 'flag' CHECK (removal_policy IN ('flag', 'exclude')),\n  retention_days_override         INTEGER CHECK (retention_days_override IS NULL OR retention_days_override >= 0),\n  status                          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'degraded', 'failing', 'paused')),\n  poll_interval_seconds           INTEGER NOT NULL DEFAULT 86400 CHECK (poll_interval_seconds > 0),\n  next_poll_at                    TEXT,\n  last_polled_at                  TEXT,\n  last_success_at                 TEXT,\n  poll_etag                       TEXT,\n  poll_last_modified              TEXT,\n  root_hash                       TEXT,\n  listing_hash                    TEXT,\n  consecutive_failures            INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),\n  last_error                      TEXT,\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, listing_open_stamp TEXT, listing_opened_at TEXT,\n  last_refusal_at                 TEXT,\n  last_refusal_absent             INTEGER CHECK (last_refusal_absent IS NULL OR last_refusal_absent >= 0),\n  last_refusal_listed             INTEGER CHECK (last_refusal_listed IS NULL OR last_refusal_listed >= 0),\n  last_refusal_successful         INTEGER CHECK (last_refusal_successful IS NULL OR last_refusal_successful >= 0),\n  removal_accepted                INTEGER NOT NULL DEFAULT 0 CHECK (removal_accepted IN (0, 1)),\n  CHECK ((last_refusal_at IS NULL) = (last_refusal_absent IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_listed IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_successful IS NULL)),\n  CHECK (removal_accepted = 0 OR last_refusal_at IS NOT NULL)) STRICT"
+      "sql": "CREATE TABLE source (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  org_id                          TEXT NOT NULL REFERENCES organization (id),\n  project_id                      TEXT REFERENCES project (id),\n  name                            TEXT NOT NULL,\n  ecosystem                       TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  type                            TEXT NOT NULL CHECK (type IN ('vcs', 'composer_repository', 'npm_registry', 'packagist_proxy', 'npmjs_proxy', 'hosted')),\n  url                             TEXT,\n  credential_id                   TEXT REFERENCES credential (id),\n  config_json                     TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),\n  protocol_mode                   TEXT CHECK (protocol_mode IS NULL OR protocol_mode IN ('v2', 'v1-providers', 'v1-lazy', 'v1-includes', 'npm-packument')),\n  has_available_packages          INTEGER NOT NULL DEFAULT 0 CHECK (has_available_packages IN (0, 1)),\n  user_agent                      TEXT,\n  default_visible_to_new_projects INTEGER NOT NULL DEFAULT 1 CHECK (default_visible_to_new_projects IN (0, 1)),\n  removal_policy                  TEXT NOT NULL DEFAULT 'flag' CHECK (removal_policy IN ('flag', 'exclude')),\n  retention_days_override         INTEGER CHECK (retention_days_override IS NULL OR retention_days_override >= 0),\n  status                          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'degraded', 'failing', 'paused')),\n  poll_interval_seconds           INTEGER NOT NULL DEFAULT 86400 CHECK (poll_interval_seconds > 0),\n  next_poll_at                    TEXT,\n  last_polled_at                  TEXT,\n  last_success_at                 TEXT,\n  poll_etag                       TEXT,\n  poll_last_modified              TEXT,\n  root_hash                       TEXT,\n  listing_hash                    TEXT,\n  consecutive_failures            INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),\n  last_error                      TEXT,\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  listing_open_stamp              TEXT,\n  listing_opened_at               TEXT,\n  last_refusal_at                 TEXT,\n  last_refusal_absent             INTEGER CHECK (last_refusal_absent IS NULL OR last_refusal_absent >= 0),\n  last_refusal_listed             INTEGER CHECK (last_refusal_listed IS NULL OR last_refusal_listed >= 0),\n  last_refusal_successful         INTEGER CHECK (last_refusal_successful IS NULL OR last_refusal_successful >= 0),\n  removal_accepted                INTEGER NOT NULL DEFAULT 0 CHECK (removal_accepted IN (0, 1)),\n  sync_generation                 TEXT,\n  sync_counts                     TEXT NOT NULL DEFAULT '{\"listing\":true,\"queued\":0,\"running\":0,\"retrying\":0,\"failed\":0,\"completed\":0,\"errors\":{}}' CHECK (json_valid(sync_counts)),\n  CHECK ((last_refusal_at IS NULL) = (last_refusal_absent IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_listed IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_successful IS NULL)),\n  CHECK (removal_accepted = 0 OR last_refusal_at IS NOT NULL)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "source_sync_package",
+      "tbl_name": "source_sync_package",
+      "sql": "CREATE TABLE source_sync_package (\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  source_id TEXT NOT NULL REFERENCES source (id) ON DELETE CASCADE,\n  package_key TEXT NOT NULL,\n  generation TEXT NOT NULL,\n  job_id TEXT NOT NULL REFERENCES job (id) ON DELETE CASCADE,\n  state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'dead')),\n  error TEXT,\n  PRIMARY KEY (org_id, source_id, package_key)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
@@ -1067,6 +1079,24 @@
       "name": "source_ecosystem_locked_with_packages",
       "tbl_name": "source",
       "sql": "CREATE TRIGGER source_ecosystem_locked_with_packages\nBEFORE UPDATE OF ecosystem ON source\nWHEN NEW.ecosystem IS NOT OLD.ecosystem\n  AND EXISTS (SELECT 1 FROM package WHERE source_id = OLD.id)\nBEGIN\n  SELECT RAISE(ABORT, 'source ecosystem cannot change while the source holds packages');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "source_sync_counts_insert",
+      "tbl_name": "source_sync_package",
+      "sql": "CREATE TRIGGER source_sync_counts_insert\nAFTER INSERT ON source_sync_package\nBEGIN\n  UPDATE source SET sync_counts = json_set((CASE WHEN NEW.error IS NULL THEN (sync_counts) ELSE json_set((sync_counts), '$.errors.' || NEW.error, COALESCE(json_extract((sync_counts), '$.errors.' || NEW.error), 0) + 1) END),\n      '$.queued', json_extract(sync_counts, '$.queued') + (NEW.state = 'queued' AND NEW.error IS NULL),\n      '$.running', json_extract(sync_counts, '$.running') + (NEW.state = 'running'),\n      '$.retrying', json_extract(sync_counts, '$.retrying') + (NEW.state = 'queued' AND NEW.error IS NOT NULL),\n      '$.failed', json_extract(sync_counts, '$.failed') + (NEW.state = 'dead'),\n      '$.completed', json_extract(sync_counts, '$.completed') + (NEW.state = 'succeeded'))\n    WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "source_sync_counts_update",
+      "tbl_name": "source_sync_package",
+      "sql": "CREATE TRIGGER source_sync_counts_update\nAFTER UPDATE ON source_sync_package\nBEGIN\n  UPDATE source SET sync_counts = json_set(sync_counts, '$.errors.' || OLD.error,\n      max(COALESCE(json_extract(sync_counts, '$.errors.' || OLD.error), 0) - 1, 0))\n    WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation\n      AND OLD.error IS NOT NULL;\n  UPDATE source SET sync_counts = json_set(sync_counts, '$.errors.' || NEW.error,\n      COALESCE(json_extract(sync_counts, '$.errors.' || NEW.error), 0) + 1)\n    WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation\n      AND NEW.error IS NOT NULL;\n  UPDATE source SET sync_counts = json_set(sync_counts,\n      '$.queued', json_extract(sync_counts, '$.queued') + ((NEW.state = 'queued' AND NEW.error IS NULL) - (OLD.state = 'queued' AND OLD.error IS NULL)),\n      '$.running', json_extract(sync_counts, '$.running') + ((NEW.state = 'running') - (OLD.state = 'running')),\n      '$.retrying', json_extract(sync_counts, '$.retrying') + ((NEW.state = 'queued' AND NEW.error IS NOT NULL) - (OLD.state = 'queued' AND OLD.error IS NOT NULL)),\n      '$.failed', json_extract(sync_counts, '$.failed') + ((NEW.state = 'dead') - (OLD.state = 'dead')),\n      '$.completed', json_extract(sync_counts, '$.completed') + ((NEW.state = 'succeeded') - (OLD.state = 'succeeded')))\n    WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "source_sync_job_state",
+      "tbl_name": "job",
+      "sql": "CREATE TRIGGER source_sync_job_state\nAFTER UPDATE OF state, last_error ON job\nBEGIN\n  UPDATE source_sync_package SET state = NEW.state,\n    error = CASE WHEN NEW.state IN ('running', 'succeeded') OR (NEW.state = 'queued' AND EXISTS (SELECT 1 FROM job_attempt WHERE org_id = NEW.org_id AND job_id = NEW.id AND fence = NEW.fence AND outcome = 'released')) THEN NULL\n      ELSE COALESCE(NEW.sync_error, CASE WHEN NEW.last_error = 'timeout' THEN 'timeout'\n        WHEN NEW.last_error IS NOT NULL THEN 'internal' END) END\n    WHERE org_id = NEW.org_id AND job_id = NEW.id;\n  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))\n    WHERE org_id = NEW.org_id AND id = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.sourceId')\n      AND NEW.type = 'core:source-sync:v1' AND NEW.state <> 'running'\n      AND NOT (NEW.state = 'queued' AND NEW.last_error IS 'lease_lost')\n      AND (NEW.state <> 'succeeded' OR NOT EXISTS (\n        SELECT 1 FROM job continuation\n        WHERE continuation.org_id = NEW.org_id AND continuation.resource_key = NEW.resource_key\n          AND continuation.id <> NEW.id AND continuation.type = 'core:source-sync:v1'\n          AND continuation.state IN ('queued', 'running')\n          AND json_extract(CASE WHEN json_valid(continuation.payload_json) THEN continuation.payload_json ELSE '{}' END, '$.syncGeneration') = source.sync_generation))\n      AND (json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration') IS NULL\n        OR sync_generation = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration'));\nEND"
     }
   ],
   "indexes": [
@@ -2130,6 +2160,22 @@
       "tbl_name": "source",
       "seq": 7,
       "name": "sqlite_autoindex_source_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "source_sync_package",
+      "seq": 0,
+      "name": "source_sync_package_job",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "source_sync_package",
+      "seq": 1,
+      "name": "sqlite_autoindex_source_sync_package_1",
       "unique": 1,
       "origin": "pk",
       "partial": 0

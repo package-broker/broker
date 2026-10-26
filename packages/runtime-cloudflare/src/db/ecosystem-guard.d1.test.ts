@@ -39,7 +39,7 @@ let executor: SqlExecutor;
 const run = (sql: string, ...params: (string | number)[]) => executor.all({ sql, params });
 const triggers = () =>
   executor.all<{ name: string }>({
-    sql: "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name",
+    sql: "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name NOT LIKE 'source_sync_%' ORDER BY name",
     params: [],
   });
 

@@ -820,6 +820,63 @@ test.describe('Node management UI', () => {
     await assertSecretAbsent(page, material);
   });
 
+  test('shows disjoint sync counts and polls retrying packages until completion', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    let phase: 'idle' | 'retrying' | 'complete' = 'idle';
+    const generation = 'a'.repeat(64);
+    await page.route(
+      (url) => url.pathname === '/_pb/sources',
+      async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.items = body.items.map((source: { name: string; status: string }) =>
+          source.name === 'Browser fixture source'
+            ? {
+                ...source,
+                status: 'active',
+                ...(phase === 'idle'
+                  ? {}
+                  : {
+                      sync: {
+                        generation,
+                        listing: false,
+                        queued: 0,
+                        running: 0,
+                        retrying: phase === 'retrying' ? 1 : 0,
+                        failed: 0,
+                        completed: phase === 'retrying' ? 2 : 3,
+                        errors: phase === 'retrying' ? [{ code: 'rate_limited', count: 1 }] : [],
+                      },
+                    }),
+              }
+            : source,
+        );
+        await route.fulfill({ response, json: body });
+      },
+    );
+    await page.route('**/_pb/sources/*/sync', async (route) => {
+      phase = 'retrying';
+      await route.fulfill({ status: 202, json: { requested: true } });
+    });
+    await go(page, 'sources');
+    const row = page.getByRole('row').filter({ hasText: 'Browser fixture source' });
+    await row.getByRole('button', { name: 'Sync now', exact: true }).click();
+    await expect(
+      row.getByText(/0 queued.*0 running.*1 retrying.*0 failed.*2 completed/),
+    ).toBeVisible();
+    await expect(row.getByText('rate_limited', { exact: true })).toBeVisible();
+    phase = 'complete';
+    await expect(
+      row.getByText(/0 queued.*0 running.*0 retrying.*0 failed.*3 completed/),
+    ).toBeVisible();
+    await expect(row.getByText('rate_limited', { exact: true })).toHaveCount(0);
+    await assertLayout(page);
+    await page.unrouteAll({ behavior: 'wait' });
+  });
+
   test('offers only the repository providers the Node runtime serves', async ({ page, admin }) => {
     await confirmIdentity(page, admin);
     const listed = page.waitForResponse(

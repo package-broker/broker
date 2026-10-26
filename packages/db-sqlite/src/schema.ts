@@ -275,6 +275,7 @@ export interface JobTable {
   fence: Generated<number>;
   run_at: Generated<string>;
   last_error: string | null;
+  sync_error: string | null;
   finished_at: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
@@ -342,6 +343,8 @@ export type DistTagAction = 'set' | 'remove';
 
 /** Mirrors `source` in `migrations/0001_init.sql`. */
 export interface SourceTable {
+  sync_generation: string | null;
+  sync_counts: Generated<string>;
   id: string;
   org_id: string;
   project_id: string | null;

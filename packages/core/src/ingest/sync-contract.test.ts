@@ -493,6 +493,7 @@ function sourceRig(
       get: async () => sourceRecord(over),
       pollState: async (_ctx, guard, input) => {
         if (guard.fence !== model.jobFence) return 'stale';
+        if (input.outcome === 'started') return 'written';
         model.polls.push({
           outcome: input.outcome,
           ...(input.outcome === 'failure' ? { error: input.error } : {}),

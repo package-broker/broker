@@ -1,3 +1,4 @@
+import { SOURCE_ERROR_CODES } from '../../sources/source-error-codes.js';
 import * as z from 'zod';
 import { PROJECT_SLUG_PATTERN } from '../../authz/project-path.js';
 import type { ApiRouteSpec } from '../route.js';
@@ -73,6 +74,26 @@ const source = z.strictObject({
   pollIntervalSeconds: z.number().int(),
   lastSuccessAt: z.string().nullable(),
   lastError: z.string().nullable(),
+  sync: z
+    .strictObject({
+      listing: z.boolean(),
+      generation: z.string(),
+      queued: z.number().int().nonnegative(),
+      running: z.number().int().nonnegative(),
+      retrying: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          'Failed packages queued for another attempt; disjoint from queued, running, failed and completed.',
+        ),
+      failed: z.number().int().nonnegative().describe('Terminal package failures.'),
+      completed: z.number().int().nonnegative(),
+      errors: z.array(
+        z.strictObject({ code: z.enum(SOURCE_ERROR_CODES), count: z.number().int().positive() }),
+      ),
+    })
+    .optional(),
   lastPolledAt: z.string().nullable(),
   nextPollAt: z.string().nullable(),
   hasCredential: z.boolean(),

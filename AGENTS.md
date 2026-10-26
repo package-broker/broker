@@ -53,7 +53,7 @@ Publisher free text in package metadata (`description`, `deprecated`) is public 
 
 ## Validation commands
 
-- `pnpm check`: typecheck, lint, unit tests and build.
+- `pnpm check`: typecheck, lint, unit tests, build and required UI browser tests; needs Chromium (`pnpm --filter @package-broker/e2e exec playwright install chromium`).
 - `pnpm check:treeshake`: confirms each runtime bundle excludes code it must not ship.
 - `pnpm check:pack`: confirms the packed packages contain what they publish.
 - `pnpm smoke:cloudflare`: runs the Worker bundle in a local Workers simulator.

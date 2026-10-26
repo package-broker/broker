@@ -26,7 +26,7 @@ pnpm build
 pnpm test
 ```
 
-`pnpm check` runs all of them in one go. `pnpm format` rewrites files to the Prettier style that `pnpm lint` checks.
+`pnpm check` runs all of them plus required UI browser tests. It needs Chromium: run `pnpm --filter @package-broker/e2e exec playwright install chromium` first. `pnpm format` rewrites files to the Prettier style that `pnpm lint` checks.
 
 ## Developer Certificate of Origin
 

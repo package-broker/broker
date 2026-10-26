@@ -4,21 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it, type TestContext } from 'vitest';
 
-async function launchBrowser() {
-  const require = createRequire(new URL('../../e2e/package.json', import.meta.url));
-  const { chromium, expect: browserExpect } = await import(require.resolve('@playwright/test'));
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-  try {
-    browser = await chromium.launch();
-    const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-    return { browser, page, browserExpect };
-  } catch (error) {
-    await browser?.close();
-    if (/bootstrap_check_in.*Permission denied|Executable doesn't exist/.test(String(error)))
-      return undefined;
-    throw error;
-  }
-}
+import { createBrowserFixture } from './browser-fixture.js';
 
 const components = {
   menuDialog: `
@@ -80,7 +66,7 @@ const components = {
     `,
 };
 
-let fixture: Awaited<ReturnType<typeof launchBrowser>>;
+let fixture: Awaited<ReturnType<typeof createBrowserFixture>>;
 const bundles: Partial<Record<keyof typeof components, string>> = {};
 
 beforeAll(async () => {
@@ -89,7 +75,7 @@ beforeAll(async () => {
       stdin: {
         contents: `import React from 'react'; import { createRoot } from 'react-dom/client'; ${contents}`,
         loader: 'tsx',
-        resolveDir: fileURLToPath(new URL('.', import.meta.url)),
+        resolveDir: fileURLToPath(new URL('../src/', import.meta.url)),
       },
       bundle: true,
       write: false,
@@ -99,24 +85,17 @@ beforeAll(async () => {
     });
     bundles[name as keyof typeof components] = bundle.outputFiles[0]!.text;
   }
-  fixture = await launchBrowser();
+  fixture = await createBrowserFixture();
 }, 60_000);
 
 afterAll(async () => {
-  try {
-    await fixture?.page.close();
-  } finally {
-    await fixture?.browser.close();
-  }
+  await fixture?.close();
 }, 60_000);
 
 async function mounted(context: TestContext, component: keyof typeof components) {
   if (!fixture) context.skip('Chromium cannot start in this environment');
-  const { page, browserExpect } = fixture!;
-  await page.goto('about:blank');
-  await page.setContent('<div id="root"></div>');
-  await page.addScriptTag({ content: bundles[component]! });
-  return { page, browserExpect };
+  await fixture!.mount(bundles[component]!);
+  return fixture!;
 }
 
 it('renders the mounted sources fixture with all model state initialized without a browser', async () => {
@@ -128,7 +107,7 @@ it('renders the mounted sources fixture with all model state initialized without
     stdin: {
       contents: `import React from 'react'; import { renderToString } from 'react-dom/server'; ${contents}`,
       loader: 'tsx',
-      resolveDir: fileURLToPath(new URL('.', import.meta.url)),
+      resolveDir: fileURLToPath(new URL('../src/', import.meta.url)),
     },
     bundle: true,
     write: false,
@@ -245,12 +224,7 @@ describe('mounted review regressions', () => {
 it.for(['app', 'token'])('fixes the edited GitHub form in %s mode', async (mode, context) => {
   if (!fixture) context.skip('Chromium cannot start in this environment');
   const { page, browserExpect } = fixture!;
-  await page.goto('about:blank');
-  await page.setContent('<div id="root"></div>');
-  await page.evaluate((value: string) => {
-    Object.assign(globalThis, { authentication: value });
-  }, mode);
-  await page.addScriptTag({ content: bundles.githubForm! });
+  await fixture!.mount(bundles.githubForm!, { authentication: mode });
   await page.getByLabel('Replace type-specific configuration', { exact: true }).check();
   await browserExpect(page.locator('select[name="githubAuthentication"]')).toHaveCount(0);
   await browserExpect(page.locator('input[name="githubAuthentication"]')).toHaveValue(mode);
@@ -269,12 +243,7 @@ it.for(['app', 'token'])('fixes the edited GitHub form in %s mode', async (mode,
 it('offers both GitHub authentication modes when creating a source', async (context) => {
   if (!fixture) context.skip('Chromium cannot start in this environment');
   const { page, browserExpect } = fixture!;
-  await page.goto('about:blank');
-  await page.setContent('<div id="root"></div>');
-  await page.evaluate(() => {
-    Object.assign(globalThis, { creating: true });
-  });
-  await page.addScriptTag({ content: bundles.githubForm! });
+  await fixture!.mount(bundles.githubForm!, { creating: true });
   await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
   const authentication = page.locator('input[name="githubAuthentication"]:checked');
   await browserExpect(authentication).toHaveValue('app');
@@ -301,12 +270,7 @@ it.for([
   async ([reported, offered], context) => {
     if (!fixture) context.skip('Chromium cannot start in this environment');
     const { page, browserExpect } = fixture!;
-    await page.goto('about:blank');
-    await page.setContent('<div id="root"></div>');
-    await page.evaluate((vcsProviders: readonly string[]) => {
-      Object.assign(globalThis, { creating: true, vcsProviders });
-    }, reported);
-    await page.addScriptTag({ content: bundles.githubForm! });
+    await fixture!.mount(bundles.githubForm!, { creating: true, vcsProviders: reported });
     await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
     const provider = page.locator('select[name="config/provider"]');
     await browserExpect(provider).toHaveValue('github');
@@ -340,12 +304,7 @@ it('switches to an offered provider when the reported list arrives late', async 
 it('blocks empty Composer selection and opens Advanced to focus an invalid interval', async (context) => {
   if (!fixture) context.skip('Chromium cannot start in this environment');
   const { page, browserExpect } = fixture!;
-  await page.goto('about:blank');
-  await page.setContent('<div id="root"></div>');
-  await page.evaluate(() => {
-    Object.assign(globalThis, { creating: true });
-  });
-  await page.addScriptTag({ content: bundles.githubForm! });
+  await fixture!.mount(bundles.githubForm!, { creating: true });
   await page.getByRole('radio', { name: 'Composer repository', exact: false }).check();
   await page.getByLabel('Source name (required)', { exact: true }).fill('Composer');
   await page
@@ -371,12 +330,7 @@ it('blocks empty Composer selection and opens Advanced to focus an invalid inter
 it('preserves the name across ecosystems and submits only the chosen type fields', async (context) => {
   if (!fixture) context.skip('Chromium cannot start in this environment');
   const { page, browserExpect } = fixture!;
-  await page.goto('about:blank');
-  await page.setContent('<div id="root"></div>');
-  await page.evaluate(() => {
-    Object.assign(globalThis, { creating: true });
-  });
-  await page.addScriptTag({ content: bundles.githubForm! });
+  await fixture!.mount(bundles.githubForm!, { creating: true });
   await page.getByLabel('Source name (required)', { exact: true }).fill('Public packages');
   await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
   await page.getByLabel('GitHub App installation ID (required)', { exact: true }).fill('42');

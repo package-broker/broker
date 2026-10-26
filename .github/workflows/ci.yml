@@ -148,6 +148,9 @@ jobs:
       - run: pnpm build
       - run: pnpm bundle
       - run: pnpm --filter @package-broker/e2e exec playwright install --with-deps chromium
+      - run: pnpm check:ui-browser
+        env:
+          PB_UI_BROWSER_REQUIRED: '1'
       - run: CI=true node packages/e2e/scripts/ui-e2e.mjs
 
   treeshake:

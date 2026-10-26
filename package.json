@@ -14,7 +14,7 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc -b",
-    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "check": "pnpm typecheck && pnpm lint && pnpm test --exclude '**/test-support/**' --exclude '**/*.browser.test.ts' && pnpm build && pnpm check:ui-browser",
     "pb": "node packages/cli/dist/bin.js",
     "openapi:sync": "pnpm pb openapi --out packages/ui/openapi.json && node scripts/sync-openapi-document.mjs && pnpm --filter @package-broker/ui run gen:api && prettier --write packages/ui/src/api-types.ts",
     "bundle": "pnpm pb build --config broker.config.ts --target cloudflare && pnpm pb build --config broker.config.ts --target node",
@@ -26,7 +26,8 @@
     "smoke:node": "node scripts/node-bundle-smoke.mjs",
     "smoke:docker": "node scripts/docker-smoke.mjs",
     "stage:prebuilt": "node scripts/stage-prebuilt.mjs",
-    "bench:install": "node scripts/bench-install.mjs"
+    "bench:install": "node scripts/bench-install.mjs",
+    "check:ui-browser": "node packages/ui/test-support/run-browser-tests.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

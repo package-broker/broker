@@ -187,7 +187,7 @@ export function describePlatformPorts(
 export function renderBuildManifest(
   configPath: string,
   orderedPluginIds: readonly string[],
-  migrations?: readonly MigrationSource[],
+  migrations?: readonly Pick<MigrationSource, 'id' | 'checksum'>[],
   platform: NodeJS.Platform = process.platform,
   platformPorts?: PlatformPortConfig | null,
 ): string {

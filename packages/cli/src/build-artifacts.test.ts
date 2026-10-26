@@ -364,6 +364,36 @@ describe('build with platformPorts', () => {
     return JSON.parse(await readFile(path.join(outDir, 'generated', 'manifest.json'), 'utf8'));
   }
 
+  it.each(['node', 'cloudflare'] as const)(
+    'bundles the expected migration metadata for %s readiness',
+    async (target) => {
+      const configPath = await writeConfig(target, {
+        node: NODE_PORTS,
+        cloudflare: CLOUDFLARE_PORTS,
+      });
+      await writeFile(runtimeEntry, "export { migrations } from '#pb-manifest';\n");
+      const result = await build({ configPath, target, cwd: project, runtimeEntry });
+      const built = await import(pathToFileURL(result.bundle).href);
+      const metadata = await readManifest(result.outDir);
+      const expected = (metadata['migrations'] as { id: string; checksum: string }[]).map(
+        ({ id, checksum }) => ({ id, checksum }),
+      );
+      expect(expected.length).toBeGreaterThan(0);
+      expect(
+        built.migrations.map(({ id, checksum }: { id: string; checksum: string }) => ({
+          id,
+          checksum,
+        })),
+      ).toEqual(expected);
+      if (target === 'cloudflare') {
+        expect(built.migrations).toEqual(expected);
+        expect(await readFile(result.bundle, 'utf8')).not.toContain('CREATE TABLE');
+      } else {
+        expect(built.migrations[0].sql).toContain('CREATE TABLE');
+      }
+    },
+  );
+
   it.each([
     ['node', false],
     ['cloudflare', false],

@@ -1,5 +1,6 @@
 import {
   mcp,
+  migrations,
   observability,
   platformPorts,
   plugins,
@@ -16,6 +17,7 @@ declare module '#pb-manifest' {
 
 export default createWorker(plugins, {
   platformPorts,
+  migrations,
   observability,
   ...(registry === undefined ? {} : { registry }),
   ...(tokens === undefined ? {} : { tokens }),

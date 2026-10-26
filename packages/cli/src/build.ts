@@ -270,7 +270,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     renderBuildManifest(
       `./${path.relative(generated, configPath)}`,
       plugins.map((plugin) => plugin.id),
-      target === 'node' ? sources : undefined,
+      target === 'node' ? sources : sources.map(({ id, checksum }) => ({ id, checksum })),
       process.platform,
       platformPorts,
     ),

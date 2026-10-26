@@ -175,6 +175,33 @@ Use the returned `worker_url` as `<broker-origin>`. Open `<broker-origin>/_pb/ui
    <!-- source: packages/ui/src/pages/tokens.tsx:973 -->
    <!-- source: scripts/docker-smoke.mjs:724 -->
 
+## Verify the deployment
+
+Run a separate smoke check from the broker checkout after creating the project; smoke reads the inventory under `.pb/state/cloudflare` in the current directory. In the same Bash terminal, replace `<worker-name>` with the name you chose during setup and `<project>` with your project slug. Load the Cloudflare API token again at the hidden prompt; `CLOUDFLARE_ACCOUNT_ID` must still identify the same account. In a new terminal, re-export `CLOUDFLARE_ACCOUNT_ID` with that account ID before running the check.
+
+```sh
+read -rs -p 'Cloudflare API token: ' CLOUDFLARE_API_TOKEN
+printf '\n'
+export CLOUDFLARE_API_TOKEN
+pnpm pb cloudflare smoke --worker-name '<worker-name>' --project '<project>' --json
+unset CLOUDFLARE_API_TOKEN
+```
+
+<!-- source: packages/cli/src/cli.ts:41 -->
+<!-- source: packages/cli/src/commands/cloudflare/api.ts:148 -->
+
+Expected output, selected fields:
+
+```json
+{ "command": "smoke", "status": "ok", "error": null }
+```
+
+Without `PB_SMOKE_TOKEN`, this checks readiness and rejection of unauthenticated Composer and npm requests. The install below verifies authenticated Composer access. On a later deployment, a failed smoke rolls the Worker back to the previous version unless `--no-rollback` is passed. On a first-deployment smoke failure there is no earlier version to restore; retain the resources and inspect the reported checks.
+
+<!-- source: packages/cli/src/commands/cloudflare/smoke.ts:416 -->
+<!-- source: packages/cli/src/commands/cloudflare/smoke.ts:462 -->
+<!-- source: packages/cli/src/commands/cloudflare/smoke.ts:724 -->
+
 ## Install a private package
 
 If you do not have an application yet, create an empty directory outside the broker checkout, open a terminal there, and use a local editor to create `composer.json` containing:
@@ -214,6 +241,7 @@ Add `auth.json` to your application's `.gitignore`. With a private local editor,
 Add the package, then verify an install from the resulting lock file:
 
 ```sh
+chmod 600 auth.json
 composer require '<vendor>/<package>:<version>' --no-plugins --no-scripts
 composer install --no-plugins --no-scripts
 ```
@@ -225,6 +253,10 @@ Check that `composer.lock` contains the private package and a distribution URL o
 
 <!-- source: packages/core/src/registry/composer/render.ts:94 -->
 
+If an initial metadata fill returns 503, wait for the response's `Retry-After` interval and repeat the failed Composer command. Keep the broker repository configured so the private package still comes through it.
+
+<!-- source: packages/core/src/registry/composer/routes.ts:63 -->
+
 ## Sign-in for a team
 
 Team sign-in uses Cloudflare Access or an OpenID Connect provider such as Dex; grants to the provider's groups give users project access. Evaluating alone needs no identity provider: use the local administrator login. See the [access model](../reference/access-model.md) for group grants and token boundaries.
@@ -232,6 +264,12 @@ Team sign-in uses Cloudflare Access or an OpenID Connect provider such as Dex; g
 <!-- source: packages/core/src/identity/port.ts:131 -->
 <!-- source: packages/core/src/identity/providers.test.ts:26 -->
 <!-- source: docs/reference/access-model.md:31 -->
+
+## What you operate
+
+You own the Cloudflare account and billing, API token, saved master key, private installation inventory, deployed configuration, backups and restore checks. Preserve D1 data, R2 objects and the matching key together. Follow [Restore rehearsal](../operations/restore-rehearsal.md) to check recovery.
+
+<!-- source: docs/operations/restore-rehearsal.md:1 -->
 
 ## Next steps
 

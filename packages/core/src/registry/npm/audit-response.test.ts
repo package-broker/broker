@@ -159,6 +159,36 @@ describe('npm audit response null tolerance', () => {
 });
 
 describe('npm audit response control characters', () => {
+  it('strips bidi and format characters from every text field', () => {
+    const format = '\u202e\u200b\u2066\u2067\u2068\u2069';
+    expect(
+      sanitize({
+        lodash: [
+          {
+            id: `GHSA-${format}x`,
+            title: `Public${format} advisory`,
+            vulnerable_versions: `<${format}2.0.0`,
+            cwe: [`CWE-${format}77`],
+            cvss: { score: 1, vectorString: `CVSS:${format}3.1` },
+          },
+        ],
+      })?.body.lodash,
+    ).toEqual([
+      {
+        id: 'GHSA-x',
+        title: 'Public advisory',
+        vulnerable_versions: '<2.0.0',
+        cwe: ['CWE-77'],
+        cvss: { score: 1, vectorString: 'CVSS:3.1' },
+      },
+    ]);
+  });
+
+  it.each(['', '\u001b\u200b\u202e\u2066\u2069', ' \t\n'])(
+    'rejects the entire response when a CWE entry is empty after stripping: %j',
+    (cwe) => expect(sanitize({ lodash: [ADVISORY, { id: 2, cwe: [cwe] }] })).toBeNull(),
+  );
+
   const ESC = '\u001b';
   const OSC = `${ESC}]8;;https://evil.test${ESC}\\link${ESC}]8;;${ESC}\\`;
   const C1 = '\u009b31m';

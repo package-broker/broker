@@ -9,7 +9,11 @@ import {
   type NpmAuditAuthorizer,
   type NpmAuditRef,
 } from '../../db/vulnerability.js';
-import type { Observability } from '../../platform/observability.js';
+import {
+  NPM_AUDIT_EVENT,
+  type NPM_AUDIT_REASON_CODES,
+  type Observability,
+} from '../../platform/observability.js';
 import { UpstreamError, type PolicyFetch } from '../../sources/policy-fetch.js';
 import { sanitizeNpmAuditResponse, type NpmAuditAdvisory } from './audit-response.js';
 
@@ -75,17 +79,7 @@ async function boundedBody(stream: ReadableStream<Uint8Array> | null): Promise<U
   return bytes;
 }
 
-type Reason =
-  | 'ok'
-  | 'empty'
-  | 'unsupported'
-  | 'verify_overflow'
-  | 'verify_failed'
-  | 'upstream_unavailable'
-  | 'upstream_rate_limited'
-  | 'upstream_status'
-  | 'upstream_protocol'
-  | 'aborted';
+type Reason = (typeof NPM_AUDIT_REASON_CODES)[number];
 
 export async function forwardNpmAudit(
   entries: NpmAuditEntries,
@@ -234,7 +228,7 @@ export async function forwardNpmAudit(
   } finally {
     dependencies.observability.log({
       level: 'info',
-      event: 'registry.npm_audit',
+      event: NPM_AUDIT_EVENT,
       outcome: request.signal.aborted
         ? 'aborted'
         : reason === 'ok' || reason === 'empty'

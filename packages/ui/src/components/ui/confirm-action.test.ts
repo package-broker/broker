@@ -56,6 +56,27 @@ describe('destructive confirmation', () => {
     expect(v.onConfirm).toHaveBeenCalledTimes(1);
     expect(v.setOpen).toHaveBeenCalledWith(false);
   });
+  it('supports a controlled dialog owned outside a menu popup without adding a trigger', () => {
+    const onOpenChange = vi.fn();
+    const onConfirm = vi.fn();
+    vi.mocked(useState).mockReturnValueOnce([false, vi.fn()]);
+    const tree = ConfirmAction({
+      action: 'Pause',
+      target: 'Alpha',
+      scope: 'Organization',
+      description: 'Stops resolution.',
+      open: true,
+      onOpenChange,
+      hideTrigger: true,
+      onConfirm,
+    });
+    const html = renderToString(tree);
+    expect(html).toContain('<dialog');
+    expect(html).not.toContain('>Pause</button>');
+    click(find(tree, (props) => props.children === 'Cancel'));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
   it('cancels without sending and wires dialog dismissal', () => {
     const v = view(true);
     click(find(v.tree, (props) => props.children === 'Cancel'));

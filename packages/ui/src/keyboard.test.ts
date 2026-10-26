@@ -1,9 +1,8 @@
 import { isValidElement, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Button } from './components/ui/button.js';
-import { Dialog, DialogContent, DialogFooter } from './components/ui/dialog.js';
+import { DialogContent, DialogFooter } from './components/ui/dialog.js';
 import { ConfirmAction } from './components/ui/confirm-action.js';
-import { DropdownMenu } from './components/ui/dropdown-menu.js';
 import { Textarea } from './components/ui/textarea.js';
 import { SourceForm } from './pages/sources/source-form.js';
 
@@ -11,6 +10,7 @@ vi.mock('react', async (original) => {
   const actual = await original<typeof import('react')>();
   return {
     ...actual,
+    useCallback: vi.fn((callback) => callback),
     useId: vi.fn(() => 'dialog-id'),
     useContext: vi.fn(),
     useEffect: vi.fn(),
@@ -38,7 +38,7 @@ function mountDialog(
   initial?: 'body' | 'null',
 ) {
   vi.useFakeTimers();
-  const body = {};
+  const body = { closest: () => null };
   const listeners = new Map<string, () => void>();
   const element = () => ({
     isConnected: true,
@@ -210,38 +210,6 @@ it('maps native Escape cancellation to closing the dialog', () => {
   expect(v.setOpen).toHaveBeenCalledWith(false);
 });
 
-it('consumes Escape in a DropdownMenu rendered inside a Dialog', () => {
-  const menuTree = DropdownMenu({ children: 'Menu item' });
-  const wrapper = Dialog({ open: true, children: menuTree });
-  const v = mountDialog([], wrapper);
-  expect(find(v.tree, 'details')).toBeDefined();
-  const cancel = find(v.tree, 'dialog')!.onCancel as (event: unknown) => void;
-  const nativeDialog = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
-  const summary = { focus: vi.fn() };
-  const menu = {
-    open: true,
-    contains: () => true,
-    closest: () => nativeDialog,
-    querySelector: () => summary,
-  };
-  const event = {
-    key: 'Escape',
-    defaultPrevented: false,
-    currentTarget: menu,
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
-  };
-  menuTree.props.onKeyDown!(event as never);
-  expect(menu.open).toBe(false);
-  expect(summary.focus).toHaveBeenCalledOnce();
-  expect(event.preventDefault).toHaveBeenCalledOnce();
-  expect(event.stopPropagation).toHaveBeenCalledOnce();
-  expect(nativeDialog.addEventListener).not.toHaveBeenCalled();
-  expect(v.setOpen).not.toHaveBeenCalled();
-  cancel({ defaultPrevented: false, preventDefault: vi.fn() });
-  expect(v.setOpen).toHaveBeenCalledWith(false);
-});
-
 it('waits for a busy trigger to become enabled', async () => {
   const v = mountDialog();
   v.opener.disabled = true;
@@ -271,7 +239,9 @@ it('falls back when an async delete detaches the trigger after close', async () 
 it('uses the summary when the opener is inside closed details', async () => {
   const v = mountDialog();
   const summary = v.element();
-  v.opener.closest.mockReturnValue({ querySelector: () => summary });
+  v.opener.closest.mockImplementation((selector) =>
+    selector === 'details:not([open])' ? { querySelector: () => summary } : null,
+  );
   v.opener.rendered = false;
   v.cleanup();
   await Promise.resolve();

@@ -162,6 +162,14 @@ export async function go(page: Page, route: string, query = ''): Promise<void> {
 }
 
 export async function openDetails(page: Page, label: string): Promise<void> {
+  if (label === 'More' || label === 'Account') {
+    const trigger = page.getByRole('button', {
+      name: label === 'More' ? /^More actions for / : label,
+    });
+    await expect(trigger).toBeVisible();
+    if ((await trigger.getAttribute('aria-expanded')) !== 'true') await trigger.click();
+    return;
+  }
   const summary = page.locator('summary').filter({ hasText: new RegExp(`^${label}$`) });
   await expect(summary).toBeVisible();
   const open = await summary.evaluate((node) => node.parentElement?.hasAttribute('open'));

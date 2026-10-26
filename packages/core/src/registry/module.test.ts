@@ -167,7 +167,11 @@ describe('registry job attachment', () => {
   it('ignores job dependencies without the job port', () => {
     const h = harness({ jobs: false });
     const built = createRegistryModule({ ...h.deps, registryJobs });
-    expect(Object.keys(built).sort()).toEqual(['ecosystemRoutes', 'visibilityPort']);
+    expect(Object.keys(built).sort()).toEqual([
+      'ecosystemRoutes',
+      'probePackage',
+      'visibilityPort',
+    ]);
     expect(h.jobs.enqueue).not.toHaveBeenCalled();
   });
 });
@@ -402,7 +406,11 @@ describe('createRegistryModule assembly', () => {
   it('registers no job and calls the job port zero times during assembly', () => {
     const h = harness();
     const built = h.module();
-    expect(Object.keys(built).sort()).toEqual(['ecosystemRoutes', 'visibilityPort']);
+    expect(Object.keys(built).sort()).toEqual([
+      'ecosystemRoutes',
+      'probePackage',
+      'visibilityPort',
+    ]);
     expect(h.jobs.enqueue).not.toHaveBeenCalled();
     expect(h.jobs.get).not.toHaveBeenCalled();
   });
@@ -1229,5 +1237,41 @@ describe('unbindable source', () => {
     const syncDeps = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0];
     expect(await syncDeps.planFill(org, 'src-1', '@acme/x')).toBeNull();
     expect(t.write).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('manual package probe', () => {
+  it.each([
+    ['outside the configured scopes', '@outside/widget', true],
+    ['without a registered-name match', '@acme/widget', false],
+  ] as const)(
+    'refuses private registry names %s without an upstream request',
+    async (_label, key, covered) => {
+      const h = harness();
+      vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+        ...npmjsSource,
+        type: 'npm_registry',
+        url: 'https://registry.acme.test',
+        configJson: JSON.stringify({ scopes: ['@acme'] }),
+      });
+      vi.mocked(h.deps.catalogue.covers).mockResolvedValue(covered);
+      expect(await h.module().probePackage(org, 'src-1', key, new AbortController().signal)).toBe(
+        'unsupported_package',
+      );
+      expect(h.policyFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    null,
+    { ...npmjsSource, status: 'paused' },
+    { ...npmjsSource, type: 'npm_registry', configJson: '{' },
+  ])('keeps missing, paused and broken source failures unavailable', async (source) => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(source as SourceRecord | null);
+    expect(
+      await h.module().probePackage(org, 'src-1', '@acme/widget', new AbortController().signal),
+    ).toBe('unavailable');
+    expect(h.policyFetch).not.toHaveBeenCalled();
   });
 });

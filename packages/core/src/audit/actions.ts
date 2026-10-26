@@ -1,4 +1,4 @@
-import { MAX_KEY_LENGTH, packageKey } from '../catalogue/names.js';
+import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
 import { isUlid } from '../ids.js';
 import { redactValue } from './redact.js';
@@ -38,6 +38,7 @@ export const AUDIT_ACTIONS = [
   'source.update',
   'source.pause',
   'source.sync_requested',
+  'source.package_requested',
   'source.removal_accepted',
   'source.removal_applied',
   'source.resume',
@@ -120,6 +121,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   ],
   'source.pause': [],
   'source.sync_requested': [],
+  'source.package_requested': ['package_name'],
   'source.removal_accepted': ['source_id', 'refused_at', 'absent', 'listed', 'successful'],
   'source.removal_applied': ['source_id', 'absent', 'listed'],
   'source.resume': [],
@@ -201,7 +203,10 @@ function stringLimit(value: string, field: string): number {
   if (field === 'package_name' && value.length <= MAX_KEY_LENGTH) {
     for (const ecosystem of ['composer', 'npm'] as const) {
       try {
-        if (packageKey(value, { ecosystem }) === value) return MAX_KEY_LENGTH;
+        if (
+          displayName(packageKey(value, { ecosystem, legacyCase: ecosystem === 'npm' })) === value
+        )
+          return MAX_KEY_LENGTH;
       } catch {
         // The other ecosystem may accept this name.
       }

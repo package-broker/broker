@@ -62,8 +62,8 @@ const AUTH_JOBS = [
   'core:pat-offboarding-sweep:v1',
 ];
 
-function remote(ecosystem: 'npm' | 'composer', count: number) {
-  const key = ecosystem === 'npm' ? 'widget' : 'acme/widget';
+function remote(ecosystem: 'npm' | 'composer', count: number, requestedKey?: string) {
+  const key = requestedKey ?? (ecosystem === 'npm' ? 'widget' : 'acme/widget');
   const versions = Array.from({ length: count }, (_, n) => `1.0.${n}`);
   const calls: Request[] = [];
   const state = { changed: false, notModified: false };
@@ -382,6 +382,168 @@ describe('Node package-sync wiring', () => {
       initiatorTokenId: null,
     });
   }
+
+  it.each([
+    ['npm', 'npmjs_proxy', 'widget'],
+    ['composer', 'packagist_proxy', 'acme/widget'],
+    ['npm', 'npm_registry', '@acme/widget'],
+  ] as const)(
+    'manually adds a %s package from %s and publishes its versions through the existing sync job',
+    async (ecosystem, type, key) => {
+      await sql(
+        "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'project:sources:write' FROM role WHERE org_id = ? AND key = 'reader'",
+        [orgId],
+      );
+      if (type === 'npm_registry') {
+        await sql('UPDATE source SET type = ?, config_json = ? WHERE org_id = ? AND id = ?', [
+          type,
+          JSON.stringify({ scopes: ['@acme'] }),
+          orgId,
+          sources.npm,
+        ]);
+        await sql(
+          "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'npm', '@acme/*')",
+          [ulid(), orgId, sources.npm],
+        );
+      }
+      const upstream = remote(ecosystem, 75, key);
+      const kernel = await boot(upstream.transport);
+      const add = () =>
+        kernel.fetch(
+          new Request(`${ORIGIN}/_pb/projects/alpha/sources/${sources[ecosystem]}/packages`, {
+            method: 'POST',
+            headers: {
+              cookie,
+              origin: ORIGIN,
+              'content-type': 'application/json',
+              'x-csrf-token': cookie.split('__Host-pb_csrf=')[1]!,
+            },
+            body: JSON.stringify({ name: upstream.key }),
+          }),
+        );
+      const response = await add();
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as { name: string; state: string; jobId: string };
+      expect(body).toEqual({ name: upstream.key, state: 'queued', jobId: expect.any(String) });
+      const queued = await sql<{ payload_json: string }>(
+        'SELECT payload_json FROM job WHERE org_id = ? AND id = ?',
+        [orgId, body.jobId],
+      );
+      expect(JSON.parse(queued[0]!.payload_json)).toEqual({
+        sourceId: sources[ecosystem],
+        key: upstream.key,
+      });
+      await startLoop();
+      await completed();
+      expect(
+        await sql(
+          'SELECT id FROM package WHERE org_id = ? AND source_id = ? AND name = ? AND last_synced_at IS NOT NULL',
+          [orgId, sources[ecosystem], upstream.key],
+        ),
+      ).toHaveLength(1);
+      expect(
+        await sql(
+          'SELECT v.id FROM version v JOIN package p ON p.id = v.package_id WHERE v.org_id = ? AND p.org_id = ? AND p.source_id = ?',
+          [orgId, orgId, sources[ecosystem]],
+        ),
+      ).toHaveLength(75);
+      const list = await kernel.fetch(
+        new Request(`${ORIGIN}/_pb/projects/alpha/packages`, { headers: { cookie } }),
+      );
+      expect(list.status).toBe(200);
+      expect(await list.text()).toContain(upstream.key);
+      const upstreamCalls = upstream.calls.length;
+      const repeated = await add();
+      expect(repeated.status).toBe(200);
+      expect(await repeated.json()).toEqual({ name: upstream.key, state: 'present' });
+      expect(upstream.calls).toHaveLength(upstreamCalls);
+    },
+  );
+
+  it.each(['npm', 'composer', 'private'] as const)(
+    'returns a %s upstream 404 without creating a job',
+    async (kind) => {
+      const ecosystem = kind === 'private' ? 'npm' : kind;
+      if (kind === 'private') {
+        await sql('UPDATE source SET type = ?, config_json = ? WHERE org_id = ? AND id = ?', [
+          'npm_registry',
+          JSON.stringify({ scopes: ['@acme'] }),
+          orgId,
+          sources.npm,
+        ]);
+        await sql(
+          "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'npm', '@acme/*')",
+          [ulid(), orgId, sources.npm],
+        );
+      }
+      await sql(
+        "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'project:sources:write' FROM role WHERE org_id = ? AND key = 'reader'",
+        [orgId],
+      );
+      const kernel = await boot(async () =>
+        Response.json(ecosystem === 'npm' ? { error: 'Not found' } : { packages: [] }, {
+          status: 404,
+        }),
+      );
+      const response = await kernel.fetch(
+        new Request(`${ORIGIN}/_pb/projects/alpha/sources/${sources[ecosystem]}/packages`, {
+          method: 'POST',
+          headers: {
+            cookie,
+            origin: ORIGIN,
+            'content-type': 'application/json',
+            'x-csrf-token': cookie.split('__Host-pb_csrf=')[1]!,
+          },
+          body: JSON.stringify({
+            name:
+              kind === 'private'
+                ? '@acme/missing'
+                : ecosystem === 'npm'
+                  ? 'missing'
+                  : 'acme/missing',
+          }),
+        }),
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ error: { code: 'package_not_found' } });
+      expect(await syncRows()).toEqual([]);
+    },
+  );
+
+  it('hides a source belonging to another organization without querying upstream', async () => {
+    await sql(
+      "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'project:sources:write' FROM role WHERE org_id = ? AND key = 'reader'",
+      [orgId],
+    );
+    const foreign = await createOrganizationBootstrap(db.executor).bootstrap({
+      id: ulid(),
+      slug: 'foreign',
+      name: 'Foreign',
+      now: new Date().toISOString(),
+    });
+    const sourceId = ulid();
+    await sql(
+      "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'foreign-npm', 'npm', 'npmjs_proxy')",
+      [sourceId, foreign.id],
+    );
+    const transport = vi.fn(async () => Response.json({}));
+    const kernel = await boot(transport);
+    const response = await kernel.fetch(
+      new Request(`${ORIGIN}/_pb/projects/alpha/sources/${sourceId}/packages`, {
+        method: 'POST',
+        headers: {
+          cookie,
+          origin: ORIGIN,
+          'content-type': 'application/json',
+          'x-csrf-token': cookie.split('__Host-pb_csrf=')[1]!,
+        },
+        body: JSON.stringify({ name: 'widget' }),
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(transport).not.toHaveBeenCalled();
+    expect(await syncRows()).toEqual([]);
+  });
 
   it.each([false, true])(
     'opens the Packagist bearer credential only when githubToken is %s',

@@ -43,9 +43,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 57 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(57);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(57);
+  it('has 58 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(58);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(58);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -1324,4 +1324,15 @@ describe('import rollback audit counts', () => {
       reason: 'unknown_field',
     });
   });
+});
+
+describe('source package request audit', () => {
+  it.each(['JSONStream', '@scope/' + 'A'.repeat(207)])(
+    'records a validated legacy npm display name: %s',
+    (name) => {
+      const result = build('source.package_requested', { package_name: { new: name } });
+      expect(result.ok).toBe(true);
+      expect(JSON.parse(payloadOf(result)).changes).toEqual({ package_name: { new: name } });
+    },
+  );
 });

@@ -1,5 +1,6 @@
 import type { ApiCall } from '../api/idempotency.js';
 import type { AuditEvent } from '../audit/actions.js';
+import { AUDIT_GENESIS_HASH, canonicalRow } from '../audit/chain.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   REAUTH_WINDOW_MS,
@@ -33,9 +34,18 @@ const call: ApiCall = {
 
 const ctx = orgContext('org-a');
 const NOW = '2026-10-16T12:00:00.000Z';
-const ANCHOR = 'oidc:https://anchor-sentinel-5b1e.example.test';
+const ISSUER = 'https://issuer-sentinel-2a6c.example.test';
+const ANCHOR = `oidc:${ISSUER}`;
+const ADMIN_EMAIL = 'admin-email-sentinel-8d4f@example.test';
+const DISPLAY_NAME = 'Display name sentinel 6e2b';
 const SUBJECT = 'subject-sentinel-7f3a';
 const PROVIDER = 'prov-sentinel-c9d2';
+const IDP_DETAILS = {
+  issuer: ISSUER,
+  subject: SUBJECT,
+  email: ADMIN_EMAIL,
+  displayName: DISPLAY_NAME,
+};
 
 function authenticated(
   overrides: {
@@ -56,7 +66,7 @@ function authenticated(
       expiresAt: '2026-10-16T20:00:00.000Z',
       lastSeenAt: NOW,
       reauthAt: overrides.reauthAt === undefined ? NOW : overrides.reauthAt,
-      user: { id: userId, email: 'admin@example.test', displayName: null },
+      user: { id: userId, ...IDP_DETAILS },
     },
     principal:
       overrides.principal === undefined ? { kind: 'user', id: userId } : overrides.principal,
@@ -66,7 +76,7 @@ function authenticated(
 function snapshot(overrides: Partial<ActorAccessSnapshot> = {}): ActorAccessSnapshot {
   return {
     session: { id: 'session-1', userId: 'admin-1' },
-    user: { id: 'admin-1' },
+    user: { id: 'admin-1', ...IDP_DETAILS },
     organizationPermissions: ['org:users:write', 'org:users:read'],
     projectPermissions: [],
     protectedHolder: true,
@@ -933,15 +943,33 @@ describe('unblockIdentity refusals', () => {
 });
 
 describe('identity audit events', () => {
-  const ADMIN_EMAIL = 'admin@example.test';
+  const auditRequest = { ...REQUEST, ...IDP_DETAILS };
+  const auditUnblock = { ...UNBLOCK, ...IDP_DETAILS, issuer: ANCHOR };
 
   function expectNoIdpDetail(event: AuditEvent | undefined): void {
     expect(event).toBeDefined();
-    for (const text of [serialized(event), event!.payloadJson]) {
-      expect(text).not.toContain(SUBJECT);
-      expect(text).not.toContain(ANCHOR);
-      expect(text).not.toContain(ADMIN_EMAIL);
-      expect(text).not.toContain('@');
+    const row = event!;
+    const canonical = canonicalRow({
+      id: row.id,
+      org_id: ctx.orgId,
+      seq: 1,
+      prev_hash: AUDIT_GENESIS_HASH,
+      hash: AUDIT_GENESIS_HASH,
+      created_at: row.occurredAt,
+      actor_type: row.actor.type,
+      actor_id: row.actor.id,
+      token_selector: row.tokenSelector,
+      source_ip: row.sourceIp,
+      action: row.action,
+      target_type: row.target.type,
+      target_id: row.target.id,
+      project_id: row.projectId,
+      payload_json: row.payloadJson,
+    });
+    for (const text of [serialized(row), row.payloadJson, canonical]) {
+      for (const detail of [ISSUER, SUBJECT, ANCHOR, ADMIN_EMAIL, DISPLAY_NAME, '@']) {
+        expect(text).not.toContain(detail);
+      }
     }
   }
 
@@ -951,7 +979,7 @@ describe('identity audit events', () => {
 
   it('names the block, not the IdP subject, as the unblock target and carries the provider', async () => {
     const { service, calls } = setupUnblock();
-    await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), UNBLOCK, call);
+    await service.unblockIdentity(ctx, authenticated(), snapshot(), fence(), auditUnblock, call);
     expect(calls[0]?.audit).toMatchObject({
       action: 'identity.unblock',
       actor: { type: 'user', id: 'admin-1' },
@@ -968,12 +996,13 @@ describe('identity audit events', () => {
 
   it('targets the affected broker user on the unlink and block rows and carries the provider', async () => {
     const { service, calls } = setup();
-    await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), REQUEST, call);
+    await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), auditRequest, call);
     const audit = calls[0]?.audit;
     for (const [event, action] of [
       [audit?.unlink, 'identity.unlink'],
       [audit?.block, 'identity.block'],
     ] as const) {
+      expectNoIdpDetail(event);
       expect(event).toMatchObject({
         action,
         actor: { type: 'user', id: 'admin-1' },
@@ -985,14 +1014,13 @@ describe('identity audit events', () => {
         request_id: call.audit.requestId,
         changes: { provider: { new: PROVIDER } },
       });
-      expectNoIdpDetail(event);
     }
     expect(audit?.unlink.id).not.toBe(audit?.block.id);
   });
 
   it('names the user whose identity is unlinked, not the acting admin', async () => {
     const { service, calls } = setup();
-    const request = { ...REQUEST, userId: 'user-77' };
+    const request = { ...auditRequest, userId: 'user-77' };
     await service.unlinkIdentity(ctx, authenticated(), snapshot(), fence(), request, call);
     expect(calls[0]?.audit.unlink.target).toEqual({ type: 'user', id: 'user-77' });
     expect(calls[0]?.audit.block.target).toEqual({ type: 'user', id: 'user-77' });
@@ -1012,7 +1040,7 @@ describe('identity audit events', () => {
         authenticated(),
         snapshot(),
         fence(),
-        { ...REQUEST, provider },
+        { ...auditRequest, provider },
         call,
       ),
     ).toEqual({ ok: true });
@@ -1023,7 +1051,7 @@ describe('identity audit events', () => {
         authenticated(),
         snapshot(),
         fence(),
-        { ...UNBLOCK, provider },
+        { ...auditUnblock, provider },
         call,
       ),
     ).toEqual({ ok: true });

@@ -43,7 +43,7 @@ const VECTOR_PASSWORD_HASH =
   'pbkdf2-sha256$i=100000$v=1$oKGio6SlpqeoqaqrrK2urw$K7MuJuKUZ7oO7dy0yZlMHaJS4zt5QunqAXSi_Zf584U';
 
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-const defaultOutDir = join(repoRoot, '.pb', 'cloudflare');
+const defaultOutDir = process.env.SMOKE_WORKER_DIR ?? join(repoRoot, '.pb', 'cloudflare');
 const workerScript =
   process.env.SMOKE_WORKER_SCRIPT === undefined
     ? join(defaultOutDir, 'worker.js')

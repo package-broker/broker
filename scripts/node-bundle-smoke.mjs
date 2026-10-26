@@ -30,7 +30,7 @@ import {
 import { checkUiBundle } from '../packages/runtime-cloudflare/scripts/ui-bundle-regression.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SOURCE = join(REPO_ROOT, '.pb', 'node');
+const SOURCE = process.env.SMOKE_NODE_DIR ?? join(REPO_ROOT, '.pb', 'node');
 const READY_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 200;
 const REQUEST_TIMEOUT_MS = 2_000;

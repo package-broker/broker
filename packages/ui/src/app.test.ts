@@ -347,7 +347,7 @@ describe('session restoration', () => {
   });
 });
 
-it('uses a native disclosure for account actions without inline styles', () => {
+it('renders an accessible account menu trigger without inline styles', () => {
   const html = renderToString(
     createElement(
       DropdownMenu,
@@ -360,8 +360,9 @@ it('uses a native disclosure for account actions without inline styles', () => {
       ),
     ),
   );
-  expect(html).toContain('<details');
-  expect(html).toContain('<summary');
+  expect(html).toContain('aria-haspopup="menu"');
+  expect(html).toContain('aria-expanded="false"');
+  expect(html).not.toContain('<details');
   expect(html).not.toMatch(/\sstyle=|<style\b/);
 });
 

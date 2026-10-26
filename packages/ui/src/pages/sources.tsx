@@ -946,8 +946,26 @@ export function SourceActions({
   model: SourcesModel;
   busy: boolean;
 }) {
+  const [pauseSource, setPauseSource] = useState<Source | null>(null);
+  useEffect(() => {
+    if (pauseSource && (pauseSource.id !== source.id || pauseSource.status !== source.status))
+      setPauseSource(null);
+  }, [pauseSource, source.id, source.status]);
   const owned = model.project === null ? source.projectId === null : source.projectId !== null;
   const organizationProject = model.project === null && source.projectId !== null;
+  const enableDenied =
+    (owned || organizationProject) &&
+    source.status === 'paused' &&
+    !isProxy(source) &&
+    model.enableNeedsAdmin(source);
+  const enableConflict = model.snapshot().enableConflicts.includes(source.id);
+  const explanationId = `source-actions-note-${source.id}`;
+  const explanation =
+    !owned && !organizationProject
+      ? 'Manage this organization source in organization scope.'
+      : [enableDenied && ENABLE_ADMIN_MESSAGE, enableConflict && ENABLE_CONFLICT_MESSAGE]
+          .filter(Boolean)
+          .join(' ');
   return (
     <>
       {owned ? (
@@ -967,7 +985,9 @@ export function SourceActions({
         </>
       ) : null}
       <DropdownMenu>
-        <DropdownMenuTrigger>More</DropdownMenuTrigger>
+        <DropdownMenuTrigger aria-label={`More actions for ${source.name}`}>
+          More
+        </DropdownMenuTrigger>
         <DropdownMenuContent className="grid gap-1">
           {owned || organizationProject ? (
             <>
@@ -976,31 +996,23 @@ export function SourceActions({
                 isProxy(source) ||
                 !model.enableNeedsAdmin(source) ? (
                 source.status === 'paused' ? (
-                  <Button
-                    type="button"
-                    variant="outline"
+                  <DropdownMenuItem
                     disabled={busy}
+                    aria-describedby={enableConflict ? explanationId : undefined}
                     onClick={() => void model.togglePause(source)}
                   >
                     Enable
-                  </Button>
+                  </DropdownMenuItem>
                 ) : (
-                  <ConfirmAction
-                    key={`${source.id}:${source.status}`}
-                    action="Pause"
-                    target={`${source.name} (${source.id})`}
-                    scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
-                    description="Pausing this source stops it from resolving packages in this scope. You can enable it again later."
-                    disabled={busy}
-                    onConfirm={() => void model.togglePause(source)}
-                  />
+                  <DropdownMenuItem disabled={busy} onClick={() => setPauseSource(source)}>
+                    Pause source…
+                  </DropdownMenuItem>
                 )
               ) : (
-                <p>{ENABLE_ADMIN_MESSAGE}</p>
+                <DropdownMenuItem disabled aria-describedby={explanationId}>
+                  Enable
+                </DropdownMenuItem>
               )}
-              {model.snapshot().enableConflicts.includes(source.id) ? (
-                <p>{ENABLE_CONFLICT_MESSAGE}</p>
-              ) : null}
 
               {owned ? (
                 <DropdownMenuItem disabled={busy} onClick={() => model.chooseCredential(source.id)}>
@@ -1009,13 +1021,33 @@ export function SourceActions({
               ) : null}
             </>
           ) : (
-            <p>Manage this organization source in organization scope.</p>
+            <DropdownMenuItem disabled aria-describedby={explanationId}>
+              Manage source
+            </DropdownMenuItem>
           )}
           <DropdownMenuItem disabled={busy} onClick={() => void model.names(source.id)}>
             Registered names
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      {explanation ? <p id={explanationId}>{explanation}</p> : null}
+      <ConfirmAction
+        action="Pause"
+        target={`${source.name} (${source.id})`}
+        scope={model.project === null ? 'Organization' : `Project: ${model.project}`}
+        description="Pausing this source stops it from resolving packages in this scope. You can enable it again later."
+        disabled={busy}
+        open={
+          pauseSource?.id === source.id &&
+          pauseSource.status === source.status &&
+          source.status !== 'paused'
+        }
+        onOpenChange={(open) => {
+          if (!open) setPauseSource(null);
+        }}
+        hideTrigger
+        onConfirm={() => void model.togglePause(source)}
+      />
     </>
   );
 }

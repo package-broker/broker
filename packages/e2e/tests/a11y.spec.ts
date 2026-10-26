@@ -211,7 +211,7 @@ for (const width of [1440, 390]) {
     await scan(page, 'Edit source advanced settings');
     await edit.getByRole('button', { name: 'Close', exact: true }).click();
     await openDetails(page, 'More');
-    await page.getByRole('button', { name: 'Set credential', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Set credential', exact: true }).click();
     const credential = activeDialog(page, 'Set credential');
     await expect(credential).toBeVisible();
     const kinds = await credential
@@ -225,7 +225,7 @@ for (const width of [1440, 390]) {
     }
     await credential.getByRole('button', { name: 'Close', exact: true }).click();
     await openDetails(page, 'More');
-    await page.getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Registered names', exact: true }).click();
     await scanDialog(page, 'Registered names');
   });
 

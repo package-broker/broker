@@ -24,6 +24,7 @@ import { runImportSatisPlan } from './commands/import-satis.js';
 import {
   runImportPrivatePackagistFetch,
   runImportPrivatePackagistPlan,
+  runImportPrivatePackagistDates,
 } from './commands/import-private-packagist.js';
 import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
@@ -49,6 +50,7 @@ const USAGE =
   '       pb import cutover-check --project-dir <dir> --old-repository <url> --new-repository <url> --old-auth-env <VAR> --new-auth-env <VAR> [--lock <file>]... [--timeout-seconds <seconds>] [--json]\n' +
   '       pb import private-packagist fetch --org <short-name> --snapshot <out.json> [--api-key-file <path>] [--api-secret-file <path>] [--versions] [--require-org-match] (or PP_API_KEY_FILE/PP_API_SECRET_FILE)\n' +
   '       pb import private-packagist plan --snapshot <file> --map <file> --out <manifest> --credentials-out <file> [--members <csv>] [--baseline <manifest>] [--mode merge|override] [--include-org-admins] [--runtime workers|node] [--packagist existing:<name>] [--compact-selection --compact-vendor <vendor>...] [--accept-project-widening <slug>...] [--quiet]\n' +
+  '       pb import private-packagist dates --snapshot <file> --map <file> --baseline <manifest> --out <manifest> [--package <name>...] [--quiet]\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb import submit --manifest <file> --receipt <file> --principal <label> --broker <origin> [--resume] [--token-file <path>]\n' +
   '       pb import status <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
@@ -83,6 +85,7 @@ function parseCliArgs(argv: string[]) {
         org: { type: 'string' },
         snapshot: { type: 'string' },
         map: { type: 'string' },
+        package: { type: 'string', multiple: true },
         'credentials-out': { type: 'string' },
         members: { type: 'string' },
         'include-org-admins': { type: 'boolean' },
@@ -339,6 +342,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'versions',
     'require-org-match',
   ],
+  'import private-packagist dates': ['snapshot', 'map', 'baseline', 'out', 'package', 'quiet'],
   'import submit': ['manifest', 'receipt', 'principal', 'broker', 'resume', 'token-file'],
   'import status': ['broker', 'token-file', 'wait', 'wait-seconds'],
   'import credentials': ['broker', 'token-file', 'manifest', 'credentials'],
@@ -497,6 +501,17 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
 
   if (command === 'import' && subcommand === 'private-packagist') {
+    if (positionals[2] === 'dates') {
+      if (!values.snapshot || !values.map || !values.baseline || !values.out) return usageError();
+      return runImportPrivatePackagistDates({
+        snapshot: values.snapshot,
+        map: values.map,
+        baseline: values.baseline,
+        out: values.out,
+        packages: values.package ?? [],
+        quiet: values.quiet ?? false,
+      });
+    }
     if (positionals[2] === 'plan') {
       if (
         !values.snapshot ||

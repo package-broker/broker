@@ -8,6 +8,7 @@ import {
 } from '../import/private-packagist/plan.js';
 import { PackagistApi, PackagistError } from '../import/private-packagist/api.js';
 import { fetchSnapshot, writeSnapshot } from '../import/private-packagist/snapshot.js';
+import { planPrivatePackagistDates } from '../import/private-packagist/dates.js';
 
 export interface ImportPrivatePackagistOptions {
   readonly org: string;
@@ -233,6 +234,58 @@ export async function runImportPrivatePackagistPlan(
     return 0;
   } catch (error) {
     console.error(error instanceof PlanFileError ? error.code : 'private_packagist_plan_failed');
+    return 2;
+  }
+}
+
+export interface ImportPrivatePackagistDatesOptions {
+  readonly snapshot: string;
+  readonly map: string;
+  readonly baseline: string;
+  readonly out: string;
+  readonly packages?: readonly string[];
+  readonly quiet?: boolean;
+}
+
+export async function runImportPrivatePackagistDates(
+  options: ImportPrivatePackagistDatesOptions,
+): Promise<number> {
+  try {
+    if (
+      [options.snapshot, options.map, options.baseline].some(
+        (p) => resolve(p) === resolve(options.out),
+      )
+    )
+      throw new PlanFileError('output_exists');
+    const snapshot = await readPlanInput(options.snapshot, true);
+    const map = await readPlanInput(options.map);
+    const baseline = await readPlanInput(options.baseline);
+    const result = await planPrivatePackagistDates({
+      snapshot: snapshot.text,
+      map: map.text,
+      baseline: baseline.text,
+      ...(options.packages === undefined ? {} : { packages: options.packages }),
+    });
+    if (!result.ok) {
+      for (const d of result.diagnostics)
+        console.error(
+          `${d.code} ${d.pointer || '/'}${d.cap === undefined ? '' : ` [${d.cap}]`}${d.selector === undefined ? '' : ` ${JSON.stringify(d.selector)}`}`,
+        );
+      if (result.diagnostics.some((d) => d.code === 'versions_missing'))
+        console.error('Re-run fetch --versions.');
+      return 2;
+    }
+    await writePlanOutputs([{ path: options.out, bytes: result.canonical }]);
+    console.log(`version_override: ${result.summary.overrides}`);
+    console.log(`releasedAt_missing: ${result.summary.missingReleasedAt}`);
+    console.log(`planHash: ${result.hash}`);
+    if (!options.quiet)
+      console.log(
+        'Submit this dates run after the sources are enabled and synced; the server refuses overrides for versions that do not exist.',
+      );
+    return 0;
+  } catch (error) {
+    console.error(error instanceof PlanFileError ? error.code : 'private_packagist_dates_failed');
     return 2;
   }
 }

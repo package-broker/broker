@@ -686,3 +686,155 @@ it('accepts repeatable widening acknowledgements and refuses plan-only flag misu
   ])
     expect(await run([...args, ...flags])).toBe(2);
 });
+
+async function datesArgs(): Promise<string[]> {
+  const { planPrivatePackagistImport } = await import('../import/private-packagist/plan.js');
+  const snapshot = await readFile(
+    new URL('../import/fixtures/private-packagist/dates-snapshot.json', import.meta.url),
+    'utf8',
+  );
+  const map = '{"version":1,"mirrorOrder":[30]}';
+  const structure = await planPrivatePackagistImport({ snapshot, map });
+  if (!structure.ok) throw new Error('Expected structure');
+  await writeFile(options.snapshot, snapshot, { mode: 0o600 });
+  await writeFile(join(dir, 'dates-map'), map);
+  await writeFile(join(dir, 'baseline'), structure.canonical, { mode: 0o600 });
+  return [
+    'import',
+    'private-packagist',
+    'dates',
+    '--snapshot',
+    options.snapshot,
+    '--map',
+    join(dir, 'dates-map'),
+    '--baseline',
+    join(dir, 'baseline'),
+    '--out',
+    join(dir, 'dates-out'),
+  ];
+}
+
+it.each([false, true])(
+  'dispatches offline dates with repeatable package flags and private output (quiet: %s)',
+  async (quiet) => {
+    const { stat } = await import('node:fs/promises');
+    const { parseManifest, canonicalManifest, planHash } =
+      await import('@package-broker/core/import/manifest');
+    const args = await datesArgs();
+    const fetch = vi.fn(() => {
+      throw new Error('No network');
+    });
+    vi.stubGlobal('fetch', fetch);
+    expect(
+      await run([
+        ...args,
+        '--package',
+        'acme/one',
+        '--package',
+        'acme/scoped',
+        ...(quiet ? ['--quiet'] : []),
+      ]),
+    ).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+    const text = await readFile(join(dir, 'dates-out'), 'utf8');
+    const parsed = parseManifest(JSON.parse(text));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error('Expected dates manifest');
+    expect(text).toBe(canonicalManifest(parsed.data));
+    expect(parsed.data.items).toHaveLength(2);
+    expect((await stat(join(dir, 'dates-out'))).mode & 0o777).toBe(0o600);
+    expect(stdout.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+      'version_override: 2',
+      'releasedAt_missing: 1',
+      `planHash: ${await planHash(parsed.data)}`,
+      ...(quiet
+        ? []
+        : [
+            'Submit this dates run after the sources are enabled and synced; the server refuses overrides for versions that do not exist.',
+          ]),
+    ]);
+    expect(await run(args)).toBe(2);
+    expect(stderr).toHaveBeenCalledWith('output_exists');
+    expect(await readFile(join(dir, 'dates-out'), 'utf8')).toBe(text);
+  },
+);
+
+it('names an unknown dates package selector and writes no output', async () => {
+  const args = await datesArgs();
+  expect(await run([...args, '--package', 'acme/one', '--package', 'acme/unknown'])).toBe(2);
+  expect(stderr).toHaveBeenCalledWith('unknown_package /options/packages/1 "acme/unknown"');
+  expect(stdout).not.toHaveBeenCalled();
+  expect(await readdir(dir)).not.toContain('dates-out');
+});
+
+it.each([0o640, 0o604])('refuses dates snapshot mode %s without output', async (mode) => {
+  const args = await datesArgs();
+  await chmod(options.snapshot, mode);
+  expect(await run(args)).toBe(2);
+  expect(stderr).toHaveBeenCalledWith('snapshot_permissions');
+  expect(await readdir(dir)).not.toContain('dates-out');
+});
+
+it('explains versions_missing and keeps request values out of dates diagnostics', async () => {
+  const args = await datesArgs();
+  const snapshot = JSON.parse(await readFile(options.snapshot, 'utf8'));
+  snapshot.versions = false;
+  await writeFile(options.snapshot, JSON.stringify(snapshot));
+  expect(await run(args)).toBe(2);
+  expect(stderr).toHaveBeenCalledWith('versions_missing /versions');
+  expect(stderr).toHaveBeenCalledWith('Re-run fetch --versions.');
+  expect(await readdir(dir)).not.toContain('dates-out');
+  snapshot.versions = true;
+  snapshot.objects.packageDetails[0].data.versions[0].version = 'sentinel@example.test';
+  const { canonical } = await import('../import/private-packagist/snapshot.js');
+  const { createHash } = await import('node:crypto');
+  const entry = snapshot.objects.packageDetails[0];
+  entry.sha256 = createHash('sha256').update(canonical(entry.data)).digest('hex');
+  await writeFile(options.snapshot, JSON.stringify(snapshot));
+  expect(await run([...args, '--quiet'])).toBe(2);
+  expect(stderr).toHaveBeenCalledWith(
+    'invalid_version /objects/packageDetails/0/data/versions/0/version',
+  );
+  expect(JSON.stringify(stderr.mock.calls)).not.toContain('sentinel@example.test');
+  expect(stdout).not.toHaveBeenCalled();
+});
+
+it('requires all dates inputs and refuses unrelated flags, extra positionals and package flags on other verbs', async () => {
+  const args = await datesArgs();
+  for (const flag of ['--snapshot', '--map', '--baseline', '--out']) {
+    const index = args.indexOf(flag);
+    expect(await run(args.filter((_, i) => i !== index && i !== index + 1))).toBe(2);
+  }
+  for (const flags of [
+    ['--versions'],
+    ['--runtime', 'node'],
+    ['--org', 'acme'],
+    ['--package'],
+    ['extra'],
+  ])
+    expect(await run([...args, ...flags])).toBe(2);
+  for (const verb of ['fetch', 'plan'])
+    expect(await run(['import', 'private-packagist', verb, '--package', 'acme/one'])).toBe(2);
+  expect(await readdir(dir)).not.toContain('dates-out');
+});
+
+it('refuses dates output aliases and snapshot symlinks without altering input files', async () => {
+  const { runImportPrivatePackagistDates } = await import('./import-private-packagist.js');
+  await datesArgs();
+  const bytes = await readFile(options.snapshot, 'utf8');
+  const config = {
+    snapshot: options.snapshot,
+    map: join(dir, 'dates-map'),
+    baseline: join(dir, 'baseline'),
+    out: join(dir, 'dates-out'),
+  };
+  for (const out of [config.snapshot, config.map, config.baseline])
+    expect(await runImportPrivatePackagistDates({ ...config, out })).toBe(2);
+  expect(await readFile(options.snapshot, 'utf8')).toBe(bytes);
+  await symlink(options.snapshot, join(dir, 'snapshot-link'));
+  expect(
+    await runImportPrivatePackagistDates({ ...config, snapshot: join(dir, 'snapshot-link') }),
+  ).toBe(2);
+  expect(stderr).toHaveBeenCalledWith('input_unreadable');
+  expect(await readdir(dir)).not.toContain('dates-out');
+});

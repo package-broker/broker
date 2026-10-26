@@ -13,6 +13,7 @@ import {
   type JobRepository,
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
+import { jobSourceError } from '@package-broker/core/platform/job-source-error';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import { releaseDelayOf } from '@package-broker/core/platform/job-release';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
@@ -352,7 +353,16 @@ async function execute(
       return { settle: { outcome: 'released', delaySeconds }, outcome: 'released' };
     }
     return {
-      settle: { outcome: 'failed', errorCode: jobErrorCode(error), permanent: false },
+      settle: {
+        outcome: 'failed',
+        errorCode: jobErrorCode(error),
+        permanent: false,
+        ...(stopReason === null &&
+        isRegisteredCoreJob(job as RegisteredCoreJob) &&
+        jobSourceError(error) !== undefined
+          ? { syncError: jobSourceError(error)! }
+          : {}),
+      },
       outcome: 'failed',
     };
   } finally {

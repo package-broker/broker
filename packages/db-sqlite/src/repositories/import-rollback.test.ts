@@ -1059,7 +1059,11 @@ describe('import rollback store', () => {
   });
 
   it('declares every foreign key that references an importable table as a dependent or owned child', async () => {
-    const owned = new Set(['role_permission.role_id', 'representation_clock.project_id']);
+    const owned = new Set([
+      'role_permission.role_id',
+      'representation_clock.project_id',
+      'source_sync_package.source_id',
+    ]);
     const tables = await rows<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
     );

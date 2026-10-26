@@ -30,7 +30,21 @@ export interface RemovalRefusal {
   readonly successful: number;
 }
 
+export interface SourceSyncStatus {
+  readonly listing: boolean;
+  readonly generation: string;
+  readonly queued: number;
+  readonly running: number;
+  /** Failed packages queued for another attempt. */
+  readonly retrying: number;
+  /** Terminal package failures. */
+  readonly failed: number;
+  readonly completed: number;
+  readonly errors: readonly { readonly code: SourceErrorCode; readonly count: number }[];
+}
+
 export interface SourceRecord {
+  readonly sync?: SourceSyncStatus;
   readonly id: string;
   readonly projectId: string | null;
   readonly name: string;
@@ -142,6 +156,12 @@ interface PollValidators {
 }
 
 export type PollOutcome =
+  | {
+      readonly id: string;
+      readonly outcome: 'started';
+      readonly generation: string;
+      readonly reset?: boolean;
+    }
   | ({ readonly id: string; readonly outcome: 'success' } & PollValidators)
   | {
       readonly id: string;

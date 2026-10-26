@@ -65,6 +65,8 @@ const SOURCE_DOMAIN = [
   'poll_last_modified',
   'root_hash',
   'listing_hash',
+  'sync_generation',
+  'sync_counts',
   'consecutive_failures',
   'last_error',
   'listing_open_stamp',

@@ -1,0 +1,41 @@
+{
+  "reference": {
+    "repository": "packagist/private-packagist-api-client",
+    "commit": "ca2f10ae70e399d8473a3de72109e25dcadd91a0",
+    "path": "src/HttpClient/Plugin/RequestSignature.php",
+    "sha256": "249e0f4abb96b28b17bdc6e37d20140c9d2d0b29e77e5e7398cdf239f5addbd2",
+    "generator": "PHP 8.5.12; unchanged reference signer with fixed getTimestamp/getNonce overrides and minimal request/interface stubs"
+  },
+  "vectors": [
+    {
+      "name": "sorted-and-encoded-query",
+      "path": "/api/packages/?z=!*%27()&a=hello+world&limit=500",
+      "key": "acme_key",
+      "secret": "example_secret",
+      "timestamp": 1700000000,
+      "cnonce": "00112233-4455-4677-8899-aabbccddeeff",
+      "nextLink": false,
+      "authorization": "PACKAGIST-HMAC-SHA256 Key=acme_key, Timestamp=1700000000, Cnonce=00112233-4455-4677-8899-aabbccddeeff, Version=2, Signature=a4sXOexMN5v5OY3+htWc+Ac7RO9qcGEDbghGwzwFhmA="
+    },
+    {
+      "name": "unsorted-next-link-query",
+      "path": "/api/packages/?page=2&limit=500",
+      "key": "example_key",
+      "secret": "acme_secret",
+      "timestamp": 1700000010,
+      "cnonce": "ffeeddcc-bbaa-4988-8766-554433221100",
+      "nextLink": true,
+      "authorization": "PACKAGIST-HMAC-SHA256 Key=example_key, Timestamp=1700000010, Cnonce=ffeeddcc-bbaa-4988-8766-554433221100, Version=2, Signature=3nvi6I/i1xG0iw0w4qxD8PzmcHM0uAbSh1jGG7VuiLs="
+    },
+    {
+      "name": "empty-query-bare-path",
+      "path": "/api/packages/1/",
+      "key": "acme_key",
+      "secret": "example_secret",
+      "timestamp": 1700000020,
+      "cnonce": "11223344-5566-4788-99aa-bbccddeeff00",
+      "nextLink": false,
+      "authorization": "PACKAGIST-HMAC-SHA256 Key=acme_key, Timestamp=1700000020, Cnonce=11223344-5566-4788-99aa-bbccddeeff00, Version=2, Signature=w7TnKZ4nIi6Yu3nTmbHTg/8asLMoaC3csdLu6LnVQOA="
+    }
+  ]
+}

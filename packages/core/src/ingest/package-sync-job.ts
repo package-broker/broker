@@ -1,3 +1,5 @@
+import { withJobSourceError } from '../platform/job-source-error.js';
+import { sourceErrorCode } from './sync-error.js';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../db/errors.js';
 import type { OrgContext, SqlExecutor, Statement } from '../db/port.js';
@@ -81,12 +83,23 @@ function validate(input: unknown): PackageSyncPayload {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new JobError('invalid_payload');
   }
-  const { sourceId, key, sessionId, generation, step, ...rest } = payload;
+  const { sourceId, key, sessionId, generation, step, syncGeneration, parentJob, ...rest } =
+    payload;
   const continuation = sessionId !== undefined || generation !== undefined;
   if (
     Object.keys(rest).length > 0 ||
+    (parentJob !== undefined &&
+      (typeof parentJob !== 'object' ||
+        parentJob === null ||
+        Array.isArray(parentJob) ||
+        Object.keys(parentJob).sort().join(',') !== 'fence,id,owner' ||
+        !text((parentJob as JobGuard).id) ||
+        !text((parentJob as JobGuard).owner) ||
+        !count((parentJob as JobGuard).fence, 1))) ||
     !text(sourceId) ||
     !text(key) ||
+    (syncGeneration !== undefined &&
+      (typeof syncGeneration !== 'string' || !/^[a-f0-9]{64}$/.test(syncGeneration))) ||
     (continuation && (!text(sessionId) || !count(generation, 1))) ||
     (step !== undefined && (!continuation || !count(step, 0)))
   ) {
@@ -95,6 +108,8 @@ function validate(input: unknown): PackageSyncPayload {
   return {
     sourceId,
     key,
+    ...(parentJob === undefined ? {} : { parentJob: parentJob as JobGuard }),
+    ...(syncGeneration === undefined ? {} : { syncGeneration: syncGeneration as string }),
     ...(continuation ? { sessionId: sessionId as string, generation: generation as number } : {}),
     ...(step === undefined ? {} : { step }),
   };
@@ -118,7 +133,14 @@ export async function packageSyncEnqueueInput(
     return { idempotencyKey: freshKey, resourceKey };
   }
   return {
-    idempotencyKey: await sha256Hex([payload.sessionId, payload.generation, payload.step ?? 0]),
+    idempotencyKey: await sha256Hex([
+      payload.sessionId,
+      payload.generation,
+      payload.step ?? 0,
+      ...(payload.parentJob === undefined
+        ? []
+        : [payload.parentJob.id, payload.parentJob.owner, payload.parentJob.fence]),
+    ]),
     resourceKey,
   };
 }
@@ -183,7 +205,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
           payload.sessionId !== undefined &&
           (session.id !== payload.sessionId || session.generation !== payload.generation)
         ) {
-          await end(session.stamp === null);
+          await end(true);
           return;
         }
         const metadata = await deps.sourceMetadata(ctx, sourceId);
@@ -273,7 +295,13 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
         session = applied.session;
         if (applied.status === 'abandoned') {
           open = false;
-          const fresh: PackageSyncPayload = { sourceId, key };
+          const fresh: PackageSyncPayload = {
+            sourceId,
+            key,
+            ...(payload.syncGeneration === undefined
+              ? {}
+              : { syncGeneration: payload.syncGeneration }),
+          };
           const now = deps.clock.now().getTime();
           await deps.jobs.enqueue(ctx, PACKAGE_SYNC_JOB_TYPE, fresh, {
             ...(await packageSyncEnqueueInput(
@@ -282,6 +310,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
                 'abandoned',
                 sourceId,
                 key,
+                ...(payload.syncGeneration === undefined ? [] : [payload.syncGeneration]),
                 Math.floor(now / ABANDONED_RESYNC_WINDOW_MS),
               ]),
             )),
@@ -302,6 +331,10 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
           const next: PackageSyncPayload = {
             sourceId,
             key,
+            ...(payload.syncGeneration === undefined
+              ? {}
+              : { syncGeneration: payload.syncGeneration }),
+            parentJob: lease,
             sessionId: session.id,
             generation: session.generation,
             step: session.pagesSoFar,
@@ -324,10 +357,16 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
         if (open) {
           await end(isSnapshotGone(error) || session.stamp === null).catch(() => undefined);
         }
-        if (error instanceof JobError) throw error;
-        if (context.signal.aborted) throw error;
-        if (isSnapshotGone(error) || isUpstreamFailure(error)) throw retry();
-        throw error;
+        if (error instanceof JobRelease || context.signal.aborted) throw error;
+        const failure = isSnapshotGone(error) || isUpstreamFailure(error) ? retry() : error;
+        if (
+          payload.syncGeneration !== undefined &&
+          typeof failure === 'object' &&
+          failure !== null
+        ) {
+          throw withJobSourceError(failure, sourceErrorCode(error));
+        }
+        throw failure;
       }
     },
   });

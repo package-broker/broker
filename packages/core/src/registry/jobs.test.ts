@@ -317,6 +317,7 @@ describe('registry jobs', () => {
       {
         sourceId: 'src',
         key: 'acme/held',
+        syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
       },
       expect.objectContaining({ resourceKey: expect.stringMatching(/^package:[a-f0-9]{64}$/) }),
     );

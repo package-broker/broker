@@ -161,7 +161,7 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 55 tables, one expand baseline', async () => {
+  it('1: a fresh database gets every core migration: 56 tables, one expand baseline', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
@@ -174,7 +174,7 @@ describe('core migrations', () => {
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    expect(await countTables()).toBe(55);
+    expect(await countTables()).toBe(56);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -324,7 +324,7 @@ describe('core migrations', () => {
 
       expect(await rows('SELECT org_id FROM cache_epoch')).toEqual([]);
       expect(
-        await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger'
+        await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name NOT LIKE 'source_sync_%'
           AND name NOT IN ('package_ecosystem_matches_source_insert',
             'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages')`),
       ).toEqual([]);

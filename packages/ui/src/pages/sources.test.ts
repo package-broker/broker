@@ -2420,3 +2420,90 @@ it('does not start polling when the sync response arrives after model disposal',
     vi.useRealTimers();
   }
 });
+
+it('shows the latest generation counts and the top stable failure codes', async () => {
+  const { model, html } = setup(
+    vi.fn().mockResolvedValue(
+      json({
+        items: [
+          {
+            ...source,
+            sync: {
+              generation: 'a'.repeat(64),
+              listing: false,
+              queued: 1,
+              running: 2,
+              retrying: 5,
+              failed: 3,
+              completed: 4,
+              errors: [
+                { code: 'tag_limit_exceeded', count: 3 },
+                { code: 'network', count: 2 },
+                { code: 'timeout', count: 1 },
+                { code: 'internal', count: 1 },
+              ],
+            },
+          },
+        ],
+        next: null,
+      }),
+    ),
+  );
+  await model.load();
+  expect(html().replaceAll('<!-- -->', '')).toContain('1 queued');
+  expect(html().replaceAll('<!-- -->', '')).toContain('2 running');
+  expect(html().replaceAll('<!-- -->', '')).toContain('3 failed');
+  expect(html().replaceAll('<!-- -->', '')).toContain('5 retrying');
+  expect(html().replaceAll('<!-- -->', '')).toContain('4 completed');
+  expect(html().replaceAll('<!-- -->', '')).toContain('Tag limit exceeded');
+  expect(html().replaceAll('<!-- -->', '')).toContain('tag_limit_exceeded</code>: 3');
+  expect(html().replaceAll('<!-- -->', '')).not.toContain('internal</code>');
+});
+
+it('keeps polling package work after listing success and stops when the generation is idle', async () => {
+  vi.useFakeTimers();
+  try {
+    const sync = {
+      generation: 'a'.repeat(64),
+      listing: false,
+      queued: 0,
+      running: 0,
+      retrying: 1,
+      failed: 0,
+      completed: 2,
+      errors: [{ code: 'network', count: 1 }],
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ requested: true }, 202))
+      .mockImplementation(() =>
+        Promise.resolve(json({ items: [{ ...source, lastSuccessAt: NOW, sync }], next: null })),
+      );
+    const { model } = setup(fetch);
+    await model.syncNow(source);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(fetch.mock.calls.length).toBeGreaterThan(4);
+    fetch.mockImplementation(() =>
+      Promise.resolve(
+        json({
+          items: [
+            {
+              ...source,
+              lastSuccessAt: NOW,
+              sync: { ...sync, queued: 0, retrying: 0, failed: 0, completed: 3, errors: [] },
+            },
+          ],
+          next: null,
+        }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const calls = fetch.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetch).toHaveBeenCalledTimes(calls);
+    expect(model.snapshot().items[0]!.sync?.completed).toBe(3);
+    model.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});

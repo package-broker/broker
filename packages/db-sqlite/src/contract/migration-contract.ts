@@ -491,14 +491,14 @@ export function describeMigrationContract(
   core0001: () => Promise<MigrationSource>,
 ): void {
   describe(`migration contract: ${name}`, () => {
-    it('1. applies the real 0001_init.sql: 55 tables, one bookkeeping row, lock free', async () => {
+    it('1. applies the real 0001_init.sql: 56 tables, one bookkeeping row, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         const init = await core0001();
 
         const result = await migrate(executor, [init], { holder: 'contract-1' });
 
         expect(result.applied).toEqual([init.id]);
-        expect(await countTables(executor)).toBe(55);
+        expect(await countTables(executor)).toBe(56);
         expect(await countBookkeepingRows(executor)).toBe(1);
         expect(await lockHolder(executor)).toBeNull();
       });
@@ -566,7 +566,7 @@ export function describeMigrationContract(
         const error = await rejection(migrate(executor, [init, failing], { holder: 'contract-2' }));
 
         expect(error).toBeInstanceOf(MigrationApplyError);
-        expect(await countTables(executor)).toBe(55);
+        expect(await countTables(executor)).toBe(56);
         expect(await countBookkeepingRows(executor)).toBe(1);
         expect(await lockHolder(executor)).toBeNull();
       });
@@ -603,7 +603,7 @@ export function describeMigrationContract(
 
         expect(result.pending).toEqual([pending.id]);
         expect(result.skipped).toEqual([init.id]);
-        expect(await countTables(executor)).toBe(55);
+        expect(await countTables(executor)).toBe(56);
         expect(await readBookkeeping(executor)).toEqual(bookkeepingBefore);
         expect(await readLock(executor)).toEqual(lockBefore);
       });
@@ -621,7 +621,7 @@ export function describeMigrationContract(
         );
         const names = await tableNames(executor);
         for (const table of NEW_TABLES) expect(names).toContain(table);
-        expect(names).toHaveLength(55);
+        expect(names).toHaveLength(56);
         expect(await lockHolder(executor)).toBeNull();
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
         for (const table of ['token_project', 'service_principal_permission']) {
@@ -804,7 +804,7 @@ export function describeMigrationContract(
           { from: 'project_id', table: 'project', to: 'id' },
         ]);
         expect(await tableNames(executor)).not.toContain('job_attempt_0006');
-        expect(await countTables(executor)).toBe(55);
+        expect(await countTables(executor)).toBe(56);
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
 
         await seedPopulated(executor);

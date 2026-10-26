@@ -25,6 +25,10 @@ This folder is the source of the 2.0 documentation site at package.broker. The v
   - [Access model](reference/access-model.md)
   - [Plugin authoring](reference/plugin-authoring.md)
   - [API reference](reference/api.md)
+- Troubleshooting
+  - [Marketplace HTTP 401](troubleshooting/magento-http-401.md)
+  - [Invalid Marketplace credentials](troubleshooting/magento-invalid-credentials.md)
+  - [Invalid authentication JSON](troubleshooting/invalid-auth-json.md)
 - [Security and data residency](security-and-residency.md)
 - [Architecture](architecture.md)
 - [Decisions](decisions/)

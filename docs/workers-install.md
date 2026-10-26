@@ -8,7 +8,12 @@ A new broker has one organization and no way to sign in. The command that create
 - The setup token. It is delivered separately from this page: printed once by the command, or written to the file you named with `--token-file`. Treat it like a password.
 - An authenticator app that supports time based codes (6 digits, 30 seconds, SHA-1), or any tool that can compute them from a base32 key.
 
-The token expires after 24 hours and works once. If it expired, was lost or was already used, run the command again to issue a fresh one; asking for a new token invalidates the old one.
+The token expires after 24 hours and works once. If it expires or is lost before setup finishes, request a fresh one through administrator bootstrap, using an unused output path if you use `--token-file`. With `pb cloudflare setup`, request a replacement explicitly with `--refresh-setup-token`. Issuing a new token invalidates the old one. After setup finishes, sign in with the enrolled credentials. Bootstrap cannot reset that login; use the intentional reset described in [After setup](#after-setup) if needed.
+
+<!-- source: packages/cli/src/commands/admin.ts:51 -->
+<!-- source: packages/cli/src/cli.ts:41 -->
+<!-- source: packages/cli/src/commands/admin.ts:400 -->
+<!-- source: packages/cli/src/commands/cloudflare/setup.ts:815 -->
 
 ## In the browser
 
@@ -20,7 +25,10 @@ The token expires after 24 hours and works once. If it expired, was lost or was 
 
 The token is never part of the address, so it does not reach browser history, server logs or a `Referer` header. The page keeps the token, password, setup key and code in memory only: nothing is written to browser storage, nothing is copied to the clipboard, and everything is cleared when setup finishes or you leave the page. The QR code is drawn in your browser; no external service sees the key.
 
-If the broker gives no clear answer to the final step, the page says so and does not retry on its own. Keep the password and authenticator enrollment, then use the local-login API described below. The ordinary UI requires a session and currently has no sign-in form. If sign-in fails, ask for a fresh token and start again.
+If the broker gives no clear answer to the final step, the page says so and does not retry on its own. Keep the password and authenticator enrollment, then open `<broker address>/_pb/ui` and sign in, or use the local-login API described below. If sign-in is refused and setup did not complete, return to setup with the unused token, or request a replacement as described in [What you need](#what-you-need) if it expired or was lost. If sign-in fails after setup completed, follow [After setup](#after-setup) to arrange an intentional local-login reset.
+
+<!-- source: packages/ui/src/app.tsx:93 -->
+<!-- source: packages/cli/src/commands/admin.ts:400 -->
 
 A token that is wrong, expired or already used gets the same generic refusal. The page does not say which, and it never reveals whether an account exists.
 
@@ -79,7 +87,9 @@ curl --silent --show-error --fail \
   "$BROKER/_pb/auth/local/login"
 ```
 
-A `204` confirms sign-in. If it is refused, obtain a fresh setup token explicitly and restart setup. When finished, close the viewer and editor without retaining credential-bearing backups and remove all request, response and cookie files. The exit trap also removes the private directory:
+A `204` confirms sign-in. If sign-in is refused and setup did not complete, resume setup with the unused token or request a replacement as described in [What you need](#what-you-need). If it is refused after setup completed, use the intentional reset described in [After setup](#after-setup). A new bootstrap token cannot reset an enrolled account. When finished, close the viewer and editor without retaining credential-bearing backups and remove all request, response and cookie files. The exit trap also removes the private directory:
+
+<!-- source: packages/cli/src/commands/admin.ts:400 -->
 
 ```sh
 rm -rf "$setup_dir"
@@ -87,7 +97,32 @@ rm -rf "$setup_dir"
 
 ## After setup
 
-Later sign-ins use your e-mail address, password and a current code, sent to `POST /_pb/auth/local/login`. A setup token cannot be reused, and it never resets an account that has finished setup. To reset a local login on purpose, run `pb admin reset-local`.
+Later sign-ins use your e-mail address, password and a current code, sent to `POST /_pb/auth/local/login`. A setup token cannot be reused, and it never resets an account that has finished setup. To reset a local login on purpose, select the database explicitly and write the replacement setup token to an unused protected file. Supply `ADMIN_EMAIL` as the administrator's e-mail address and `SETUP_TOKEN_FILE` as that output path.
+
+<!-- source: packages/cli/src/cli.ts:41 -->
+<!-- source: packages/cli/src/commands/admin.ts:400 -->
+
+For SQLite, set `SQLITE_FILE` to the deployment's database file:
+
+```sh
+set +x
+umask 077
+pb admin reset-local --email "${ADMIN_EMAIL:?}" --sqlite "${SQLITE_FILE:?}" \
+  --token-file "${SETUP_TOKEN_FILE:?}"
+```
+
+For Workers, set `D1_ID` to the database ID and supply `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` through the protected operator environment:
+
+<!-- source: packages/cli/src/commands/cloudflare.ts:82 -->
+
+```sh
+set +x
+umask 077
+pb admin reset-local --email "${ADMIN_EMAIL:?}" --cloudflare \
+  --database-id "${D1_ID:?}" --token-file "${SETUP_TOKEN_FILE:?}"
+```
+
+Use the replacement token to repeat setup and enroll the new local-login credentials.
 
 ## Cleanup inventory
 
@@ -115,10 +150,7 @@ foreign-account inventories and unrelated JSON files, and shares account Worker
 reference discovery across the selected expired inventories in one run. It checks
 selected Workers live and only reads foreign Workers to verify references.
 
-The provision API's R2 jurisdiction query parameter still requires live
-verification during T830 against `cf-r2-jurisdiction`. Fixture tests do not prove
-that the provider honors the query parameter. T830 must also verify notification
-discovery in the default, EU and FedRAMP jurisdictions with the target token.
+The provision API's R2 jurisdiction query parameter still requires live verification against `cf-r2-jurisdiction`. Fixture tests do not prove that the provider honors the query parameter. Maintainers must also verify notification discovery in the default, EU and FedRAMP jurisdictions with the target token.
 
 ## Tracing
 

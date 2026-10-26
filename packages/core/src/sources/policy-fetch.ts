@@ -1,4 +1,4 @@
-import type { Observability } from '../platform/observability.js';
+import { UPSTREAM_FETCH_EVENT, type Observability } from '../platform/observability.js';
 import { childSpan, tracedFetch, type FetchLike, type SpanContext } from '../platform/tracing.js';
 import { classifyUrl, type OutboundPolicy } from './url-policy.js';
 
@@ -209,6 +209,9 @@ function changedQueryNames(before: URL, after: URL): string[] {
 }
 
 interface Tracking {
+  readonly hop: (url: URL, redirects: number) => void;
+  readonly refusedHop: () => void;
+  readonly response: (status?: number) => void;
   readonly arrived: (status: number) => void;
   readonly bodyFailed: (code: string) => void;
 }
@@ -256,7 +259,11 @@ function discard(response: Response): void {
 export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
   const { fetchImpl, policy, userAgent, observability, span } = options;
 
-  async function run(request: UpstreamRequest, tracking: Tracking): Promise<UpstreamResponse> {
+  async function run(
+    request: UpstreamRequest,
+    tracking: Tracking,
+    child: SpanContext,
+  ): Promise<UpstreamResponse> {
     const allowed = PURPOSE_HEADERS.get(request.purpose);
     if (allowed === undefined || !METHODS.has(request.method)) throw refuse('request');
     if (
@@ -279,7 +286,7 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
     const destinations = request.destinations?.map(canonicalOrigin);
     const bound = request.credential?.origins.map(canonicalOrigin) ?? [];
     const total = AbortSignal.timeout(request.timeoutMs);
-    const send = tracedFetch(fetchImpl, childSpan(span ?? null));
+    const send = tracedFetch(fetchImpl, child);
 
     let current: URL;
     try {
@@ -323,6 +330,7 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
         for (const name of request.credential.queryParams) stripped.add(name);
         if (redirects > 0) stripQuery(target, stripped);
       }
+      tracking.hop(current, redirects);
       headers.set('user-agent', userAgent);
 
       const hop = new AbortController();
@@ -347,11 +355,14 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
           ...(body !== undefined ? { body } : {}),
         });
       } catch (error) {
-        throw guardFailure(error) ?? failure();
+        const guarded = guardFailure(error);
+        if (guarded?.code === 'refused') tracking.refusedHop();
+        throw guarded ?? failure();
       } finally {
         clearTimeout(timer);
       }
 
+      tracking.response(response.status);
       if (response.status === 0 || response.type === 'opaqueredirect') {
         discard(response);
         throw refuse(request.redirects === 'error' ? 'redirect_refused' : 'opaque_redirect');
@@ -373,6 +384,7 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
           throw new UpstreamError('http_status', response.status);
         }
         if (redirects >= MAX_REDIRECTS) throw refuse('redirect_limit');
+        tracking.response();
         let next: URL;
         try {
           next = new URL(location, current);
@@ -431,12 +443,32 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
         : 'unknown';
     const started = Date.now();
     let arrived = false;
+    const child = childSpan(span ?? null);
+    let origin: string | undefined;
+    let redirects = 0;
+    let crossOrigin = false;
+    let status: number | undefined;
+    let outcome: string | undefined;
     const emit = (outcome: string, statusClass?: string): void => {
       const labels = { kind, outcome, ...(statusClass ? { status_class: statusClass } : {}) };
       observability?.counter('pb.upstream.requests', labels);
       observability?.histogram('pb.upstream.duration_ms', Date.now() - started, labels);
     };
+    let beforeHop = { redirects, crossOrigin };
     const tracking: Tracking = {
+      hop(url, count) {
+        beforeHop = { redirects, crossOrigin };
+        redirects = count;
+        origin ??= url.origin;
+        if (origin !== undefined && url.origin !== origin) crossOrigin = true;
+      },
+      refusedHop() {
+        if (redirects === 0) origin = undefined;
+        ({ redirects, crossOrigin } = beforeHop);
+      },
+      response(value) {
+        status = value !== undefined && value >= 100 && value <= 599 ? value : undefined;
+      },
       arrived(status) {
         arrived = true;
         emit('ok', `${Math.trunc(status / 100)}xx`);
@@ -446,9 +478,15 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
       },
     };
     try {
-      return await run(request, tracking);
+      return await run(request, tracking, child);
     } catch (error) {
       const known = error instanceof UpstreamError ? error : new UpstreamError('network');
+      outcome =
+        known.code === 'refused'
+          ? REFUSAL_REASONS.has(`upstream.${known.reason}`)
+            ? `upstream.${known.reason}`
+            : 'upstream.unknown'
+          : known.code;
       if (!arrived) {
         emit(known.code);
         if (known.code === 'refused') {
@@ -462,6 +500,25 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
         }
       }
       throw known;
+    } finally {
+      observability?.log({
+        level: 'debug',
+        event: UPSTREAM_FETCH_EVENT,
+        upstream_span_id: child.spanId,
+        ...(span === undefined
+          ? {}
+          : {
+              upstream_trace_id: child.traceId,
+              upstream_parent_span_id: span.spanId,
+            }),
+        ...(origin === undefined ? {} : { upstream_origin: origin }),
+        ...(METHODS.has(request.method) ? { upstream_method: request.method } : {}),
+        ...(status === undefined ? {} : { status }),
+        redirects,
+        cross_origin: crossOrigin,
+        duration_ms: Date.now() - started,
+        ...(outcome === undefined ? {} : { outcome }),
+      });
     }
   };
 }

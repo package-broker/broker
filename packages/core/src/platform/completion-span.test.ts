@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { completionSpan } from './completion-span.js';
+import { completionSpan, upstreamSpan } from './completion-span.js';
 import { encodeTraces } from './otlp.js';
 import { safeRecord, type SafeLogRecord } from './observability.js';
 
@@ -172,5 +172,116 @@ describe('completionSpan', () => {
       expect(span).not.toHaveProperty('status');
       expect(keysOf(span)).not.toContain('status');
     });
+  });
+});
+
+describe('upstreamSpan', () => {
+  const upstream = (overrides: Record<string, unknown> = {}) =>
+    safeRecord({
+      ...record(),
+      level: 'debug',
+      event: 'upstream.fetch',
+      upstream_span_id: 'c'.repeat(16),
+      upstream_origin: 'https://upstream.test:8443',
+      upstream_method: 'HEAD',
+      redirects: 0,
+      cross_origin: false,
+      ...overrides,
+    })!;
+
+  it('requires a parent context, child id, method and valid timestamp', () => {
+    for (const overrides of [
+      { trace_id: undefined },
+      { span_id: undefined },
+      { trace_id: '0'.repeat(32) },
+      { span_id: '0'.repeat(16) },
+      { upstream_span_id: undefined },
+      { upstream_span_id: SPAN },
+      { upstream_span_id: '0'.repeat(16) },
+      { upstream_method: undefined },
+      { upstream_method: 'INVALID' },
+      { timestamp: undefined },
+      { timestamp: 'bad' },
+      { event: 'http.request' },
+    ])
+      expect(upstreamSpan(upstream(overrides))).toBeNull();
+  });
+
+  it('caps duration at one day during field validation', () => {
+    expect(upstream({ duration_ms: 86_400_000 }).duration_ms).toBe(86_400_000);
+    const over = upstream({ duration_ms: 86_400_001 });
+    expect(over).not.toHaveProperty('duration_ms');
+    expect(upstreamSpan(over)?.attributes).not.toHaveProperty('duration_ms');
+  });
+
+  it.each([
+    'https://user:secret@upstream.test',
+    'https://upstream.test/private-segment',
+    'https://upstream.test?secret=1',
+    'https://upstream.test#secret',
+    'file:///private-segment',
+    'https://upstream.test/',
+  ])('drops an unsafe origin at both sanitization boundaries: %s', (origin) => {
+    const safe = upstream({ upstream_origin: origin });
+    expect(safe).not.toHaveProperty('upstream_origin');
+    const span = upstreamSpan(safe)!;
+    expect(span.attributes).not.toHaveProperty('upstream.origin');
+    const wire = JSON.stringify(
+      encodeTraces([{ ...span, attributes: { 'upstream.origin': origin } }], {}),
+    );
+    expect(wire).not.toContain('upstream.origin');
+    expect(wire).not.toMatch(/[?@]|private-segment|secret/);
+  });
+
+  it('prefers scoped parentage over explicit caller ids', () => {
+    const scoped = upstream();
+    const span = upstreamSpan(
+      upstream({
+        upstream_trace_id: 'd'.repeat(32),
+        upstream_parent_span_id: 'e'.repeat(16),
+      }),
+    );
+    expect(span).toMatchObject({ traceId: scoped.trace_id, parentSpanId: scoped.span_id });
+    expect(
+      upstreamSpan(
+        upstream({
+          span_id: undefined,
+          upstream_parent_span_id: 'e'.repeat(16),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it('encodes explicit job parentage, safe origin, numeric and boolean attributes', () => {
+    const span = upstreamSpan(
+      upstream({
+        trace_id: undefined,
+        span_id: undefined,
+        upstream_trace_id: 'd'.repeat(32),
+        upstream_parent_span_id: 'e'.repeat(16),
+      }),
+    )!;
+    expect(span).toMatchObject({
+      traceId: 'd'.repeat(32),
+      parentSpanId: 'e'.repeat(16),
+      attributes: {
+        'upstream.origin': 'https://upstream.test:8443',
+        method: 'HEAD',
+        redirects: 0,
+        cross_origin: false,
+      },
+    });
+    const encoded = encodeTraces([span], {}) as {
+      resourceSpans: { scopeSpans: { spans: Record<string, unknown>[] }[] }[];
+    };
+    const wire = encoded.resourceSpans[0]!.scopeSpans[0]!.spans[0]!;
+    expect(wire).toMatchObject({ traceId: 'd'.repeat(32), parentSpanId: 'e'.repeat(16), kind: 3 });
+    expect(wire.attributes).toEqual(
+      expect.arrayContaining([
+        { key: 'upstream.origin', value: { stringValue: 'https://upstream.test:8443' } },
+        { key: 'redirects', value: { intValue: '0' } },
+        { key: 'cross_origin', value: { boolValue: false } },
+      ]),
+    );
   });
 });

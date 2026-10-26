@@ -17,6 +17,7 @@ function frozenSet(values: readonly string[]): ReadonlySet<string> {
 export const KERNEL_EVENTS = frozenSet([
   'http.request',
   'http.error',
+  'health.schema_drift',
   'authz.denied',
   'authz.error',
 ]);

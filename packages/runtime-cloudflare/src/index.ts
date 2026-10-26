@@ -1,3 +1,5 @@
+import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
@@ -327,6 +329,7 @@ export interface WorkerServices {
 }
 
 export interface WorkerOptions {
+  readonly migrations?: readonly Pick<MigrationSource, 'id' | 'checksum'>[];
   readonly log?: KernelLog;
   readonly authorization?: AuthorizationEngine;
   /** The cloudflare stanza of `platformPorts`; null or absent leaves platform services disabled. */
@@ -1930,6 +1933,7 @@ export function createWorker(
           }),
         );
       }
+      const migrations = options.migrations;
       const kernel = await createKernel({
         platform: 'cloudflare',
         ...(env?.PB_PUBLIC_URL === undefined
@@ -1941,6 +1945,9 @@ export function createWorker(
         ...(services === undefined ? {} : { platformServices: services.platformServices }),
         resolveOrg,
         health: async () => (await bootstrap.findSingleton()) !== null,
+        ...(migrations === undefined
+          ? {}
+          : { schemaMatches: () => schemaMigrationsMatch(executor, migrations) }),
         coreRoutes,
         ...(authorization === undefined ? {} : { authorization }),
         ...(registryModule === undefined

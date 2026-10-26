@@ -269,3 +269,39 @@ describe('createWorker', () => {
     expect(Object.isFrozen(organizations)).toBe(true);
   });
 });
+
+it('reports schema drift through the Worker with a real Miniflare D1 database', async () => {
+  const db = await migratedDatabase();
+  await bootstrap(db);
+  const source = await initSource();
+  const executor = createD1Executor(db);
+  const worker = () => createWorker([], { migrations: [source], log: () => undefined });
+  const ready = (app: ReturnType<typeof createWorker>) =>
+    app.fetch(request('/health/ready'), env(db));
+  const healthy = await ready(worker());
+  expect(healthy.status).toBe(200);
+  expect(await healthy.json()).toEqual({ status: 'ready' });
+
+  await executor.all({
+    sql: 'UPDATE schema_migration SET checksum = ? WHERE id = ?',
+    params: ['0'.repeat(64), source.id],
+  });
+  const drifting = worker();
+  const mismatch = await ready(drifting);
+  expect(mismatch.status).toBe(503);
+  expect(await mismatch.json()).toEqual({ status: 'not_ready', reason: 'schema_drift' });
+  const live = await drifting.fetch(request('/health/live'), env(db));
+  expect(live.status).toBe(200);
+  expect(await live.json()).toEqual({ status: 'live' });
+
+  await executor.all({
+    sql: 'UPDATE schema_migration SET checksum = ? WHERE id = ?',
+    params: [source.checksum, source.id],
+  });
+  expect((await ready(drifting)).status).toBe(200);
+
+  await executor.all({ sql: 'DROP TABLE schema_migration', params: [] });
+  const missing = await ready(worker());
+  expect(missing.status).toBe(503);
+  expect(await missing.json()).toEqual({ status: 'not_ready', reason: 'schema_drift' });
+});

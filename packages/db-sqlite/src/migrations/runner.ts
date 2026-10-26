@@ -114,15 +114,44 @@ function migrationBatch(source: MigrationSource): ScalarStatement[] {
   ];
 }
 
-async function readApplied(
+/** Migration bookkeeping is database-wide, independent of organization data. */
+export async function schemaMigrationsMatch(
   executor: ScalarSqlExecutor,
-  sources: readonly MigrationSource[],
-): Promise<AppliedState> {
+  sources: readonly Pick<MigrationSource, 'id' | 'checksum'>[],
+): Promise<boolean> {
+  let applied: Map<string, string>;
+  try {
+    applied = await readApplied(executor);
+  } catch (error) {
+    if (isMissingSchemaTable(error)) return false;
+    throw error;
+  }
+  return sources.every(({ id, checksum }) => applied.has(id) && applied.get(id) === checksum);
+}
+
+function isMissingSchemaTable(error: unknown): boolean {
+  const seen = new Set<Error>();
+  while (error instanceof Error && !seen.has(error)) {
+    if (/\bno such table: (?:main\.)?schema_migration(?=[:\s]|$)/i.test(error.message)) return true;
+    seen.add(error);
+    error = error.cause;
+  }
+  return false;
+}
+
+async function readApplied(executor: ScalarSqlExecutor): Promise<Map<string, string>> {
   const rows = await executor.all<{ id: string; checksum: string }>({
     sql: 'SELECT id, checksum FROM schema_migration',
     params: [],
   });
-  const stored = new Map(rows.map((row) => [row.id, row.checksum]));
+  return new Map(rows.map((row) => [row.id, row.checksum]));
+}
+
+async function readAppliedState(
+  executor: ScalarSqlExecutor,
+  sources: readonly MigrationSource[],
+): Promise<AppliedState> {
+  const stored = await readApplied(executor);
   const shipped = new Set(sources.map((source) => source.id));
 
   for (const source of sources) {
@@ -266,7 +295,7 @@ export async function migrate(
     tables = await readTables(executor);
   }
 
-  const state = await readApplied(executor, sources);
+  const state = await readAppliedState(executor, sources);
   const reportedUnknown = new Set<string>();
   const reportUnknown = (ids: readonly string[]): void => {
     for (const id of ids) {
@@ -319,7 +348,7 @@ export async function migrate(
 
   try {
     log({ level: 'info', message: 'migration lock acquired' });
-    const current = await readApplied(executor, sources);
+    const current = await readAppliedState(executor, sources);
     reportUnknown(current.unknown);
     const lostRace: string[] = [];
     for (const source of current.pending) {

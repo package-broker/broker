@@ -773,6 +773,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     broker = createNodeServer(options.plugins, {
       trustedProxy,
       executor: opened.executor,
+      migrations: options.migrations,
       closeDatabase,
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),

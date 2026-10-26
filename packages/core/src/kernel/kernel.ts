@@ -44,7 +44,7 @@ import { denialResponse } from './denial-page.js';
 import { defaultLog, envelopeResponse, errorResponse, responseReason } from './errors.js';
 import type { ErrorFormat, KernelLog } from './errors.js';
 import { reportableErrorName } from './error-name.js';
-import { liveResponse, readyResponse } from './health.js';
+import { createSchemaReadinessCheck, liveResponse, readyResponse } from './health.js';
 import {
   denyReason,
   engineStatusReason,
@@ -103,6 +103,8 @@ export interface KernelOptions {
   readonly resolveOrg: () => Promise<OrgContext>;
   /** Uncached database probe, called on every readiness request. */
   readonly health: () => Promise<boolean>;
+  /** Bundled migration comparison; a pass is cached for this kernel lifetime. */
+  readonly schemaMatches?: () => Promise<boolean>;
   /** Routes under `/_pb/`, registered before plugin routes and served through the same pipeline. */
   readonly coreRoutes?: readonly RouteDefinition[];
   /** Core ecosystem routes under /:project/, served through the plugin boundary pipeline. */
@@ -370,6 +372,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   if (coreProblems.length > 0) throw new KernelConfigError(coreProblems);
   const { ports, resolveOrg, health } = options;
+  const schemaMatches =
+    options.schemaMatches === undefined
+      ? undefined
+      : createSchemaReadinessCheck(options.schemaMatches);
   const services = options.platformServices;
   if (Object.hasOwn(ports, 'platform') || ports.platform !== undefined) {
     throw new KernelConfigError(['ports.platform is bound by the kernel; pass platform services']);
@@ -753,7 +759,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   });
   app.get('/health/ready', async (c) => {
     c.env.scope.set({ route: '/health/ready' });
-    const response = await readyResponse(health, resolveOrg, c.env.requestId, { log: c.env.log });
+    const response = await readyResponse(health, resolveOrg, c.env.requestId, {
+      log: c.env.log,
+      ...(schemaMatches === undefined ? {} : { schemaMatches }),
+    });
     if (response.status >= 500) {
       c.env.markLogged();
       c.env.guard.reason('health.not_ready');

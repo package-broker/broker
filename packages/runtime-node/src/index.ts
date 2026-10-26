@@ -1,3 +1,5 @@
+import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { createMcpTools } from '@package-broker/core/mcp/tools';
@@ -299,6 +301,7 @@ export interface NodeAuthOptions {
 }
 
 export interface NodeServerOptions {
+  readonly migrations?: readonly Pick<MigrationSource, 'id' | 'checksum'>[];
   /** Trust client IP headers only when a proxy overwrites them. Default false. */
   readonly trustedProxy?: boolean;
   readonly executor?: SqlExecutor;
@@ -1266,6 +1269,7 @@ export function createNodeServer(
         ...createMcpRoutes({ handlers, publicOrigin, limiter: createInProcessMcpLimiter() }),
       );
     }
+    const migrations = options.migrations;
     const kernel = await createKernel({
       platform: 'node',
       ...(packageResolver === undefined ? {} : { packageResolver }),
@@ -1276,6 +1280,9 @@ export function createNodeServer(
       ports,
       resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
       health: async () => (await bootstrap.findSingleton()) !== null,
+      ...(migrations === undefined
+        ? {}
+        : { schemaMatches: () => schemaMigrationsMatch(executor, migrations) }),
       log,
       ...(options.observability === undefined ? {} : { observability: options.observability }),
       ...(options.platformServices === undefined

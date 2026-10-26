@@ -1,8 +1,10 @@
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
   manifest: {} as {
     plugins: [];
+    migrations?: MigrationSource[];
     vulnerability?: { enabled: boolean };
     mcp?: { enabled: boolean };
     platformPorts: null;
@@ -13,6 +15,9 @@ const state = vi.hoisted(() => ({
   createWorker: vi.fn(() => ({ fetch: vi.fn() })),
 }));
 vi.mock('#pb-manifest', () => ({
+  get migrations() {
+    return state.manifest.migrations;
+  },
   get plugins() {
     return state.manifest.plugins;
   },
@@ -55,6 +60,7 @@ describe('Worker entry observability', () => {
       await import('./entry.js');
       expect(state.createWorker).toHaveBeenCalledExactlyOnceWith([], {
         platformPorts: null,
+        migrations: undefined,
         observability,
       });
     },
@@ -124,4 +130,22 @@ it.each([undefined, true, false])('forwards the mcp deployment switch %s', async
   const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
   if (mcp === undefined) expect(options).not.toHaveProperty('mcp');
   else expect(options).toHaveProperty('mcp', mcp);
+});
+
+it('forwards the bundled migration set to createWorker', async () => {
+  const migrations: MigrationSource[] = [
+    {
+      id: 'core:0001_init',
+      owner: 'core',
+      name: '0001_init',
+      sequence: 1,
+      sql: 'SELECT 1',
+      checksum: 'bundled-checksum',
+      phase: 'expand',
+    },
+  ];
+  state.manifest = { plugins: [], platformPorts: null, migrations };
+  await import('./entry.js');
+  const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
+  expect(options).toHaveProperty('migrations', migrations);
 });

@@ -128,7 +128,7 @@ class Refusal extends Error {
 function refuse(code: string, pointer = '', cap?: string): never {
   throw new Refusal(code, pointer, cap);
 }
-function repository(value: unknown, node: boolean): string {
+function repository(value: unknown, node: boolean, vcs = false): string {
   if (typeof value !== 'string' || /\s/.test(value)) return refuse('invalid_repository_url');
   let url = value;
   if (/^[a-z0-9._-]+@[^:]+:.+$/i.test(url)) url = `ssh://${url.replace(':', '/')}`;
@@ -149,13 +149,13 @@ function repository(value: unknown, node: boolean): string {
     refuse('invalid_repository_url');
   url = parsed.href;
   if (!isCanonicalUrl(url)) refuse('invalid_repository_url');
-  if (parsed.hostname === 'github.com') {
-    const path = parsed.pathname
-      .replace(/\/$/, '')
-      .replace(/\.git$/, '')
-      .toLowerCase();
-    if (!/^\/[a-z0-9-]+\/[a-z0-9._-]+$/.test(path)) refuse('invalid_repository_url');
-    url = `${parsed.origin}${path}`;
+  if (vcs || parsed.hostname === 'github.com') {
+    let path = parsed.pathname.replace(/\/+$/, '').replace(/\.git$/, '');
+    if (parsed.hostname === 'github.com') {
+      path = path.toLowerCase();
+      if (!/^\/[a-z0-9-]+\/[a-z0-9._-]+$/.test(path)) refuse('invalid_repository_url');
+    }
+    url = `${parsed.origin}${path || '/'}`;
   }
   return url;
 }
@@ -224,6 +224,7 @@ function credential(
   map: PackagistMap,
   summary: PlanSummary,
 ): { kind: CredentialKind; ref: string | null } | undefined {
+  const bindings = new Set<string>();
   const matches = map.credentials
     .flatMap((rule, index) => {
       const m = rule.match;
@@ -243,7 +244,13 @@ function credential(
       if ('host' in m && new URL(source.identity).hostname === m.host) score = 1_000_000;
       return score < 0 ? [] : [{ rule, index, score }];
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => b.score - a.score)
+    .filter(({ rule }) => {
+      const key = stable([rule.kind, rule.ref]);
+      if (bindings.has(key)) return false;
+      bindings.add(key);
+      return true;
+    });
   if (matches.length === 0) return undefined;
   if (matches[1]?.score === matches[0]!.score) refuse('ambiguous_credential', source.pointer);
   const { rule, index } = matches[0]!;
@@ -261,10 +268,11 @@ function credential(
       ? (source.item.config as { provider: string }).provider
       : null;
   if (
-    (provider === 'github' && rule.kind !== 'github_app') ||
-    (provider === 'git' && rule.kind !== 'http_basic') ||
-    (provider === 'ssh' && rule.kind !== 'ssh_key') ||
-    (provider === null && !['http_basic', 'bearer'].includes(rule.kind))
+    rule.ref !== null &&
+    ((provider === 'github' && !['github_app', 'http_basic'].includes(rule.kind)) ||
+      (provider === 'git' && rule.kind !== 'http_basic') ||
+      (provider === 'ssh' && rule.kind !== 'ssh_key') ||
+      (provider === null && !['http_basic', 'bearer'].includes(rule.kind)))
   )
     refuse('invalid_credential_kind', `/credentials/${index}`);
   return rule;
@@ -369,6 +377,10 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
     if ('ref' in reference) items.push({ type: 'project', external_ref, slug, name: row.name });
     else summary.existing.push({ code: 'project', project: slug });
   }
+  const projectSlugs = new Set([...projects.values()].map((p) => p.slug));
+  for (const [index, slug] of (options.acceptProjectWidening ?? []).entries())
+    if (!projectSlugs.has(slug))
+      refuse('unknown_project_acknowledgement', `/options/acceptProjectWidening/${index}`);
   const sources = new Map<string, Source>();
   const sourceNames = new Map<string, string>();
   function source(
@@ -414,11 +426,17 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
   }
   const mirrors = new Map<number, Row>();
   const mirrorCredentials = new Map<number, Set<number>>();
-  for (const row of [
+  for (const [index, row] of [
     ...(rows.mirroredRepositories ?? []),
     ...(rows.suborganizationMirroredRepositories ?? []),
-  ]) {
+  ].entries()) {
     if (typeof row.id !== 'number' || typeof row.url !== 'string') refuse('invalid_snapshot');
+    if (
+      row.mirroringBehavior !== undefined &&
+      (typeof row.mirroringBehavior !== 'string' ||
+        !['manual', 'add_on_use', 'admin_managed', 'disabled'].includes(row.mirroringBehavior))
+    )
+      refuse('unsupported_mirroring_behavior', `/mirrors/${index}`);
     const previous = mirrors.get(row.id);
     if (previous && previous.url !== row.url) refuse('conflicting_source');
     mirrors.set(row.id, row);
@@ -426,6 +444,9 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
     if (typeof row.credentials === 'number') ids.add(row.credentials);
     mirrorCredentials.set(row.id, ids);
   }
+  for (const [index, id] of map.mirrorOrder.entries())
+    if (!mirrors.has(id))
+      summary.warning.push({ code: 'stale_mirror_order', pointer: `/mirrorOrder/${index}` });
   for (const row of [...(rows.suborganizationPackages ?? []), ...(rows.suborganizationTeams ?? [])])
     if (!projects.has(row.suborganizationId as number)) refuse('invalid_snapshot');
   const packageSources = new Map<Row, Source>();
@@ -444,6 +465,12 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
     if (Buffer.byteLength(name) > MAX_PATTERN_BYTES)
       refuse('single_run_limit_exceeded', pointer, 'MAX_PATTERN_BYTES');
     const c = pkg.config;
+    if (
+      c.defaultSuborganizationAccess !== undefined &&
+      (typeof c.defaultSuborganizationAccess !== 'string' ||
+        !['active', 'no-access'].includes(c.defaultSuborganizationAccess))
+    )
+      refuse('unsupported_default_suborganization_access', pointer);
     if (c.customJson !== undefined && c.customJson !== null && c.customJson !== '') {
       summary.unsupported.push({ code: 'inline_package_unsupported', pointer });
       refuse('inline_package_unsupported', pointer);
@@ -515,7 +542,11 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
         !['vcs', 'git', 'github', 'gitlab', 'bitbucket'].includes(String(c.type))
       )
         refuse('unsupported_package_type', pointer);
-      const url = repository(own(map.packages, name)?.url ?? c.url, options.runtime === 'node');
+      const url = repository(
+        own(map.packages, name)?.url ?? c.url,
+        options.runtime === 'node',
+        true,
+      );
       const parsed = new URL(url);
       const installationId =
         parsed.hostname === 'github.com'
@@ -619,7 +650,10 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
         if (
           names.length < 2 ||
           allSources.some(
-            (other) => other !== s && [...other.names].some((n) => n.startsWith(`${vendor}/`)),
+            (other) =>
+              other !== s &&
+              other.item.source_type !== 'packagist_proxy' &&
+              [...other.names].some((n) => n.startsWith(`${vendor}/`)),
           )
         )
           continue;
@@ -682,8 +716,6 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
   const mirrorSorted = [...mirrorSources].sort(
     (a, b) => mirrorRank(a) - mirrorRank(b) || compare(a.item.external_ref, b.item.external_ref),
   );
-  const serves = (s: Source, name: string) =>
-    s.names.has(name) || s.patterns.some((p) => matchesPattern(p, name));
   for (const project of projects.values()) {
     const listed = (rows.suborganizationPackages ?? []).filter(
       (pkg) => pkg.suborganizationId === project.id,
@@ -693,10 +725,19 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
       return s ? [{ name: pkg.name as string, s }] : [];
     });
     const attached = [...new Set(wanted.map((w) => w.s))];
+    const conflict = (conflicting: Iterable<Source>): never => {
+      for (const s of conflicting)
+        summary.warning.push({
+          code: 'cross_source_conflict',
+          project: project.slug,
+          source: s.item.name,
+        });
+      return refuse('cross_source_conflict', project.pointer);
+    };
     const edges = new Map<Source, Set<Source>>(attached.map((s) => [s, new Set()]));
     for (const { name, s } of wanted)
       for (const other of attached) {
-        if (other !== s && other.item.source_type !== 'packagist_proxy' && serves(other, name))
+        if (other !== s && other.item.source_type !== 'packagist_proxy' && other.names.has(name))
           edges.get(s)!.add(other);
       }
     const ordered: Source[] = [];
@@ -734,7 +775,7 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
         .sort(
           (a, b) => priority(a) - priority(b) || compare(a.item.external_ref, b.item.external_ref),
         );
-      if (!ready.length) refuse('cross_source_conflict', project.pointer);
+      if (!ready.length) conflict(pending);
       const next = ready[0]!;
       ordered.push(next);
       pending.delete(next);
@@ -746,8 +787,14 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
           100 *
             mirrorRank(mirrorSorted.filter((m) => attached.includes(m))[localMirrors.indexOf(s)]!)
         : priority(s);
-    if (ordered.some((s) => [...edges.get(s)!].some((other) => precedence(s) >= precedence(other))))
-      refuse('cross_source_conflict', project.pointer);
+    const conflicting = new Set<Source>();
+    for (const s of ordered)
+      for (const other of edges.get(s)!)
+        if (precedence(s) >= precedence(other)) {
+          conflicting.add(s);
+          conflicting.add(other);
+        }
+    if (conflicting.size) conflict(conflicting);
     const projectNames = new Set(listed.map((pkg) => pkg.name as string));
     for (const s of attached) {
       if (s.item.source_type === 'composer_repository') {
@@ -934,12 +981,18 @@ function addGrants(
     )
       refuse('invalid_snapshot', pointer);
     const permission = team.permission;
+    const org = team.suborganizationId === undefined;
+    if (
+      !(org ? ['owner', 'admin', 'edit', 'view', 'billing'] : ['owner', 'view']).includes(
+        permission,
+      )
+    )
+      refuse('unsupported_team_permission', pointer);
     if (['Owners', 'Admins', 'Billing', 'All Organization Members'].includes(team.name)) {
       summary.warning.push({ code: 'built_in_team_skipped', pointer });
       continue;
     }
     const mapping = own(map.teams, team.name);
-    const org = team.suborganizationId === undefined;
     if (permission === 'billing') {
       summary.warning.push({ code: 'billing_team', pointer });
       continue;
@@ -956,8 +1009,6 @@ function addGrants(
       });
       continue;
     }
-    if (!(org ? ['owner', 'admin', 'edit', 'view'] : ['owner', 'view']).includes(permission))
-      refuse('unsupported_team_permission', pointer);
     const targets: (Project | null)[] =
       org && ['owner', 'admin'].includes(permission)
         ? [null]
@@ -1002,9 +1053,12 @@ function addGrants(
           subject,
         };
         const previous = grants.get(key);
-        if (previous && 'existing' in previous.role && previous.role.existing !== role)
-          refuse('conflicting_grant', pointer);
-        if (!previous || compare(grant.external_ref, previous.external_ref) < 0)
+        if (previous && 'existing' in previous.role && previous.role.existing !== role) {
+          summary.warning.push({ code: 'grant_merged', pointer, count: 1 });
+          const stronger = previous.role.existing === 'project_owner' ? previous.role : grant.role;
+          const chosen = compare(grant.external_ref, previous.external_ref) < 0 ? grant : previous;
+          grants.set(key, { ...chosen, role: stronger });
+        } else if (!previous || compare(grant.external_ref, previous.external_ref) < 0)
           grants.set(key, grant);
       }
   }

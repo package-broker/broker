@@ -257,9 +257,10 @@ it('refuses credential files on platforms without POSIX uid support', async () =
   }
 });
 
-it('dispatches an offline plan, writes canonical private files, and prints counts only in quiet mode', async () => {
+it('dispatches an offline plan, writes canonical private files, and prints counts and planHash in quiet mode', async () => {
   const { stat } = await import('node:fs/promises');
-  const { canonicalManifest, parseManifest } = await import('@package-broker/core/import/manifest');
+  const { canonicalManifest, parseManifest, planHash } =
+    await import('@package-broker/core/import/manifest');
   const snapshot = await readFile(
     new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
     'utf8',
@@ -301,6 +302,7 @@ it('dispatches an offline plan, writes canonical private files, and prints count
     'warning: 8',
     'needs-input: 5',
     'unsupported: 2',
+    `planHash: ${await planHash(parsed.data)}`,
   ]);
   const logs = JSON.stringify(stderr.mock.calls);
   for (const sentinel of [

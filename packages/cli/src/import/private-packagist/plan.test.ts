@@ -191,6 +191,26 @@ it('gives two packages in a monorepo distinct sources and stable identities', as
     expect(s.name).toBe(`pp-${digest.slice(0, 61)}`);
   }
 });
+it.each(['gitlab.com', 'bitbucket.org', 'git.example.test'])(
+  'normalizes HTTPS VCS suffixes on %s without changing mirror URLs',
+  async (host) => {
+    const url = `https://${host}/Acme/Repo`;
+    const expected = await success(
+      await plan({ ...minimal(), packages: [vcs(10, 'acme/one', url)] }),
+    );
+    for (const suffix of ['.git', '/', '.git/']) {
+      const result = await success(
+        await plan({ ...minimal(), packages: [vcs(10, 'acme/one', `${url}${suffix}`)] }),
+      );
+      expect(result.canonical).toBe(expected.canonical);
+      expect(result.hash).toBe(expected.hash);
+    }
+    const rows = mirrorRows(['acme/one']);
+    rows.mirroredRepositories = [mirror(20, `${url}.git/`)];
+    const result = await success(await plan(rows));
+    expect(result.manifest.items.find((item) => item.type === 'source')?.url).toBe(`${url}.git/`);
+  },
+);
 it.each([undefined, 'existing:public'])('maps the public proxy %#', async (packagist) => {
   const rows = minimal();
   rows.suborganizationPackages = [
@@ -305,6 +325,46 @@ it('never compacts a vendor shared with any other planned source', async () => {
     'SOURCE_CONFIG_LIST_LIMIT',
   );
 });
+it.each([undefined, 'existing:public'])(
+  'compacts a Magento-like mirror alongside the public proxy (%s) with exact name ownership',
+  async (packagist) => {
+    const names = Array.from({ length: 65 }, (_, i) => `magento/p${i}`);
+    const rows = mirrorRows(names);
+    rows.suborganizationPackages = [
+      ...rows.packages!.map((pkg) => ({ ...pkg, suborganizationId: 1 })),
+      {
+        id: 999,
+        name: 'magento/public',
+        origin: 'public-mirror',
+        config: {},
+        suborganizationId: 1,
+      },
+    ];
+    const result = await success(
+      await plan(rows, defaults, {
+        options: {
+          compactSelection: true,
+          acceptProjectWidening: ['acme'],
+          ...(packagist === undefined ? {} : { packagist }),
+        },
+      }),
+    );
+    expect(
+      result.manifest.items.find(
+        (i) => i.type === 'source' && i.source_type === 'composer_repository',
+      ),
+    ).toMatchObject({ config: { selection: { packages: [], patterns: ['magento/*'] } } });
+    expect(
+      result.manifest.items
+        .filter((i) => i.type === 'name')
+        .map((i) => i.pattern)
+        .sort(),
+    ).toEqual([...names].sort());
+    expect(result.summary.warning).toContainEqual(
+      expect.objectContaining({ code: 'selection_compacted', pattern: 'magento/*' }),
+    );
+  },
+);
 it('still refuses uncompactable or oversized compacted lists', async () => {
   const names = Array.from({ length: 65 }, (_, i) => `vendor${i}/one`);
   await refused(
@@ -355,6 +415,55 @@ it('requires acknowledgement even if a compacted vendor has no known extra packa
     expect.objectContaining({ code: 'project_widening', count: 0 }),
   );
 });
+it.each([false, true])(
+  'refuses unknown project acknowledgements (existing=%s)',
+  async (existing) => {
+    const map = {
+      ...defaults,
+      projects: { acme: existing ? { existing: 'target' } : { slug: 'target' } },
+    };
+    await success(await plan(minimal(), map, { options: { acceptProjectWidening: ['target'] } }));
+    for (const slug of ['acme', 'typo'])
+      await refused(
+        await plan(minimal(), map, { options: { acceptProjectWidening: ['target', slug] } }),
+        'unknown_project_acknowledgement',
+      );
+  },
+);
+it.each(['cycle', 'precedence'])(
+  'reports the project and sources for a %s conflict',
+  async (kind) => {
+    const rows = mirrorRows(['acme/one', 'acme/two'], ['acme/one', 'acme/two']);
+    rows.suborganizationPackages =
+      kind === 'cycle'
+        ? [
+            { ...mirrored(100, 'acme/one'), suborganizationId: 1 },
+            { ...mirrored(1001, 'acme/two', 21), suborganizationId: 1 },
+          ]
+        : [
+            { ...mirrored(100, 'acme/one'), suborganizationId: 1 },
+            {
+              id: 999,
+              name: 'acme/two',
+              origin: 'public-mirror',
+              config: {},
+              suborganizationId: 1,
+            },
+          ];
+    const result = await plan(rows);
+    await refused(result, 'cross_source_conflict');
+    const conflicts = result.summary.warning.filter(
+      (entry) => entry.code === 'cross_source_conflict',
+    );
+    expect(conflicts).toHaveLength(2);
+    for (const entry of conflicts)
+      expect(entry).toMatchObject({
+        project: 'acme',
+        source: expect.stringMatching(/^pp-[a-f0-9]{61}$/),
+      });
+    expect(new Set(conflicts.map((entry) => entry.source)).size).toBe(2);
+  },
+);
 it('owns shared names once, uses project-specific winners, and rejects cross-use cycles', async () => {
   const rows = mirrorRows(['acme/one', 'acme/two'], ['acme/one', 'acme/two']);
   rows.suborganizationPackages = [
@@ -494,6 +603,52 @@ it('refuses unknown mirror order and long exact package patterns with named caps
     'MAX_PATTERN_BYTES',
   );
 });
+it('warns for each mirror order id absent from the snapshot', async () => {
+  const result = await success(
+    await plan(mirrorRows(['acme/one']), { version: 1, mirrorOrder: [999, 20, 21, 998] }),
+  );
+  expect(result.summary.warning.filter((entry) => entry.code === 'stale_mirror_order')).toEqual([
+    { code: 'stale_mirror_order', pointer: '/mirrorOrder/0' },
+    { code: 'stale_mirror_order', pointer: '/mirrorOrder/3' },
+  ]);
+});
+it.each(['mirroredRepositories', 'suborganizationMirroredRepositories'])(
+  'refuses unknown mirroring behavior in %s even if another row for the mirror is supported',
+  async (kind) => {
+    const rows = minimal();
+    rows.mirroredRepositories = [mirror()];
+    rows.suborganizationMirroredRepositories = [{ ...mirror(), suborganizationId: 1 }];
+    rows[kind]![0]!.mirroringBehavior = 'future';
+    await refused(await plan(rows), 'unsupported_mirroring_behavior');
+  },
+);
+it.each(['packages', 'suborganizationPackages'])(
+  'refuses unknown default suborganization access in %s',
+  async (kind) => {
+    const rows = minimal();
+    rows.packages = [vcs()];
+    rows.suborganizationPackages = [{ ...vcs(), suborganizationId: 1 }];
+    rows[kind]![0]!.config = { ...(vcs().config as Row), defaultSuborganizationAccess: 'future' };
+    await refused(await plan(rows), 'unsupported_default_suborganization_access');
+  },
+);
+it.each(['teams', 'suborganizationTeams'])(
+  'refuses unknown %s permission before skipping an unlisted or built-in team',
+  async (kind) => {
+    for (const name of ['Unlisted', 'Owners']) {
+      const rows = minimal();
+      rows[kind] = [
+        {
+          id: 30,
+          name,
+          permission: 'future',
+          ...(kind === 'teams' ? {} : { suborganizationId: 1 }),
+        },
+      ];
+      await refused(await plan(rows, { version: 1 }), 'unsupported_team_permission');
+    }
+  },
+);
 it.each([
   ['suborg owner', 'owner', false, {}, 'project_owner'],
   ['suborg view', 'view', false, {}, 'project_developer'],
@@ -614,6 +769,70 @@ const binding = (match: Row, ref: string | null = 'env:COMPOSER_REF', kind = 'ht
   kind,
   ref,
 });
+it.each([
+  [{ host: 'git.example.test' }, { host: 'git.example.test' }],
+  [{ package: 'acme/*' }, { package: '*/private' }],
+  [
+    { url_prefix: 'https://git.example.test/acme' },
+    { url_prefix: 'https://git.example.test/acme' },
+  ],
+])('collapses identical credential bindings at the same matching level %#', async (...matches) => {
+  const result = await success(
+    await plan(
+      { ...minimal(), packages: [vcs()] },
+      { version: 1, credentials: matches.map((match) => binding(match)) },
+    ),
+  );
+  expect(credentialBindings(result.credentialsOut, result.manifest)).toEqual([
+    expect.objectContaining({ credential_ref: 'env:COMPOSER_REF', kind: 'http_basic' }),
+  ]);
+});
+it.each(['http_basic', 'github_app'])(
+  'accepts %s credentials for mapped GitHub sources',
+  async (kind) => {
+    const result = await success(
+      await plan(
+        { ...minimal(), packages: [vcs(10, 'acme/private', 'https://github.com/acme/repo')] },
+        {
+          version: 1,
+          github: { installations: { acme: 42 } },
+          credentials: [binding({ host: 'github.com' }, 'env:GITHUB_REF', kind)],
+        },
+      ),
+    );
+    expect(credentialBindings(result.credentialsOut, result.manifest)).toEqual([
+      expect.objectContaining({ credential_ref: 'env:GITHUB_REF', kind }),
+    ]);
+  },
+);
+it.each(['http_basic', 'bearer', 'github_app', 'ssh_key'])(
+  'ignores the credential kind for an explicit null %s binding',
+  async (kind) => {
+    const result = await success(
+      await plan(
+        { ...minimal(), packages: [vcs()] },
+        { version: 1, credentials: [binding({ host: 'git.example.test' }, null, kind)] },
+      ),
+    );
+    expect(result.summary.needsInput).toEqual([]);
+    expect(credentialBindings(result.credentialsOut, result.manifest)).toEqual([]);
+  },
+);
+it('still refuses equal-level bindings with the same ref but different kinds', async () => {
+  await refused(
+    await plan(
+      { ...minimal(), packages: [vcs()] },
+      {
+        version: 1,
+        credentials: [
+          binding({ host: 'git.example.test' }),
+          binding({ host: 'git.example.test' }, 'env:COMPOSER_REF', 'bearer'),
+        ],
+      },
+    ),
+    'ambiguous_credential',
+  );
+});
 it('uses exact package, pattern, longest segment prefix, credential id, then host', async () => {
   const rows = mirrorRows(['acme/one']);
   const rules = [
@@ -689,7 +908,7 @@ it.each([
   await refused(
     await plan(
       { ...minimal(), packages: [vcs()] },
-      { version: 1, credentials: matches.map((m) => binding(m)) },
+      { version: 1, credentials: matches.map((m, i) => binding(m, `env:REF_${i}`)) },
     ),
     'ambiguous_credential',
   );
@@ -894,15 +1113,18 @@ it('does not inherit operator mappings from object prototypes', async () => {
     config: { provider: 'git', installationId: null },
   });
 });
-it('refuses conflicting grants for the same subject and target', async () => {
+it.each([
+  ['owner', 'view'],
+  ['view', 'owner'],
+])('merges overlapping grants using the stronger role (%s, %s)', async (...permissions) => {
   const rows = minimal();
-  rows.suborganizationTeams = ['owner', 'view'].map((permission, i) => ({
+  rows.suborganizationTeams = permissions.map((permission, i) => ({
     id: 30 + i,
     name: `team${i}`,
     permission,
     suborganizationId: 1,
   }));
-  await refused(
+  const result = await success(
     await plan(rows, {
       version: 1,
       teams: {
@@ -910,8 +1132,22 @@ it('refuses conflicting grants for the same subject and target', async () => {
         team1: { group: { provider: 'sso', value: 'acme' } },
       },
     }),
-    'conflicting_grant',
   );
+  expect(result.manifest.items.filter((item) => item.type === 'grant')).toEqual([
+    expect.objectContaining({ role: { existing: 'project_owner' } }),
+  ]);
+  expect(result.summary.warning).toContainEqual(expect.objectContaining({ code: 'grant_merged' }));
+  rows.suborganizationTeams.reverse();
+  const shuffled = await success(
+    await plan(rows, {
+      version: 1,
+      teams: {
+        team0: { group: { provider: 'sso', value: 'acme' } },
+        team1: { group: { provider: 'sso', value: 'acme' } },
+      },
+    }),
+  );
+  expect(shuffled.canonical).toBe(result.canonical);
 });
 
 it.each([false, true])(

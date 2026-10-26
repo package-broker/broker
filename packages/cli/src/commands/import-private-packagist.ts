@@ -221,7 +221,7 @@ export async function runImportPrivatePackagistPlan(
         console.error(`${d.code} ${d.pointer || '/'}${d.cap === undefined ? '' : ` [${d.cap}]`}`);
       return 2;
     }
-    if (!options.quiet) console.log(`planHash: ${result.hash}`);
+    console.log(`planHash: ${result.hash}`);
     return 0;
   } catch (error) {
     console.error(error instanceof PlanFileError ? error.code : 'private_packagist_plan_failed');

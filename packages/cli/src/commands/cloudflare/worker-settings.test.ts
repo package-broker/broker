@@ -96,3 +96,58 @@ it.each(['enabled', 'invocation_logs'])(
     expect(workerSettingsDifferences(actual, declared(), names)).toEqual([]);
   },
 );
+
+it.each<[string, unknown, unknown]>([
+  ['enabled', true, false],
+  ['head_sampling_rate', 0.05, 1],
+  ['destinations', ['collector'], ['PRIVATE_SENTINEL']],
+  ['persist', false, true],
+])('compares only declared tracing %s', (field, prior, live) => {
+  const expected = { ...declared(), observability: { traces: { [field]: prior } } };
+  const actual = { ...declared(), observability: { traces: { [field]: live } } };
+  expect(workerSettingsDifferences(actual, expected, names)).toEqual([
+    `worker_settings:observability:traces:${field}`,
+  ]);
+  expect(workerSettingsDifferences(declared(), expected, names)).toEqual([
+    `worker_settings:observability:traces:${field}`,
+  ]);
+  expect(workerSettingsDifferences(expected, expected, names)).toEqual([]);
+  expect(workerSettingsDifferences(actual, declared(), names)).toEqual([]);
+  expect(
+    workerSettingsDifferences(
+      actual,
+      {
+        ...declared(),
+        observability: { traces: {} },
+      },
+      names,
+    ),
+  ).toEqual([]);
+});
+
+it.each([
+  ['enabled', true],
+  ['head_sampling_rate', 0.05],
+  ['persist', false],
+])('detects trace %s drift against the real fixture', (field, value) => {
+  const actual = structuredClone(real);
+  actual.observability.traces[field] = value;
+  expect(workerSettingsDifferences(actual, real, names)).toEqual([
+    `worker_settings:observability:traces:${field}`,
+  ]);
+});
+
+it('compares the real fixture when neither side declares trace destinations', () => {
+  expect(real.observability.traces).not.toHaveProperty('destinations');
+  expect(workerSettingsDifferences(structuredClone(real), real, names)).toEqual([]);
+});
+
+it('ignores trace destination order without mutating settings', () => {
+  const expected = structuredClone(real);
+  expected.observability.traces.destinations = ['first', 'second'];
+  const actual = structuredClone(expected);
+  actual.observability.traces.destinations.reverse();
+  expect(workerSettingsDifferences(actual, expected, names)).toEqual([]);
+  expect(actual.observability.traces.destinations).toEqual(['second', 'first']);
+  expect(expected.observability.traces.destinations).toEqual(['first', 'second']);
+});

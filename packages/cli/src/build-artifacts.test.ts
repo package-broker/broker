@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build as bundle } from 'esbuild';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  credentialProblems,
   describePlatformPorts,
   renderBuildInfo,
   renderBuildManifest,
@@ -572,6 +573,19 @@ describe('build with platformPorts', () => {
       'cloudflare.observability.analyticsBinding: looks like a credential value',
     ],
     [
+      'a trace destination',
+      {
+        cloudflare: {
+          ...CLOUDFLARE_PORTS,
+          observability: {
+            ...CLOUDFLARE_PORTS.observability,
+            traces: { enabled: true, destinations: ['collector', `ghp_${'a1B2'.repeat(9)}`] },
+          },
+        },
+      },
+      'cloudflare.observability.traces.destinations: looks like a credential value',
+    ],
+    [
       'a cache namespace',
       {
         cloudflare: {
@@ -783,3 +797,52 @@ describe('built plugin order round trip', () => {
     ).rejects.toThrow('dependency cycle at plugin "b"');
   });
 });
+
+it('preserves nested Workers tracing settings in described platform ports', () => {
+  const traces = {
+    enabled: true,
+    headSamplingRate: 0.05,
+    destinations: ['collector'],
+    persist: false,
+  };
+  const ports = {
+    ...CLOUDFLARE_PORTS,
+    observability: { ...CLOUDFLARE_PORTS.observability, traces },
+  };
+  const described = describePlatformPorts(ports);
+  expect(described).toEqual(ports);
+  traces.destinations.push('another');
+  expect(described?.observability.traces?.destinations).toEqual(['collector']);
+});
+
+it.each([null, true, 'invalid', 1, []])('omits invalid traces objects: %j', (traces) => {
+  const ports = {
+    ...CLOUDFLARE_PORTS,
+    observability: { ...CLOUDFLARE_PORTS.observability, traces },
+  } as unknown as Parameters<typeof describePlatformPorts>[0];
+  expect(describePlatformPorts(ports)?.observability).not.toHaveProperty('traces');
+});
+
+it.each([null, 'invalid', 1, {}, [null], Array(1)])(
+  'omits trace fields with invalid types and safely scans destinations: %j',
+  (invalid) => {
+    const ports = {
+      ...CLOUDFLARE_PORTS,
+      observability: {
+        ...CLOUDFLARE_PORTS.observability,
+        traces: {
+          enabled: invalid,
+          headSamplingRate: invalid,
+          destinations: invalid,
+          persist: invalid,
+        },
+      },
+    } as unknown as Parameters<typeof describePlatformPorts>[0];
+    const described = describePlatformPorts(ports);
+    expect(described?.observability.traces).toEqual(
+      typeof invalid === 'number' ? { headSamplingRate: invalid } : {},
+    );
+    expect(credentialProblems(ports ?? null, 'cloudflare')).toEqual([]);
+    expect(credentialProblems(described, 'cloudflare')).toEqual([]);
+  },
+);

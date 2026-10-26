@@ -1,4 +1,5 @@
 import { MAX_KEY_LENGTH, packageKey } from '../catalogue/names.js';
+import { isValidProviderId } from '../identity/port.js';
 import { isUlid } from '../ids.js';
 import { redactValue } from './redact.js';
 
@@ -69,15 +70,21 @@ const IMPORT_RUN_FIELDS = ['state', 'plan_hash', 'count', 'external_ref_count'] 
 const IMPORT_ROLLBACK_FIELDS = [...IMPORT_RUN_FIELDS, 'restored', 'conflict', 'expired'] as const;
 const ATTACH_FIELDS = ['project_id', 'position'] as const;
 const REGISTERED_NAME_FIELDS = ['pattern'] as const;
+const IDENTITY_FIELDS = ['provider'] as const;
+const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
+  'identity.unblock',
+  'identity.unlink',
+  'identity.block',
+]);
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'session.login': [],
   'session.logout': [],
   'session.reauth': [],
   'setup.complete': [],
-  'identity.unblock': [],
-  'identity.unlink': [],
-  'identity.block': [],
+  'identity.unblock': IDENTITY_FIELDS,
+  'identity.unlink': IDENTITY_FIELDS,
+  'identity.block': IDENTITY_FIELDS,
   'user.suspend': [],
   'user.reactivate': [],
   'role.create': ['key', 'name', 'scope', 'permissions'],
@@ -224,6 +231,13 @@ function cleanValue(value: unknown, field: string): Cleaned {
   return { ok: false, reason: 'bad_value' };
 }
 
+/** A provider id is an operator-configured identifier held to the config grammar, not a secret. */
+function cleanProviderId(value: unknown): Cleaned {
+  return typeof value === 'string' && isValidProviderId(value)
+    ? { ok: true, value }
+    : { ok: false, reason: 'bad_value' };
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -321,7 +335,10 @@ function cleanChanges(
     for (const key of Object.keys(entry)) {
       if (!CHANGE_KEYS.has(key)) return { ok: false, reason: 'bad_value' };
       if (entry[key] === undefined) continue;
-      const cleaned = cleanValue(entry[key], field);
+      const cleaned =
+        field === 'provider' && IDENTITY_ACTIONS.has(action)
+          ? cleanProviderId(entry[key])
+          : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
       cleanedEntry[key] = cleaned.value;
     }

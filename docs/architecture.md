@@ -42,4 +42,4 @@ The database is SQLite: D1 on Cloudflare and `better-sqlite3` on Node. Blobs are
 
 ## Observability
 
-One observability port in `packages/core/src/platform` covers logs, metrics and traces. Node writes JSON logs to standard output, and Cloudflare uses Workers Logs and Analytics Engine. Both can export logs, metrics and traces over OTLP, so any OTLP backend works without a vendor SDK. Requests are traced, upstream fetches are child spans, and the `traceparent` header is propagated.
+One observability port in `packages/core/src/platform` covers logs, metrics and traces. Node writes JSON logs to standard output, and Cloudflare uses Workers Logs and Analytics Engine. Both can export logs, metrics and traces over OTLP, so any OTLP backend works without a vendor SDK. The broker exports one server span per request; upstream child spans and upstream `traceparent` propagation are not implemented yet.

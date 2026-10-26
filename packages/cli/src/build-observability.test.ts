@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { build } from './build.js';
 import { run } from './cli.js';
+import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -69,4 +70,40 @@ describe('build observability', () => {
     expect(printed).toEqual(['error: observability.trustInboundTraceparent: must be a boolean']);
     expect(printed.join('\n')).not.toContain(secret);
   });
+});
+
+it.each([
+  undefined,
+  { enabled: true },
+  { enabled: true, headSamplingRate: 0.05, destinations: ['collector'], persist: false },
+])('carries automatic tracing through the build manifest: %j', async (traces) => {
+  const options = await fixture(undefined);
+  const ports: PlatformPortConfig = {
+    blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+    cache: { adapter: 'cache-api' },
+    jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
+    observability: {
+      adapter: 'workers',
+      deploymentIdEnv: 'DEPLOYMENT_ID',
+      ...(traces === undefined ? {} : { traces }),
+    },
+  };
+  await writeFile(
+    options.configPath,
+    `export default ${JSON.stringify({
+      platform: 'cloudflare',
+      plugins: [],
+      platformPorts: { cloudflare: ports },
+    })};`,
+  );
+  await writeFile(options.runtimeEntry, "export { platformPorts } from '#pb-manifest';");
+  const result = await build({ ...options, target: 'cloudflare' });
+  const bundled = (await import(/* @vite-ignore */ pathToFileURL(result.bundle).href)) as {
+    platformPorts: PlatformPortConfig;
+  };
+  expect(bundled.platformPorts).toEqual(ports);
+  const manifest = JSON.parse(
+    await readFile(path.join(options.cwd, '.pb/cloudflare/generated/manifest.json'), 'utf8'),
+  );
+  expect(manifest.platformPorts).toEqual(ports);
 });

@@ -445,9 +445,9 @@ test.describe('Node management UI', () => {
     await expect(page.getByText('Last listing:', { exact: false }).first()).toBeVisible();
     await expect(page.getByText('Last listing error:', { exact: false }).first()).toBeVisible();
     await expect(page.getByText('Next poll:', { exact: false }).first()).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /^Sync now / })).toBeDisabled();
     await expect(page.getByText('Enable before syncing.', { exact: true })).toBeVisible();
-    await page.getByRole('menuitem', { name: 'Registered names', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Registered names / }).click();
     await page.getByLabel('Registered pattern', { exact: true }).fill('@browser-fixture/*');
     const registered = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/names'),
@@ -459,11 +459,11 @@ test.describe('Node management UI', () => {
       .getByRole('button', { name: 'Close', exact: true })
       .click();
     await openDetails(page, 'More');
-    await expect(page.getByRole('menuitem', { name: 'Enable', exact: true })).toBeEnabled();
+    await expect(page.getByRole('menuitem', { name: /^Enable / })).toBeEnabled();
     const enabled = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/enable'),
     );
-    await page.getByRole('menuitem', { name: 'Enable', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Enable / }).click();
     expect((await enabled).status()).toBe(204);
     await openDetails(page, 'More');
     const synced = page.waitForResponse(
@@ -472,12 +472,12 @@ test.describe('Node management UI', () => {
     const refreshed = page.waitForResponse(
       (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/_pb/sources',
     );
-    await page.getByRole('button', { name: 'Sync now', exact: true }).click();
+    await page.getByRole('button', { name: /^Sync now / }).click();
     expect((await synced).status()).toBe(202);
     expect((await refreshed).status()).toBe(200);
     await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
     await openDetails(page, 'More');
-    await page.getByRole('menuitem', { name: 'Set credential', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Set credential / }).click();
     const material = randomBytes(32).toString('base64url');
     await page
       .getByRole('combobox', { name: 'Credential kind', exact: true })
@@ -494,7 +494,7 @@ test.describe('Node management UI', () => {
     await expect(page.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
     await expect(page.getByText('Browser fixture source', { exact: true }).first()).toBeVisible();
     await openDetails(page, 'More');
-    await expect(page.getByRole('menuitem', { name: 'Set credential', exact: true })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /^Set credential / })).toBeVisible();
     await assertSecretAbsent(page, material);
   });
 
@@ -514,14 +514,12 @@ test.describe('Node management UI', () => {
       expect(await scrollTop()).toBe(0);
       await more.focus();
       await page.keyboard.press('Enter');
-      await expect(
-        page.getByRole('menuitem', { name: 'Registered names', exact: true }),
-      ).toBeVisible();
+      await expect(page.getByRole('menuitem', { name: /^Registered names / })).toBeVisible();
       const menu = page.getByRole('menu');
       expect(
         await menu.evaluate((element) => element.closest('.list-card, .table-scroll')),
       ).toBeNull();
-      const last = page.getByRole('menuitem', { name: 'Registered names', exact: true });
+      const last = page.getByRole('menuitem', { name: /^Registered names / });
       expect(
         await last.evaluate((element) => {
           const box = element.getBoundingClientRect();
@@ -532,11 +530,9 @@ test.describe('Node management UI', () => {
       expect(await scrollTop()).toBe(0);
       await page.keyboard.press('Escape');
       await expect(more).toBeFocused();
-      await expect(
-        page.getByRole('menuitem', { name: 'Registered names', exact: true }),
-      ).not.toBeVisible();
+      await expect(page.getByRole('menuitem', { name: /^Registered names / })).not.toBeVisible();
       await page.keyboard.press('Space');
-      await page.getByRole('menuitem', { name: 'Registered names', exact: true }).focus();
+      await page.getByRole('menuitem', { name: /^Registered names / }).focus();
       await page.keyboard.press('Enter');
       const names = activeDialog(page, 'Registered names');
       await expect(names).toBeVisible();
@@ -545,7 +541,7 @@ test.describe('Node management UI', () => {
       await names.getByRole('button', { name: 'Close', exact: true }).click();
       await more.focus();
       await page.keyboard.press('Enter');
-      await page.getByRole('menuitem', { name: 'Set credential', exact: true }).focus();
+      await page.getByRole('menuitem', { name: /^Set credential / }).focus();
       await page.keyboard.press('Enter');
       const credential = activeDialog(page, 'Set credential');
       await expect(credential).toBeVisible();
@@ -608,7 +604,9 @@ test.describe('Node management UI', () => {
       page.getByRole('row').filter({ hasText: 'Browser Composer repository' });
     await expect(sourceRow()).toBeVisible();
 
-    await sourceRow().getByRole('button', { name: 'Edit', exact: true }).click();
+    await sourceRow()
+      .getByRole('button', { name: /^Edit / })
+      .click();
     const edit = activeDialog(page, 'Edit source');
     await edit.getByText('Advanced settings', { exact: true }).click();
     await edit.getByLabel('Sync interval (seconds)', { exact: true }).fill('600');
@@ -639,7 +637,7 @@ test.describe('Node management UI', () => {
 
     await go(page, 'sources');
     await sourceRow().getByText('More', { exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Set credential', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Set credential / }).click();
     const material = randomBytes(32).toString('base64url');
     await page
       .getByRole('combobox', { name: 'Credential kind', exact: true })
@@ -711,8 +709,8 @@ test.describe('Node management UI', () => {
       page.getByRole('row').filter({ hasText: 'Browser project Composer repository' });
     await expect(sourceRow().getByText('Paused', { exact: true }).first()).toBeVisible();
     await sourceRow().getByText('More', { exact: true }).click();
-    await expect(sourceRow().getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
-    await page.getByRole('menuitem', { name: 'Registered names', exact: true }).click();
+    await expect(sourceRow().getByRole('button', { name: /^Sync now / })).toBeDisabled();
+    await page.getByRole('menuitem', { name: /^Registered names / }).click();
     await page.getByLabel('Registered pattern', { exact: true }).fill('browser/project-package');
     const registered = page.waitForResponse(
       (r) =>
@@ -729,7 +727,7 @@ test.describe('Node management UI', () => {
       .getByRole('button', { name: 'Close', exact: true })
       .click();
     await sourceRow().getByText('More', { exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Enable', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Enable / }).click();
     expect((await enabled).status()).toBe(204);
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
     await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
@@ -749,17 +747,19 @@ test.describe('Node management UI', () => {
         r.request().method() === 'GET' &&
         new URL(r.url()).pathname === '/_pb/projects/browser-fixture/sources',
     );
-    await sourceRow().getByRole('button', { name: 'Sync now', exact: true }).click();
+    await sourceRow()
+      .getByRole('button', { name: /^Sync now / })
+      .click();
     expect((await synced).status()).toBe(202);
     expect((await refreshed).status()).toBe(200);
     await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
     await expect(nextPoll()).toHaveAttribute('datetime', /\d{4}-\d{2}-\d{2}T/);
     await expect(nextPoll()).not.toHaveAttribute('datetime', previousPoll!);
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
-    if (!(await page.getByRole('menuitem', { name: 'Pause source…', exact: true }).isVisible())) {
+    if (!(await page.getByRole('menuitem', { name: /^Pause source… / }).isVisible())) {
       await sourceRow().getByText('More', { exact: true }).click();
     }
-    await page.getByRole('menuitem', { name: 'Pause source…', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Pause source… / }).click();
     const paused = page.waitForResponse(
       (r) =>
         r.request().method() === 'POST' &&
@@ -781,7 +781,7 @@ test.describe('Node management UI', () => {
         r.request().method() === 'POST' &&
         new URL(r.url()).pathname === `/_pb/sources/${id}/enable`,
     );
-    await page.getByRole('menuitem', { name: 'Enable', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Enable / }).click();
     expect((await enabledFromOrganization).status()).toBe(204);
     await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
@@ -879,7 +879,7 @@ test.describe('Node management UI', () => {
     });
     await go(page, 'sources');
     const row = page.getByRole('row').filter({ hasText: 'Browser fixture source' });
-    await row.getByRole('button', { name: 'Sync now', exact: true }).click();
+    await row.getByRole('button', { name: /^Sync now / }).click();
     await expect(
       row.getByText(/0 queued.*0 running.*1 retrying.*0 failed.*2 completed/),
     ).toBeVisible();

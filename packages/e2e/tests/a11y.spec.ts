@@ -202,7 +202,7 @@ for (const width of [1440, 390]) {
     }
     await add.getByRole('button', { name: 'Close', exact: true }).click();
     const row = page.getByRole('row').filter({ hasText: 'Browser fixture source' });
-    await row.getByRole('button', { name: 'Edit', exact: true }).click();
+    await row.getByRole('button', { name: /^Edit / }).click();
     const edit = activeDialog(page, 'Edit source');
     await expect(edit).toBeVisible();
     await scan(page, 'Edit source');
@@ -211,7 +211,7 @@ for (const width of [1440, 390]) {
     await scan(page, 'Edit source advanced settings');
     await edit.getByRole('button', { name: 'Close', exact: true }).click();
     await openDetails(page, 'More');
-    await page.getByRole('menuitem', { name: 'Set credential', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Set credential / }).click();
     const credential = activeDialog(page, 'Set credential');
     await expect(credential).toBeVisible();
     const kinds = await credential
@@ -225,7 +225,7 @@ for (const width of [1440, 390]) {
     }
     await credential.getByRole('button', { name: 'Close', exact: true }).click();
     await openDetails(page, 'More');
-    await page.getByRole('menuitem', { name: 'Registered names', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Registered names / }).click();
     await scanDialog(page, 'Registered names');
   });
 

@@ -120,6 +120,15 @@ describe('identity audit fields', () => {
     expect(JSON.parse(payloadOf(result)).changes).toEqual({ provider: { new: 'oidc' } });
   });
 
+  it('records identity.unblock with the production identity_block target and no broker id', () => {
+    const target = { type: 'identity_block', id: null };
+    const result = build('identity.unblock', { provider: { new: 'oidc' } }, { target });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.event.target).toEqual(target);
+    expect(JSON.parse(result.event.payloadJson).changes).toEqual({ provider: { new: 'oidc' } });
+  });
+
   it.each(
     IDENTITY_ACTIONS.flatMap((action) =>
       ['issuer', 'subject', 'email', 'display_name'].map((field) => [action, field] as const),

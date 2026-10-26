@@ -189,7 +189,7 @@ test.describe('Node management UI', () => {
     await page.getByRole('button', { name: 'Open Package Broker', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
     await openDetails(page, 'Account');
-    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Sign out', exact: true }).click();
     await fillSecret(page.getByLabel('E-mail', { exact: true }), broker.email);
     await fillSecret(page.getByLabel('Password', { exact: true }), password);
     await fillSecret(page.getByLabel('Authenticator code'), await authCode(enrollment));
@@ -447,7 +447,7 @@ test.describe('Node management UI', () => {
     await expect(page.getByText('Next poll:', { exact: false }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
     await expect(page.getByText('Enable before syncing.', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Registered names', exact: true }).click();
     await page.getByLabel('Registered pattern', { exact: true }).fill('@browser-fixture/*');
     const registered = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/names'),
@@ -459,11 +459,11 @@ test.describe('Node management UI', () => {
       .getByRole('button', { name: 'Close', exact: true })
       .click();
     await openDetails(page, 'More');
-    await expect(page.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled();
+    await expect(page.getByRole('menuitem', { name: 'Enable', exact: true })).toBeEnabled();
     const enabled = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/enable'),
     );
-    await page.getByRole('button', { name: 'Enable', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Enable', exact: true }).click();
     expect((await enabled).status()).toBe(204);
     await openDetails(page, 'More');
     const synced = page.waitForResponse(
@@ -477,7 +477,7 @@ test.describe('Node management UI', () => {
     expect((await refreshed).status()).toBe(200);
     await expect(page.getByRole('status').filter({ hasText: 'Sync requested.' })).toBeVisible();
     await openDetails(page, 'More');
-    await page.getByRole('button', { name: 'Set credential', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Set credential', exact: true }).click();
     const material = randomBytes(32).toString('base64url');
     await page
       .getByRole('combobox', { name: 'Credential kind', exact: true })
@@ -494,7 +494,7 @@ test.describe('Node management UI', () => {
     await expect(page.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
     await expect(page.getByText('Browser fixture source', { exact: true }).first()).toBeVisible();
     await openDetails(page, 'More');
-    await expect(page.getByRole('button', { name: 'Set credential', exact: true })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Set credential', exact: true })).toBeVisible();
     await assertSecretAbsent(page, material);
   });
 
@@ -507,20 +507,36 @@ test.describe('Node management UI', () => {
       await page.setViewportSize({ width, height: 844 });
       await go(page, 'sources');
       const row = page.getByRole('row').filter({ hasText: 'Browser fixture source' });
-      const more = row.locator('summary').filter({ hasText: /^More$/ });
+      const more = row.getByRole('button', { name: /^More actions for / });
       await expect(row.getByText('Edit source', { exact: true })).toHaveCount(0);
+      const scrollTop = () =>
+        row.evaluate((element) => element.closest('.table-scroll')!.scrollTop);
+      expect(await scrollTop()).toBe(0);
       await more.focus();
       await page.keyboard.press('Enter');
       await expect(
-        row.getByRole('button', { name: 'Registered names', exact: true }),
+        page.getByRole('menuitem', { name: 'Registered names', exact: true }),
       ).toBeVisible();
+      const menu = page.getByRole('menu');
+      expect(
+        await menu.evaluate((element) => element.closest('.list-card, .table-scroll')),
+      ).toBeNull();
+      const last = page.getByRole('menuitem', { name: 'Registered names', exact: true });
+      expect(
+        await last.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+          return hit === element || element.contains(hit);
+        }),
+      ).toBe(true);
+      expect(await scrollTop()).toBe(0);
       await page.keyboard.press('Escape');
       await expect(more).toBeFocused();
       await expect(
-        row.getByRole('button', { name: 'Registered names', exact: true }),
+        page.getByRole('menuitem', { name: 'Registered names', exact: true }),
       ).not.toBeVisible();
       await page.keyboard.press('Space');
-      await row.getByRole('button', { name: 'Registered names', exact: true }).focus();
+      await page.getByRole('menuitem', { name: 'Registered names', exact: true }).focus();
       await page.keyboard.press('Enter');
       const names = activeDialog(page, 'Registered names');
       await expect(names).toBeVisible();
@@ -529,7 +545,7 @@ test.describe('Node management UI', () => {
       await names.getByRole('button', { name: 'Close', exact: true }).click();
       await more.focus();
       await page.keyboard.press('Enter');
-      await row.getByRole('button', { name: 'Set credential', exact: true }).focus();
+      await page.getByRole('menuitem', { name: 'Set credential', exact: true }).focus();
       await page.keyboard.press('Enter');
       const credential = activeDialog(page, 'Set credential');
       await expect(credential).toBeVisible();
@@ -623,7 +639,7 @@ test.describe('Node management UI', () => {
 
     await go(page, 'sources');
     await sourceRow().getByText('More', { exact: true }).click();
-    await sourceRow().getByRole('button', { name: 'Set credential', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Set credential', exact: true }).click();
     const material = randomBytes(32).toString('base64url');
     await page
       .getByRole('combobox', { name: 'Credential kind', exact: true })
@@ -696,7 +712,7 @@ test.describe('Node management UI', () => {
     await expect(sourceRow().getByText('Paused', { exact: true }).first()).toBeVisible();
     await sourceRow().getByText('More', { exact: true }).click();
     await expect(sourceRow().getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
-    await sourceRow().getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Registered names', exact: true }).click();
     await page.getByLabel('Registered pattern', { exact: true }).fill('browser/project-package');
     const registered = page.waitForResponse(
       (r) =>
@@ -713,7 +729,7 @@ test.describe('Node management UI', () => {
       .getByRole('button', { name: 'Close', exact: true })
       .click();
     await sourceRow().getByText('More', { exact: true }).click();
-    await sourceRow().getByRole('button', { name: 'Enable', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Enable', exact: true }).click();
     expect((await enabled).status()).toBe(204);
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
     await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
@@ -740,10 +756,10 @@ test.describe('Node management UI', () => {
     await expect(nextPoll()).toHaveAttribute('datetime', /\d{4}-\d{2}-\d{2}T/);
     await expect(nextPoll()).not.toHaveAttribute('datetime', previousPoll!);
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
-    if (!(await sourceRow().getByRole('button', { name: 'Pause', exact: true }).isVisible())) {
+    if (!(await page.getByRole('menuitem', { name: 'Pause source…', exact: true }).isVisible())) {
       await sourceRow().getByText('More', { exact: true }).click();
     }
-    await sourceRow().getByRole('button', { name: 'Pause', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Pause source…', exact: true }).click();
     const paused = page.waitForResponse(
       (r) =>
         r.request().method() === 'POST' &&
@@ -765,7 +781,7 @@ test.describe('Node management UI', () => {
         r.request().method() === 'POST' &&
         new URL(r.url()).pathname === `/_pb/sources/${id}/enable`,
     );
-    await sourceRow().getByRole('button', { name: 'Enable', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Enable', exact: true }).click();
     expect((await enabledFromOrganization).status()).toBe(204);
     await expect(sourceRow().getByText('Active', { exact: true }).first()).toBeVisible();
     await expect(sourceRow().getByText('Paused', { exact: true })).toHaveCount(0);
@@ -883,12 +899,16 @@ test.describe('Node management UI', () => {
       (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/_pb/sources',
     );
     await go(page, 'sources');
-    expect((await (await listed).json()).vcsProviders).toEqual(['github', 'git']);
+    expect((await (await listed).json()).vcsProviders).toEqual(['github', 'git', 'ssh']);
     await page.getByRole('button', { name: 'Add source', exact: true }).click();
     const create = activeDialog(page, 'Add source');
     await create.getByRole('radio', { name: /^Git repository/ }).check();
     const provider = create.getByLabel('Repository provider', { exact: true });
-    await expect(provider.locator('option')).toHaveText(['GitHub', 'Git over HTTP(S)']);
+    await expect(provider.locator('option')).toHaveText([
+      'GitHub',
+      'Git over HTTP(S)',
+      'Git over SSH',
+    ]);
     await expect(create.getByText(/Node runtime/)).toHaveCount(0);
     await provider.selectOption('git');
     await expect(create.getByLabel('Git repository URL (required)', { exact: true })).toBeVisible();

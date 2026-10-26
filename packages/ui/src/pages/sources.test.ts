@@ -4,8 +4,8 @@ import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { createElement, isValidElement, type ReactNode, type ReactElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
-import { DropdownMenu } from '../components/ui/dropdown-menu.js';
 import { createApiClient } from '../api.js';
+import { DropdownMenuItem } from '../components/ui/dropdown-menu.js';
 import type { paths } from '../api-types.js';
 import { createReauthFlow, type ShellServices } from '../auth.js';
 import { loadPending } from '../pending.js';
@@ -77,6 +77,34 @@ function setup(
   const model = createSourcesModel({ client, requireReauth }, project, () => NOW);
   const html = () => renderToString(createElement(SourcesView, { model }));
   return { model, fetch, permissionsFetch, entries, storage, flow, requireReauth, navigate, html };
+}
+
+function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
+  if (Array.isArray(node)) return node.flatMap(elements);
+  if (!isValidElement<Record<string, unknown>>(node)) return [];
+  return [node, ...elements(node.props.children as ReactNode)];
+}
+
+function actions(model: ReturnType<typeof setup>['model'], selected = source, busy = false) {
+  let tree: ReactNode;
+  function Probe() {
+    tree = SourceActions({ source: selected, model, busy });
+    return null;
+  }
+  renderToString(createElement(Probe));
+  return tree;
+}
+
+function menuControl(model: ReturnType<typeof setup>['model'], label: string) {
+  return model
+    .snapshot()
+    .items.flatMap((selected) => elements(actions(model, selected, model.snapshot().busy)))
+    .find((element) => element.type === DropdownMenuItem && element.props.children === label)
+    ?.props;
+}
+
+function enableControl(model: ReturnType<typeof setup>['model']) {
+  return menuControl(model, 'Enable');
 }
 
 function credentialForm() {
@@ -430,7 +458,7 @@ describe('additional source boundaries', () => {
     await model.load();
     expect(html()).toContain('Manage this organization source in organization scope.');
     expect(html()).not.toContain('Save settings');
-    expect(html()).not.toContain('Set credential');
+    expect(menuControl(model, 'Set credential')).toBeUndefined();
   });
 
   it('ignores an older who-wins response after a newer query completes', async () => {
@@ -837,8 +865,10 @@ describe('round 2 regressions', () => {
     const fetch = vi.fn().mockResolvedValue(json({ items: [paused], next: null }));
     const { model, html } = setup(fetch, 'acme', ['project:sources:write']);
     await model.load();
-    expect(html()).not.toMatch(/>Enable</);
-    expect(html()).toContain('<p>An organization admin must enable this source.</p>');
+    expect(enableControl(model)).toMatchObject({ disabled: true });
+    expect(html()).toContain(
+      `<p id="source-actions-note-${SOURCE}">An organization admin must enable this source.</p>`,
+    );
     fetch.mockClear();
     await model.togglePause(paused);
     expect(fetch).not.toHaveBeenCalled();
@@ -858,20 +888,36 @@ describe('round 2 regressions', () => {
       );
       await model.load();
       await model.togglePause(paused);
-      expect(html()).toMatch(/>Enable</);
+      expect(enableControl(model)).toMatchObject({ disabled: false });
       expect(model.snapshot().enableDenied).toEqual([]);
       expect(model.snapshot().error).toBe(
         'The request could not be saved or loaded. Refresh and try again.',
       );
       expect(html()).not.toContain(SECRET);
       await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: false, status: 403, code });
-      expect(html()).toMatch(/>Enable</);
+      expect(enableControl(model)).toMatchObject({ disabled: false });
       expect(model.snapshot().enableDenied).toEqual([]);
       expect(model.snapshot().error).toBe(
         'The request could not be saved or loaded. Refresh and try again.',
       );
     },
   );
+
+  it('shows both admin and conflict guidance when both apply to Enable', () => {
+    const { model } = setup();
+    const paused = { ...source, status: 'paused' as const };
+    vi.spyOn(model, 'snapshot').mockReturnValue({
+      ...model.snapshot(),
+      enableConflicts: [SOURCE],
+    });
+    vi.spyOn(model, 'enableNeedsAdmin').mockReturnValue(true);
+    const html = renderToString(
+      createElement(SourceActions, { source: paused, model, busy: false }),
+    );
+    expect(html).toContain(
+      `<p id="source-actions-note-${SOURCE}">An organization admin must enable this source. Register package names, then enable the source.</p>`,
+    );
+  });
 
   it('announces project enable conflicts next to the source and permits retry after registering names', async () => {
     const paused = { ...attached, status: 'paused' as const };
@@ -886,8 +932,10 @@ describe('round 2 regressions', () => {
     );
     await model.load();
     await model.togglePause(paused);
-    expect(html()).toContain('<p>Register package names, then enable the source.</p>');
-    expect(html()).toMatch(/>Enable</);
+    expect(html()).toContain(
+      `<p id="source-actions-note-${SOURCE}">Register package names, then enable the source.</p>`,
+    );
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     expect(html()).not.toContain(SECRET);
     expect(model.snapshot().error).toBeNull();
     await model.togglePause(paused);
@@ -910,8 +958,10 @@ describe('round 2 regressions', () => {
       status: 409,
       code: 'conflict',
     });
-    expect(html()).toContain('<p>Register package names, then enable the source.</p>');
-    expect(html()).toMatch(/>Enable</);
+    expect(html()).toContain(
+      `<p id="source-actions-note-${SOURCE}">Register package names, then enable the source.</p>`,
+    );
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     expect(model.snapshot().error).toBeNull();
   });
 
@@ -926,7 +976,7 @@ describe('round 2 regressions', () => {
     );
     await model.load();
     await model.togglePause(paused);
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     expect(model.snapshot().busy).toBe(false);
     expect(model.snapshot().error).toBe(
       'The request could not be saved or loaded. Refresh and try again.',
@@ -948,12 +998,12 @@ describe('round 2 regressions', () => {
           }),
       )
       .mockResolvedValueOnce(json({ items: [attached], next: null }));
-    const { model, html } = setup(fetch, 'acme');
+    const { model } = setup(fetch, 'acme');
     await model.load();
     const pending = model.togglePause(paused);
     await model.togglePause(paused);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(html()).toMatch(/disabled="">Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: true });
     finish(new Response(null, { status: 204 }));
     await pending;
     expect(model.snapshot().busy).toBe(false);
@@ -962,7 +1012,7 @@ describe('round 2 regressions', () => {
 
   it('clears cached enable denial on reload and reauthentication without duplicate entries', async () => {
     const paused = { ...attached, status: 'paused' as const };
-    const { model, html, fetch, requireReauth } = setup(
+    const { model, fetch, requireReauth } = setup(
       vi.fn().mockImplementation(() => Promise.resolve(json({ items: [paused], next: null }))),
       'acme',
     );
@@ -983,11 +1033,11 @@ describe('round 2 regressions', () => {
     await model.replayed(denial);
     await model.load();
     expect(model.snapshot().enableDenied).toEqual([]);
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     await model.replayed(denial);
     await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: true, status: 204 });
     expect(model.snapshot().enableDenied).toEqual([]);
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
   });
 
   it('replaces project Enable with admin guidance after the enable route denies access', async () => {
@@ -1000,13 +1050,14 @@ describe('round 2 regressions', () => {
       'acme',
     );
     await model.load();
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     await model.togglePause(paused);
     expect(fetch.mock.calls[1]).toMatchObject([
       `/_pb/sources/${SOURCE}/enable`,
       { method: 'POST' },
     ]);
-    expect(html()).not.toMatch(/>Enable<|>Resume</);
+    expect(enableControl(model)).toMatchObject({ disabled: true });
+    expect(menuControl(model, 'Resume')).toBeUndefined();
     expect(html()).toContain('An organization admin must enable this source.');
     expect(html()).not.toContain(SECRET);
     expect(model.snapshot().error).toBeNull();
@@ -1022,9 +1073,9 @@ describe('round 2 regressions', () => {
       .mockResolvedValueOnce(json({ items: [paused], next: null }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(json({ items: [attached], next: null }));
-    const { model, html } = setup(fetch, 'acme');
+    const { model } = setup(fetch, 'acme');
     await model.load();
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     await model.togglePause(paused);
     expect(fetch.mock.calls[1]).toMatchObject([
       `/_pb/sources/${SOURCE}/enable`,
@@ -1032,7 +1083,7 @@ describe('round 2 regressions', () => {
     ]);
     expect(fetch.mock.calls[2]?.[0]).toBe('/_pb/projects/acme/sources?limit=100');
     expect(model.snapshot().items[0]?.status).toBe('active');
-    expect(html()).not.toMatch(/>Enable</);
+    expect(enableControl(model)).toBeUndefined();
   });
 
   it('keeps reauthentication available for project enable and refreshes after replay', async () => {
@@ -1051,7 +1102,7 @@ describe('round 2 regressions', () => {
       { method: 'POST', path: `/_pb/sources/${SOURCE}/enable` },
       { credential: false, secretFields: [] },
     );
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     expect(html()).not.toContain('An organization admin must enable this source.');
     await model.replayed({ path: `/_pb/sources/${SOURCE}/enable`, ok: true, status: 204 });
     expect(model.snapshot().items[0]?.status).toBe('active');
@@ -1064,15 +1115,17 @@ describe('round 2 regressions', () => {
       'acme',
     );
     await model.load();
-    expect(html()).toMatch(/>Enable</);
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     await model.replayed({
       path: `/_pb/sources/${SOURCE}/enable`,
       ok: false,
       status: 403,
       code: 'forbidden',
     });
-    expect(html()).not.toMatch(/>Enable</);
-    expect(html()).toContain('<p>An organization admin must enable this source.</p>');
+    expect(enableControl(model)).toMatchObject({ disabled: true });
+    expect(html()).toContain(
+      `<p id="source-actions-note-${SOURCE}">An organization admin must enable this source.</p>`,
+    );
   });
 });
 
@@ -1726,12 +1779,6 @@ it.each([
 });
 
 describe('source row action controls', () => {
-  function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
-    if (Array.isArray(node)) return node.flatMap(elements);
-    if (!isValidElement<Record<string, unknown>>(node)) return [];
-    return [node, ...elements(node.props.children as ReactNode)];
-  }
-
   it.each([
     ['Sync now', 'syncNow'],
     ['Set credential', 'chooseCredential'],
@@ -1739,7 +1786,7 @@ describe('source row action controls', () => {
   ] as const)('connects %s to the selected source', (label, method) => {
     const { model } = setup();
     const action = vi.spyOn(model, method).mockImplementation(vi.fn());
-    const controls = elements(SourceActions({ source, model, busy: false }));
+    const controls = elements(actions(model));
     const button = controls.find((node) => node.props.children === label);
     expect(button).toBeDefined();
     (button!.props.onClick as () => void)();
@@ -1752,7 +1799,7 @@ describe('source row action controls', () => {
       const { model } = setup();
       const selected = { ...source, status };
       const action = vi.spyOn(model, 'togglePause').mockResolvedValue();
-      const controls = elements(SourceActions({ source: selected, model, busy: false }));
+      const controls = elements(actions(model, selected));
       const button = controls.find((node) =>
         status === 'paused' ? node.props.children === 'Enable' : node.props.action === 'Pause',
       );
@@ -1762,56 +1809,12 @@ describe('source row action controls', () => {
     },
   );
 
-  it('closes More with Escape and restores focus to its trigger', () => {
+  it('labels More with the source it controls', () => {
     const { model } = setup();
-    const menu = elements(SourceActions({ source, model, busy: false })).find(
-      (node) => node.type === DropdownMenu,
-    )!;
-    const focus = vi.fn();
-    const details = {
-      open: true,
-      contains: vi.fn(() => true),
-      closest: vi.fn(() => null),
-      querySelector: vi.fn(() => ({ focus })),
-    };
-    const preventDefault = vi.fn();
-    const handler = DropdownMenu(menu.props).props.onKeyDown as (event: unknown) => void;
-    handler({
-      key: 'Escape',
-      currentTarget: details,
-      preventDefault,
-      stopPropagation: vi.fn(),
-    });
-    expect(details.open).toBe(false);
-    expect(preventDefault).toHaveBeenCalledOnce();
-    expect(focus).toHaveBeenCalledOnce();
-    details.open = false;
-    preventDefault.mockClear();
-    handler({
-      key: 'Escape',
-      currentTarget: details,
-      preventDefault,
-      stopPropagation: vi.fn(),
-    });
-    expect(details.open).toBe(false);
-    expect(preventDefault).not.toHaveBeenCalled();
-  });
-
-  it('Escape from outside the menu does not close it', () => {
-    const { model } = setup();
-    const menu = elements(SourceActions({ source, model, busy: false })).find(
-      (node) => node.type === DropdownMenu,
-    )!;
-    const details = { open: true, contains: vi.fn(() => false) };
-    const preventDefault = vi.fn();
-    DropdownMenu(menu.props).props.onKeyDown!({
-      key: 'Escape',
-      currentTarget: details,
-      target: {},
-      preventDefault,
-    } as never);
-    expect(details.open).toBe(true);
-    expect(preventDefault).not.toHaveBeenCalled();
+    const controls = elements(actions(model));
+    expect(controls.find((node) => node.props.children === 'More')?.props['aria-label']).toBe(
+      `More actions for ${source.name}`,
+    );
   });
 
   it('keeps row settings exclusively in Edit and includes the read-only identity summary', async () => {
@@ -1905,12 +1908,12 @@ describe('organization ownership filter', () => {
       finish(json({ items: [selected], next: SOURCE }));
       await pending;
       expect(permissionsFetch).toHaveBeenCalledTimes(1);
-      expect(html()).toContain('>Enable<');
+      expect(enableControl(model)).toMatchObject({ disabled: false });
       expect(html()).not.toContain('Source scope');
       await model.load(true);
       expect(permissionsFetch).toHaveBeenCalledTimes(1);
       expect(model.snapshot().items).toHaveLength(1);
-      expect(html()).toContain('>Enable<');
+      expect(enableControl(model)).toMatchObject({ disabled: false });
       expect(model.enableNeedsAdmin(selected)).toBe(false);
     },
   );
@@ -1980,9 +1983,9 @@ describe('organization ownership filter', () => {
     expect(fetch.mock.calls[1]?.[0]).toBe('/_pb/sources?limit=100&ownership=project');
     expect(model.snapshot().items).toHaveLength(1);
     expect(html()).toContain('Project: Payments');
-    expect(html()).toContain('>Enable<');
+    expect(enableControl(model)).toMatchObject({ disabled: false });
     expect(html()).not.toContain('>Edit<');
-    expect(html()).not.toContain('Set credential');
+    expect(menuControl(model, 'Set credential')).toBeUndefined();
     await model.load(true);
     expect(fetch.mock.calls[2]?.[0]).toContain(`after=${SOURCE}`);
     expect(fetch.mock.calls[2]?.[0]).toContain('ownership=project');
@@ -2051,7 +2054,7 @@ describe('organization ownership filter', () => {
     );
     await model.setOwnership('project');
     expect(html()).toContain('An organization admin must enable this source.');
-    expect(html()).not.toContain('>Enable<');
+    expect(enableControl(model)).toMatchObject({ disabled: true });
     await model.togglePause(model.snapshot().items[0]!);
     expect(fetch).toHaveBeenCalledTimes(1);
   });

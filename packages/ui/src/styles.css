@@ -318,3 +318,17 @@
     margin-bottom: 8px;
   }
 }
+
+[data-overlay-host] {
+  position: relative;
+  z-index: 50;
+}
+.menu-positioner {
+  z-index: 50;
+}
+.menu-popup {
+  max-width: var(--available-width);
+  max-height: var(--available-height);
+  overflow: auto;
+  overscroll-behavior: contain;
+}

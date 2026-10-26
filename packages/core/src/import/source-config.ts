@@ -1,4 +1,5 @@
 import * as z from 'zod/mini';
+import type { SourceConfig } from '../sources/config.js';
 import { PackageNameError, packageKey } from '../catalogue/names.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 
@@ -204,6 +205,31 @@ export const sourceConfig = z.union([
 ]);
 
 export type SourceConfigValue = z.infer<typeof sourceConfig>;
+
+type ReadonlyConfig<T> = T extends readonly (infer U)[]
+  ? readonly ReadonlyConfig<U>[]
+  : T extends object
+    ? { readonly [K in keyof T]: ReadonlyConfig<T[K]> }
+    : T;
+
+type NullsToOptional<T> = T extends object
+  ? { [K in keyof T as null extends T[K] ? never : K]: T[K] } & {
+      [K in keyof T as null extends T[K] ? K : never]?: Exclude<T[K], null>;
+    }
+  : T;
+
+function dropNullFields<T extends object>(config: T): NullsToOptional<T> {
+  return Object.fromEntries(
+    Object.entries(config).filter(([, value]) => value !== null),
+  ) as NullsToOptional<T>;
+}
+
+/** Converts validated import config for runtime storage without changing the manifest. */
+export function toRuntimeSourceConfig(config: ReadonlyConfig<SourceConfigValue>): SourceConfig {
+  const converted = dropNullFields(config);
+  if ('scopes' in converted) return { scopes: converted.scopes, distHosts: [] };
+  return converted;
+}
 
 export function isPackagistConfig(config: unknown): config is { githubToken: boolean } {
   return z.safeParse(packagistProxyConfig, config).success;

@@ -943,8 +943,8 @@ describe('served VCS providers', () => {
   const vcs = (provider: keyof typeof repositories, runtime: 'node' | 'cloudflare') =>
     parse('vcs', 'composer', null, { provider, repository: repositories[provider] }, { runtime });
 
-  it('reports github and git on node and only github on cloudflare', () => {
-    expect(servedVcsProviders('node')).toEqual(['github', 'git']);
+  it('reports github, git and ssh on node and only github on cloudflare', () => {
+    expect(servedVcsProviders('node')).toEqual(['github', 'git', 'ssh']);
     expect(servedVcsProviders('cloudflare')).toEqual(['github']);
   });
 
@@ -962,12 +962,15 @@ describe('served VCS providers', () => {
     }
   });
 
-  it('accepts git on node, where its archives are built and served', () => {
-    expect(vcs('git', 'node')).toMatchObject({
-      ok: true,
-      config: { provider: 'git', repository: repositories.git },
-    });
-  });
+  it.each(['git', 'ssh'] as const)(
+    'accepts %s on node, where its archives are built and served',
+    (provider) => {
+      expect(vcs(provider, 'node')).toMatchObject({
+        ok: true,
+        config: { provider, repository: repositories[provider] },
+      });
+    },
+  );
 });
 
 describe('reported VCS providers', () => {
@@ -976,9 +979,12 @@ describe('reported VCS providers', () => {
     expect(reportedVcsProviders('node', [vcs('git'), vcs('github'), vcs('ssh')])).toEqual([
       'github',
       'git',
+      'ssh',
     ]);
     expect(reportedVcsProviders('node', [vcs('git')])).toEqual(['git']);
-    expect(reportedVcsProviders('cloudflare', [vcs('git'), vcs('github')])).toEqual(['github']);
+    expect(reportedVcsProviders('cloudflare', [vcs('git'), vcs('github'), vcs('ssh')])).toEqual([
+      'github',
+    ]);
     expect(
       reportedVcsProviders('node', [{ id: 'github', sourceTypes: ['composer_repository'] }]),
     ).toEqual([]);

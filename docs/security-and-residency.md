@@ -8,7 +8,7 @@ description: Security model and data residency of Package Broker.
 
 Package Broker periodically checks eligible public Composer and npm package versions against OSV's known vulnerability advisories. The API and the packages page show the result, source and last successful check time. Results can be incomplete or out of date and do not establish that a package is safe. These are version-level advisory checks: they do not scan source code or artifacts, analyze malware, audit a transitive dependency tree, review lock files, enforce installation policy, send alerts or guarantee that every vulnerability will be found. This feature does not establish a security certification or SOC 2 compatibility.
 
-Checks are enabled by default (owner decision Q29(a)). The OSV job uses one allowlisted host, `api.osv.dev`, and never forwards source credentials to OSV. The browser reads stored results from the broker; opening the packages page does not call OSV or start a check. See the [API reference](reference/api.md) for the response contract.
+Checks are enabled by default. The OSV job uses one allowlisted host, `api.osv.dev`, and never forwards source credentials to OSV. The browser reads stored results from the broker; opening the packages page does not call OSV or start a check. See the [API reference](reference/api.md) for the response contract.
 
 ## Which names may be sent to OSV
 
@@ -28,7 +28,7 @@ These OSV checks send eligible public package names, ecosystems and exact versio
 
 The broker takes a fresh primary database snapshot immediately before every outbound request, including each retry, continuation page and advisory-detail request after pacing. It sends the authorized tuples immediately; queued references and previously cached eligibility are not dispatch authorization. Writes recheck eligibility, and API reads mask old findings when public provenance no longer holds.
 
-Owner decision Q37 accepts the snapshot-to-send privatization window: a private claim committed before the authorization snapshot prevents dispatch; one committed after that snapshot, even before the physical send, can miss that request. Later privatization cannot recall an authorized or in-flight disclosure. This policy does not promise perpetual privacy for a formerly public name.
+The policy accepts the snapshot-to-send privatization window: a private claim committed before the authorization snapshot prevents dispatch; one committed after that snapshot, even before the physical send, can miss that request. Later privatization cannot recall an authorized or in-flight disclosure. This policy does not promise perpetual privacy for a formerly public name.
 
 Masked results use only `Not checked` and `Only verified public proxy packages are checked.` for a visible proxy. Hidden holders, registrations, malformed evidence and evidence-budget overflow have identical presentation, without a hidden-holder hint. A visibly non-proxy source may instead say `Not checked: private package` using already-authorized source context. Masking still exposes an eligibility bit: a transition from a visible assessment to `Not checked` reveals that eligibility changed, even though the reason and any hidden holder remain concealed.
 
@@ -55,6 +55,6 @@ This is a build-time setting. Rebuild and restart Node deployments; rebuild and 
 
 ## Independent npm audit and follow-up work
 
-The legacy npm audit forwarder is independent of these OSV checks and their off switch. It forwards filtered audit requests to `registry.npmjs.org`; it does not serve results from the PB-97 advisory cache. Its project-winner filter is weaker than the organization-wide provenance rule described above. T866 is the separate hardening work for that path. Until that hardening is verified, do not interpret this OSV policy as an unqualified promise that private names never leave through any advisory request.
+The legacy npm audit forwarder is independent of these OSV checks and their off switch. It forwards filtered audit requests to `registry.npmjs.org`; it does not serve results from the OSV advisory cache. Its project-winner filter is weaker than the organization-wide provenance rule described above. Separate hardening work for that path is planned. Until that hardening is verified, do not interpret this OSV policy as an unqualified promise that private names never leave through any advisory request.
 
-Cache-backed npm audit and advisory monitoring/notifications (PB-87) and lock-file review (PB-118) are separate work. A version's known-advisory result does not implement those features.
+Cache-backed npm audit and advisory monitoring/notifications and lock-file review are separate work. A version's known-advisory result does not implement those features.

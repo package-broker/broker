@@ -340,10 +340,10 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
     fixture({ sourceProject: project ? PROJECT : null, ...extra });
   describe(base, () => {
     it('lists the VCS providers the runtime reports', async () => {
-      const f = await setup({ vcsProviders: ['github', 'git'] });
+      const f = await setup({ vcsProviders: ['github', 'git', 'ssh'] });
       const response = await f.request('GET', base);
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ vcsProviders: ['github', 'git'] });
+      expect(await response.json()).toMatchObject({ vcsProviders: ['github', 'git', 'ssh'] });
     });
     it('refuses to create or reconfigure a source for a provider the runtime has not registered', async () => {
       const f = await setup({ refuseVcsProvider: (provider) => provider === 'git' });

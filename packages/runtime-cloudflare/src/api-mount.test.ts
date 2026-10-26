@@ -230,6 +230,13 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ownerPacket: 'T531',
   },
   {
+    dependency: 'sourcePackages',
+    constructed: 'source package request store, project-source reader and registry probe',
+    routes: ['POST /_pb/projects/:project/sources/:source/packages'],
+    jobs: [],
+    ownerPacket: 'T1041',
+  },
+  {
     dependency: 'sourceNames',
     constructed: 'source service, registered-name repository and catalogue visibility',
     routes: [
@@ -323,7 +330,7 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   const mountedKeys = mounted.map((route) => `${route.method} ${route.path}`);
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
-    expect(entry.ownerPacket).toBe('T531');
+    expect(entry.ownerPacket).toBe(entry.dependency === 'sourcePackages' ? 'T1041' : 'T531');
     for (const key of entry.routes) {
       expect(
         mountedKeys.filter((candidate) => candidate === key),

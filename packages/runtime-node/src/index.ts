@@ -1201,6 +1201,9 @@ export function createNodeServer(
             clientIp,
             executor,
             runtime: 'node',
+            ...(registry?.module.probePackage === undefined
+              ? {}
+              : { sourcePackageProbe: registry?.module.probePackage }),
             keyring: auth.keyring,
             access,
             packages,

@@ -167,7 +167,11 @@ describe('registry job attachment', () => {
   it('ignores job dependencies without the job port', () => {
     const h = harness({ jobs: false });
     const built = createRegistryModule({ ...h.deps, registryJobs });
-    expect(Object.keys(built).sort()).toEqual(['ecosystemRoutes', 'visibilityPort']);
+    expect(Object.keys(built).sort()).toEqual([
+      'ecosystemRoutes',
+      'probePackage',
+      'visibilityPort',
+    ]);
     expect(h.jobs.enqueue).not.toHaveBeenCalled();
   });
 });
@@ -402,7 +406,11 @@ describe('createRegistryModule assembly', () => {
   it('registers no job and calls the job port zero times during assembly', () => {
     const h = harness();
     const built = h.module();
-    expect(Object.keys(built).sort()).toEqual(['ecosystemRoutes', 'visibilityPort']);
+    expect(Object.keys(built).sort()).toEqual([
+      'ecosystemRoutes',
+      'probePackage',
+      'visibilityPort',
+    ]);
     expect(h.jobs.enqueue).not.toHaveBeenCalled();
     expect(h.jobs.get).not.toHaveBeenCalled();
   });
@@ -1122,14 +1130,48 @@ describe('unbindable source', () => {
     expect(t.write).not.toHaveBeenCalled();
   });
 
+  it('collapses credential_unavailable writes across packages while the write is pending', async () => {
+    const t = setup(credentialed);
+    let finishWrite!: () => void;
+    const pendingWrite = new Promise<undefined>((resolve) => {
+      finishWrite = () => resolve(undefined);
+    });
+    let startWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      startWrite = resolve;
+    });
+    t.write.mockImplementationOnce(() => {
+      startWrite();
+      return pendingWrite;
+    });
+
+    const first = t.get(scoped, '@acme/x');
+    try {
+      await writeStarted;
+      // A different package cannot join the first package's on-demand fill.
+      const second = { ...scoped, key: '@acme/y' } as PackageVisibility;
+      const response = await t.get(second, '@acme/y');
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('60');
+      expect(t.h.deps.ingest.credential).toHaveBeenCalledTimes(2);
+      expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
+    } finally {
+      finishWrite();
+      expect((await first).status).toBe(503);
+    }
+  });
+
   it('writes credential_unavailable once and not again while the source holds it', async () => {
     const t = setup(credentialed);
-    await Promise.all([t.get(scoped, '@acme/x'), t.get(scoped, '@acme/x')]);
-    expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
-    vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
-      ...credentialed,
-      lastError: 'credential_unavailable',
+    t.write.mockImplementation(async () => {
+      vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
+        ...credentialed,
+        lastError: 'credential_unavailable',
+      });
     });
+    const responses = await Promise.all([t.get(scoped, '@acme/x'), t.get(scoped, '@acme/x')]);
+    for (const response of responses) expect(response.status).toBe(503);
+    expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
     for (let i = 0; i < 3; i += 1) expect((await t.get(scoped, '@acme/x')).status).toBe(503);
     expect(t.write).toHaveBeenCalledTimes(1);
     vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
@@ -1195,5 +1237,41 @@ describe('unbindable source', () => {
     const syncDeps = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0];
     expect(await syncDeps.planFill(org, 'src-1', '@acme/x')).toBeNull();
     expect(t.write).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('manual package probe', () => {
+  it.each([
+    ['outside the configured scopes', '@outside/widget', true],
+    ['without a registered-name match', '@acme/widget', false],
+  ] as const)(
+    'refuses private registry names %s without an upstream request',
+    async (_label, key, covered) => {
+      const h = harness();
+      vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+        ...npmjsSource,
+        type: 'npm_registry',
+        url: 'https://registry.acme.test',
+        configJson: JSON.stringify({ scopes: ['@acme'] }),
+      });
+      vi.mocked(h.deps.catalogue.covers).mockResolvedValue(covered);
+      expect(await h.module().probePackage(org, 'src-1', key, new AbortController().signal)).toBe(
+        'unsupported_package',
+      );
+      expect(h.policyFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    null,
+    { ...npmjsSource, status: 'paused' },
+    { ...npmjsSource, type: 'npm_registry', configJson: '{' },
+  ])('keeps missing, paused and broken source failures unavailable', async (source) => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(source as SourceRecord | null);
+    expect(
+      await h.module().probePackage(org, 'src-1', '@acme/widget', new AbortController().signal),
+    ).toBe('unavailable');
+    expect(h.policyFetch).not.toHaveBeenCalled();
   });
 });

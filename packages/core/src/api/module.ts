@@ -12,6 +12,7 @@ import { projectRoutes } from './routes/projects.js';
 import { servicePrincipalRoutes } from './routes/service-principals.js';
 import { sourceAttachmentRoutes } from './routes/source-attachment.js';
 import { sourceNameRoutes } from './routes/source-names.js';
+import { sourcePackageRoutes } from './routes/source-packages.js';
 import { sourceRoutes } from './routes/sources.js';
 import { tokenRoutes } from './routes/tokens.js';
 
@@ -28,6 +29,7 @@ export interface ApiModuleDeps {
     Parameters<typeof servicePrincipalRoutes>[0],
     'sessions' | 'projects' | 'idempotency'
   >;
+  readonly sourcePackages: Parameters<typeof sourcePackageRoutes>[0];
   readonly sources: Parameters<typeof sourceRoutes>[0];
   readonly sourceNames: Parameters<typeof sourceNameRoutes>[0];
   readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
@@ -157,6 +159,14 @@ const REQUIRED_DEPENDENCIES = {
     projectSources: { list: true },
     projects: { get: true },
   },
+  sourcePackages: {
+    ...CONTEXT_METHODS,
+    sources: { get: true },
+    projects: { get: true },
+    projectSources: { list: true },
+    store: { request: true, present: true },
+    probe: true,
+  },
   packages: { listProject: true, listOrganization: true, listVersions: true },
   audit: { list: true, head: true },
   packageManage: {
@@ -248,6 +258,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
       idempotency: deps.tokens.idempotency,
     }),
     ...sourceRoutes(deps.sources),
+    ...sourcePackageRoutes(deps.sourcePackages),
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),

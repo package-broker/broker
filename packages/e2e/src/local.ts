@@ -450,16 +450,27 @@ export async function startLocal(
   const cleanups: (() => Promise<unknown>)[] = [
     () => rm(directory, { recursive: true, force: true }),
   ];
-  const close = async () => {
+  let closing: Promise<void> | undefined;
+  const close = () => (closing ??= cleanup());
+  const cleanup = async () => {
     const results = await Promise.allSettled(
       cleanups
         .slice(1)
         .reverse()
         .map((cleanup) => cleanup()),
     );
-    await cleanups[0]!();
-    if (results.some((result) => result.status === 'rejected'))
-      throw new Error('LocalCleanupFailed');
+    try {
+      await cleanups[0]!();
+    } catch (error) {
+      results.push({ status: 'rejected', reason: error });
+    }
+    const failures = results
+      .filter((result) => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (failures.length)
+      throw new Error('LocalCleanupFailed', {
+        cause: new AggregateError(failures, 'LocalResourceCleanupFailed'),
+      });
   };
   let logs = '';
   let logOverflow = false;
@@ -512,7 +523,6 @@ export async function startLocal(
           dispose(): Promise<void>;
         }
       | undefined;
-    let bootWorker: (() => typeof worker) | undefined;
     if (runtime === 'cloudflare') {
       const require = createRequire(join(repository, 'packages/runtime-cloudflare/package.json'));
       const { Miniflare, convertV4MiniflareOptions } = await import(require.resolve('miniflare'));
@@ -528,67 +538,75 @@ export async function startLocal(
           not_found_handling: string;
         };
       };
-      bootWorker = () =>
-        new Miniflare(
-          convertV4MiniflareOptions({
-            host: '127.0.0.1',
-            port,
-            rootPath: copy,
-            modules: true,
-            scriptPath: entry,
-            compatibilityDate: '2026-10-01',
-            compatibilityFlags: ['nodejs_compat'],
-            d1Databases: ['DB'],
-            resourcePersistencePath: persist,
-            isolatedResourcePersistencePath: join(directory, 'isolated'),
-            resourceTmpPath: join(directory, 'tmp'),
-            logRequests: false,
-            assets: {
-              directory: resolve(copy, assets.directory),
-              binding: assets.binding,
-              run_worker_first: assets.run_worker_first,
-              routerConfig: { has_user_worker: true },
-              assetConfig: {
-                html_handling: assets.html_handling,
-                not_found_handling: assets.not_found_handling,
-              },
+      worker = new Miniflare(
+        convertV4MiniflareOptions({
+          host: '127.0.0.1',
+          port,
+          rootPath: copy,
+          modules: true,
+          scriptPath: entry,
+          compatibilityDate: '2026-10-01',
+          compatibilityFlags: ['nodejs_compat'],
+          d1Databases: ['DB'],
+          resourcePersistencePath: persist,
+          isolatedResourcePersistencePath: join(directory, 'isolated'),
+          resourceTmpPath: join(directory, 'tmp'),
+          logRequests: false,
+          assets: {
+            directory: resolve(copy, assets.directory),
+            binding: assets.binding,
+            run_worker_first: assets.run_worker_first,
+            routerConfig: { has_user_worker: true },
+            assetConfig: {
+              html_handling: assets.html_handling,
+              not_found_handling: assets.not_found_handling,
             },
-            r2Buckets: ['STORAGE'],
-            queueProducers: { JOBS: 'local-jobs' },
-            queueConsumers: ['local-jobs'],
-            analyticsEngineDatasets: { ANALYTICS: { dataset: 'local-release' } },
-            bindings: {
-              PB_MASTER_KEY: masterKey,
-              PB_PUBLIC_URL: origin,
-              DEPLOYMENT_ID: 'local-release',
-            },
-            handleStructuredLogs: (entry: { message: string }) => record(entry.message),
-            outboundService: async (request: Request) => {
-              const destination = options.outboundDestination
-                ? options.outboundDestination(request.url, origin)
-                : fixtureDestination(request.url, fixtureOrigin);
-              return fetch(destination, {
-                method: request.method,
-                headers: request.headers,
-                redirect: 'manual',
-                ...(['GET', 'HEAD'].includes(request.method)
-                  ? {}
-                  : {
-                      body: new Uint8Array(await request.arrayBuffer()),
-                    }),
-              });
-            },
-          }),
-        );
-      worker = bootWorker();
+          },
+          r2Buckets: ['STORAGE'],
+          queueProducers: { JOBS: 'local-jobs' },
+          queueConsumers: ['local-jobs'],
+          analyticsEngineDatasets: { ANALYTICS: { dataset: 'local-release' } },
+          bindings: {
+            PB_MASTER_KEY: masterKey,
+            PB_PUBLIC_URL: origin,
+            DEPLOYMENT_ID: 'local-release',
+          },
+          handleStructuredLogs: (entry: { message: string }) => record(entry.message),
+          outboundService: async (request: Request) => {
+            const destination = options.outboundDestination
+              ? options.outboundDestination(request.url, origin)
+              : fixtureDestination(request.url, fixtureOrigin);
+            return fetch(destination, {
+              method: request.method,
+              headers: request.headers,
+              redirect: 'manual',
+              ...(['GET', 'HEAD'].includes(request.method)
+                ? {}
+                : {
+                    body: new Uint8Array(await request.arrayBuffer()),
+                  }),
+            });
+          },
+        }),
+      );
+      let readyFailure: { error: unknown } | undefined;
       cleanups.push(async () => {
-        await worker?.dispose();
+        try {
+          await worker?.dispose();
+        } catch (error) {
+          // Miniflare disposal rethrows a failed initialization after cleaning up.
+          if (!readyFailure || error !== readyFailure.error) throw error;
+        }
       });
-      await worker!.ready;
+      try {
+        await worker!.ready;
+      } catch (error) {
+        readyFailure = { error };
+        throw error;
+      }
       // eslint-disable-next-line no-restricted-syntax -- Materialize Miniflare's empty database before applying built migrations.
       await (await worker!.getD1Database('DB')).prepare('SELECT 1').bind().all();
-      await worker!.dispose();
-      worker = undefined;
+      // The completed read holds no transaction across the external CLI migration.
       const sqliteFiles = (await files(join(persist, 'd1'))).filter(
         (path) => path.endsWith('.sqlite') && !path.endsWith('/metadata.sqlite'),
       );
@@ -704,9 +722,6 @@ syncBuiltinESMExports();
         ]);
         await exited;
       });
-    } else {
-      worker = bootWorker!();
-      await worker!.ready;
     }
     try {
       await until(async () => {
@@ -918,7 +933,22 @@ syncBuiltinESMExports();
       close,
     };
   } catch (error) {
-    await close();
+    try {
+      await close();
+    } catch (cleanupError) {
+      if (!(error instanceof Error))
+        throw new AggregateError([error, cleanupError], 'LocalStartupFailed', {
+          cause: cleanupError,
+        });
+      Object.defineProperty(error, 'cause', {
+        configurable: true,
+        writable: true,
+        value:
+          error.cause === undefined
+            ? cleanupError
+            : new AggregateError([error.cause, cleanupError], 'LocalStartupCauses'),
+      });
+    }
     throw error;
   }
 }

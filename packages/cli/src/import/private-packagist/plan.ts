@@ -27,10 +27,19 @@ type Item = ParsedManifest['items'][number];
 type SourceItem = Extract<Item, { type: 'source' }>;
 type ProjectRef = Extract<Item, { type: 'attachment' }>['project'];
 type SourceRef = Extract<Item, { type: 'attachment' }>['source'];
+const GRANT_ROLE_RANK = {
+  project_developer: 1,
+  project_owner: 2,
+  organization_admin: 3,
+} as const;
+type PlannedGrant = Extract<Item, { type: 'grant' }> & {
+  readonly role: { readonly existing: keyof typeof GRANT_ROLE_RANK };
+};
 export interface PlanDiagnostic {
   readonly code: string;
   readonly pointer: string;
   readonly cap?: string;
+  readonly detail?: string;
 }
 export interface SummaryEntry {
   readonly code: string;
@@ -121,12 +130,13 @@ class Refusal extends Error {
     readonly code: string,
     readonly pointer: string,
     readonly cap?: string,
+    readonly detail?: string,
   ) {
     super(code);
   }
 }
-function refuse(code: string, pointer = '', cap?: string): never {
-  throw new Refusal(code, pointer, cap);
+function refuse(code: string, pointer = '', cap?: string, detail?: string): never {
+  throw new Refusal(code, pointer, cap, detail);
 }
 function repository(value: unknown, pointer: string, vcs = false): string {
   if (typeof value !== 'string' || /[\s\p{Cc}\p{Cf}]/u.test(value))
@@ -304,6 +314,7 @@ export async function planPrivatePackagistImport(
             code: error.code,
             pointer: error.pointer,
             ...(error.cap === undefined ? {} : { cap: error.cap }),
+            ...(error.detail === undefined ? {} : { detail: error.detail }),
           }
         : error instanceof MapError
           ? {
@@ -439,17 +450,19 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
   }
   const mirrors = new Map<number, Row>();
   const mirrorCredentials = new Map<number, Set<number>>();
-  for (const [index, row] of [
-    ...(rows.mirroredRepositories ?? []),
-    ...(rows.suborganizationMirroredRepositories ?? []),
-  ].entries()) {
+  for (const [collection, index, row] of [
+    'mirroredRepositories',
+    'suborganizationMirroredRepositories',
+  ].flatMap((collection) =>
+    (rows[collection] ?? []).map((row, index) => [collection, index, row] as const),
+  )) {
     if (typeof row.id !== 'number' || typeof row.url !== 'string') refuse('invalid_snapshot');
     if (
       row.mirroringBehavior !== undefined &&
       (typeof row.mirroringBehavior !== 'string' ||
         !['manual', 'add_on_use', 'admin_managed', 'disabled'].includes(row.mirroringBehavior))
     )
-      refuse('unsupported_mirroring_behavior', `/mirrors/${index}`);
+      refuse('unsupported_mirroring_behavior', `/objects/${collection}/${index}`);
     const previous = mirrors.get(row.id);
     if (previous && previous.url !== row.url) refuse('conflicting_source');
     if (!previous) mirrors.set(row.id, row);
@@ -649,6 +662,7 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
     if (s.item.source_type !== 'composer_repository') continue;
     let packages = sorted(s.names);
     const vendors = new Map<string, string[]>();
+    const proxyVendors = new Set<string>();
     for (const n of packages) {
       const vendor = n.split('/')[0]!;
       vendors.set(vendor, [...(vendors.get(vendor) ?? []), n]);
@@ -659,16 +673,15 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
       );
       for (const [vendor, names] of candidates) {
         if (packages.length + s.patterns.length <= 64) break;
-        if (
-          names.length < 2 ||
-          allSources.some(
-            (other) =>
-              other !== s &&
-              other.item.source_type !== 'packagist_proxy' &&
-              [...other.names].some((n) => n.startsWith(`${vendor}/`)),
-          )
-        )
+        if (names.length < 2) continue;
+        const shared = allSources.filter(
+          (other) => other !== s && [...other.names].some((n) => n.startsWith(`${vendor}/`)),
+        );
+        if (shared.length) {
+          if (shared.some((other) => other.item.source_type === 'packagist_proxy'))
+            proxyVendors.add(vendor);
           continue;
+        }
         packages = packages.filter((n) => !n.startsWith(`${vendor}/`));
         const pattern = `${vendor}/*`;
         if (Buffer.byteLength(pattern) > MAX_PATTERN_BYTES)
@@ -683,7 +696,14 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
       }
     }
     if (packages.length + s.patterns.length > 64)
-      refuse('single_run_limit_exceeded', s.pointer, 'SOURCE_CONFIG_LIST_LIMIT');
+      refuse(
+        'single_run_limit_exceeded',
+        s.pointer,
+        'SOURCE_CONFIG_LIST_LIMIT',
+        proxyVendors.size
+          ? `Proxy-served vendors: ${sorted(proxyVendors).join(', ')}. See owner question A (project_package).`
+          : undefined,
+      );
     const hosts = sorted(
       new Set(
         [...s.mirrorIds].flatMap(
@@ -983,7 +1003,7 @@ function addGrants(
   widening: { type: 'grant'; external_ref: string }[],
   summary: PlanSummary,
 ): void {
-  const grants = new Map<string, Extract<Item, { type: 'grant' }>>();
+  const grants = new Map<string, PlannedGrant>();
   for (const [i, team] of [...(rows.teams ?? []), ...(rows.suborganizationTeams ?? [])].entries()) {
     const pointer = `/teams/${i}`;
     if (
@@ -1056,7 +1076,7 @@ function addGrants(
               ? 'project_owner'
               : 'project_developer';
         const key = stable([project?.reference ?? null, subject]);
-        const grant: Extract<Item, { type: 'grant' }> = {
+        const grant: PlannedGrant = {
           type: 'grant',
           external_ref: ref('grant', project?.id ?? null, team.id, JSON.parse(stable(subject))),
           scope: project === null ? 'organization' : 'project',
@@ -1067,7 +1087,10 @@ function addGrants(
         const previous = grants.get(key);
         if (previous && 'existing' in previous.role && previous.role.existing !== role) {
           summary.warning.push({ code: 'grant_merged', pointer, count: 1 });
-          const stronger = previous.role.existing === 'project_owner' ? previous.role : grant.role;
+          const stronger =
+            GRANT_ROLE_RANK[previous.role.existing] > GRANT_ROLE_RANK[role]
+              ? previous.role
+              : grant.role;
           const chosen = compare(grant.external_ref, previous.external_ref) < 0 ? grant : previous;
           grants.set(key, { ...chosen, role: stronger });
         } else if (!previous || compare(grant.external_ref, previous.external_ref) < 0)

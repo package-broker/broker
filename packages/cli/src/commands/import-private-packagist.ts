@@ -223,7 +223,9 @@ export async function runImportPrivatePackagistPlan(
     }
     if (!result.ok) {
       for (const d of result.diagnostics)
-        console.error(`${d.code} ${d.pointer || '/'}${d.cap === undefined ? '' : ` [${d.cap}]`}`);
+        console.error(
+          `${d.code} ${d.pointer || '/'}${d.cap === undefined ? '' : ` [${d.cap}]`}${d.detail === undefined ? '' : ` ${d.detail}`}`,
+        );
       return 2;
     }
     console.log(`planHash: ${result.hash}`);

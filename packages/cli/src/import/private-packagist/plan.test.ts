@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
+import { admitProxy, type VisibilityConfig } from '@package-broker/core/catalogue/visibility';
 import { canonicalManifest, parseManifest, planHash } from '@package-broker/core/import/manifest';
+import { isSelected } from '@package-broker/core/ingest/composer/v1-index';
 import { credentialBindings } from '../../commands/import.js';
 import { canonical, type PackagistSnapshot } from './snapshot.js';
 import {
@@ -487,45 +489,112 @@ it('never compacts a vendor shared with any other planned source', async () => {
   );
 });
 it.each([undefined, 'existing:public'])(
-  'compacts a Magento-like mirror alongside the public proxy (%s) with exact name ownership',
+  'refuses vendor compaction because mirror describe accepts public pattern matches and visibility vetoes the proxy (%s)',
   async (packagist) => {
     const names = Array.from({ length: 65 }, (_, i) => `magento/p${i}`);
+    const publicName = 'magento/public';
+    expect(isSelected(publicName, { packages: names, patterns: [], expandPatterns: false })).toBe(
+      false,
+    );
+    expect(
+      isSelected(publicName, { packages: [], patterns: ['magento/*'], expandPatterns: false }),
+    ).toBe(true);
+    const routing: VisibilityConfig = {
+      projects: [{ id: 'acme', orgId: 'org', active: true }],
+      sources: (['composer_repository', 'packagist_proxy'] as const).map((type) => ({
+        id: type,
+        orgId: 'org',
+        ecosystem: 'composer',
+        type,
+        ownerProjectId: null,
+        removalPolicy: 'flag',
+        defaultVisible: 1,
+      })),
+      attachments: [
+        {
+          projectId: 'acme',
+          sourceId: 'packagist_proxy',
+          precedence: 99999,
+          includes: [],
+          excludes: [],
+        },
+      ],
+      registeredNames: names.map((pattern) => ({ orgId: 'org', ecosystem: 'composer', pattern })),
+      packages: [],
+      explicit: [],
+    };
+    expect(admitProxy(routing, 'acme', 'composer', publicName)).toEqual(['packagist_proxy']);
+    expect(
+      admitProxy(
+        {
+          ...routing,
+          packages: [
+            {
+              id: 'public',
+              orgId: 'org',
+              sourceId: 'composer_repository',
+              ecosystem: 'composer',
+              key: publicName,
+              status: 'active',
+              visible: 1,
+            },
+          ],
+        },
+        'acme',
+        'composer',
+        publicName,
+      ),
+    ).toEqual([]);
     const rows = mirrorRows(names);
     rows.suborganizationPackages = [
       ...rows.packages!.map((pkg) => ({ ...pkg, suborganizationId: 1 })),
       {
         id: 999,
-        name: 'magento/public',
+        name: publicName,
         origin: 'public-mirror',
         config: {},
         suborganizationId: 1,
       },
     ];
-    const result = await success(
-      await plan(rows, defaults, {
-        options: {
-          compactSelection: true,
-          acceptProjectWidening: ['acme'],
-          ...(packagist === undefined ? {} : { packagist }),
-        },
+    const result = await plan(rows, defaults, {
+      options: {
+        compactSelection: true,
+        acceptProjectWidening: ['acme'],
+        ...(packagist === undefined ? {} : { packagist }),
+      },
+    });
+    await refused(result, 'single_run_limit_exceeded', 'SOURCE_CONFIG_LIST_LIMIT');
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        detail: 'Proxy-served vendors: magento. See owner question A (project_package).',
       }),
     );
-    expect(
-      result.manifest.items.find(
-        (i) => i.type === 'source' && i.source_type === 'composer_repository',
-      ),
-    ).toMatchObject({ config: { selection: { packages: [], patterns: ['magento/*'] } } });
-    expect(
-      result.manifest.items
-        .filter((i) => i.type === 'name')
-        .map((i) => i.pattern)
-        .sort(),
-    ).toEqual([...names].sort());
-    expect(result.summary.warning).toContainEqual(
-      expect.objectContaining({ code: 'selection_compacted', pattern: 'magento/*' }),
-    );
+    expect(result.summary.warning.filter((e) => e.code === 'selection_compacted')).toEqual([]);
   },
 );
+it('compacts another vendor when that is enough to leave a proxy-served vendor exact', async () => {
+  const rows = mirrorRows([
+    ...Array.from({ length: 40 }, (_, i) => `shared/p${i}`),
+    ...Array.from({ length: 25 }, (_, i) => `safe/p${i}`),
+  ]);
+  rows.packages!.push({ id: 999, name: 'shared/public', origin: 'public-proxy', config: {} });
+  const result = await success(await plan(rows, defaults, { options: { compactSelection: true } }));
+  expect(result.summary.warning.filter((e) => e.code === 'selection_compacted')).toEqual([
+    expect.objectContaining({ pattern: 'safe/*' }),
+  ]);
+  expect(
+    result.manifest.items.find(
+      (i) => i.type === 'source' && i.source_type === 'composer_repository',
+    ),
+  ).toMatchObject({
+    config: {
+      selection: {
+        patterns: ['safe/*'],
+        packages: Array.from({ length: 40 }, (_, i) => `shared/p${i}`).sort(),
+      },
+    },
+  });
+});
 it('still refuses uncompactable or oversized compacted lists', async () => {
   const names = Array.from({ length: 65 }, (_, i) => `vendor${i}/one`);
   await refused(
@@ -780,7 +849,11 @@ it.each(['mirroredRepositories', 'suborganizationMirroredRepositories'])(
     rows.mirroredRepositories = [mirror()];
     rows.suborganizationMirroredRepositories = [{ ...mirror(), suborganizationId: 1 }];
     rows[kind]![0]!.mirroringBehavior = 'future';
-    await refused(await plan(rows), 'unsupported_mirroring_behavior');
+    const result = await plan(rows);
+    await refused(result, 'unsupported_mirroring_behavior');
+    expect(result.diagnostics).toEqual([
+      { code: 'unsupported_mirroring_behavior', pointer: `/objects/${kind}/0` },
+    ]);
   },
 );
 it.each(['packages', 'suborganizationPackages'])(

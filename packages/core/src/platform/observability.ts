@@ -56,6 +56,11 @@ export interface SafeLogRecord {
   readonly redirects?: number;
   readonly cross_origin?: boolean;
   readonly outcome?: string;
+  readonly requested_names?: number;
+  readonly forwarded_names?: number;
+  readonly advisories?: number;
+  readonly unexpected_keys?: number;
+  readonly dropped_advisories?: number;
 }
 
 export const LOG_FIELDS = [
@@ -96,6 +101,11 @@ export const LOG_FIELDS = [
   'redirects',
   'cross_origin',
   'outcome',
+  'requested_names',
+  'forwarded_names',
+  'advisories',
+  'unexpected_keys',
+  'dropped_advisories',
 ] as const satisfies readonly (keyof SafeLogRecord)[];
 
 export type LogField = (typeof LOG_FIELDS)[number];
@@ -180,6 +190,20 @@ export const DROPPED_SIGNALS = [
 export type DroppedSignal = (typeof DROPPED_SIGNALS)[number];
 export const HTTP_REQUEST_EVENT = 'http.request';
 export const UPSTREAM_FETCH_EVENT = 'upstream.fetch';
+export const NPM_AUDIT_EVENT = 'registry.npm_audit';
+export const NPM_AUDIT_REASON_CODES = [
+  'ok',
+  'empty',
+  'unsupported',
+  'disabled',
+  'verify_overflow',
+  'verify_failed',
+  'upstream_unavailable',
+  'upstream_rate_limited',
+  'upstream_status',
+  'upstream_protocol',
+  'aborted',
+] as const;
 
 export function isUpstreamOrigin(value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -363,6 +387,11 @@ const FIELD_CHECKS: Readonly<
   redirects: (v) => isInt(v, 0, 5),
   cross_origin: (v) => typeof v === 'boolean',
   outcome: matches(CODE),
+  requested_names: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  forwarded_names: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  advisories: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  unexpected_keys: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  dropped_advisories: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
 };
 
 const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;

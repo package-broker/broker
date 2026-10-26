@@ -92,6 +92,7 @@ interface Setup {
   handle?: string | null;
   actor?: ProjectActor | null;
   kernelActor?: boolean;
+  audit?: NpmRouteDeps['audit'];
 }
 
 async function harness(setup: Setup = {}) {
@@ -134,6 +135,7 @@ async function harness(setup: Setup = {}) {
     handleOf: () => (setup.handle === undefined ? 'alice' : setup.handle),
     publicUrl: 'https://broker.test',
     codecs: { gunzip: () => new TransformStream() },
+    audit: setup.audit ?? { enabled: true },
   };
   const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
   const session: EngineSessionAccess = {
@@ -521,6 +523,142 @@ describe('npm on-demand fill', () => {
 });
 
 describe('npm literal routes', () => {
+  const auditPaths = ['advisories/bulk', 'audits/quick', 'audits'];
+  const auditRoute = (deps: NpmRouteDeps, path: string) =>
+    npmRoutes(deps).find((route) => route.path === `/:project/npm/-/npm/v1/security/${path}`)!;
+  const auditContext = (path: string, body: string | undefined, log = vi.fn()) => {
+    const request = new Request(`https://broker.test/demo/npm/-/npm/v1/security/${path}`, {
+      method: 'POST',
+      ...(body === undefined ? {} : { body }),
+      headers: { 'content-encoding': 'br' },
+    });
+    const ctx = {
+      request,
+      requestId: 'fixed',
+      ports: { platform: { observability: { log } } },
+    } as unknown as RequestContext;
+    return { ctx, request, log };
+  };
+
+  it.each(auditPaths)(
+    'refuses disabled %s with identical bytes before reading any body',
+    async (path) => {
+      const forward = vi.fn(async () => Response.json({ forwarded: true }));
+      const { deps, access, resolve } = await harness({ audit: { enabled: false, forward } });
+      for (const body of ['{"private-sentinel":["1.0.0"]}', 'not json', '', undefined]) {
+        const { ctx, request, log } = auditContext(path, body);
+        if (body?.startsWith('{')) request.headers.delete('content-encoding');
+        const response = await auditRoute(deps, path).handler(ctx);
+        expect(response.status).toBe(501);
+        expect(await response.text()).toBe(
+          '{"error":"npm audit is disabled on this broker","code":"npm_audit_disabled","requestId":"fixed"}',
+        );
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+        expect(request.bodyUsed).toBe(false);
+        expect(log).toHaveBeenCalledExactlyOnceWith({
+          level: 'info',
+          event: 'registry.npm_audit',
+          outcome: 'error',
+          reason_code: 'disabled',
+          requested_names: 0,
+          forwarded_names: 0,
+          advisories: 0,
+          unexpected_keys: 0,
+          dropped_advisories: 0,
+        });
+      }
+      expect(forward).not.toHaveBeenCalled();
+      expect(resolve).not.toHaveBeenCalled();
+      for (const port of Object.values(access)) expect(port).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['audits/quick', 'audits'])(
+    'refuses enabled %s without consuming or forwarding the body',
+    async (path) => {
+      const forward = vi.fn(async () => Response.json({ forwarded: true }));
+      const { deps } = await harness({ audit: { enabled: true, forward } });
+      const { ctx, request, log } = auditContext(path, 'private-sentinel');
+      const response = await auditRoute(deps, path).handler(ctx);
+      expect(response.status).toBe(501);
+      expect(await response.text()).toBe(
+        '{"error":"Use the bulk advisory endpoint","code":"unsupported","requestId":"fixed"}',
+      );
+      expect(response.headers.get('cache-control')).toBe('private, no-store');
+      expect(request.bodyUsed).toBe(false);
+      expect(forward).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]![0]).toMatchObject({
+        event: 'registry.npm_audit',
+        reason_code: 'unsupported',
+        requested_names: 0,
+        forwarded_names: 0,
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain('private-sentinel');
+    },
+  );
+
+  it('logs one unsupported refusal when the bulk forwarder is absent', async () => {
+    const { deps } = await harness();
+    const { ctx, log } = auditContext('advisories/bulk', '{"private-sentinel":["1.0.0"]}');
+    ctx.request.headers.delete('content-encoding');
+    const response = await auditRoute(deps, 'advisories/bulk').handler(ctx);
+    expect(response.status).toBe(501);
+    expect(log).toHaveBeenCalledExactlyOnceWith({
+      level: 'info',
+      event: 'registry.npm_audit',
+      outcome: 'error',
+      reason_code: 'unsupported',
+      requested_names: 1,
+      forwarded_names: 0,
+      advisories: 0,
+      unexpected_keys: 0,
+      dropped_advisories: 0,
+    });
+  });
+
+  it.each(auditPaths)(
+    'dispatches authenticated disabled %s without forwarding or catalogue reads',
+    async (path) => {
+      const forward = vi.fn(async () => Response.json({ forwarded: true }));
+      const { call, access, resolve } = await harness({ audit: { enabled: false, forward } });
+      const response = await call(`/-/npm/v1/security/${path}`, {
+        method: 'POST',
+        body: '{"private-sentinel":["1.0.0"]}',
+      });
+      expect(response.status).toBe(501);
+      expect(await response.json()).toEqual({
+        error: 'npm audit is disabled on this broker',
+        code: 'npm_audit_disabled',
+        requestId: expect.any(String),
+      });
+      expect(forward).not.toHaveBeenCalled();
+      expect(resolve).not.toHaveBeenCalled();
+      for (const port of Object.values(access)) expect(port).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(auditPaths)('authenticates disabled %s before consulting the switch', async (path) => {
+    const enabled = vi.fn(() => false);
+    const forward = vi.fn();
+    const { kernel } = await harness({
+      audit: {
+        get enabled() {
+          return enabled();
+        },
+        forward,
+      },
+    });
+    const request = new Request(`https://broker.test/demo/npm/-/npm/v1/security/${path}`, {
+      method: 'POST',
+      body: 'unread',
+    });
+    expect((await kernel.fetch(request)).status).toBe(401);
+    expect(request.bodyUsed).toBe(false);
+    expect(enabled).not.toHaveBeenCalled();
+    expect(forward).not.toHaveBeenCalled();
+  });
+
   it('serves dist-tags for unscoped and encoded scoped names', async () => {
     const { call, access } = await harness();
     const plain = await call('/-/package/x/dist-tags');
@@ -548,7 +686,7 @@ describe('npm literal routes', () => {
     expect(access.search).toHaveBeenCalledWith(actor, 'npm', { text: 'found', limit: 50 });
   });
 
-  it('answers audit from local data without any upstream call', async () => {
+  it('refuses audit without a forwarder without any upstream call', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { call } = await harness();
     const response = await call('/-/npm/v1/security/advisories/bulk', {
@@ -556,8 +694,8 @@ describe('npm literal routes', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ 'private-elsewhere': ['1.0.0'], lodash: ['4.17.21'] }),
     });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({});
+    expect(response.status).toBe(501);
+    expect(await response.json()).toMatchObject({ code: 'unsupported' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -566,8 +704,13 @@ describe('npm literal routes', () => {
     ['[1]', 400, 'invalid_request'],
     [JSON.stringify({ a: 'x' }), 400, 'invalid_request'],
     [
+      JSON.stringify({ a: Array.from({ length: 2001 }, (_, i) => `1.0.${i}`) }),
+      413,
+      'payload_too_large',
+    ],
+    [
       JSON.stringify(
-        Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`p${i}`, ['1.0.0']])),
+        Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`p${i}`, ['1.0.0']])),
       ),
       413,
       'payload_too_large',

@@ -14,6 +14,7 @@ import type { OrgContext, SqlExecutor } from '../db/port.js';
 import type { PackageIdReads } from '../db/registry-reads.js';
 import type { SourceRecord, SourceRepository } from '../db/source.js';
 import type { UpstreamStateRepository } from '../db/upstream-state.js';
+import type { NpmAuditAuthorizer } from '../db/vulnerability.js';
 import type { Clock } from '../ids.js';
 import type { ApplyDeps, ApplyInput } from '../ingest/apply-description.js';
 import type { BlobReplacer } from '../ingest/dist-fetch.js';
@@ -76,6 +77,7 @@ import { createDistService, type DistFetchPlan } from './dist-service.js';
 import { createRegistryJobs, type RegistryJobs, type RegistryJobsDeps } from './jobs.js';
 import { npmVersionInput } from './npm/version-object.js';
 import { npmRoutes } from './npm/routes.js';
+import { forwardNpmAudit } from './npm/audit.js';
 import type { RegistryConfig } from './registry-config.js';
 import { createScopedAdmittingAccess } from './scoped-access.js';
 
@@ -116,6 +118,10 @@ export interface RegistryModuleDeps {
   readonly deploymentId: string;
   readonly providers?: readonly SourceProvider[];
   readonly registryJobs?: RegistryJobsDeps;
+  readonly npmAudit?: {
+    readonly provenance: NpmAuditAuthorizer;
+    readonly sources: Pick<SourceRepository, 'hasAttachedProxy'>;
+  };
   readonly defer?: (thunk: () => Promise<void>) => void;
   readonly handleOf?: (ctx: RequestContext) => string | null;
   readonly catalogue: {
@@ -190,7 +196,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     throw new PlatformUnavailableError();
   }
   const { blob, cache, observability } = deps.ports;
-  const { catalogue, ingest, registry, sync } = deps;
+  const { catalogue, ingest, registry, sync, npmAudit } = deps;
 
   const packageAccess = createPackageAccess(catalogue.reader);
   const visibilityPort = createScopedAdmittingAccess(packageAccess, catalogue.scopedAdmission);
@@ -546,6 +552,36 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       ...(deps.defer === undefined ? {} : { defer: deps.defer }),
       publicUrl: deps.publicUrl,
       codecs: deps.codecs,
+      audit: {
+        enabled: registry.npmAudit.enabled,
+        ...(npmAudit === undefined
+          ? {}
+          : {
+              forward: (entries, ctx) => {
+                if (ctx.org === null || ctx.projectId === null) {
+                  throw new PlatformUnavailableError();
+                }
+                return forwardNpmAudit(
+                  entries,
+                  ctx.request,
+                  ctx.org,
+                  ctx.projectId,
+                  ctx.requestId,
+                  {
+                    classifyWinners: (org, query) => catalogue.reader.classifyWinners(org, query),
+                    hasAttachedProxy: (org, project, ecosystem) =>
+                      npmAudit.sources.hasAttachedProxy(org, project, ecosystem),
+                    authorizeNpmAudit: (org, refs) =>
+                      npmAudit.provenance.authorizeNpmAudit(org, refs),
+                    policyFetch: deps.policyFetch(registry.userAgent.default, {
+                      observability: ctx.ports.platform?.observability ?? observability,
+                    }),
+                    observability: ctx.ports.platform?.observability ?? observability,
+                  },
+                );
+              },
+            }),
+      },
     }),
   ]);
 

@@ -5,25 +5,26 @@ import { deferOf } from '../defer.js';
 import type { ProjectActor } from '../../authz/project-actor.js';
 import { displayName, packageKey } from '../../catalogue/names.js';
 import type { PackageAccess } from '../../catalogue/package-access.js';
-import {
-  CATALOGUE_SEARCH_MAX,
-  CATALOGUE_WINNER_KEYS_MAX,
-  type PackageVisibility,
-} from '../../db/catalogue.js';
+import { CATALOGUE_SEARCH_MAX, type PackageVisibility } from '../../db/catalogue.js';
+import { NPM_AUDIT_REFS_MAX } from '../../db/vulnerability.js';
 import type { OnDemandFill } from '../../ingest/on-demand.js';
 import { resolvedPackageOf } from '../../internal/package-context.js';
 import { CodecLimitError, type Codecs } from '../../platform/codec.js';
+import { NPM_AUDIT_EVENT } from '../../platform/observability.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
 import { isNotModified, notModifiedResponse, npmValidators } from '../conditional.js';
 import type { DistService } from '../dist-service.js';
 import { parseNpmPath, type NpmPath } from './paths.js';
 import { renderPackument, renderVersionDocument, type NpmRenderOptions } from './render.js';
+import type { NpmAuditEntries } from './audit.js';
 
 export const NPM_RENDER_VERSION = 1;
 const ABBREVIATED_TYPE = 'application/vnd.npm.install-v1+json';
 const VARY = 'Accept, Authorization';
 const REVALIDATE = 'private, no-cache';
 const AUDIT_BODY_MAX = 1024 * 1024;
+const AUDIT_NAMES_MAX = 1000;
+const AUDIT_HEADERS = { 'cache-control': 'private, no-store' };
 const SEARCH_DEFAULT = 20;
 const READ = 'project:packages:read';
 const NOT_FOUND = { status: 404, code: 'not_found', message: 'Route not found' };
@@ -38,6 +39,10 @@ export interface NpmRouteDeps {
   readonly defer?: (thunk: () => Promise<void>) => void;
   readonly publicUrl: string;
   readonly codecs: Pick<Codecs, 'gunzip'>;
+  readonly audit: {
+    readonly enabled: boolean;
+    readonly forward?: (entries: NpmAuditEntries, ctx: RequestContext) => Promise<Response>;
+  };
 }
 
 function fail(
@@ -326,7 +331,33 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     return new Uint8Array(await new Blob(chunks).arrayBuffer());
   }
 
+  function logAuditRefusal(
+    ctx: RequestContext,
+    reason: 'disabled' | 'unsupported',
+    requestedNames = 0,
+  ): void {
+    ctx.ports.platform?.observability.log({
+      level: 'info',
+      event: NPM_AUDIT_EVENT,
+      outcome: 'error',
+      reason_code: reason,
+      requested_names: requestedNames,
+      forwarded_names: 0,
+      advisories: 0,
+      unexpected_keys: 0,
+      dropped_advisories: 0,
+    });
+  }
+
+  function auditRefusal(ctx: RequestContext): Response {
+    logAuditRefusal(ctx, deps.audit.enabled ? 'unsupported' : 'disabled');
+    return deps.audit.enabled
+      ? fail(ctx, 501, 'unsupported', 'Use the bulk advisory endpoint', AUDIT_HEADERS)
+      : fail(ctx, 501, 'npm_audit_disabled', 'npm audit is disabled on this broker', AUDIT_HEADERS);
+  }
+
   async function audit(ctx: RequestContext): Promise<Response> {
+    if (!deps.audit.enabled) return auditRefusal(ctx);
     const encoding = ctx.request.headers.get('content-encoding')?.trim().toLowerCase();
     if (encoding && encoding !== 'identity' && encoding !== 'gzip') {
       return fail(
@@ -334,30 +365,55 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
         415,
         'unsupported_media_type',
         API_ERROR_CODES.unsupported_media_type.message,
+        AUDIT_HEADERS,
       );
     }
     const tooLarge = () =>
-      fail(ctx, 413, 'payload_too_large', API_ERROR_CODES.payload_too_large.message);
+      fail(
+        ctx,
+        413,
+        'payload_too_large',
+        'npm audit accepts at most 1 MiB, 1000 distinct names and 2000 name/version pairs',
+        AUDIT_HEADERS,
+      );
     const invalid = () =>
-      fail(ctx, 400, 'invalid_request', API_ERROR_CODES.invalid_request.message);
+      fail(ctx, 400, 'invalid_request', API_ERROR_CODES.invalid_request.message, AUDIT_HEADERS);
+    const entries: [string, string[]][] = [];
     try {
       const bytes = await readAuditBody(ctx);
       const input: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
       if (input === null || typeof input !== 'object' || Array.isArray(input)) return invalid();
-      const entries = Object.entries(input);
-      if (entries.length > CATALOGUE_WINNER_KEYS_MAX) return tooLarge();
-      for (const [name, versions] of entries) {
-        packageKey(name, { ecosystem: 'npm', legacyCase: true });
+      const names = new Map<string, Set<string>>();
+      let pairs = 0;
+      for (const [name, versions] of Object.entries(input)) {
+        const key = packageKey(name, { ecosystem: 'npm', legacyCase: true });
         if (!Array.isArray(versions) || !versions.every((v: unknown) => typeof v === 'string')) {
           return invalid();
         }
+        const distinct = names.get(key) ?? new Set<string>();
+        const before = distinct.size;
+        for (const version of versions) distinct.add(version as string);
+        pairs += distinct.size - before;
+        names.set(key, distinct);
+        if (names.size > AUDIT_NAMES_MAX || pairs > NPM_AUDIT_REFS_MAX) return tooLarge();
       }
-      return jsonResponse(200, {});
+      for (const [key, versions] of names) entries.push([displayName(key), [...versions]]);
     } catch (error) {
       return error instanceof RangeError || error instanceof CodecLimitError
         ? tooLarge()
         : invalid();
     }
+    if (deps.audit.forward === undefined) {
+      logAuditRefusal(ctx, 'unsupported', entries.length);
+      return fail(
+        ctx,
+        501,
+        'unsupported',
+        'npm audit is unavailable on this broker',
+        AUDIT_HEADERS,
+      );
+    }
+    return deps.audit.forward(entries, ctx);
   }
 
   function methodNotAllowed(ctx: RequestContext): Response {
@@ -396,6 +452,13 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       boundary: 'project',
       handler: audit,
     },
+    ...['audits/quick', 'audits'].map((path): RouteDefinition => ({
+      method: 'POST',
+      path: `/:project/npm/-/npm/v1/security/${path}`,
+      permission: READ,
+      boundary: 'project',
+      handler: auditRefusal,
+    })),
     {
       method: 'GET',
       path: '/:project/npm/-/package/:a/dist-tags',

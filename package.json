@@ -24,6 +24,7 @@
     "client-matrix": "node scripts/client-matrix.mjs",
     "smoke:cloudflare": "pnpm --filter @package-broker/runtime-cloudflare exec node scripts/worker-smoke.mjs",
     "smoke:node": "node scripts/node-bundle-smoke.mjs",
+    "smoke:prebuilt": "node scripts/prebuilt-smoke.mjs",
     "smoke:docker": "node scripts/docker-smoke.mjs",
     "stage:prebuilt": "node scripts/stage-prebuilt.mjs",
     "bench:install": "node scripts/bench-install.mjs",

@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import type { Platform } from '@package-broker/core/plugin';
 import { build, BuildDiagnosticsError } from './build.js';
+import { assertPrebuiltConfiguration } from './prebuilt.js';
 import {
   runAdminBootstrap,
   runAdminRebindProvider,
@@ -34,13 +35,13 @@ const USAGE =
   'Usage: pb build [--config <file>] [--target cloudflare|node] [--out <dir>]\n' +
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
-  '       pb cloudflare setup --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
-  '       pb cloudflare provision --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
-  '       pb cloudflare deploy --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
+  '       pb cloudflare setup [--prebuilt] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
+  '       pb cloudflare provision [--prebuilt] --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
+  '       pb cloudflare deploy [--prebuilt] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
   '       pb cloudflare smoke --worker-name <slug> [--project <slug>] [--smoke-token-env <name>] [--deadline-seconds <1..300>] [--no-rollback] [--json] [--dry-run]\n' +
   '       pb cloudflare teardown --inventory <file> [--config <file>] [--project <dir>] [--inventory-id <owner_digest> --i-understand-this-deletes] [--json] [--dry-run]\n' +
   '       pb cloudflare janitor --repository-id <numeric-id> [--inventory <file>] [--config <file>] [--project <dir>] [--json] [--dry-run]\n' +
-  '       pb cloudflare migrate --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
+  '       pb cloudflare migrate [--prebuilt] --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
   '       pb admin bootstrap --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
@@ -119,6 +120,7 @@ function parseCliArgs(argv: string[]) {
         'expected-anchor': { type: 'string' },
         'new-anchor': { type: 'string' },
         cloudflare: { type: 'boolean' },
+        prebuilt: { type: 'boolean' },
         'token-file': { type: 'string' },
         'key-file': { type: 'string' },
         'master-key-env': { type: 'string' },
@@ -170,6 +172,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   migrate: ['sqlite', 'out', 'dry-run'],
   bootstrap: ['sqlite', 'slug', 'name'],
   'cloudflare setup': [
+    'prebuilt',
     'worker-name',
     'config',
     'out',
@@ -204,6 +207,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'deadline-seconds',
   ],
   'cloudflare provision': [
+    'prebuilt',
     'worker-name',
     'config',
     'environment',
@@ -220,6 +224,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'dry-run',
   ],
   'cloudflare deploy': [
+    'prebuilt',
     'worker-name',
     'config',
     'environment',
@@ -254,6 +259,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'dry-run',
   ],
   'cloudflare migrate': [
+    'prebuilt',
     'database-id',
     'out',
     'dry-run',
@@ -409,6 +415,16 @@ export async function run(argv: readonly string[]): Promise<number> {
     return usageError();
   }
   const [command, subcommand] = positionals;
+  if (command === 'cloudflare' && values.prebuilt) {
+    try {
+      await assertPrebuiltConfiguration(process.cwd(), values.config);
+    } catch (error) {
+      const result = failCommand(commandEnvelope(subcommand!, values['dry-run']), error);
+      if (values.json) console.log(JSON.stringify(result.output));
+      else console.error(result.output.error?.message);
+      return result.exitCode;
+    }
+  }
 
   if (command === 'cloudflare' && (subcommand === 'teardown' || subcommand === 'janitor')) {
     const options = {
@@ -582,6 +598,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     )
       return usageError();
     return runCloudflareSetup({
+      prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'] ?? '',
       env: process.env,
       ...(values.config === undefined ? {} : { configPath: values.config }),
@@ -671,6 +688,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     )
       return usageError();
     return runCloudflareDeploy({
+      prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'],
       env: process.env,
       ...(values.config === undefined ? {} : { configPath: values.config }),
@@ -702,6 +720,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     )
       return usageError();
     return runCloudflareProvision({
+      prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'],
       env: process.env,
       ...(values.config === undefined ? {} : { configPath: values.config }),
@@ -731,6 +750,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       if (values.jurisdiction !== undefined && !['eu', 'default'].includes(values.jurisdiction))
         return usageError();
       return runCloudflareMigrate({
+        prebuilt: values.prebuilt ?? false,
         ...(values['database-id'] === undefined ? {} : { databaseId: values['database-id'] }),
         ...(values['worker-name'] === undefined ? {} : { workerName: values['worker-name'] }),
         ...(values.config === undefined ? {} : { configPath: values.config }),
@@ -744,7 +764,7 @@ export async function run(argv: readonly string[]): Promise<number> {
           ? {}
           : { allowContract: values['allow-contract'] }),
         json: values.json ?? false,
-        outDir: values.out || '.pb/cloudflare',
+        outDir: values.out || (values.prebuilt ? '.pb/prebuilt/cloudflare' : '.pb/cloudflare'),
         dryRun: values['dry-run'] ?? false,
         env: process.env,
       });

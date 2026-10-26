@@ -1,6 +1,16 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1868,3 +1878,55 @@ it.each(['foreign owner', 'invalid zone', 'duplicate attachment'])(
     await expectPreflightRefusal('configuration_conflict', 8);
   },
 );
+
+it('setup prebuilt dry-run materializes without building and reports its envelope', async () => {
+  delete options.configPath;
+  options.prebuilt = true;
+  options.dryRun = true;
+  const version = JSON.parse(
+    await readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+  ).version as string;
+  const isolatedOut = join(project, '.pb/prebuilt/cloudflare.run');
+  ops.materializePrebuilt = vi.fn(async () => {
+    await mkdir(isolatedOut, { recursive: true });
+    await writeFile(`${isolatedOut}.lock`, JSON.stringify(process.pid));
+    return {
+      outDir: isolatedOut,
+      package: '@package-broker/dist-cloudflare',
+      version,
+      gitSha: 'a'.repeat(40),
+      artifactSha256: 'b'.repeat(64),
+    };
+  });
+  const result = await setup(options, ops);
+  expect(result.exitCode).toBe(0);
+  expect(await readdir(join(project, '.pb/prebuilt'))).toEqual([]);
+  expect(ops.build).not.toHaveBeenCalled();
+  expect(ops.materializePrebuilt).toHaveBeenCalledWith({
+    project,
+    outDir: join(project, '.pb/prebuilt/cloudflare'),
+  });
+  expect(ops.validateArtifact).toHaveBeenCalledWith(isolatedOut);
+  expect(result.output.prebuilt).toEqual({
+    package: '@package-broker/dist-cloudflare',
+    version,
+    gitSha: 'a'.repeat(40),
+    artifact_sha256: 'b'.repeat(64),
+  });
+  expect(ops.provision).toHaveBeenCalledWith(
+    expect.objectContaining({ prebuilt: false, outDir: isolatedOut }),
+  );
+});
+
+it('setup preserves undefined merge values for keys other than prebuilt', async () => {
+  options.dryRun = true;
+  ops.provision = vi.fn(async () => {
+    const planned = result('provision');
+    Object.assign(planned.output, { artifact_sha256: undefined });
+    return planned;
+  });
+  const completed = await setup(options, ops);
+  expect(completed.exitCode).toBe(0);
+  expect(completed.output).toHaveProperty('artifact_sha256', undefined);
+  expect(completed.output).not.toHaveProperty('prebuilt');
+});

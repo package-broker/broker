@@ -12,6 +12,12 @@ import {
   generateMasterKey,
   parseMasterKey,
 } from '@package-broker/core/secrets/master-key';
+import {
+  assertPrebuiltConfiguration,
+  materializePrebuilt,
+  prebuiltEnvelope,
+  removePrebuilt,
+} from '../../prebuilt.js';
 import { bootstrapAdmin } from '../admin.js';
 import { bootstrapCloudflare, migrateCloudflare } from '../cloudflare.js';
 import {
@@ -67,6 +73,7 @@ export interface SetupOptions extends Omit<ProvisionOptions, 'contract' | 'trans
 }
 
 export interface SetupOperations {
+  materializePrebuilt?: typeof materializePrebuilt;
   build: typeof buildSetupArtifact;
   validateArtifact: typeof validateDeploymentArtifact;
   provision: typeof provision;
@@ -415,6 +422,7 @@ export async function setup(
     (o.tty ?? (process.stdin.isTTY === true && process.stderr.isTTY === true));
   const ask = o.prompt ?? prompt;
   const progress = o.progress ?? ((message: string) => console.error(message));
+  let prebuiltOut: string | undefined;
   let transaction: InventoryTransaction | undefined;
   let stage = 'validate';
   let completed: CommandResult = { exitCode: 1, output };
@@ -425,6 +433,7 @@ export async function setup(
       if (
         !['command', 'dry_run', 'plan', 'checks'].includes(key) &&
         value !== null &&
+        (key !== 'prebuilt' || value !== undefined) &&
         (!Array.isArray(value) || value.length)
       )
         Object.assign(output, { [key]: value });
@@ -434,6 +443,7 @@ export async function setup(
     return (completed = { exitCode: result.exitCode, output });
   };
   try {
+    if (o.prebuilt) await assertPrebuiltConfiguration(resolve(o.project ?? '.'), o.configPath);
     const guided = tty && (!o.workerName || !o.orgSlug || !o.orgName || !o.adminEmail);
     const values = {
       workerName: o.workerName,
@@ -484,7 +494,10 @@ export async function setup(
     if (o.publicUrl !== undefined) o = { ...o, publicUrl: new URL(o.publicUrl).origin };
     const configPath = resolve(o.configPath ?? 'broker.config.ts');
     const project = await realpath(resolve(o.project ?? dirname(configPath)));
-    const outDir = resolve(project, o.outDir ?? '.pb/cloudflare');
+    let outDir = resolve(
+      project,
+      o.outDir ?? (o.prebuilt ? '.pb/prebuilt/cloudflare' : '.pb/cloudflare'),
+    );
     const auth = cloudflareCredentials(o.env);
     const identity = installIdentity({ ...o, ...auth, workerName: values.workerName! });
     const store = await InventoryStore.create({
@@ -513,7 +526,14 @@ export async function setup(
     const selectedSecrets = [...(o.secret ?? []), ...(o.secrets?.split('\n') ?? [])];
     for (const selected of [...selectedSecrets, o.masterKeyEnv, o.smokeTokenEnv])
       if (selected) delete buildEnv[selected];
-    await operations.build(configPath, outDir, buildEnv);
+    if (o.prebuilt) {
+      const materialized = await (operations.materializePrebuilt ?? materializePrebuilt)({
+        project,
+        outDir,
+      });
+      outDir = prebuiltOut = materialized.outDir;
+      output.prebuilt = prebuiltEnvelope(materialized);
+    } else await operations.build(configPath, outDir, buildEnv);
     validateSmokeToken(o);
     const artifact = await operations.validateArtifact(outDir);
     output.build_info = artifact.info ?? null;
@@ -549,6 +569,7 @@ export async function setup(
     const common = {
       ...o,
       workerName: values.workerName!,
+      prebuilt: false,
       project,
       configPath,
       outDir,
@@ -898,6 +919,7 @@ export async function setup(
           ),
     ));
   } finally {
+    if (prebuiltOut) await removePrebuilt(prebuiltOut).catch(() => undefined);
     try {
       await transaction?.close();
     } catch {

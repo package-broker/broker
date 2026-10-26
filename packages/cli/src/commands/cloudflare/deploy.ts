@@ -9,6 +9,12 @@ import {
   type PlatformPortConfig,
 } from '@package-broker/core/platform/port-config';
 import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
+import {
+  assertPrebuiltConfiguration,
+  materializePrebuilt,
+  prebuiltEnvelope,
+  removePrebuilt,
+} from '../../prebuilt.js';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
 import { normalizeQueueConsumer } from './queue-consumer.js';
 import { d1BindingId, workerSettingsDifferences } from './worker-settings.js';
@@ -282,6 +288,7 @@ export const cloudflareDeployContract: DeployProviderContract = {
 
 export interface DeployOptions {
   workerName: string;
+  prebuilt?: boolean;
   configPath?: string;
   project?: string;
   outDir?: string;
@@ -1235,7 +1242,11 @@ function outputAttempt(output: ReturnType<typeof commandEnvelope>, a: Deployment
     target_version_id: a.rollback === 'not_needed' ? null : a.previous_version_id,
   };
 }
-export async function deploy(o: DeployOptions): Promise<CommandResult> {
+export async function deploy(
+  o: DeployOptions,
+  operations: { materializePrebuilt?: typeof materializePrebuilt } = {},
+): Promise<CommandResult> {
+  let prebuiltOut: string | undefined;
   const output = commandEnvelope('deploy', o.dryRun);
   const result: CommandResult = { exitCode: 1, output };
   const succeed = () => {
@@ -1251,6 +1262,11 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
   let uploadSent = false;
   let creatingWorker = false;
   try {
+    if (o.prebuilt)
+      await assertPrebuiltConfiguration(
+        resolve(o.project ?? dirname(resolve(o.configPath ?? 'broker.config.ts'))),
+        o.configPath,
+      );
     const auth = cloudflareCredentials(o.env);
     const identity = installIdentity({
       ...auth,
@@ -1261,7 +1277,19 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       ...(o.runIdentity === undefined ? {} : { runIdentity: o.runIdentity }),
     });
     const project = resolve(o.project ?? dirname(resolve(o.configPath ?? 'broker.config.ts')));
-    const out = resolve(project, o.outDir ?? '.pb/cloudflare');
+    let out = resolve(
+      project,
+      o.outDir ?? (o.prebuilt ? '.pb/prebuilt/cloudflare' : '.pb/cloudflare'),
+    );
+    if (o.prebuilt) {
+      const materialized = await (operations.materializePrebuilt ?? materializePrebuilt)({
+        project,
+        outDir: out,
+      });
+      out = prebuiltOut = materialized.outDir;
+      output.prebuilt = prebuiltEnvelope(materialized);
+      output.artifact_sha256 = materialized.artifactSha256;
+    }
     const rollout = o.rollout ?? 100;
     if (!Number.isInteger(rollout) || rollout < 1 || rollout > 100) return invalid();
     const selectedSecrets = secretNames(o);
@@ -1317,6 +1345,18 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
       journal.operations.some((op) => op.state === 'pending' || op.state === 'unknown')
     )
       return invalid();
+    if (o.prebuilt) {
+      const migrations = await loadBuiltMigrations(out);
+      if (
+        migrations.some(
+          (m) =>
+            !journal!.migrations.ledger.some(
+              (entry) => entry.id === m.id && entry.checksum === m.checksum,
+            ),
+        )
+      )
+        throw new CloudflareError('migrations_pending', 2, false, 'deploy');
+    }
     if (journal.deployment) {
       outputAttempt(output, journal.deployment.attempt);
       output.artifact_sha256 = artifact.artifactHash;
@@ -1993,23 +2033,26 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
         output,
         failure instanceof DeploymentHistoryCapacityError
           ? new DeploymentHistoryCapacityError()
-          : failure instanceof CloudflareError
-            ? new CloudflareError(
-                failure.code,
-                failure.exitCode,
-                failure.retryable,
-                'deploy',
-                failure.status,
-                failure.check,
-                failure.providerCode,
-                failure.source,
-                failure.fields,
-              )
-            : new CloudflareError('provider_failure', 1, false, 'deploy'),
+          : failure instanceof CloudflareError && failure.stage === 'prebuilt'
+            ? failure
+            : failure instanceof CloudflareError
+              ? new CloudflareError(
+                  failure.code,
+                  failure.exitCode,
+                  failure.retryable,
+                  'deploy',
+                  failure.status,
+                  failure.check,
+                  failure.providerCode,
+                  failure.source,
+                  failure.fields,
+                )
+              : new CloudflareError('provider_failure', 1, false, 'deploy'),
       ),
     );
     return result;
   } finally {
+    if (prebuiltOut) await removePrebuilt(prebuiltOut).catch(() => undefined);
     if (release) {
       try {
         await release();

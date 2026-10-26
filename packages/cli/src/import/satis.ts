@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { isCredentialValue } from '@package-broker/core/audit/redact';
 import { PROJECT_SLUG_PATTERN } from '@package-broker/core/authz/project-path';
 import { PackageNameError, packageKey } from '@package-broker/core/catalogue/names';
 import { MAX_PATTERN_BYTES } from '@package-broker/core/catalogue/patterns';
@@ -12,6 +11,8 @@ import {
   type ParsedManifest,
 } from '@package-broker/core/import/manifest';
 import { isCanonicalUrl, sortConfigLists } from '@package-broker/core/import/source-config';
+
+import { isCredentialReference as isReference } from './credential-refs.js';
 
 export const DIAGNOSTIC_TEXT = {
   invalid_satis_config: 'Invalid or unsupported Satis configuration; see the field path.',
@@ -160,7 +161,6 @@ const ATTACHMENT_PRECEDENCE = 1000;
 const GITHUB_REPOSITORY =
   /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/;
 const VENDOR_FILTER = /^[a-z0-9][a-z0-9_.-]*\/\*$/;
-const ENV_REF = /^env:[A-Z_][A-Z0-9_]{0,127}$/;
 
 const isObj = (value: unknown): value is Obj =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -256,9 +256,6 @@ function classifyUrl(url: string): UrlClass {
   return 'invalid';
 }
 
-const TOKEN_ENV_PREFIXES = ['AKIA', 'ASIA', 'GHP_', 'GHO_', 'GHS_', 'GITHUB_PAT_', 'XOX', 'GLPAT'];
-const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/])/;
-
 const SOURCE_CONFIG_ENTRY_LENGTH_LIMIT = 200;
 
 function listCap(list: unknown): string | null {
@@ -268,26 +265,6 @@ function listCap(list: unknown): string | null {
     (entry) => typeof entry === 'string' && entry.length > SOURCE_CONFIG_ENTRY_LENGTH_LIMIT,
   );
   return long ? 'SOURCE_CONFIG_ENTRY_LENGTH_LIMIT' : null;
-}
-
-function isReference(ref: string): boolean {
-  if (/\p{Cc}/u.test(ref)) return false;
-  if (ref.startsWith('env:')) {
-    const name = ref.slice(4);
-    return (
-      ENV_REF.test(ref) &&
-      !TOKEN_ENV_PREFIXES.some((prefix) => name.startsWith(prefix)) &&
-      !isCredentialValue(name)
-    );
-  }
-  if (!ref.startsWith('file:')) return false;
-  const path = ref.slice(5);
-  return (
-    ABSOLUTE_PATH.test(path) &&
-    !path.split(/[\\/]/).includes('..') &&
-    Buffer.byteLength(path) <= 1024 &&
-    !isCredentialValue(path)
-  );
 }
 
 interface MapEntry {

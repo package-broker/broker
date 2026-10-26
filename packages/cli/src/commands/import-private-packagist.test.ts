@@ -256,3 +256,224 @@ it('refuses credential files on platforms without POSIX uid support', async () =
     Object.defineProperty(process, 'getuid', descriptor);
   }
 });
+
+it('dispatches an offline plan, writes canonical private files, and prints counts only in quiet mode', async () => {
+  const { stat } = await import('node:fs/promises');
+  const { canonicalManifest, parseManifest } = await import('@package-broker/core/import/manifest');
+  const snapshot = await readFile(
+    new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
+    'utf8',
+  );
+  await writeFile(options.snapshot, snapshot, { mode: 0o600 });
+  await writeFile(join(dir, 'map.json'), JSON.stringify({ version: 1, mirrorOrder: [20, 21] }));
+  const fetch = vi.fn(() => {
+    throw new Error('No network');
+  });
+  vi.stubGlobal('fetch', fetch);
+  const out = join(dir, 'manifest.json');
+  const credentials = join(dir, 'credentials.json');
+  const args = [
+    'import',
+    'private-packagist',
+    'plan',
+    '--snapshot',
+    options.snapshot,
+    '--map',
+    join(dir, 'map.json'),
+    '--out',
+    out,
+    '--credentials-out',
+    credentials,
+    '--quiet',
+  ];
+  expect(await run(args)).toBe(0);
+  expect(fetch).not.toHaveBeenCalled();
+  const bytes = await readFile(out, 'utf8');
+  const parsed = parseManifest(JSON.parse(bytes));
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) throw new Error('Expected manifest');
+  expect(bytes).toBe(canonicalManifest(parsed.data));
+  expect((await stat(out)).mode & 0o777).toBe(0o600);
+  expect((await stat(credentials)).mode & 0o777).toBe(0o600);
+  expect(stdout.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+    'create: 12',
+    'existing: 0',
+    'warning: 8',
+    'needs-input: 5',
+    'unsupported: 2',
+  ]);
+  const logs = JSON.stringify(stderr.mock.calls);
+  for (const sentinel of [
+    'acme/private',
+    'example/artifact',
+    'acme-user',
+    'acme@example.test',
+    'https://git.example.test',
+  ])
+    expect(logs).not.toContain(sentinel);
+  expect(await run(args)).toBe(2);
+  expect(stderr).toHaveBeenCalledWith('output_exists');
+  expect(await readFile(out, 'utf8')).toBe(bytes);
+});
+it('refuses readable snapshots, warns for readable members, and leaves no partial output', async () => {
+  const { runImportPrivatePackagistPlan } = await import('./import-private-packagist.js');
+  const snapshot = await readFile(
+    new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
+    'utf8',
+  );
+  await writeFile(options.snapshot, snapshot, { mode: 0o600 });
+  const map = join(dir, 'map');
+  await writeFile(map, '{"version":1,"mirrorOrder":[20,21]}');
+  const out = join(dir, 'manifest');
+  const credentialsOut = join(dir, 'credentials');
+  await chmod(options.snapshot, 0o644);
+  expect(
+    await runImportPrivatePackagistPlan({ snapshot: options.snapshot, map, out, credentialsOut }),
+  ).toBe(2);
+  expect(stderr).toHaveBeenCalledWith('snapshot_permissions');
+  await chmod(options.snapshot, 0o600);
+  const members = join(dir, 'members.csv');
+  await writeFile(members, 'username,email\nacme-user,acme@example.test', { mode: 0o644 });
+  await writeFile(credentialsOut, 'retained', { mode: 0o600 });
+  expect(
+    await runImportPrivatePackagistPlan({
+      snapshot: options.snapshot,
+      map,
+      out,
+      credentialsOut,
+      members,
+    }),
+  ).toBe(2);
+  expect(await readdir(dir)).not.toContain('manifest');
+  expect(await readFile(credentialsOut, 'utf8')).toBe('retained');
+  await rm(credentialsOut);
+  expect(
+    await runImportPrivatePackagistPlan({
+      snapshot: options.snapshot,
+      map,
+      out,
+      credentialsOut,
+      members,
+    }),
+  ).toBe(0);
+  expect(stdout).toHaveBeenCalledWith(expect.stringContaining('members_permissions'));
+  expect(stdout).toHaveBeenCalledWith(expect.stringMatching(/^planHash: [a-f0-9]{64}$/));
+});
+it('does not leak snapshot, member or map values in refused stderr and quiet stdout', async () => {
+  const { runImportPrivatePackagistPlan } = await import('./import-private-packagist.js');
+  const snapshot = JSON.parse(
+    await readFile(
+      new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const { canonical } = await import('../import/private-packagist/snapshot.js');
+  const { createHash } = await import('node:crypto');
+  snapshot.objects.packages[0].data.config.customJson = '{"name":"sentinel/private"}';
+  snapshot.objects.packages[0].sha256 = createHash('sha256')
+    .update(canonical(snapshot.objects.packages[0].data))
+    .digest('hex');
+  await writeFile(options.snapshot, JSON.stringify(snapshot), { mode: 0o600 });
+  const map = join(dir, 'map');
+  await writeFile(map, '{"version":1,"mirrorOrder":[20,21]}');
+  const members = join(dir, 'members.csv');
+  await writeFile(members, 'username,email\nsentinel-user,sentinel@example.test');
+  expect(
+    await runImportPrivatePackagistPlan({
+      snapshot: options.snapshot,
+      map,
+      out: join(dir, 'out'),
+      credentialsOut: join(dir, 'credentials'),
+      members,
+      quiet: true,
+    }),
+  ).toBe(2);
+  expect(stderr).toHaveBeenCalledWith(
+    expect.stringMatching(/^inline_package_unsupported \/packages\/\d+$/),
+  );
+  const diagnostics = JSON.stringify(stderr.mock.calls);
+  for (const sentinel of [
+    'acme/private',
+    'example/artifact',
+    'example/mirrored',
+    'acme/suborganization-only',
+    'acme-user',
+    'sentinel/private',
+    'sentinel-user',
+    'sentinel@example.test',
+    'git.example.test',
+  ])
+    expect(diagnostics).not.toContain(sentinel);
+  for (const call of stdout.mock.calls)
+    expect(call[0]).toMatch(/^(create|existing|warning|needs-input|unsupported): \d+$/);
+  expect(await readdir(dir)).not.toContain('out');
+});
+it('accepts repeatable widening acknowledgements and refuses plan-only flag misuse', async () => {
+  const { canonical } = await import('../import/private-packagist/snapshot.js');
+  const { createHash } = await import('node:crypto');
+  const snapshot = JSON.parse(
+    await readFile(
+      new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const data = {
+    id: 99,
+    name: 'example/extra',
+    origin: 'private-mirror',
+    config: { mirroredRepositoryId: 20 },
+  };
+  snapshot.objects.packages.push({
+    data,
+    sha256: createHash('sha256').update(canonical(data)).digest('hex'),
+  });
+  snapshot.objects.suborganizationPackages = snapshot.objects.suborganizationPackages.filter(
+    (e: { data: { origin: string } }) => e.data.origin !== 'private-mirror',
+  );
+  for (const suborganizationId of [1, 2]) {
+    const scoped = {
+      ...snapshot.objects.packages.find(
+        (e: { data: { origin: string } }) => e.data.origin === 'private-mirror',
+      ).data,
+      suborganizationId,
+    };
+    snapshot.objects.suborganizationPackages.push({
+      data: scoped,
+      sha256: createHash('sha256').update(canonical(scoped)).digest('hex'),
+    });
+  }
+  await writeFile(options.snapshot, JSON.stringify(snapshot), { mode: 0o600 });
+  const map = join(dir, 'map');
+  await writeFile(map, '{"version":1,"mirrorOrder":[20,21]}');
+  const args = [
+    'import',
+    'private-packagist',
+    'plan',
+    '--snapshot',
+    options.snapshot,
+    '--map',
+    map,
+    '--out',
+    join(dir, 'out'),
+    '--credentials-out',
+    join(dir, 'credentials'),
+  ];
+  expect(await run(args)).toBe(2);
+  expect(stderr).toHaveBeenCalledWith(expect.stringContaining('project_widening'));
+  expect(
+    await run([
+      ...args,
+      '--accept-project-widening',
+      'acme',
+      '--accept-project-widening',
+      'example',
+    ]),
+  ).toBe(0);
+  for (const flags of [
+    ['--runtime', 'unknown'],
+    ['--mode', 'unknown'],
+    ['--org', 'acme'],
+    ['--api-key-file', join(dir, 'key')],
+  ])
+    expect(await run([...args, ...flags])).toBe(2);
+});

@@ -403,10 +403,14 @@ function AppContent(props: { client?: AuthClient }) {
 
   const resolved = resolveRoute(hash, session === 'in');
   if (session === 'out') {
-    return resolved.route === 'setup' ? (
-      <SetupScreen client={client} onSignedIn={onSignedIn} />
-    ) : (
-      <LoginScreen client={client} onSignedIn={onSignedIn} />
+    return (
+      <main>
+        {resolved.route === 'setup' ? (
+          <SetupScreen client={client} onSignedIn={onSignedIn} />
+        ) : (
+          <LoginScreen client={client} onSignedIn={onSignedIn} />
+        )}
+      </main>
     );
   }
 

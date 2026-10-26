@@ -1,4 +1,3 @@
-import { entries as packageSyncErrorEntries } from './mutation-table/package-sync-error.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
 import { entries as sourceAttachmentCountsEntries } from './mutation-table/source-attachment-counts.js';
 import { entries as projectGrantReadEntries } from './mutation-table/project-grant-read.js';
@@ -217,7 +216,6 @@ export const mutationTable: readonly MutationEntry[] = [
   ...importRollbackEntries,
   ...importVerificationEntries,
   ...sourceSyncCountsEntries,
-  ...packageSyncErrorEntries,
   ...sourceRemovalEntries,
   ...sourceSyncReadsEntries,
   ...sourceSelectionEntries,

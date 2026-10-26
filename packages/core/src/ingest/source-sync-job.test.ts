@@ -400,7 +400,9 @@ describe('source sync job: listing and fan-out', () => {
       { sourceId: 'src', key: 'a/three', syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/) },
     ]);
     expect(t.fanout().map((e) => e.idempotencyKey)).toEqual(
-      ['a/one', 'a/two', 'a/three'].map((key) => sha(['v1', 'src', key, 'sess-1', 1])),
+      ['a/one', 'a/two', 'a/three'].map((key) =>
+        sha(['v1', 'src', key, 'sess-1', 1, t.fanout()[0]!.payload.syncGeneration]),
+      ),
     );
     expect(t.calls.open).toBe(1);
     expect(t.marks.map((m) => [...m.present])).toEqual([['a/one'], ['a/three']]);
@@ -449,8 +451,8 @@ describe('source sync job: listing and fan-out', () => {
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
     expect(keys).toEqual([
-      sha(['v1', 'src', 'a/one', 'sess-1', 1]),
-      sha(['v1', 'src', 'a/one', 'sess-2', 2]),
+      sha(['v1', 'src', 'a/one', 'sess-1', 1, t.fanout()[0]!.payload.syncGeneration]),
+      sha(['v1', 'src', 'a/one', 'sess-2', 2, t.fanout()[1]!.payload.syncGeneration]),
     ]);
   });
 
@@ -1094,8 +1096,8 @@ describe('source sync generation', () => {
       new Set([next.syncGeneration]),
     );
     expect(t.starts).toEqual([
-      { id: 'src', outcome: 'started', generation: next.syncGeneration },
-      { id: 'src', outcome: 'started', generation: next.syncGeneration },
+      { id: 'src', outcome: 'started', generation: next.syncGeneration, reset: true },
+      { id: 'src', outcome: 'started', generation: next.syncGeneration, reset: false },
     ]);
   });
 });
@@ -1108,6 +1110,7 @@ it('ignores a late source continuation from an older generation', async () => {
         listing: false,
         queued: 0,
         running: 0,
+        retrying: 0,
         failed: 0,
         completed: 3,
         errors: [],
@@ -1118,4 +1121,18 @@ it('ignores a late source continuation from an older generation', async () => {
   expect(t.starts).toEqual([]);
   expect(t.fanout()).toEqual([]);
   expect(t.calls.list).toEqual([]);
+});
+
+it('assigns distinct source generations even when the same job and proxy poll key are reused', async () => {
+  const t = setup({
+    source: record({ type: 'npmjs_proxy', ecosystem: 'npm' }),
+    held: { '': { keys: ['a/one'], next: null } },
+  });
+  await t.run(payload());
+  await t.run(payload());
+  expect(t.fanout()).toHaveLength(2);
+  expect(new Set(t.fanout().map((child) => child.idempotencyKey)).size).toBe(2);
+  const starts = t.starts as { generation: string }[];
+  expect(starts).toHaveLength(2);
+  expect(starts[0]!.generation).not.toBe(starts[1]!.generation);
 });

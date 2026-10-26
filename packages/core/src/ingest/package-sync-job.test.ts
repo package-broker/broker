@@ -361,8 +361,18 @@ describe('apply', () => {
     expect(h.deps.jobs.enqueue).toHaveBeenCalledWith(
       org,
       'core:package-sync:v1',
-      { sourceId: 'A', key: 'name', sessionId: 'session', generation: 1, step: 4 },
-      { idempotencyKey: sha(['session', 1, 4]), resourceKey: sha(['v1', 'A', 'name']) },
+      {
+        sourceId: 'A',
+        key: 'name',
+        parentJob: lease,
+        sessionId: 'session',
+        generation: 1,
+        step: 4,
+      },
+      {
+        idempotencyKey: sha(['session', 1, 4, lease.id, lease.owner, lease.fence]),
+        resourceKey: sha(['v1', 'A', 'name']),
+      },
     );
   });
 
@@ -756,4 +766,15 @@ describe('fix round 1', () => {
     );
     await expect(h.run()).rejects.toMatchObject({ code: 'lease_lost' });
   });
+});
+
+it('abandons the acquired stamped session when a continuation generation is stale', async () => {
+  const h = setup();
+  h.sessions.acquire.mockResolvedValue({ ...staged, generation: 2 });
+  await h.run({ sourceId: 'A', key: 'name', sessionId: staged.id, generation: 1 });
+  expect(h.sessions.abandon).toHaveBeenCalledExactlyOnceWith(
+    org,
+    expect.objectContaining({ generation: 2 }),
+  );
+  expect(h.sessions.release).not.toHaveBeenCalled();
 });

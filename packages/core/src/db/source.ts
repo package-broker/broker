@@ -35,7 +35,9 @@ export interface SourceSyncStatus {
   readonly generation: string;
   readonly queued: number;
   readonly running: number;
-  /** Packages with a failed last attempt, including those queued for retry. */
+  /** Failed packages queued for another attempt. */
+  readonly retrying: number;
+  /** Terminal package failures. */
   readonly failed: number;
   readonly completed: number;
   readonly errors: readonly { readonly code: SourceErrorCode; readonly count: number }[];
@@ -154,7 +156,12 @@ interface PollValidators {
 }
 
 export type PollOutcome =
-  | { readonly id: string; readonly outcome: 'started'; readonly generation: string }
+  | {
+      readonly id: string;
+      readonly outcome: 'started';
+      readonly generation: string;
+      readonly reset?: boolean;
+    }
   | ({ readonly id: string; readonly outcome: 'success' } & PollValidators)
   | {
       readonly id: string;
@@ -167,12 +174,6 @@ export type PollOutcome =
  * re-read. `conflict` also covers a failure that could not be classified.
  */
 export interface SourceRepository {
-  /** Pending child code; job settlement publishes it with the package state. */
-  packageErrorStatements?(
-    ctx: OrgContext,
-    guard: JobGuard,
-    code: SourceErrorCode,
-  ): readonly Statement[];
   syncNow(
     ctx: OrgContext,
     fence: MutationFence,

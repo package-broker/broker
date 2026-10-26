@@ -15,6 +15,7 @@ import {
   type JobRepository,
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
+import { jobSourceError } from '@package-broker/core/platform/job-source-error';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import { releaseDelayOf } from '@package-broker/core/platform/job-release';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
@@ -296,7 +297,16 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
         const errorCode = controller.signal.aborted
           ? jobErrorCode(controller.signal.reason)
           : jobErrorCode(error);
-        return { outcome: 'failed', errorCode, permanent: errorCode === 'invalid_payload' };
+        return {
+          outcome: 'failed',
+          errorCode,
+          permanent: errorCode === 'invalid_payload',
+          ...(!controller.signal.aborted &&
+          isRegisteredCoreJob(job as RegisteredCoreJob) &&
+          jobSourceError(error) !== undefined
+            ? { syncError: jobSourceError(error)! }
+            : {}),
+        };
       }
     };
 

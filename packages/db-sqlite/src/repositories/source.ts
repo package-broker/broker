@@ -1,4 +1,3 @@
-import type { JobGuard } from '@package-broker/core/platform/job-repository';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -181,10 +180,11 @@ function removalRefusalOf(row: SourceRow): SourceRecord['removalRefusal'] {
 }
 
 function syncStatus(generation: string, counts: string): NonNullable<SourceRecord['sync']> {
-  const { listing, queued, running, failed, completed, errors } = JSON.parse(counts) as {
+  const { listing, queued, running, retrying, failed, completed, errors } = JSON.parse(counts) as {
     listing: boolean;
     queued: number;
     running: number;
+    retrying: number;
     failed: number;
     completed: number;
     errors: Record<string, number>;
@@ -194,6 +194,7 @@ function syncStatus(generation: string, counts: string): NonNullable<SourceRecor
     listing,
     queued,
     running,
+    retrying,
     failed,
     completed,
     errors: SOURCE_ERROR_CODES.flatMap((code) =>
@@ -269,27 +270,6 @@ const SOURCE_COLUMNS = [
   'last_refusal_successful',
   'removal_accepted',
 ] as const;
-
-export function packageSyncErrorStatements(
-  ctx: OrgContext,
-  guard: JobGuard,
-  code: SourceErrorCode,
-): readonly Statement[] {
-  return [
-    compile(
-      db
-        .updateTable('job')
-        .set({ sync_error: errorCode(code) })
-        .where('org_id', '=', ctx.orgId)
-        .where('id', '=', guard.id)
-        .where('type', '=', 'core:package-sync:v1')
-        .where('state', '=', 'running')
-        .where('lease_owner', '=', guard.owner)
-        .where('fence', '=', guard.fence)
-        .where('lease_until', '>', DB_NOW),
-    ),
-  ];
-}
 
 export function findByRepositoryStatement(
   ctx: OrgContext,
@@ -965,7 +945,6 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       ]);
     },
 
-    packageErrorStatements: packageSyncErrorStatements,
     async pollState(ctx, guard, input) {
       const format = '%Y-%m-%dT%H:%M:%fZ';
       const keep = (column: string, value: string | null | undefined) =>
@@ -976,7 +955,18 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           throw new TypeError('invalid sync generation');
         update = db.updateTable('source').set({
           sync_generation: input.generation,
-          sync_counts: sql<string>`json_set(sync_counts, '$.listing', json('true'))`,
+          sync_counts:
+            input.reset !== false
+              ? JSON.stringify({
+                  listing: true,
+                  queued: 0,
+                  running: 0,
+                  retrying: 0,
+                  failed: 0,
+                  completed: 0,
+                  errors: {},
+                })
+              : sql<string>`json_set(sync_counts, '$.listing', json('true'))`,
         });
       } else if (input.outcome === 'success') {
         update = db.updateTable('source').set({
@@ -1021,6 +1011,16 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
               where polling.id = ${guard.id} and polling.org_id = ${ctx.orgId}
                 and polling.resource_key = ${`source:${input.id}`})`,
           ),
+          ...(input.outcome === 'started' && input.reset !== false
+            ? [
+                compile({
+                  compile: () =>
+                    sql`DELETE FROM source_sync_package WHERE org_id = ${ctx.orgId} AND source_id = ${input.id}`.compile(
+                      db,
+                    ),
+                }),
+              ]
+            : []),
           statement,
         ]);
       } catch (error) {

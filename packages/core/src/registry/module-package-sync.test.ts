@@ -1,4 +1,5 @@
 import * as composerRepository from '../ingest/composer/composer-repository.js';
+import { jobSourceError } from '../platform/job-source-error.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { orgContext, type OrgContext } from '../db/port.js';
@@ -481,18 +482,16 @@ it('uses a plugin claiming composer_repository before the built-in default', asy
   expect(h.transport).not.toHaveBeenCalled();
 });
 
-it('wires stable child error recording from the source repository into package jobs', async () => {
+it('passes a stable child error from registry package jobs to settlement', async () => {
   const h = harness();
-  const packageErrorStatements = vi.fn(() => [{ sql: 'record-source-error', params: [] }]);
-  Object.assign(h.deps.catalogue.sources, { packageErrorStatements });
   h.transport.mockRejectedValue(new Error('private upstream failure'));
   const definition = createRegistryModule(h.deps).packageSyncJob!;
-  await expect(
-    definition.handler(
+  const error = await definition
+    .handler(
       definition.validate({ sourceId: 'src-1', key: h.key, syncGeneration: 'a'.repeat(64) }),
       h.context,
-    ),
-  ).rejects.toThrow();
-  expect(packageErrorStatements).toHaveBeenCalledExactlyOnceWith(org, lease, 'network');
-  expect(h.batch).toHaveBeenCalledWith([{ sql: 'record-source-error', params: [] }]);
+    )
+    .catch((error: unknown) => error);
+  expect(jobSourceError(error)).toBe('network');
+  expect(h.batch).not.toHaveBeenCalledWith([{ sql: 'record-source-error', params: [] }]);
 });

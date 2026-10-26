@@ -1,4 +1,4 @@
-import type { SourceRepository } from '../db/source.js';
+import { withJobSourceError } from '../platform/job-source-error.js';
 import { sourceErrorCode } from './sync-error.js';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../db/errors.js';
@@ -36,7 +36,6 @@ const ABANDONED_RESYNC_WINDOW_MS = 3_600_000;
 const MAX_TEXT = 512;
 
 export interface PackageSyncDeps {
-  readonly sourceErrorStatements?: SourceRepository['packageErrorStatements'];
   readonly sessions: IngestSessions & IngestSessionRelease;
   readonly apply: ApplyDeps;
   readonly jobs: Pick<Jobs, 'enqueue'>;
@@ -84,10 +83,19 @@ function validate(input: unknown): PackageSyncPayload {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new JobError('invalid_payload');
   }
-  const { sourceId, key, sessionId, generation, step, syncGeneration, ...rest } = payload;
+  const { sourceId, key, sessionId, generation, step, syncGeneration, parentJob, ...rest } =
+    payload;
   const continuation = sessionId !== undefined || generation !== undefined;
   if (
     Object.keys(rest).length > 0 ||
+    (parentJob !== undefined &&
+      (typeof parentJob !== 'object' ||
+        parentJob === null ||
+        Array.isArray(parentJob) ||
+        Object.keys(parentJob).sort().join(',') !== 'fence,id,owner' ||
+        !text((parentJob as JobGuard).id) ||
+        !text((parentJob as JobGuard).owner) ||
+        !count((parentJob as JobGuard).fence, 1))) ||
     !text(sourceId) ||
     !text(key) ||
     (syncGeneration !== undefined &&
@@ -100,6 +108,7 @@ function validate(input: unknown): PackageSyncPayload {
   return {
     sourceId,
     key,
+    ...(parentJob === undefined ? {} : { parentJob: parentJob as JobGuard }),
     ...(syncGeneration === undefined ? {} : { syncGeneration: syncGeneration as string }),
     ...(continuation ? { sessionId: sessionId as string, generation: generation as number } : {}),
     ...(step === undefined ? {} : { step }),
@@ -124,7 +133,14 @@ export async function packageSyncEnqueueInput(
     return { idempotencyKey: freshKey, resourceKey };
   }
   return {
-    idempotencyKey: await sha256Hex([payload.sessionId, payload.generation, payload.step ?? 0]),
+    idempotencyKey: await sha256Hex([
+      payload.sessionId,
+      payload.generation,
+      payload.step ?? 0,
+      ...(payload.parentJob === undefined
+        ? []
+        : [payload.parentJob.id, payload.parentJob.owner, payload.parentJob.fence]),
+    ]),
     resourceKey,
   };
 }
@@ -189,7 +205,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
           payload.sessionId !== undefined &&
           (session.id !== payload.sessionId || session.generation !== payload.generation)
         ) {
-          await end(session.stamp === null);
+          await end(true);
           return;
         }
         const metadata = await deps.sourceMetadata(ctx, sourceId);
@@ -318,6 +334,7 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
             ...(payload.syncGeneration === undefined
               ? {}
               : { syncGeneration: payload.syncGeneration }),
+            parentJob: lease,
             sessionId: session.id,
             generation: session.generation,
             step: session.pagesSoFar,
@@ -337,19 +354,15 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
         }
         open = false;
       } catch (error) {
-        if (
-          payload.syncGeneration !== undefined &&
-          !context.signal.aborted &&
-          !(error instanceof JobRelease) &&
-          deps.sourceErrorStatements !== undefined
-        ) {
-          await deps.executor.batch(deps.sourceErrorStatements(ctx, lease, sourceErrorCode(error)));
-        }
         if (open) {
           await end(isSnapshotGone(error) || session.stamp === null).catch(() => undefined);
         }
+        if (error instanceof JobRelease || context.signal.aborted) throw error;
+        const failure = error instanceof JobError ? error : retry();
+        if (payload.syncGeneration !== undefined) {
+          throw withJobSourceError(failure, sourceErrorCode(error));
+        }
         if (error instanceof JobError) throw error;
-        if (context.signal.aborted) throw error;
         if (isSnapshotGone(error) || isUpstreamFailure(error)) throw retry();
         throw error;
       }

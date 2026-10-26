@@ -5948,10 +5948,13 @@ export interface operations {
                         | 'internal';
                       count: number;
                     }[];
+                    /** @description Terminal package failures. */
                     failed: number;
                     generation: string;
                     listing: boolean;
                     queued: number;
+                    /** @description Failed packages queued for another attempt; disjoint from queued, running, failed and completed. */
+                    retrying: number;
                     running: number;
                   };
                   /** @enum {string} */
@@ -6011,10 +6014,13 @@ export interface operations {
                         | 'internal';
                       count: number;
                     }[];
+                    /** @description Terminal package failures. */
                     failed: number;
                     generation: string;
                     listing: boolean;
                     queued: number;
+                    /** @description Failed packages queued for another attempt; disjoint from queued, running, failed and completed. */
+                    retrying: number;
                     running: number;
                   };
                   /** @enum {string} */
@@ -8429,10 +8435,13 @@ export interface operations {
                     | 'internal';
                   count: number;
                 }[];
+                /** @description Terminal package failures. */
                 failed: number;
                 generation: string;
                 listing: boolean;
                 queued: number;
+                /** @description Failed packages queued for another attempt; disjoint from queued, running, failed and completed. */
+                retrying: number;
                 running: number;
               };
               /** @enum {string} */

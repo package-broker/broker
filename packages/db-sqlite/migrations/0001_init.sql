@@ -431,8 +431,6 @@ CREATE TABLE session (
 ) STRICT;
 
 CREATE TABLE source (
-  sync_generation                 TEXT,
-  sync_counts                     TEXT NOT NULL DEFAULT '{"listing":true,"queued":0,"running":0,"failed":0,"completed":0,"errors":{}}' CHECK (json_valid(sync_counts)),
   id                              TEXT NOT NULL PRIMARY KEY,
   org_id                          TEXT NOT NULL REFERENCES organization (id),
   project_id                      TEXT REFERENCES project (id),
@@ -468,6 +466,8 @@ CREATE TABLE source (
   last_refusal_listed             INTEGER CHECK (last_refusal_listed IS NULL OR last_refusal_listed >= 0),
   last_refusal_successful         INTEGER CHECK (last_refusal_successful IS NULL OR last_refusal_successful >= 0),
   removal_accepted                INTEGER NOT NULL DEFAULT 0 CHECK (removal_accepted IN (0, 1)),
+  sync_generation                 TEXT,
+  sync_counts                     TEXT NOT NULL DEFAULT '{"listing":true,"queued":0,"running":0,"retrying":0,"failed":0,"completed":0,"errors":{}}' CHECK (json_valid(sync_counts)),
   CHECK ((last_refusal_at IS NULL) = (last_refusal_absent IS NULL)
     AND (last_refusal_at IS NULL) = (last_refusal_listed IS NULL)
     AND (last_refusal_at IS NULL) = (last_refusal_successful IS NULL)),
@@ -479,7 +479,7 @@ CREATE TABLE source_sync_package (
   source_id TEXT NOT NULL REFERENCES source (id) ON DELETE CASCADE,
   package_key TEXT NOT NULL,
   generation TEXT NOT NULL,
-  job_id TEXT NOT NULL REFERENCES job (id),
+  job_id TEXT NOT NULL REFERENCES job (id) ON DELETE CASCADE,
   state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'dead')),
   error TEXT,
   PRIMARY KEY (org_id, source_id, package_key)
@@ -1010,12 +1010,11 @@ BEGIN
   SELECT RAISE(ABORT, 'source ecosystem cannot change while the source holds packages');
 END;
 
-CREATE TRIGGER source_sync_generation_reset
-AFTER UPDATE OF sync_generation ON source
-WHEN NEW.sync_generation IS NOT OLD.sync_generation
+CREATE TRIGGER source_sync_pause
+AFTER UPDATE OF status ON source
+WHEN NEW.status = 'paused'
 BEGIN
-  DELETE FROM source_sync_package WHERE org_id = NEW.org_id AND source_id = NEW.id;
-  UPDATE source SET sync_counts = '{"listing":true,"queued":0,"running":0,"failed":0,"completed":0,"errors":{}}'
+  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))
     WHERE org_id = NEW.org_id AND id = NEW.id;
 END;
 
@@ -1023,19 +1022,31 @@ CREATE TRIGGER source_sync_job_state
 AFTER UPDATE OF state, last_error ON job
 BEGIN
   UPDATE source_sync_package SET state = NEW.state,
-    error = CASE WHEN NEW.state = 'succeeded' THEN NULL
+    error = CASE WHEN NEW.state IN ('running', 'succeeded') OR (NEW.state = 'queued' AND EXISTS (SELECT 1 FROM job_attempt WHERE org_id = NEW.org_id AND job_id = NEW.id AND fence = NEW.fence AND outcome = 'released')) THEN NULL
       ELSE COALESCE(NEW.sync_error, CASE WHEN NEW.last_error = 'timeout' THEN 'timeout'
         WHEN NEW.last_error IS NOT NULL THEN 'internal' END) END
     WHERE org_id = NEW.org_id AND job_id = NEW.id;
+  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))
+    WHERE org_id = NEW.org_id AND id = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.sourceId')
+      AND NEW.type = 'core:source-sync:v1' AND NEW.state <> 'running'
+      AND (NEW.state <> 'succeeded' OR NOT EXISTS (
+        SELECT 1 FROM job continuation
+        WHERE continuation.org_id = NEW.org_id AND continuation.resource_key = NEW.resource_key
+          AND continuation.id <> NEW.id AND continuation.type = 'core:source-sync:v1'
+          AND continuation.state IN ('queued', 'running')
+          AND json_extract(CASE WHEN json_valid(continuation.payload_json) THEN continuation.payload_json ELSE '{}' END, '$.syncGeneration') = source.sync_generation))
+      AND (json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration') IS NULL
+        OR sync_generation = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration'));
 END;
 
 CREATE TRIGGER source_sync_counts_insert
 AFTER INSERT ON source_sync_package
 BEGIN
   UPDATE source SET sync_counts = json_set((CASE WHEN NEW.error IS NULL THEN (sync_counts) ELSE json_set((sync_counts), '$.errors.' || NEW.error, COALESCE(json_extract((sync_counts), '$.errors.' || NEW.error), 0) + 1) END),
-      '$.queued', json_extract(sync_counts, '$.queued') + (NEW.state = 'queued'),
+      '$.queued', json_extract(sync_counts, '$.queued') + (NEW.state = 'queued' AND NEW.error IS NULL),
       '$.running', json_extract(sync_counts, '$.running') + (NEW.state = 'running'),
-      '$.failed', json_extract(sync_counts, '$.failed') + (NEW.error IS NOT NULL),
+      '$.retrying', json_extract(sync_counts, '$.retrying') + (NEW.state = 'queued' AND NEW.error IS NOT NULL),
+      '$.failed', json_extract(sync_counts, '$.failed') + (NEW.state = 'dead'),
       '$.completed', json_extract(sync_counts, '$.completed') + (NEW.state = 'succeeded'))
     WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation;
 END;
@@ -1052,9 +1063,10 @@ BEGIN
     WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation
       AND NEW.error IS NOT NULL;
   UPDATE source SET sync_counts = json_set(sync_counts,
-      '$.queued', json_extract(sync_counts, '$.queued') + ((NEW.state = 'queued') - (OLD.state = 'queued')),
+      '$.queued', json_extract(sync_counts, '$.queued') + ((NEW.state = 'queued' AND NEW.error IS NULL) - (OLD.state = 'queued' AND OLD.error IS NULL)),
       '$.running', json_extract(sync_counts, '$.running') + ((NEW.state = 'running') - (OLD.state = 'running')),
-      '$.failed', json_extract(sync_counts, '$.failed') + ((NEW.error IS NOT NULL) - (OLD.error IS NOT NULL)),
+      '$.retrying', json_extract(sync_counts, '$.retrying') + ((NEW.state = 'queued' AND NEW.error IS NOT NULL) - (OLD.state = 'queued' AND OLD.error IS NOT NULL)),
+      '$.failed', json_extract(sync_counts, '$.failed') + ((NEW.state = 'dead') - (OLD.state = 'dead')),
       '$.completed', json_extract(sync_counts, '$.completed') + ((NEW.state = 'succeeded') - (OLD.state = 'succeeded')))
     WHERE org_id = NEW.org_id AND id = NEW.source_id AND sync_generation = NEW.generation;
 END;

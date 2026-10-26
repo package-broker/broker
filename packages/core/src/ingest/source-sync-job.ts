@@ -234,7 +234,13 @@ async function fanOut(
         ...(input.syncGeneration === undefined ? {} : { syncGeneration: input.syncGeneration }),
       },
       {
-        idempotencyKey: await digest(['v1', input.sourceId, input.key, ...input.generation]),
+        idempotencyKey: await digest([
+          'v1',
+          input.sourceId,
+          input.key,
+          ...input.generation,
+          ...(input.syncGeneration === undefined ? [] : [input.syncGeneration]),
+        ]),
         resourceKey: `package:${await digest(['v1', input.sourceId, input.key])}`,
       },
     );
@@ -602,11 +608,13 @@ export function createSourceSyncJob(deps: SourceSyncDeps): JobDefinition<SourceS
       }
       try {
         const syncGeneration =
-          payload.syncGeneration ?? (await digest(['sync', acquired?.id ?? job.idempotencyKey]));
+          payload.syncGeneration ??
+          (await digest(['sync', job.jobId, job.attempt, acquired?.id, acquired?.generation]));
         const started = await deps.sources.pollState(ctx, deps.jobGuard(job), {
           id: record.id,
           outcome: 'started',
           generation: syncGeneration,
+          reset: payload.syncGeneration === undefined,
         });
         if (started !== 'written') throw lostSession();
         payload = { ...payload, syncGeneration };

@@ -289,13 +289,16 @@ it.each([false, true])(
           ctx.orgId,
         ),
       );
+    const revision = await reads.selectionRevision(ctx, 'S');
     await run();
+    const activatedRevision = await reads.selectionRevision(ctx, 'S');
+    expect(activatedRevision).not.toBe(revision);
     expect(await state()).toEqual([{ removal_accepted: 0, last_refusal_absent: 9 }]);
     expect(await removed()).toEqual([{ n: 0 }]);
-    const revision = await reads.selectionRevision(ctx, 'S');
     expect(await accept()).toBe('accepted');
     accepted = true;
-    expect(await reads.selectionRevision(ctx, 'S')).toBe(revision);
+    expect(await reads.selectionRevision(ctx, 'S')).not.toBe(revision);
+    expect(await reads.selectionRevision(ctx, 'S')).toBe(activatedRevision);
     await run();
     expect(await sessions.latest(ctx, { scope: 'source', sourceId: 'S' })).toMatchObject({
       state: 'complete',
@@ -330,7 +333,8 @@ it.each([false, true])(
         ),
       ),
     ).toEqual([{ n: 1 }]);
-    expect(await reads.selectionRevision(ctx, 'S')).toBe(revision);
+    expect(await reads.selectionRevision(ctx, 'S')).not.toBe(revision);
+    expect(await reads.selectionRevision(ctx, 'S')).toBe(activatedRevision);
   },
 );
 

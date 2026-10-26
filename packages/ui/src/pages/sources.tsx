@@ -914,7 +914,8 @@ function SyncStatus({ source }: { source: Source }) {
         <>
           <p>
             Latest sync: {source.sync.queued} queued · {source.sync.running} running ·{' '}
-            {source.sync.failed} failed · {source.sync.completed} completed
+            {source.sync.retrying} retrying · {source.sync.failed} failed · {source.sync.completed}{' '}
+            completed
           </p>
           {source.sync.errors.slice(0, 3).map(({ code, count }) => (
             <p key={code}>

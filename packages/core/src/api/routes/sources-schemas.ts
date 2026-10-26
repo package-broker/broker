@@ -80,7 +80,14 @@ const source = z.strictObject({
       generation: z.string(),
       queued: z.number().int().nonnegative(),
       running: z.number().int().nonnegative(),
-      failed: z.number().int().nonnegative(),
+      retrying: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe(
+          'Failed packages queued for another attempt; disjoint from queued, running, failed and completed.',
+        ),
+      failed: z.number().int().nonnegative().describe('Terminal package failures.'),
       completed: z.number().int().nonnegative(),
       errors: z.array(
         z.strictObject({ code: z.enum(SOURCE_ERROR_CODES), count: z.number().int().positive() }),

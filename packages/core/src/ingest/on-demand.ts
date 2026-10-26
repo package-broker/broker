@@ -45,6 +45,7 @@ export interface PackageFillPlan extends Pick<
 }
 export interface PackageSyncPayload {
   readonly syncGeneration?: string;
+  readonly parentJob?: import('../platform/job-repository.js').JobGuard;
   readonly sourceId: string;
   readonly key: string;
   readonly sessionId?: string;

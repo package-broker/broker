@@ -2413,6 +2413,7 @@ it('shows the latest generation counts and the top stable failure codes', async 
               listing: false,
               queued: 1,
               running: 2,
+              retrying: 5,
               failed: 3,
               completed: 4,
               errors: [
@@ -2432,6 +2433,7 @@ it('shows the latest generation counts and the top stable failure codes', async 
   expect(html().replaceAll('<!-- -->', '')).toContain('1 queued');
   expect(html().replaceAll('<!-- -->', '')).toContain('2 running');
   expect(html().replaceAll('<!-- -->', '')).toContain('3 failed');
+  expect(html().replaceAll('<!-- -->', '')).toContain('5 retrying');
   expect(html().replaceAll('<!-- -->', '')).toContain('4 completed');
   expect(html().replaceAll('<!-- -->', '')).toContain('Tag limit exceeded');
   expect(html().replaceAll('<!-- -->', '')).toContain('tag_limit_exceeded</code>: 3');
@@ -2444,9 +2446,10 @@ it('keeps polling package work after listing success and stops when the generati
     const sync = {
       generation: 'a'.repeat(64),
       listing: false,
-      queued: 1,
+      queued: 0,
       running: 0,
-      failed: 1,
+      retrying: 1,
+      failed: 0,
       completed: 2,
       errors: [{ code: 'network', count: 1 }],
     };
@@ -2459,7 +2462,7 @@ it('keeps polling package work after listing success and stops when the generati
     const { model } = setup(fetch);
     await model.syncNow(source);
     await vi.advanceTimersByTimeAsync(40_000);
-    expect(fetch.mock.calls.length).toBeGreaterThan(16);
+    expect(fetch.mock.calls.length).toBeGreaterThan(4);
     fetch.mockImplementation(() =>
       Promise.resolve(
         json({
@@ -2467,16 +2470,16 @@ it('keeps polling package work after listing success and stops when the generati
             {
               ...source,
               lastSuccessAt: NOW,
-              sync: { ...sync, queued: 0, failed: 0, completed: 3, errors: [] },
+              sync: { ...sync, queued: 0, retrying: 0, failed: 0, completed: 3, errors: [] },
             },
           ],
           next: null,
         }),
       ),
     );
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     const calls = fetch.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fetch).toHaveBeenCalledTimes(calls);
     expect(model.snapshot().items[0]!.sync?.completed).toBe(3);
     model.dispose();

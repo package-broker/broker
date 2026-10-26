@@ -50,7 +50,16 @@ export default defineConfig({
       test: {
         name,
         root: fileURLToPath(new URL(`./packages/${name}`, import.meta.url)),
-        include: ['src/**/*.test.ts'],
+        include: ['src/**/*.test.ts', ...(name === 'ui' ? ['test-support/**/*.test.ts'] : [])],
+        ...(name === 'ui'
+          ? {
+              globalSetup: [
+                fileURLToPath(
+                  new URL('./packages/ui/test-support/global-setup.ts', import.meta.url),
+                ),
+              ],
+            }
+          : {}),
         ...(budgetGuardedProjects.has(name)
           ? {
               setupFiles: [

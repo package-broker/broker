@@ -8,6 +8,7 @@
     { "path": "packages/runtime-node" },
     { "path": "packages/cli" },
     { "path": "packages/ui" },
+    { "path": "packages/ui/test-support" },
     { "path": "packages/ui-assets" },
     { "path": "packages/plugin-sso-oidc" },
     { "path": "packages/plugin-github" }

@@ -29,8 +29,11 @@ Narrowing a source's package list, patterns, registered names or npm scopes stop
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm --filter @package-broker/e2e exec playwright install chromium
 pnpm check
 ```
+
+`pnpm check` includes required UI browser tests and needs Chromium (`playwright install chromium`).
 
 ## Build with a plugin set
 

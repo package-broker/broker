@@ -1,8 +1,10 @@
 ---
-title: '"<path>" does not contain valid JSON'
+title: auth.json does not contain valid JSON
 sidebar_position: 3
 description: Check malformed Composer auth.json without printing Magento credentials, broker tokens or parser excerpts.
 ---
+
+`"./auth.json" does not contain valid JSON` is Composer's message when that authentication file cannot be parsed.
 
 ## Cause
 

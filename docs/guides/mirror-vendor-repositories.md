@@ -1,10 +1,12 @@
 ---
-title: Vendor repositories as sources
+title: Magento Marketplace keys per client project (repo.magento.com)
 sidebar_position: 1
-description: Add vendor repositories as project sources with separate credentials.
+description: Add Magento Marketplace and other vendor repositories as project sources with separate credentials per client project.
 ---
 
 Connect a vendor Composer repository to a project, store that project's vendor credentials, then check installs and access from a second project. Project-owned sources serve only their owner project. <!-- source: packages/core/src/catalogue/visibility.ts:71 -->
+
+Magento Marketplace sources are built, in final verification.
 
 ## Prerequisites
 
@@ -135,13 +137,13 @@ A 401 means authentication failed and does not prove project isolation. A 403 ca
 
 Configure source type, package selection, archive retention and removal policy. Archive fetching and cache reuse follow the behavior below. <!-- source: packages/core/src/api/routes/sources-schemas.ts:19 --> <!-- source: packages/core/src/db/source.ts:33 -->
 
-| Choice or behavior         | Effect                                                                                                                                                                                                                                                                                                                                            |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Composer repository source | Sync reads selected package metadata from the vendor. An archive request first checks visible stored bytes; missing bytes for a current version can trigger a fetch and storage through the source. <!-- source: packages/core/src/ingest/composer/composer-repository.ts:131 --> <!-- source: packages/core/src/registry/dist-service.ts:272 --> |
-| Public proxy               | Admits public names on demand, subject to private-name reservations; it is a separate source type. <!-- source: packages/core/src/catalogue/package-access.ts:124 --> <!-- source: packages/core/src/catalogue/visibility.ts:123 -->                                                                                                              |
-| Removal policy `flag`      | A package marked removed at the vendor can remain eligible. This does not guarantee that an archive never fetched can still be downloaded from the vendor. <!-- source: packages/core/src/catalogue/visibility.ts:170 --> <!-- source: packages/core/src/registry/dist-service.ts:229 -->                                                         |
-| Removal policy `exclude`   | A removed package becomes ineligible; possession of cached bytes does not bypass resolution. <!-- source: packages/core/src/catalogue/visibility.ts:170 --> <!-- source: packages/core/src/registry/dist-service.ts:272 -->                                                                                                                       |
-| Archive retention override | Can lengthen organization retention. It does not widen project visibility or promise permanent retention. <!-- source: packages/ui/src/pages/sources/source-form.tsx:119 -->                                                                                                                                                                      |
+| Choice or behavior                       | Effect                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Composer repository source               | Sync reads selected package metadata from the vendor. An archive request first checks visible stored bytes; missing bytes for a current version can trigger a fetch and storage through the source. <!-- source: packages/core/src/ingest/composer/composer-repository.ts:131 --> <!-- source: packages/core/src/registry/dist-service.ts:272 --> |
+| [Public proxy](public-registry-proxy.md) | Admits public names on demand, subject to private-name reservations; it is a separate source type. <!-- source: packages/core/src/catalogue/package-access.ts:124 --> <!-- source: packages/core/src/catalogue/visibility.ts:123 -->                                                                                                              |
+| Removal policy `flag`                    | A package marked removed at the vendor can remain eligible. This does not guarantee that an archive never fetched can still be downloaded from the vendor. <!-- source: packages/core/src/catalogue/visibility.ts:170 --> <!-- source: packages/core/src/registry/dist-service.ts:229 -->                                                         |
+| Removal policy `exclude`                 | A removed package becomes ineligible; possession of cached bytes does not bypass resolution. <!-- source: packages/core/src/catalogue/visibility.ts:170 --> <!-- source: packages/core/src/registry/dist-service.ts:272 -->                                                                                                                       |
+| Archive retention override               | Can lengthen organization retention. It does not widen project visibility or promise permanent retention. <!-- source: packages/ui/src/pages/sources/source-form.tsx:119 -->                                                                                                                                                                      |
 
 ## Troubleshoot credentials
 

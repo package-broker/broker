@@ -1,6 +1,6 @@
-# Documentation
+# How the docs are maintained
 
-This folder is the source of the 2.0 documentation site at package.broker. The v1 site stays frozen under `/v1/` and is not built from here.
+This folder is the source of the 2.0 documentation site at package.broker.
 
 ## Page tree
 

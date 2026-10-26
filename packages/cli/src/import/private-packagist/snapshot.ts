@@ -88,10 +88,14 @@ const repositoryUrl: Schema = (value) => {
       /[\s\r\n]/.test(text) ||
       (parsed.username && !(ssh && /^[a-zA-Z0-9_-]+$/.test(parsed.username))) ||
       // Retain public routing queries; credential-bearing query parameters are never persisted.
-      [...parsed.searchParams.keys()].some((key) =>
-        /^(?:(?:access|refresh|id|auth)[_-]?token|(?:api|private|public)[_-]?key|(?:client[_-])?secret|token|key|password|passwd|auth|authorization|signature|credentials?|x-amz-(?:credential|signature|security-token))$/i.test(
-          key,
-        ),
+      [...parsed.searchParams.keys()].some(
+        (key) =>
+          /^(?:[a-z0-9]+[_-])*(?:token|key|secret|password|passwd|pwd|auth|signature|sig|credentials?)(?:[_-][a-z0-9]+)*$/i.test(
+            key,
+          ) ||
+          /^(?:(?:access|refresh|id|auth)token|(?:api|private|public)key|authorization)$/i.test(
+            key,
+          ),
       )
     )
       throw new RepositoryUrlError();

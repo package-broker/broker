@@ -1,3 +1,4 @@
+import { sourceErrorCode } from './sync-error.js';
 import { repositoryListingEvidence } from '../internal/composer-repository-listing.js';
 import { sha256Hex } from '../auth/primitives.js';
 import {
@@ -15,7 +16,7 @@ import {
   type JobContext,
   type JobDefinition,
 } from '../platform/jobs.js';
-import { UpstreamError, type UpstreamCredential } from '../sources/policy-fetch.js';
+import { type UpstreamCredential } from '../sources/policy-fetch.js';
 import {
   collectListing,
   SESSION_PAGE_CAP,
@@ -49,6 +50,7 @@ export interface SourceSyncPayload {
   readonly reason: 'poll' | 'webhook' | 'admin';
   readonly cursor?: string;
   readonly generation?: string;
+  readonly syncGeneration?: string;
 }
 
 export interface SourceSyncDeps {
@@ -147,45 +149,29 @@ function validate(input: unknown): SourceSyncPayload {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new JobError('invalid_payload');
   }
-  const { sourceId, reason, cursor, generation } = value;
+  const { sourceId, reason, cursor, generation, syncGeneration } = value;
   if (
     Object.keys(value).some(
-      (key) => !['sourceId', 'reason', 'cursor', 'generation'].includes(key),
+      (key) => !['sourceId', 'reason', 'cursor', 'generation', 'syncGeneration'].includes(key),
     ) ||
     typeof sourceId !== 'string' ||
     sourceId.length === 0 ||
     sourceId.length > MAX_KEY_BYTES ||
     !REASONS.has(reason) ||
     (cursor !== undefined && (typeof cursor !== 'string' || cursor.length > MAX_PAYLOAD_CURSOR)) ||
-    (generation !== undefined && (typeof generation !== 'string' || !HEX_64.test(generation)))
+    (generation !== undefined && (typeof generation !== 'string' || !HEX_64.test(generation))) ||
+    (syncGeneration !== undefined &&
+      (typeof syncGeneration !== 'string' || !HEX_64.test(syncGeneration)))
   ) {
     throw new JobError('invalid_payload');
   }
   return {
     sourceId,
+    ...(syncGeneration === undefined ? {} : { syncGeneration: syncGeneration as string }),
     reason: reason as SourceSyncPayload['reason'],
     ...(cursor === undefined ? {} : { cursor: cursor as string }),
     ...(generation === undefined ? {} : { generation: generation as string }),
   };
-}
-
-function classify(error: unknown): SourceErrorCode {
-  if (!(error instanceof UpstreamError)) return 'internal';
-  switch (error.code) {
-    case 'refused':
-      return 'policy_denied';
-    case 'timeout':
-      return 'timeout';
-    case 'too_large':
-      return 'too_large';
-    case 'network':
-      return 'network';
-    case 'http_status':
-      if (error.status === 401 || error.status === 403) return 'unauthorized';
-      if (error.status === 429) return 'rate_limited';
-      if (error.status === 404) return 'not_found';
-      return 'http_error';
-  }
 }
 
 function isKey(name: unknown): name is string {
@@ -235,15 +221,26 @@ async function fanOut(
     readonly sourceId: string;
     readonly key: string;
     readonly generation: readonly unknown[];
+    readonly syncGeneration?: string;
   },
 ): Promise<void> {
   try {
     await jobsOf(job).enqueue(
       job.org,
       PACKAGE_SYNC,
-      { sourceId: input.sourceId, key: input.key },
       {
-        idempotencyKey: await digest(['v1', input.sourceId, input.key, ...input.generation]),
+        sourceId: input.sourceId,
+        key: input.key,
+        ...(input.syncGeneration === undefined ? {} : { syncGeneration: input.syncGeneration }),
+      },
+      {
+        idempotencyKey: await digest([
+          'v1',
+          input.sourceId,
+          input.key,
+          ...input.generation,
+          ...(input.syncGeneration === undefined ? [] : [input.syncGeneration]),
+        ]),
         resourceKey: `package:${await digest(['v1', input.sourceId, input.key])}`,
       },
     );
@@ -286,7 +283,12 @@ async function refreshHeld(
         })
       : { keys: [], next: payload.cursor ?? '' };
   for (const key of held.keys) {
-    await fanOut(job, { sourceId: record.id, key, generation: ['proxy', generation] });
+    await fanOut(job, {
+      sourceId: record.id,
+      key,
+      generation: ['proxy', generation],
+      ...(payload.syncGeneration === undefined ? {} : { syncGeneration: payload.syncGeneration }),
+    });
   }
   if (held.next === null) {
     await recordSuccess(deps, job, record.id);
@@ -300,6 +302,7 @@ async function refreshHeld(
       reason: payload.reason,
       ...(held.next === '' ? {} : { cursor: held.next }),
       generation,
+      ...(payload.syncGeneration === undefined ? {} : { syncGeneration: payload.syncGeneration }),
     },
     {
       idempotencyKey: await digest(['v1', 'proxy-next', record.id, generation, held.next]),
@@ -356,7 +359,7 @@ async function syncListing(
       await jobsOf(job).enqueue(
         ctx,
         SOURCE_SYNC,
-        { sourceId: record.id, reason: payload.reason },
+        { sourceId: record.id, reason: payload.reason, syncGeneration: payload.syncGeneration },
         {
           idempotencyKey: await digest([session.id, session.generation, session.pagesSoFar]),
           resourceKey: `source:${record.id}`,
@@ -382,7 +385,8 @@ async function syncListing(
       },
     );
     const page = holder.page;
-    if (outcome.stop === 'error') throw new SyncFailure(classify(outcome.error), true, true, false);
+    if (outcome.stop === 'error')
+      throw new SyncFailure(sourceErrorCode(outcome.error), true, true, false);
     if (outcome.abandoned) throw new SyncFailure('invalid_response', true, true, true);
     if (page === undefined || (outcome.next !== null && outcome.next === cursor.c)) {
       throw invalidListing();
@@ -438,6 +442,7 @@ async function syncListing(
         sourceId: record.id,
         key,
         generation: [session.id, session.generation],
+        ...(payload.syncGeneration === undefined ? {} : { syncGeneration: payload.syncGeneration }),
       });
     }
     budget -= slice.length;
@@ -492,6 +497,7 @@ async function syncListing(
         sourceId: record.id,
         reason: payload.reason,
         generation: await digest([session.id, session.generation, 'held']),
+        ...(payload.syncGeneration === undefined ? {} : { syncGeneration: payload.syncGeneration }),
       },
       job,
       record,
@@ -578,6 +584,12 @@ export function createSourceSyncJob(deps: SourceSyncDeps): JobDefinition<SourceS
       const ctx = job.org;
       const record = await deps.sources.get(ctx, payload.sourceId);
       if (record === null || record.status === 'paused' || record.type === 'hosted') return;
+      if (
+        payload.syncGeneration !== undefined &&
+        record.sync !== undefined &&
+        payload.syncGeneration !== record.sync.generation
+      )
+        return;
 
       const run: Run = { session: null };
       let acquired: IngestSessionHandle | null = null;
@@ -595,6 +607,17 @@ export function createSourceSyncJob(deps: SourceSyncDeps): JobDefinition<SourceS
         run.session = handle;
       }
       try {
+        const syncGeneration =
+          payload.syncGeneration ??
+          (await digest(['sync', job.jobId, job.attempt, acquired?.id, acquired?.generation]));
+        const started = await deps.sources.pollState(ctx, deps.jobGuard(job), {
+          id: record.id,
+          outcome: 'started',
+          generation: syncGeneration,
+          reset: payload.syncGeneration === undefined,
+        });
+        if (started !== 'written') throw lostSession();
+        payload = { ...payload, syncGeneration };
         if (acquired === null) await refreshHeld(deps, payload, job, record);
         else await syncListing(deps, payload, job, record, run, acquired);
       } catch (error) {
@@ -605,7 +628,7 @@ export function createSourceSyncJob(deps: SourceSyncDeps): JobDefinition<SourceS
         const failure =
           error instanceof SyncFailure
             ? error
-            : new SyncFailure(classify(error), true, true, false);
+            : new SyncFailure(sourceErrorCode(error), true, true, false);
         if (run.session !== null) {
           await quietly(
             failure.abandon

@@ -51,3 +51,86 @@ it('cancels on disposal and does not reschedule an in-flight request', async () 
   expect(refresh).toHaveBeenCalledOnce();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it('backs off pending polls from two seconds to thirty seconds', async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn<() => Promise<boolean | 'pending'>>().mockResolvedValue('pending');
+  pollSync(refresh);
+  for (const [calls, delay] of [2_000, 4_000, 8_000, 16_000, 30_000, 30_000].entries()) {
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(refresh).toHaveBeenCalledTimes(calls);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(calls + 1);
+  }
+});
+
+it('caps pending polling at ten minutes even when requests take time', async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn(
+    () => new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 5_000)),
+  );
+  pollSync(refresh);
+  await vi.advanceTimersByTimeAsync(600_000);
+  const calls = refresh.mock.calls.length;
+  expect(calls).toBeGreaterThan(SYNC_POLL_ATTEMPTS);
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(refresh).toHaveBeenCalledTimes(calls);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('stops pending polling when hidden', async () => {
+  vi.useFakeTimers();
+  const visibility = Object.assign(new EventTarget(), { hidden: false });
+  const refresh = vi.fn<() => Promise<boolean | 'pending'>>().mockResolvedValue('pending');
+  pollSync(refresh, visibility);
+  await vi.advanceTimersByTimeAsync(2_000);
+  visibility.hidden = true;
+  visibility.dispatchEvent(new Event('visibilitychange'));
+  await vi.advanceTimersByTimeAsync(600_000);
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('waits for listing and children even when the listing timestamp has changed', async () => {
+  const { syncPollResult } = await import('./sync-poll.js');
+  const before = { status: 'active', lastPolledAt: null, lastSuccessAt: null, lastError: null };
+  const sync = { generation: 'new', listing: true, queued: 0, running: 0 };
+  const after = { ...before, lastSuccessAt: 'now', sync };
+  expect(syncPollResult(before, after)).toBe('pending');
+  expect(syncPollResult(before, { ...after, sync: { ...sync, listing: false, queued: 1 } })).toBe(
+    'pending',
+  );
+  expect(syncPollResult(before, { ...after, sync: { ...sync, listing: false, running: 1 } })).toBe(
+    'pending',
+  );
+  expect(syncPollResult(before, { ...after, sync: { ...sync, listing: false } })).toBe(true);
+});
+
+it('does not refresh past the wall-clock cap after a suspended timer resumes', async () => {
+  vi.useFakeTimers();
+  const refresh = vi.fn<() => Promise<boolean | 'pending'>>().mockResolvedValue('pending');
+  pollSync(refresh);
+  vi.setSystemTime(Date.now() + 600_001);
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(refresh).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('returns to normal polling and a fresh attempt cap after pending work', async () => {
+  vi.useFakeTimers();
+  const refresh = vi
+    .fn<() => Promise<boolean | 'pending'>>()
+    .mockResolvedValueOnce(false)
+    .mockResolvedValueOnce('pending')
+    .mockResolvedValue(false);
+  pollSync(refresh);
+  await vi.advanceTimersByTimeAsync(2_000 + 2_000 + 4_000);
+  expect(refresh).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(SYNC_POLL_INTERVAL_MS - 1);
+  expect(refresh).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  await vi.advanceTimersByTimeAsync(SYNC_POLL_INTERVAL_MS * 30);
+  expect(refresh).toHaveBeenCalledTimes(2 + SYNC_POLL_ATTEMPTS);
+  expect(vi.getTimerCount()).toBe(0);
+});

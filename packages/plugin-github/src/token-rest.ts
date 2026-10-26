@@ -15,9 +15,8 @@ const API = 'https://api.github.com';
 const SHA = /^[a-f0-9]{40}$/;
 
 export class GithubRestError extends Error {
-  readonly code = 'invalid_response';
-  constructor() {
-    super('GitHub provider invalid_response');
+  constructor(readonly code: 'invalid_response' | 'tag_limit_exceeded' = 'invalid_response') {
+    super(`GitHub provider ${code}`);
     this.name = 'GithubRestError';
   }
 }
@@ -130,7 +129,7 @@ export function tokenRest(
       }
       if (entries.length < 100) return result;
     }
-    throw new GithubRestError();
+    throw new GithubRestError(kind === 'tags' ? 'tag_limit_exceeded' : 'invalid_response');
   }
   async function manifest() {
     return json('contents/composer.json', true);

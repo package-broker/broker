@@ -33,6 +33,7 @@ it('lists only working commands in --help', async () => {
       'admin rebind-provider',
       'admin show-provider-binding',
       'import cutover-check',
+      'import private-packagist fetch',
       'import satis plan',
       'import submit',
       'import status <run>',

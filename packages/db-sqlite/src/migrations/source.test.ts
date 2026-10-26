@@ -30,7 +30,7 @@ test('the initial migration splits into tables, indexes and one insert', () => {
   const count = (pattern: RegExp) => statements.filter((s) => pattern.test(s)).length;
   const indexes = (initText.match(/^\s*CREATE\s+(UNIQUE\s+)?INDEX\b/gim) ?? []).length;
 
-  expect(count(/^CREATE\s+TABLE\b/i)).toBe(55);
+  expect(count(/^CREATE\s+TABLE\b/i)).toBe(56);
   expect(count(/^CREATE\s+(UNIQUE\s+)?INDEX\b/i)).toBe(indexes);
   expect(count(/^INSERT\b/i)).toBe(1);
 });

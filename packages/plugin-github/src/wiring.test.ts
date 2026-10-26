@@ -490,7 +490,11 @@ describe('GitHub plugin wiring', () => {
     expect(enqueue).toHaveBeenCalledWith(
       ctx.org,
       'core:package-sync:v1',
-      { sourceId: source.id, key: 'vendor/package' },
+      {
+        sourceId: source.id,
+        key: 'vendor/package',
+        syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
       expect.anything(),
     );
     expect(finalize).toHaveBeenCalledOnce();
@@ -710,7 +714,11 @@ describe('GitHub plugin wiring', () => {
         expect(enqueue).toHaveBeenCalledWith(
           h.ctx.org,
           'core:package-sync:v1',
-          { sourceId: source.id, key: 'vendor/package' },
+          {
+            sourceId: source.id,
+            key: 'vendor/package',
+            syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
           expect.anything(),
         );
         expect(finalize).toHaveBeenCalledOnce();

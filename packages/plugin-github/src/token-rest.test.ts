@@ -340,3 +340,20 @@ describe('token REST reads', () => {
     ).rejects.toMatchObject({ code: 'http_status', status: 403 });
   });
 });
+
+it('reports the full final tag page with tag_limit_exceeded and no upstream data', async () => {
+  const fetch = vi.fn<PolicyFetch>(async () => ({
+    status: 200,
+    headers: new Headers(),
+    body: Response.json(
+      Array.from({ length: 100 }, () => ({ name: 'private-tag', commit: { sha } })),
+    ).body,
+  }));
+  await expect(
+    tokenRest(fetch, credential, 'owner/repo', resetAt).refs('tags'),
+  ).rejects.toMatchObject({
+    code: 'tag_limit_exceeded',
+    message: 'GitHub provider tag_limit_exceeded',
+  });
+  expect(fetch).toHaveBeenCalledTimes(500);
+});

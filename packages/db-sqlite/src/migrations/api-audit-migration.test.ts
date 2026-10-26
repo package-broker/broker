@@ -105,7 +105,7 @@ describe('baseline schema', () => {
     );
     expect(source.phase).toBe('expand');
     expect(
-      await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger'
+      await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name NOT LIKE 'source_sync_%'
       AND name NOT IN ('package_ecosystem_matches_source_insert',
         'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages')`),
     ).toEqual([]);

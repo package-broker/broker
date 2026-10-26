@@ -24,6 +24,8 @@ import {
   type JobState,
   type JobStatus,
 } from '@package-broker/core/platform/jobs';
+import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
+import type { SourceErrorCode } from '@package-broker/core/db/source';
 import { db } from '../kysely.js';
 
 const FORMAT = '%Y-%m-%dT%H:%M:%fZ';
@@ -246,13 +248,13 @@ export function createJobRepository(
     return statement(sql`UPDATE job SET
       state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'queued' END,
       run_at = COALESCE(${backoffAt(attempts, max)}, run_at),
-      last_error = 'lease_lost',
+      last_error = 'lease_lost', sync_error = NULL,
       finished_at = CASE WHEN attempts >= max_attempts THEN ${NOW} ELSE NULL END,
       lease_owner = NULL, lease_until = NULL, updated_at = ${NOW}
       WHERE job.org_id = ${ctx.orgId} AND job.state = 'running' AND job.lease_until <= ${NOW}
       AND job.id IN (${ids})
       AND NOT EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence
-        AND a.outcome = 'running')`);
+        AND a.outcome = 'running') RETURNING id`);
   }
 
   const requeueExpired = (ctx: OrgContext): Statement =>
@@ -282,6 +284,7 @@ export function createJobRepository(
     outcome: JobAttemptOutcome,
     where: RawBuilder<unknown>,
     lastError: JobErrorCode | null,
+    syncError: SourceErrorCode | null = null,
   ): Statement {
     const next = marker(outcome, 'next_run_at');
     const finished = marker(outcome, 'finished_at');
@@ -290,6 +293,8 @@ export function createJobRepository(
       state = CASE WHEN ${dead} THEN 'dead' ELSE 'queued' END,
       attempts = ${outcome === 'released' ? sql`max(attempts - 1, 0)` : sql`attempts`},
       run_at = COALESCE(${next}, run_at),
+      sync_error = CASE WHEN job.type = 'core:package-sync:v1' AND job.lease_until > ${finished}
+        THEN ${syncError} ELSE NULL END,
       last_error = ${lastError === null ? sql`last_error` : sql`${lastError}`},
       finished_at = CASE WHEN ${dead} THEN ${finished} ELSE NULL END,
       lease_owner = NULL,
@@ -297,7 +302,7 @@ export function createJobRepository(
       updated_at = ${finished}
       WHERE ${where}
       AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence
-        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL)`);
+        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL) RETURNING id`);
   }
 
   return {
@@ -333,6 +338,26 @@ export function createJobRepository(
           statement(sql`SELECT id, type, payload_json, project_id, resource_key FROM job
           WHERE org_id = ${ctx.orgId} AND idempotency_key = ${key}`),
           statement(sql`SELECT id FROM project WHERE org_id = ${ctx.orgId} AND id = ${projectId}`),
+          statement(sql`INSERT INTO source_sync_package
+            (org_id, source_id, package_key, generation, job_id, state)
+            SELECT j.org_id, s.id, json_extract(j.payload_json, '$.key'), s.sync_generation, j.id, j.state
+            FROM job j JOIN source s ON s.org_id = j.org_id
+              AND s.id = json_extract(j.payload_json, '$.sourceId')
+            WHERE j.org_id = ${ctx.orgId} AND j.id = ${id}
+              AND j.type = 'core:package-sync:v1' AND j.state = 'queued'
+              AND s.sync_generation = json_extract(j.payload_json, '$.syncGeneration')
+              AND json_type(j.payload_json, '$.key') = 'text'
+            ON CONFLICT (org_id, source_id, package_key) DO UPDATE SET
+              job_id = excluded.job_id, state = excluded.state, error = NULL
+            WHERE source_sync_package.org_id = ${ctx.orgId}
+              AND source_sync_package.generation = excluded.generation
+              AND source_sync_package.job_id <> excluded.job_id
+              AND EXISTS (SELECT 1 FROM job parent
+                WHERE parent.org_id = ${ctx.orgId} AND parent.id = source_sync_package.job_id
+                  AND parent.id = json_extract(${payloadJson}, '$.parentJob.id')
+                  AND parent.lease_owner = json_extract(${payloadJson}, '$.parentJob.owner')
+                  AND parent.fence = json_extract(${payloadJson}, '$.parentJob.fence')
+                  AND parent.state = 'running' AND parent.lease_until > ${NOW})`),
         ])
         .catch(async (error: unknown) => {
           if (
@@ -423,13 +448,13 @@ export function createJobRepository(
         expireAttempts(ctx, holders),
         requeueExpired(ctx),
         expireOrphans(ctx, holders),
-        statement(sql`UPDATE job SET state = 'dead', last_error = 'invalid_payload',
+        statement(sql`UPDATE job SET state = 'dead', sync_error = NULL, last_error = 'invalid_payload',
           finished_at = ${NOW}, updated_at = ${NOW}
           WHERE org_id = ${ctx.orgId} AND state = 'queued' AND ${unused}
           AND run_at <= ${NOW}
           AND id IN (${corrupt})`),
         statement(sql`UPDATE job SET
-          state = 'running',
+          state = 'running', sync_error = NULL,
           attempts = attempts + 1,
           fence = fence + 1,
           lease_owner = ${who},
@@ -495,7 +520,7 @@ export function createJobRepository(
           statement(sql`UPDATE job_attempt SET outcome = 'succeeded', finished_at = ${NOW}
             WHERE ${attemptWhere}`),
           statement(sql`UPDATE job SET state = 'succeeded', lease_owner = NULL, lease_until = NULL,
-            last_error = NULL, finished_at = ${marker('succeeded', 'finished_at')},
+            last_error = NULL, sync_error = NULL, finished_at = ${marker('succeeded', 'finished_at')},
             updated_at = ${marker('succeeded', 'finished_at')}
             WHERE ${jobWhere} AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id
               AND a.fence = job.fence AND a.worker = job.lease_owner AND a.outcome = 'succeeded')`),
@@ -517,7 +542,14 @@ export function createJobRepository(
           next_run_at = CASE WHEN ${outcome.permanent === true ? 1 : 0} = 1 THEN NULL
             ELSE ${nextRunOf()} END
           WHERE ${attemptWhere}`),
-        requeueJob('failed', jobWhere, code),
+        requeueJob(
+          'failed',
+          jobWhere,
+          code,
+          outcome.syncError !== undefined && SOURCE_ERROR_CODES.includes(outcome.syncError)
+            ? outcome.syncError
+            : null,
+        ),
       ]);
     },
 
@@ -537,7 +569,7 @@ export function createJobRepository(
         requeueExpired(ctx),
         expireOrphans(ctx, expired(sql`NOT EXISTS`)),
       ]);
-      return (requeued?.changes ?? 0) + (orphans?.changes ?? 0);
+      return (requeued?.rows.length ?? 0) + (orphans?.rows.length ?? 0);
     },
 
     async listDue(ctx, input) {
@@ -574,7 +606,7 @@ export function createJobRepository(
       if (input.types.length === 0) return 0;
       const cutoff = sql`strftime(${sql.raw(`'${FORMAT}'`)}, 'now', printf('-%d seconds', ${grace}))`;
       const [result] = await executor.batch([
-        statement(sql`UPDATE job SET state = 'dead', last_error = 'unknown_job_type',
+        statement(sql`UPDATE job SET state = 'dead', sync_error = NULL, last_error = 'unknown_job_type',
           finished_at = ${NOW}, updated_at = ${NOW}
           WHERE org_id = ${ctx.orgId} AND state = 'queued' AND id IN (
             SELECT u.id FROM job u
@@ -584,9 +616,9 @@ export function createJobRepository(
               AND NOT EXISTS (SELECT 1 FROM job_attempt a JOIN job t ON t.id = a.job_id
                 WHERE a.org_id = ${ctx.orgId} AND t.type = u.type
                 AND (a.started_at > ${cutoff} OR a.finished_at > ${cutoff}))
-            ORDER BY u.run_at, u.id LIMIT ${page})`),
+            ORDER BY u.run_at, u.id LIMIT ${page}) RETURNING id`),
       ]);
-      return result?.changes ?? 0;
+      return result?.rows.length ?? 0;
     },
   };
 }

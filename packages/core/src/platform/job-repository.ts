@@ -1,3 +1,4 @@
+import type { SourceErrorCode } from '../db/source.js';
 import type { OrgContext } from '../db/port.js';
 import { JobError, type JobAttemptOutcome, type JobErrorCode, type JobStatus } from './jobs.js';
 
@@ -53,7 +54,12 @@ export interface JobClaim extends JobGuard {
 
 export type JobSettle =
   | { readonly outcome: 'succeeded' }
-  | { readonly outcome: 'failed'; readonly errorCode: JobErrorCode; readonly permanent: boolean }
+  | {
+      readonly outcome: 'failed';
+      readonly errorCode: JobErrorCode;
+      readonly permanent: boolean;
+      readonly syncError?: SourceErrorCode;
+    }
   | { readonly outcome: 'released'; readonly delaySeconds: number };
 
 export interface JobRepository {

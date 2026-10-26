@@ -1,0 +1,144 @@
+{
+  "/api/suborganizations/": [
+    {
+      "id": 1,
+      "name": "Acme",
+      "urlName": "acme",
+      "links": { "repository": "https://repo.example.test/acme/" }
+    },
+    { "id": 2, "name": "Example", "urlName": "example" }
+  ],
+  "/api/packages/": [
+    {
+      "id": 10,
+      "name": "acme/private",
+      "origin": "private",
+      "config": {
+        "type": "vcs",
+        "url": "https://git.example.test/acme/private",
+        "credentialsId": "",
+        "artifactIds": []
+      }
+    },
+    {
+      "id": 11,
+      "name": "example/artifact",
+      "origin": "private",
+      "config": { "type": "artifact", "artifactIds": [101] }
+    },
+    { "id": 12, "name": "example/custom", "origin": "private", "config": { "customJson": "{}" } },
+    {
+      "id": 13,
+      "name": "example/mirrored",
+      "origin": "private-mirror",
+      "config": { "mirroredRepositoryId": 20 }
+    }
+  ],
+  "/api/mirrored-repositories/": [
+    {
+      "id": 20,
+      "name": "Acme",
+      "url": "https://composer.example.test/",
+      "mirroringBehavior": "manual",
+      "credentials": 40
+    },
+    {
+      "id": 21,
+      "name": "Example",
+      "url": "https://mirror.example.test/",
+      "mirroringBehavior": "disabled",
+      "credentials": ""
+    }
+  ],
+  "/api/teams/": [
+    {
+      "id": 30,
+      "name": "Acme",
+      "permission": "admin",
+      "members": [{ "id": 300, "username": "acme-user", "remoteIds": { "example": "acme" } }]
+    }
+  ],
+  "/api/tokens/": [
+    {
+      "id": 50,
+      "description": "Acme",
+      "access": "read",
+      "token": "",
+      "url": "https://repo.example.test/acme/",
+      "expiresAt": null,
+      "teamId": 30
+    }
+  ],
+  "/api/credentials/": [
+    { "id": 40, "type": "http-basic", "description": "Acme", "domain": "composer.example.test" }
+  ],
+  "/api/synchronizations/": [
+    {
+      "name": "Acme",
+      "isPrimary": true,
+      "integration": { "target": "github", "url": "https://git.example.test/acme" }
+    }
+  ],
+  "/api/customers/": [{ "id": 60, "name": "Acme" }],
+  "/api/vendor-bundles/": [{ "id": 70, "name": "Example" }],
+  "/api/suborganizations/acme/packages/": [
+    {
+      "id": 10,
+      "name": "acme/private",
+      "origin": "private",
+      "config": { "type": "vcs", "url": "https://git.example.test/acme/private" }
+    },
+    {
+      "id": 14,
+      "name": "acme/suborganization-only",
+      "origin": "private",
+      "config": { "url": "https://git.example.test/acme/suborganization-only" }
+    },
+    {
+      "id": 15,
+      "name": "example/mirrored",
+      "origin": "private-mirror",
+      "config": { "mirroredRepositoryId": 21 }
+    }
+  ],
+  "/api/suborganizations/acme/mirrored-repositories/": [
+    {
+      "mirroringBehavior": "add_on_use",
+      "mirroredRepository": {
+        "id": 20,
+        "name": "Acme",
+        "url": "https://composer.example.test/",
+        "credentials": 40
+      }
+    }
+  ],
+  "/api/suborganizations/acme/teams/": [
+    {
+      "id": 30,
+      "name": "Acme",
+      "permission": "owner",
+      "members": [{ "id": 300, "username": "acme-user" }]
+    }
+  ],
+  "/api/suborganizations/acme/tokens/": [
+    {
+      "id": 51,
+      "description": "Acme",
+      "access": "read",
+      "token": "",
+      "url": "https://repo.example.test/acme/acme/"
+    }
+  ],
+  "/api/suborganizations/example/packages/": [],
+  "/api/suborganizations/example/mirrored-repositories/": [],
+  "/api/suborganizations/example/teams/": [],
+  "/api/suborganizations/example/tokens/": [],
+  "/api/packages/11/artifacts/": [
+    {
+      "id": 101,
+      "version": "1.0.0",
+      "originalFileName": "acme.zip",
+      "composerJson": { "name": "example/artifact", "version": "1.0.0" }
+    }
+  ]
+}

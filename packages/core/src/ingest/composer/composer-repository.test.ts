@@ -218,6 +218,7 @@ describe('Composer repository provider', () => {
         {
           sourceId: t.source.id,
           key: NAME,
+          syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
         },
         expect.anything(),
       );

@@ -32,10 +32,17 @@ The runtime derives a server span from each emitted request completion log, name
 health checks log at debug, so the default info level also suppresses their spans.
 Set the build-config key `observability.level` to change the log level.
 Inbound `traceparent` is trusted only when build configuration sets
-`observability.trustInboundTraceparent: true`. The broker currently exports one
-server span per request completion that passes the log-level filter and no
-upstream child span. No configuration enables upstream `traceparent` propagation
-in this release. Upstream activity appears as `pb.upstream.requests` and
+`observability.trustInboundTraceparent: true`. The broker exports one server span
+per request completion that passes the log-level filter. Each upstream request
+inside it, redirects included, adds one `upstream.fetch` client span with the
+server span as parent. Its attributes are `upstream.origin` (scheme, host and
+port of the first hop the outbound policy accepted), `method`, `status` (final
+response only), `redirects`, `cross_origin`, `duration_ms` and, on failure,
+`outcome`. Refused targets are never recorded. The span ends when response
+headers arrive, so failures while reading the body are not reflected. Upstream
+spans are exported regardless of the log level. Background jobs export no
+upstream spans. No configuration enables upstream `traceparent` propagation in
+this release. Upstream activity also appears as `pb.upstream.requests` and
 `pb.upstream.duration_ms` metrics. Cloudflare's platform tracing is a separate
 source of spans; see [Workers tracing](../workers-install.md#tracing).
 

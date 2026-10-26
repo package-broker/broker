@@ -3305,9 +3305,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
-        'Port types plus the NPM_AUDIT_REFS_MAX numeric constant from the core vulnerability port; no executor, SQL or D1 call crosses this import.',
+        'Port types, the NPM_AUDIT_REFS_MAX numeric constant and the VulnerabilitySnapshotError class from the core vulnerability port; no executor, SQL or D1 call crosses this import.',
       sites: [
-        "db-sqlite/src/repositories/vulnerability.ts:opaque dependency: import {\n  NPM_AUDIT_REFS_MAX,\n  type AuthorizedNpmAudit,\n  type NpmAuditAuthorizer,\n  type NpmAuditRef,\n  type NpmAuditTuple,\n} from '@package-broker/core/db/vulnerability'; #1",
+        "db-sqlite/src/repositories/vulnerability.ts:opaque dependency: import {\n  NPM_AUDIT_REFS_MAX,\n  VulnerabilitySnapshotError,\n  type AuthorizedNpmAudit,\n  type NpmAuditAuthorizer,\n  type NpmAuditRef,\n  type NpmAuditTuple,\n} from '@package-broker/core/db/vulnerability'; #1",
       ],
     },
     {

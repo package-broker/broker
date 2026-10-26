@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { upstreamSpan } from '../platform/completion-span.js';
+import { encodeTraces } from '../platform/otlp.js';
 import {
   createObservability,
   filterLogLevel,
@@ -652,7 +654,7 @@ describe('createPolicyFetch headers', () => {
 });
 
 describe('createPolicyFetch observability', () => {
-  it('records only the purpose and never the credential or the query', async () => {
+  it('records the purpose and safe origin, never the credential or query', async () => {
     const { obs, seen } = recorder();
     const { run } = make(
       {
@@ -670,7 +672,10 @@ describe('createPolicyFetch observability', () => {
     const dump = JSON.stringify(seen) + failed.message + refused.message + String(refused.stack);
     expect(dump).not.toContain(SECRET);
     expect(dump).not.toContain('x=1');
-    expect(dump).not.toContain('example.com');
+    expect(dump).not.toContain('b.example.com');
+    expect(dump).not.toContain('127.0.0.1');
+    expect(dump).toContain('https://a.example.com');
+    expect(dump).not.toContain('/start');
     expect(seen.length).toBeGreaterThan(0);
     expect(dump).toContain('metadata');
   });
@@ -925,7 +930,7 @@ describe('createPolicyFetch round 2', () => {
       filterLogLevel({ emit: (r) => void records.push(r) }),
       { deploymentId: 'dep-1', runtime: 'node', requestId: null },
       {
-        events: new Set(['upstream.refused']),
+        events: new Set(['upstream.refused', 'upstream.fetch']),
         reasonCodes: new Set(['upstream.blocked_address']),
         routeTemplates: new Set(),
       },
@@ -956,7 +961,8 @@ describe('createPolicyFetch round 2', () => {
     await run(request({ url: 'https://a.example.com/s', credential: tokenCredential }));
     expect(f.hops[0]?.headers.get('traceparent')).toBeNull();
     expect(JSON.stringify(seen)).not.toContain(SECRET);
-    expect(JSON.stringify(seen)).not.toContain('example.com');
+    expect(JSON.stringify(seen)).toContain('https://a.example.com');
+    expect(JSON.stringify(seen)).not.toContain('/s?');
   });
 
   it('strips a token from Location even when the initial URL already carried the same value', async () => {
@@ -1024,7 +1030,7 @@ describe('createPolicyFetch round 2', () => {
     const obs = createObservability(
       { emit: (r) => void records.push(r) },
       { deploymentId: 'dep-1', runtime: 'node', requestId: null },
-      { events: new Set(), reasonCodes: new Set(), routeTemplates: new Set() },
+      { events: new Set(['upstream.fetch']), reasonCodes: new Set(), routeTemplates: new Set() },
     );
     const ok = make({ 'https://a.example.com/start?x=1': new Response('abc') }, obs);
     await ok.run(request());
@@ -1070,7 +1076,7 @@ describe.each(['node', 'cloudflare'] as const)('refusal reporting on %s', (runti
       filterLogLevel({ emit: (r) => void records.push(r) }, level),
       { deploymentId: 'dep-1', runtime, requestId: null, projectId: 'project-1' },
       {
-        events: new Set(['upstream.refused']),
+        events: new Set(['upstream.refused', 'upstream.fetch']),
         reasonCodes: new Set([
           'upstream.destination',
           'upstream.blocked_address',
@@ -1106,7 +1112,19 @@ describe.each(['node', 'cloudflare'] as const)('refusal reporting on %s', (runti
         }),
       ),
     ).rejects.toMatchObject({ code: 'refused' });
-    const logs = records.filter((r) => r.kind === 'log');
+    const logs = records.filter((r) => r.kind === 'log' && r.record.event === 'upstream.refused');
+    const fetchLogs = records.filter(
+      (r) => r.kind === 'log' && r.record.event === 'upstream.fetch',
+    );
+    expect(fetchLogs).toHaveLength(level === 'debug' ? 1 : 0);
+    if (level === 'debug') {
+      expect(fetchLogs[0]).toMatchObject({
+        kind: 'log',
+        record: { level: 'debug', event: 'upstream.fetch' },
+      });
+      if (kind !== 'redirect' && fetchLogs[0]?.kind === 'log')
+        expect(fetchLogs[0].record).not.toHaveProperty('upstream_origin');
+    }
     expect(logs).toEqual(
       level === 'debug'
         ? [
@@ -1133,6 +1151,338 @@ describe.each(['node', 'cloudflare'] as const)('refusal reporting on %s', (runti
     ).toEqual([expect.objectContaining({ value: 1 })]);
     expect(hops).toHaveLength(kind === 'destination' ? 0 : 1);
     expect(hops.some((url) => url.includes('sentinel'))).toBe(false);
-    expect(JSON.stringify(records)).not.toMatch(/secret|127\.0\.0\.1|example\.com/);
+    expect(JSON.stringify(records)).not.toMatch(/secret|sentinel|127\.0\.0\.1/);
+    if (kind !== 'redirect') expect(JSON.stringify(records)).not.toContain('example.com');
+  });
+});
+
+describe('upstream.fetch spans', () => {
+  const parent = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) };
+
+  async function captureSpan(
+    url: string,
+    replies: Record<string, Reply>,
+    explicit = false,
+    context = true,
+    overrides: Partial<UpstreamRequest> = {},
+  ) {
+    const records: ObsRecord[] = [];
+    const obs = createObservability(
+      { emit: (r) => records.push(r) },
+      {
+        deploymentId: 'dep',
+        runtime: 'node',
+        requestId: null,
+        method: 'POST',
+        ...(context && !explicit ? parent : {}),
+      },
+      {
+        events: new Set(['upstream.fetch', 'upstream.refused']),
+        reasonCodes: new Set(['upstream.userinfo', 'upstream.blocked_address', 'upstream.request']),
+        routeTemplates: new Set(),
+      },
+    );
+    const f = fake(replies);
+    const fetch = createPolicyFetch({
+      fetchImpl: f.fetchImpl,
+      policy,
+      userAgent: 'test',
+      observability: obs,
+      ...(explicit ? { span: parent } : {}),
+    });
+    await fetch(request({ url, ...overrides })).catch(() => undefined);
+    const spans = records.flatMap((r) =>
+      r.kind === 'log' ? [upstreamSpan(r.record)].filter((s) => s !== null) : [],
+    );
+    for (const span of spans) {
+      expect(span.traceId).toBe(parent.traceId);
+      expect(span.parentSpanId).toBe(parent.spanId);
+      expect(span.spanId).not.toBe(parent.spanId);
+      for (const value of Object.values(span.attributes ?? {})) {
+        expect(String(value)).not.toMatch(/[?@]|private-segment|secret/);
+      }
+    }
+    return { spans, hops: f.hops, records };
+  }
+
+  it('does not count a redirect hop that the DNS guard refuses', async () => {
+    const first = 'https://a.example.com/private-segment?secret=1';
+    const next = 'https://b.example.com/private-segment?secret=2';
+    const { spans, records } = await captureSpan(first, {
+      [first]: redirect(next),
+      [next]: async () => {
+        const cause = Object.assign(new Error('private address'), {
+          name: 'DnsGuardError',
+          reason: 'blocked_address',
+        });
+        throw new TypeError('fetch failed', { cause });
+      },
+    });
+    expect(spans).toHaveLength(1);
+    expect(spans[0]?.attributes).toMatchObject({
+      'upstream.origin': 'https://a.example.com',
+      redirects: 0,
+      cross_origin: false,
+    });
+    expect(JSON.stringify(records)).not.toContain('b.example.com');
+  });
+
+  it('emits one child across a redirect chain, with only approved attributes', async () => {
+    const first = 'https://a.example.com/private-segment?secret=1';
+    const next = 'https://b.example.com/private-segment?secret=2';
+    const { spans, hops } = await captureSpan(first, {
+      [first]: redirect(next),
+      [next]: new Response('ok'),
+    });
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      name: 'upstream.fetch',
+      kind: 'client',
+      status: 'unset',
+      attributes: {
+        'upstream.origin': 'https://a.example.com',
+        method: 'GET',
+        status: 200,
+        redirects: 1,
+        cross_origin: true,
+      },
+    });
+    expect(Object.keys(spans[0]!.attributes!).sort()).toEqual([
+      'cross_origin',
+      'duration_ms',
+      'method',
+      'redirects',
+      'status',
+      'upstream.origin',
+    ]);
+    expect(spans[0]!.attributes!.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(hops.every((hop) => !hop.headers.has('traceparent'))).toBe(true);
+    const wire = JSON.stringify(encodeTraces(spans, {}));
+    expect(wire).toContain('parentSpanId');
+    expect(wire).toContain('upstream.origin');
+    expect(wire).toContain('cross_origin');
+    expect(wire).not.toMatch(/[?@]|private-segment|secret/);
+  });
+
+  it('records only the origin of an allowed URL with path, query and fragment', async () => {
+    const url = 'https://a.example.com/private-segment?secret=1#secret';
+    const { spans } = await captureSpan(url, { [url]: new Response(null) });
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.attributes!['upstream.origin']).toBe('https://a.example.com');
+  });
+
+  it('keeps the debug record but omits an invalid method and emits no span', async () => {
+    const { spans, records, hops } = await captureSpan(
+      'https://sentinel.example.com/private-segment',
+      {},
+      false,
+      true,
+      { method: 'INVALID' as never },
+    );
+    expect(hops).toHaveLength(0);
+    expect(spans).toHaveLength(0);
+    const logs = records.flatMap((r) => (r.kind === 'log' ? [r.record] : []));
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: 'debug',
+        event: 'upstream.refused',
+        reason_code: 'upstream.request',
+      }),
+    );
+    const completion = logs.find((r) => r.event === 'upstream.fetch');
+    expect(completion).toMatchObject({ level: 'debug', outcome: 'upstream.request' });
+    expect(completion).not.toHaveProperty('upstream_method');
+    expect(completion).not.toHaveProperty('upstream_origin');
+    expect(JSON.stringify(records)).not.toContain('sentinel');
+  });
+
+  it.each([
+    ['https://user:secret@a.example.com:8443/private-segment?secret=1', 'upstream.userinfo'],
+    ['https://127.0.0.1/private-segment?secret=1', 'upstream.blocked_address'],
+  ])('records a refusal safely for %s', async (url, outcome) => {
+    const { spans, hops } = await captureSpan(url, {});
+    expect(hops).toHaveLength(0);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      status: 'error',
+      attributes: {
+        outcome,
+        redirects: 0,
+        cross_origin: false,
+      },
+    });
+    expect(spans[0]!.attributes).not.toHaveProperty('upstream.origin');
+  });
+
+  it.each([
+    ['blocked_address', 'https://127.0.0.1/private-segment'],
+    ['blocked_host', 'https://localhost/private-segment'],
+    ['self_origin', 'https://broker.example.com/private-segment'],
+    ['invalid_url', 'https://[invalid'],
+    ['scheme', 'http://sentinel.example.com/private-segment'],
+    ['destination', 'https://sentinel.example.com/private-segment'],
+    ['request', 'https://sentinel.example.com/private-segment'],
+    ['limit', 'https://sentinel.example.com/private-segment'],
+    ['body', 'https://sentinel.example.com/private-segment'],
+    ['header', 'https://sentinel.example.com/private-segment'],
+  ])('hides a %s refusal before and after a redirect', async (reason, target) => {
+    const beforeClassification = ['request', 'limit', 'body', 'header'].includes(reason);
+    for (const redirectTarget of beforeClassification ? [false] : [false, true]) {
+      const records: ObsRecord[] = [];
+      const obs = createObservability(
+        { emit: (record) => records.push(record) },
+        { deploymentId: 'dep', runtime: 'node', requestId: null, ...parent },
+        {
+          events: new Set(['upstream.fetch', 'upstream.refused']),
+          reasonCodes: new Set([`upstream.${reason}`]),
+          routeTemplates: new Set(),
+        },
+      );
+      const first = 'https://a.example.com/private-segment';
+      let calls = 0;
+      const fetch = createPolicyFetch({
+        fetchImpl: async () => {
+          calls++;
+          return redirect(target);
+        },
+        policy: { ...policy, selfOrigins: ['https://broker.example.com'] },
+        userAgent: 'test',
+        observability: obs,
+      });
+      await expect(
+        fetch(
+          request({
+            url: redirectTarget ? first : target,
+            ...(reason === 'destination' ? { destinations: ['https://a.example.com'] } : {}),
+            ...(reason === 'request' ? { redirects: 'invalid' as never } : {}),
+            ...(reason === 'limit' ? { maxBytes: 0 } : {}),
+            ...(reason === 'body' ? { body: new Uint8Array(1) } : {}),
+            ...(reason === 'header' ? { headers: { accept: 'invalid\r\nheader' } } : {}),
+          }),
+        ),
+      ).rejects.toMatchObject({ reason });
+      expect(calls).toBe(redirectTarget ? 1 : 0);
+      const spans = records.flatMap((record) =>
+        record.kind === 'log' ? [upstreamSpan(record.record)].filter((span) => span !== null) : [],
+      );
+      expect(spans).toHaveLength(1);
+      expect(spans[0]!.attributes).toMatchObject({
+        outcome: `upstream.${reason}`,
+        redirects: 0,
+        cross_origin: false,
+      });
+      if (redirectTarget)
+        expect(spans[0]!.attributes!['upstream.origin']).toBe('https://a.example.com');
+      else expect(spans[0]!.attributes).not.toHaveProperty('upstream.origin');
+      expect(spans[0]!.attributes).not.toHaveProperty('status');
+      expect(JSON.stringify(records) + JSON.stringify(encodeTraces(spans, {}))).not.toMatch(
+        /sentinel|127\.0\.0\.1|localhost|broker\.example|private-segment/,
+      );
+    }
+  });
+
+  it.each([false, true])(
+    'counts every redirect and retains cross-origin history: %s',
+    async (crossOrigin) => {
+      const first = 'https://a.example.com/private-segment?secret=1';
+      const middle = `https://${crossOrigin ? 'b' : 'a'}.example.com/private-segment?secret=2`;
+      const last = 'https://a.example.com/private-segment?secret=3';
+      const { spans, hops } = await captureSpan(first, {
+        [first]: redirect(middle),
+        [middle]: redirect(last),
+        [last]: new Response(null),
+      });
+      expect(hops).toHaveLength(3);
+      expect(spans).toHaveLength(1);
+      expect(spans[0]!.attributes).toMatchObject({
+        redirects: 2,
+        cross_origin: crossOrigin,
+        status: 200,
+      });
+    },
+  );
+
+  it('records a redirect to a refused destination as one failed span', async () => {
+    const first = 'https://a.example.com/private-segment?secret=1';
+    const { spans, hops } = await captureSpan(first, {
+      [first]: redirect('https://127.0.0.1/private-segment?secret=2'),
+    });
+    expect(hops).toHaveLength(1);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      status: 'error',
+      attributes: {
+        outcome: 'upstream.blocked_address',
+        redirects: 0,
+        cross_origin: false,
+      },
+    });
+    expect(spans[0]!.attributes).not.toHaveProperty('status');
+    expect(spans[0]!.attributes!['upstream.origin']).toBe('https://a.example.com');
+  });
+
+  it('omits an intermediate redirect status when the next hop fails', async () => {
+    const first = 'https://a.example.com/private-segment';
+    const { spans, hops } = await captureSpan(first, {
+      [first]: redirect('https://b.example.com/private-segment'),
+    });
+    expect(hops).toHaveLength(2);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.attributes).toMatchObject({
+      outcome: 'network',
+      redirects: 1,
+      cross_origin: true,
+      'upstream.origin': 'https://a.example.com',
+    });
+    expect(spans[0]!.attributes).not.toHaveProperty('status');
+  });
+
+  it('marks a network failure and 5xx as errors', async () => {
+    const url = 'https://a.example.com/private-segment?secret=1';
+    const network = await captureSpan(url, {});
+    expect(network.spans).toHaveLength(1);
+    expect(network.spans[0]).toMatchObject({ status: 'error', attributes: { outcome: 'network' } });
+    const server = await captureSpan(url, { [url]: new Response(null, { status: 503 }) });
+    expect(server.spans).toHaveLength(1);
+    expect(server.spans[0]).toMatchObject({ status: 'error', attributes: { status: 503 } });
+    expect(server.spans[0]!.attributes).not.toHaveProperty('outcome');
+  });
+
+  it('gives concurrent logical requests distinct child ids on a shared fetcher', async () => {
+    const spans: ReturnType<typeof upstreamSpan>[] = [];
+    const obs = createObservability(
+      {
+        emit(entry) {
+          if (entry.kind === 'log' && entry.record.event === 'upstream.fetch')
+            spans.push(upstreamSpan(entry.record));
+        },
+      },
+      { deploymentId: 'dep', runtime: 'node', requestId: null, ...parent },
+      { events: new Set(['upstream.fetch']), reasonCodes: new Set(), routeTemplates: new Set() },
+    );
+    const fetch = createPolicyFetch({
+      fetchImpl: async () => new Response(null),
+      policy,
+      userAgent: 'test',
+      observability: obs,
+    });
+    await Promise.all([fetch(request()), fetch(request())]);
+    expect(spans).toHaveLength(2);
+    expect(
+      spans.every(
+        (span) => span?.parentSpanId === parent.spanId && span.traceId === parent.traceId,
+      ),
+    ).toBe(true);
+    expect(new Set(spans.map((span) => span?.spanId)).size).toBe(2);
+  });
+
+  it('uses an explicit job context without an HTTP scope and emits nothing without a parent', async () => {
+    const url = 'https://a.example.com/private-segment';
+    expect((await captureSpan(url, { [url]: new Response(null) }, true, false)).spans).toHaveLength(
+      1,
+    );
+    expect(
+      (await captureSpan(url, { [url]: new Response(null) }, false, false)).spans,
+    ).toHaveLength(0);
   });
 });

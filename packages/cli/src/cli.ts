@@ -19,6 +19,7 @@ import { runCloudflareTeardown } from './commands/cloudflare/teardown.js';
 import { runCloudflareJanitor } from './commands/cloudflare/janitor.js';
 import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudflare/api.js';
 import { runImport } from './commands/import.js';
+import { runImportCutover } from './commands/import-cutover.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
 import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
@@ -41,6 +42,7 @@ const USAGE =
   '       pb admin reset-local --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
+  '       pb import cutover-check --project-dir <dir> --old-repository <url> --new-repository <url> --old-auth-env <VAR> --new-auth-env <VAR> [--lock <file>]... [--timeout-seconds <seconds>] [--json]\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb import submit --manifest <file> --receipt <file> --principal <label> --broker <origin> [--resume] [--token-file <path>]\n' +
   '       pb import status <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
@@ -65,6 +67,13 @@ function parseCliArgs(argv: string[]) {
       options: {
         url: { type: 'string' },
         broker: { type: 'string' },
+        'project-dir': { type: 'string' },
+        'old-repository': { type: 'string' },
+        'new-repository': { type: 'string' },
+        'old-auth-env': { type: 'string' },
+        'new-auth-env': { type: 'string' },
+        'timeout-seconds': { type: 'string' },
+        lock: { type: 'string', multiple: true },
         manifest: { type: 'string' },
         receipt: { type: 'string' },
         principal: { type: 'string' },
@@ -265,6 +274,16 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'database-id',
   ],
   'admin show-provider-binding': ['provider', 'sqlite', 'cloudflare', 'database-id'],
+  'import cutover-check': [
+    'project-dir',
+    'old-repository',
+    'new-repository',
+    'old-auth-env',
+    'new-auth-env',
+    'timeout-seconds',
+    'lock',
+    'json',
+  ],
   'import satis plan': [
     'config',
     'out',
@@ -405,6 +424,29 @@ export async function run(argv: readonly string[]): Promise<number> {
           ? { waitSeconds: 300 }
           : {}
         : { waitSeconds: Number(values['wait-seconds']) }),
+    });
+  }
+
+  if (command === 'import' && subcommand === 'cutover-check') {
+    if (
+      !values['project-dir'] ||
+      !values['old-repository'] ||
+      !values['new-repository'] ||
+      !values['old-auth-env'] ||
+      !values['new-auth-env'] ||
+      (values['timeout-seconds'] !== undefined && !/^\d+$/.test(values['timeout-seconds']))
+    )
+      return usageError();
+    return runImportCutover({
+      projectDir: values['project-dir'],
+      oldRepository: values['old-repository'],
+      newRepository: values['new-repository'],
+      oldAuthEnv: values['old-auth-env'],
+      newAuthEnv: values['new-auth-env'],
+      historicLocks: values.lock ?? [],
+      timeoutSeconds:
+        values['timeout-seconds'] === undefined ? 1800 : Number(values['timeout-seconds']),
+      json: values.json ?? false,
     });
   }
 

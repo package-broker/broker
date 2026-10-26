@@ -1473,6 +1473,8 @@ describe('T430n review round 4', () => {
       { deploymentId: 'test' },
     );
     const service = createOnDemandFill({ ...h.deps, cache });
+    const coalescer = vi.mocked(createCoalescer).mock.results.at(-1)!.value;
+    const run = vi.spyOn(coalescer, 'run');
     const other = { ...actor, projectId: 'other' };
     const describing = deferred<{ kind: 'not_found'; definitive: true }>();
     h.describePackage.mockImplementation(() => describing.promise);
@@ -1484,7 +1486,8 @@ describe('T430n review round 4', () => {
       key: 'name',
       outcome: { ...admitted, projectId: other.projectId },
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
     describing.resolve({ kind: 'not_found', definitive: true });
     await Promise.all([leader, joiner]);
     expect(rawSet).not.toHaveBeenCalled();
@@ -1616,6 +1619,8 @@ describe('T430n review round 4 ordering', () => {
       { deploymentId: 'test' },
     );
     const service = createOnDemandFill({ ...h.deps, cache });
+    const coalescer = vi.mocked(createCoalescer).mock.results.at(-1)!.value;
+    const run = vi.spyOn(coalescer, 'run');
     const other = { ...actor, projectId: 'other' };
     const describing = deferred<{ kind: 'not_found'; definitive: true }>();
     h.describePackage.mockImplementation(() => describing.promise);
@@ -1626,7 +1631,8 @@ describe('T430n review round 4 ordering', () => {
       key: 'name',
       outcome: { ...admitted, projectId: other.projectId },
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
     describing.resolve({ kind: 'not_found', definitive: true });
     expect(await Promise.all([leader, joiner])).toEqual([
       { kind: 'not_found' },

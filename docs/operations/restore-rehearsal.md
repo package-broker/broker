@@ -1,6 +1,6 @@
 # Restore rehearsal
 
-Run only against disposable deployment resources. The helpers preserve authentication in an isolated deployment; T858's deployed-account cache epoch rotation and session/PAT invalidation are separate work. Never set `PB_KEYRING_RESEED` during a restore.
+Run only against disposable deployment resources. The helpers preserve authentication in an isolated deployment; deployed-account cache epoch rotation and session/PAT invalidation are separate work. Never set `PB_KEYRING_RESEED` during a restore.
 
 The Node rehearsal directory exports `seedDeployment`, `backupDeployment`, `destroyDeployment`, `restoreDeployment`, `inventory`, `checkInventory`, `startDeployment`, and `verifyDeployment`. The Cloudflare directory exports equivalent operations over Miniflare D1/R2. `exportDatabase` produces a logical snapshot of bound statements, including byte-preserving TEXT and BLOB parameters, schema, migration ledger, indexes and triggers. Inserts are chunked to at most 100 bound parameters per statement, with SQL kept below 100,000 bytes. The JSON backup retains complete byte values; `bindSnapshot` decodes them before restore. Callers must quiesce writes before the database/object snapshot boundary. Node uses SQLite's online backup API, including committed WAL pages; it does not copy a live SQLite main file. Filesystem media sidecars and R2 content type metadata are part of the object backup. Node restore refuses an existing main database or any `-wal`, `-shm`, or `-journal` sidecar before writing the target.
 
@@ -51,11 +51,11 @@ pnpm smoke:cloudflare
 pnpm smoke:node
 ```
 
-For final acceptance, use the immutable RC artifact selected by T447, and record its artifact SHA-256 in both reports. Run both native commands from that same successfully built candidate. Set `PB_REHEARSAL_CANDIDATE` to the identity printed by `identity`; the helpers refuse an identity mismatch before restoring. The identity of compiled modules is not interchangeable with a source revision or a bundle hash. Also record the bundle hashes and non-secret runtime configuration. Development evidence against another candidate does not establish RC equivalence.
+For final acceptance, use the immutable RC artifact selected for release, and record its artifact SHA-256 in both reports. Run both native commands from that same successfully built candidate. Set `PB_REHEARSAL_CANDIDATE` to the identity printed by `identity`; the helpers refuse an identity mismatch before restoring. The identity of compiled modules is not interchangeable with a source revision or a bundle hash. Also record the bundle hashes and non-secret runtime configuration. Development evidence against another candidate does not establish RC equivalence.
 
-## Real Cloudflare manual procedure — not executed by the worker
+## Real Cloudflare manual procedure — not yet executed
 
-All commands below are MANUAL and need real Cloudflare/R2 credentials. The worker inspected installed Wrangler 4.151.0 help for D1 create/list/export/execute, R2 create/get, queues create/consumer removal, secret bulk/list, deploy/delete and tail. AWS CLI 2.38.1 supplies the S3-compatible object operations. No deployed-account command was run. Have the selected candidate's prebuilt Worker bundle, installed Wrangler/AWS CLI, a Workers Paid account, and scoped Cloudflare and R2 credentials available on the operator host. Do not run dependency installation in the worker.
+All commands below are MANUAL and need real Cloudflare/R2 credentials. The procedure was checked against installed Wrangler 4.151.0 help for D1 create/list/export/execute, R2 create/get, queues create/consumer removal, secret bulk/list, deploy/delete and tail. AWS CLI 2.38.1 supplies the S3-compatible object operations. No deployed-account command was run. Have the selected candidate's prebuilt Worker bundle, installed Wrangler/AWS CLI, a Workers Paid account, and scoped Cloudflare and R2 credentials available on the operator host. Use the preinstalled dependencies.
 
 Use a dedicated test account or reserve the unique resource names below. Do not point this procedure at an existing production Worker, database, queue or bucket. Keep shell tracing disabled. Supply `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, AWS credentials (or `AWS_PROFILE`) and `PB_WORKERS_SUBDOMAIN` through the protected operator environment; never paste their values into a report.
 
@@ -75,7 +75,7 @@ export CANDIDATE_WORKER="$PWD/.pb/cloudflare/worker.js"
 export CANDIDATE_ASSETS="$PWD/.pb/cloudflare/assets"
 export PB_REHEARSAL_R2_ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.eu.r2.cloudflarestorage.com"
 node -e 'const fs=require("node:fs"),c=require("node:crypto"); fs.writeFileSync(process.env.LAB+"/worker.sha256",c.createHash("sha256").update(fs.readFileSync(process.env.CANDIDATE_WORKER)).digest("hex")+"\n")'
-# Compare worker.sha256 with T447's pinned artifact before provisioning anything.
+# Compare worker.sha256 with the pinned RC artifact before provisioning anything.
 wrangler whoami
 ```
 
@@ -191,7 +191,7 @@ for MODE in happy wrong-key missing-keys missing-blobs corrupt-blobs; do
 done
 ```
 
-The wrong-key and missing-key cases must return 503 even for authenticated dist requests. To observe the T707 error, run `wrangler tail "$RUN-wrong-key" --config "$LAB/wrong-key.jsonc" --format json --search "Master key version 1 does not match"` in a second terminal, trigger the `verify ... wrong-key` command again, and retain only the fixed KernelConfigError name and master-key mismatch/version diagnostic, not raw invocation records. Stop the tail with Ctrl-C. Happy verification requires real password/TOTP login, original PAT acceptance, excluded-project and foreign-organization denial, unauthenticated refusal, exact archive length and the original SHA-256. Missing/corrupt objects must fail that same byte oracle. An error from inventory transport is not evidence of byte corruption; confirm the assertion shows a length/digest mismatch.
+The wrong-key and missing-key cases must return 503 even for authenticated dist requests. To observe the master-key mismatch error, run `wrangler tail "$RUN-wrong-key" --config "$LAB/wrong-key.jsonc" --format json --search "Master key version 1 does not match"` in a second terminal, trigger the `verify ... wrong-key` command again, and retain only the fixed KernelConfigError name and master-key mismatch/version diagnostic, not raw invocation records. Stop the tail with Ctrl-C. Happy verification requires real password/TOTP login, original PAT acceptance, excluded-project and foreign-organization denial, unauthenticated refusal, exact archive length and the original SHA-256. Missing/corrupt objects must fail that same byte oracle. An error from inventory transport is not evidence of byte corruption; confirm the assertion shows a length/digest mismatch.
 
 The Miniflare wrappers cover missing/truncated/same-length corruption independently, all three non-empty target refusals with preservation checks, stripped keys and mutation proofs. Run those host gates as well; remote success does not replace them. Do not retry a restore over the same target: discard it and reserve new empty resources.
 

@@ -11,6 +11,8 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { cn, portalContainer } from '../../lib/utils.js';
+import { OverlayHost } from './overlay-host.js';
+import { useMergedRefs } from '../../lib/use-merged-refs.js';
 
 const DialogContext = createContext<{
   open: boolean;
@@ -77,10 +79,12 @@ export function DialogContent({
   className,
   children,
   variant,
+  ref: callerRef,
   ...props
 }: ComponentProps<'dialog'> & { variant?: 'source' }) {
   const context = useContext(DialogContext);
   const ref = useRef<HTMLDialogElement>(null);
+  const mergedRef = useMergedRefs(callerRef, ref);
   const open = context?.open ?? false;
   const stopRestore = useRef<(() => void) | null>(null);
   useEffect(() => {
@@ -90,7 +94,13 @@ export function DialogContent({
     const dialog = ref.current;
     const document = dialog.ownerDocument;
     const active = document.activeElement as HTMLElement | null;
-    const opener = active === document.body ? null : active;
+    const menu = active?.closest('[role="menu"]');
+    const menuTrigger = menu?.getAttribute('aria-labelledby');
+    const opener = menuTrigger
+      ? document.getElementById(menuTrigger)
+      : active === document.body
+        ? null
+        : active;
     dialog.showModal();
     const visible = (element: HTMLElement) =>
       !element.matches(':disabled') && element.getClientRects().length > 0;
@@ -190,7 +200,7 @@ export function DialogContent({
   const content = (
     <dialog
       {...props}
-      ref={ref}
+      ref={mergedRef}
       aria-labelledby={context?.titleId}
       aria-describedby={context?.descriptionId}
       onCancel={(event) => {
@@ -205,34 +215,44 @@ export function DialogContent({
         if (open && !event.currentTarget.open) context?.setOpen(false);
       }}
       className={cn(
-        'fixed inset-0 m-auto w-[calc(100%_-_2rem)] min-w-0 max-w-lg max-h-[90dvh] overflow-y-auto gap-4 rounded-lg border border-neutral-200 bg-white p-6 text-neutral-900 shadow-lg open:grid backdrop:bg-black/50',
+        'fixed inset-0 m-auto w-[calc(100%_-_2rem)] min-w-0 max-w-lg max-h-[90dvh] overflow-visible rounded-lg border-0 bg-transparent p-0 text-neutral-900 shadow-lg backdrop:bg-black/50',
         variant === 'source' &&
-          'h-dvh max-h-none w-full max-w-none rounded-none p-0 overflow-hidden open:flex flex-col gap-0 sm:h-auto sm:max-h-[90dvh] sm:w-[calc(100%_-_2rem)] sm:max-w-lg sm:rounded-lg',
+          'h-dvh max-h-none w-full max-w-none rounded-none sm:h-auto sm:max-h-[90dvh] sm:w-[calc(100%_-_2rem)] sm:max-w-lg sm:rounded-lg',
         className,
       )}
     >
-      {children}
-      <DialogClose
-        className={cn(
-          'absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600',
-          variant === 'source' && 'flex h-11 w-11 items-center justify-center',
-        )}
-        aria-label="Close"
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 24 24"
-          width="16"
-          height="16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          aria-hidden="true"
+      <OverlayHost>
+        <div
+          className={cn(
+            'relative grid min-w-0 max-h-[90dvh] gap-4 overflow-y-auto rounded-lg border border-neutral-200 bg-white p-6',
+            variant === 'source' &&
+              'flex h-dvh max-h-none flex-col gap-0 overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[90dvh] sm:rounded-lg',
+          )}
         >
-          <path d="M18 6 6 18M6 6l12 12" />
-        </svg>
-      </DialogClose>
+          {children}
+          <DialogClose
+            className={cn(
+              'absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600',
+              variant === 'source' && 'flex h-11 w-11 items-center justify-center',
+            )}
+            aria-label="Close"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </DialogClose>
+        </div>
+      </OverlayHost>
     </dialog>
   );
   return container ? createPortal(content, container) : content;

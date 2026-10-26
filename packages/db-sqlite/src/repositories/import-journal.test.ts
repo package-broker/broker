@@ -194,6 +194,77 @@ describe('import journal', () => {
     slug: 'imported',
     name: 'Imported',
   };
+  it.each([
+    {
+      provider: 'git',
+      repository: 'https://git.example.test/acme/widget.git',
+      installationId: null,
+      packageName: null,
+    },
+    {
+      provider: 'ssh',
+      repository: 'ssh://git@git.example.test/acme/widget.git',
+      installationId: null,
+      packageName: null,
+    },
+    {
+      provider: 'github',
+      repository: 'acme/widget',
+      installationId: 7,
+      packageName: 'acme/widget',
+    },
+  ] as const)(
+    'stores runtime config for an imported $provider source without mutating the wire config',
+    async (vcs) => {
+      const config = { ...vcs, refs: { tags: true, branches: ['main'] } };
+      const original = structuredClone(config);
+      const item: ImportApplyItem = {
+        type: 'source',
+        external_ref: 'vcs-source',
+        name: 'imported-vcs',
+        ecosystem: 'composer',
+        source_type: 'vcs',
+        project: null,
+        url: null,
+        config,
+        status: 'paused',
+      };
+      expect(await apply([item])).toEqual({ ok: true });
+      const rows = () =>
+        executor.all<{ config_json: string; status: string }>(
+          stmt(
+            'SELECT config_json, status FROM source WHERE org_id = ? AND name = ?',
+            ctx.orgId,
+            item.name,
+          ),
+        );
+      const stored = await rows();
+      expect(stored).toEqual([{ status: 'paused', config_json: expect.any(String) }]);
+      expect(JSON.parse(stored[0]!.config_json)).toEqual({
+        provider: vcs.provider,
+        repository: vcs.repository,
+        refs: config.refs,
+        ...(vcs.installationId === null ? {} : { installationId: vcs.installationId }),
+        ...(vcs.packageName === null ? {} : { packageName: vcs.packageName }),
+      });
+      expect(config).toEqual(original);
+      const refs = await store.rollbackRefs(ctx, 'run');
+      expect(refs).toHaveLength(1);
+      expect(refs[0]).toMatchObject({
+        entityType: 'source',
+        action: 'create',
+        contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+      expect(await apply([item])).toEqual({ ok: true });
+      expect(await rows()).toEqual(stored);
+      expect(await store.rollbackRefs(ctx, 'run')).toEqual(refs);
+      expect(
+        await executor.all(
+          stmt('SELECT id FROM source WHERE org_id = ? AND name = ?', foreign.orgId, item.name),
+        ),
+      ).toEqual([]);
+    },
+  );
   it.each(['before planning', 'before the batch'])(
     'refuses an override when a purge claims its rollback blob %s',
     async (timing) => {

@@ -67,11 +67,10 @@ export interface ParseSourceConfigOptions {
   readonly hasCredential: boolean;
 }
 
-// SSH sources validate on Node, but their built archives cannot be served as dists yet.
 const SERVED_VCS_PROVIDERS: Readonly<
   Record<ParseSourceConfigOptions['runtime'], readonly VcsProvider[]>
 > = Object.freeze({
-  node: Object.freeze(['github', 'git'] as const),
+  node: Object.freeze(['github', 'git', 'ssh'] as const),
   cloudflare: Object.freeze(['github'] as const),
 });
 

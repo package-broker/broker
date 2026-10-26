@@ -21,6 +21,7 @@ import type {
   ImportApplyStore,
 } from '@package-broker/core/import/apply';
 import { IMPORT_RUN_JOB, IMPORT_VERIFICATION_JOB } from '@package-broker/core/import/run-service';
+import { toRuntimeSourceConfig } from '@package-broker/core/import/source-config';
 import { parseSha256 } from '@package-broker/core/platform/blob';
 import { ulid } from '@package-broker/core/ids';
 import {
@@ -350,7 +351,7 @@ export function createImportJournalStore(options: {
               type: item.source_type,
               project_id: await projectId(item.project),
               url: item.url,
-              config_json: JSON.stringify(item.config),
+              config_json: JSON.stringify(toRuntimeSourceConfig(item.config)),
               status: 'paused',
               credential_id: null,
               protocol_mode: null,

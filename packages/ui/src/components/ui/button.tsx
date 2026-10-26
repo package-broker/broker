@@ -27,14 +27,16 @@ export const buttonVariants = cva(
 
 export interface ButtonProps
   extends ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
+  /** Slotted children own their element semantics, including button type. */
   asChild?: boolean;
   ref?: Ref<HTMLButtonElement>;
 }
 
-export function Button({ className, variant, size, asChild = false, ...props }: ButtonProps) {
+export function Button({ className, variant, size, asChild = false, type, ...props }: ButtonProps) {
   const Comp = asChild ? Slot : 'button';
   return (
     <Comp
+      type={type ?? (asChild ? undefined : 'button')}
       data-variant={variant ?? 'default'}
       className={cn(buttonVariants({ variant, size }), className)}
       {...props}

@@ -16,13 +16,16 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { build as bundle } from 'esbuild';
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
+import type { ScalarStatement } from '@package-broker/core/db/port';
+import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
 import {
   formatMasterKey,
   generateMasterKey,
   parseMasterKey,
 } from '@package-broker/core/secrets/master-key';
 import { stageAssets } from '../../build-assets.js';
+import { migrateCloudflare } from '../cloudflare.js';
 import { commandEnvelope, failCommand, CloudflareError } from './api.js';
 import { cloudflareDeployContract, deploy, validateDeploymentArtifact } from './deploy.js';
 import {
@@ -919,10 +922,17 @@ it('an identical completed rerun retains selected non-master secrets without res
 it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
   'reuses the real deployment version on an identical %s rerun with selected secrets',
   async (checkpoint) => {
+    const database = openNodeSqliteExecutor();
+    onTestFinished(() => database.close());
+    ops.migrate = vi.fn(migrateCloudflare);
     const out = join(project, '.pb/cloudflare');
+    const migrationSql = await readFile(
+      new URL('../../../../db-sqlite/migrations/0001_init.sql', import.meta.url),
+      'utf8',
+    );
     await mkdir(join(out, 'generated'), { recursive: true });
     await mkdir(join(out, 'migrations/core'), { recursive: true });
-    await writeFile(join(out, 'migrations/core/0001_init.sql'), '-- fixture migration\n');
+    await writeFile(join(out, 'migrations/core/0001_init.sql'), migrationSql);
     await writeFile(join(out, 'worker.js'), 'export default { fetch() {} };');
     await writeFile(
       join(out, 'generated/manifest.json'),
@@ -936,7 +946,7 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
           {
             id: 'core:0001_init',
             name: '0001_init.sql',
-            checksum: digest('-- fixture migration\n'),
+            checksum: digest(migrationSql),
             phase: 'expand',
           },
         ],
@@ -1004,6 +1014,23 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
     options.fetch = vi.fn(async (input, init) => {
       const path = new URL(String(input)).pathname.replace(`/client/v4/accounts/${ACCOUNT}`, '');
       const method = init?.method ?? 'GET';
+      if (path === `/d1/database/${DB}/query`) {
+        const body = JSON.parse(String(init?.body)) as {
+          batch?: ScalarStatement[];
+          sql?: string;
+          params?: [];
+        };
+        const results = await database.executor.batch(
+          body.batch ?? [{ sql: body.sql ?? '', params: body.params ?? [] }],
+        );
+        return ok(
+          results.map(({ rows, changes }) => ({
+            success: true,
+            results: rows,
+            meta: { changes },
+          })),
+        );
+      }
       if (path === '/workers/scripts') return ok([{ id: identity.script_name, tags }]);
       if (path === `/d1/database/${DB}`)
         return ok({ uuid: DB, name: 'broker-production-db', jurisdiction: 'eu' });
@@ -1089,6 +1116,13 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
     expect(first.exitCode, JSON.stringify(first.output)).toBe(
       checkpoint === 'upload_pending' ? 6 : 0,
     );
+    expect((await journal()).migrations.ledger).toEqual([
+      { id: 'core:0001_init', checksum: digest(migrationSql), phase: 'expand' },
+    ]);
+    await expect(vi.mocked(ops.migrate).mock.results[0]!.value).resolves.toMatchObject({
+      exitCode: 0,
+      value: { applied: ['core:0001_init'] },
+    });
     expect(uploads).toBe(1);
     if (checkpoint === 'completed_deleted_files') {
       delete options.masterKeyEnv;

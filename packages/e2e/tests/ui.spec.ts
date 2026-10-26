@@ -85,6 +85,76 @@ const test = base.extend<{
 });
 
 test.describe('Node management UI', () => {
+  async function tabTo(page: Page, target: ReturnType<Page['getByRole']>) {
+    const visited = new Set<string>();
+    const bound = await page
+      .locator('button, a, input, select, textarea, summary, [tabindex]')
+      .count();
+    for (let step = 0; step <= bound + 1; step++) {
+      if (await target.evaluate((element) => element === document.activeElement)) break;
+      const active = await page.evaluate(() => {
+        const elements = Array.from(document.querySelectorAll('*'));
+        return String(elements.indexOf(document.activeElement!));
+      });
+      if (visited.has(active)) break;
+      visited.add(active);
+      await page.keyboard.press('Tab');
+    }
+    await expect(target).toBeFocused();
+  }
+
+  test('creates a source and restores its trigger using only the keyboard', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'sources');
+    const trigger = page.getByRole('button', { name: 'Add source', exact: true });
+    await tabTo(page, trigger);
+    await page.keyboard.press('Enter');
+    const dialog = activeDialog(page, 'Add source');
+    await expect(dialog.getByRole('radio', { name: 'Composer', exact: true })).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await expect(dialog.getByRole('radio', { name: 'npm', exact: true })).toBeChecked();
+    await tabTo(page, dialog.getByLabel('Source name (required)', { exact: true }));
+    await page.keyboard.type('Keyboard npm source');
+    const created = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/_pb/sources',
+    );
+    await page.keyboard.press('Enter');
+    expect((await created).status()).toBe(201);
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeEnabled();
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+
+  test('focuses Cancel and restores a confirmation trigger using only the keyboard', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'projects');
+    await createArchiveTarget(page);
+    await go(page, 'projects', 'project=browser-archive');
+    const trigger = page
+      .getByRole('region', { name: 'Project settings' })
+      .getByRole('button', { name: 'Archive', exact: true });
+    await tabTo(page, trigger);
+    await page.keyboard.press('Enter');
+    const dialog = activeDialog(page, 'Archive?');
+    await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+
   test.beforeAll(async () => {
     test.setTimeout(90_000);
     browser = await chromium.launch();

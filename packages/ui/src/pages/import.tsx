@@ -147,7 +147,8 @@ export function createImportController(services: ShellServices) {
         set({ dialog: true, confirmed: false });
     },
     closeApproval() {
-      if (!state.busy) set({ dialog: false, confirmed: false });
+      if (state.busy) return;
+      set({ dialog: false, confirmed: false });
     },
     confirmApproval(confirmed: boolean) {
       if (state.dialog && !state.busy) set({ confirmed });
@@ -219,12 +220,13 @@ export function ImportView({
   }, []);
   return (
     <section aria-labelledby="page-heading" className="space-y-4">
-      <h1 id="page-heading" className="text-2xl font-semibold">
+      <h1 tabIndex={-1} id="page-heading" className="text-2xl font-semibold">
         Import
       </h1>
       <p>Upload credentials with the CLI. Import manifests are managed with the CLI.</p>
       {state.selectedId && run === null ? (
         <Button
+          type="button"
           variant="link"
           className="px-0"
           disabled={state.busy}
@@ -236,6 +238,7 @@ export function ImportView({
       {state.error === null ? null : (
         <ListState kind="error" title={state.error}>
           <Button
+            type="button"
             variant="outline"
             disabled={state.busy || state.loading}
             onClick={() => {
@@ -249,6 +252,7 @@ export function ImportView({
       )}
       {state.notice === null ? null : <p role="status">{state.notice}</p>}
       <Button
+        type="button"
         variant="outline"
         disabled={state.loading || state.busy}
         onClick={() => void controller.load(state.cursor)}
@@ -271,6 +275,7 @@ export function ImportView({
                   render: (item) => (
                     <div className="flex flex-wrap items-center gap-1">
                       <Button
+                        type="button"
                         variant="link"
                         className="h-auto p-0 font-mono"
                         disabled={state.busy}
@@ -328,6 +333,7 @@ export function ImportView({
             />
             <div className="flex gap-2">
               <Button
+                type="button"
                 variant="outline"
                 disabled={!state.cursor || state.busy}
                 onClick={() => (onPage ? onPage() : void controller.load())}
@@ -335,6 +341,7 @@ export function ImportView({
                 First page
               </Button>
               <Button
+                type="button"
                 variant="outline"
                 disabled={!state.next || state.busy}
                 onClick={() => {
@@ -360,6 +367,7 @@ export function ImportView({
       {run === null ? null : (
         <section aria-labelledby="run-heading" className="space-y-3">
           <Button
+            type="button"
             variant="link"
             className="px-0"
             disabled={state.busy}
@@ -425,6 +433,7 @@ export function ImportView({
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
+              type="button"
               variant="outline"
               disabled={state.busy}
               onClick={() => void controller.select(run.id)}
@@ -432,6 +441,7 @@ export function ImportView({
               Reload run
             </Button>
             <Button
+              type="button"
               disabled={state.busy || !importActionAllowed(run, 'approve', now)}
               onClick={() => controller.openApproval()}
             >
@@ -439,6 +449,7 @@ export function ImportView({
             </Button>
             {(['apply', 'cancel', 'rollback'] as const).map((action) => (
               <Button
+                type="button"
                 key={action}
                 variant={action === 'apply' ? 'outline' : 'ghost'}
                 className={action === 'apply' ? undefined : 'text-red-700'}
@@ -463,42 +474,53 @@ export function ImportView({
             if (!open) controller.closeApproval();
           }}
         >
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Approve import run</DialogTitle>
-              <DialogDescription>
-                Confirm the full plan hash for the plan you reviewed with the CLI.
-              </DialogDescription>
-            </DialogHeader>
-            <p className="break-all">
-              <code>{run.planHash}</code>
-            </p>
-            <div className="flex items-center gap-2">
-              <Input
-                id="confirm-plan"
-                type="checkbox"
-                className="h-4 w-4"
-                checked={state.confirmed}
-                disabled={state.busy}
-                onChange={(event) => controller.confirmApproval(event.currentTarget.checked)}
-              />
-              <Label htmlFor="confirm-plan">I confirm this plan hash.</Label>
-            </div>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                disabled={state.busy}
-                onClick={() => controller.closeApproval()}
-              >
-                Back
-              </Button>
-              <Button
-                disabled={!state.confirmed || state.busy}
-                onClick={() => void controller.action('approve')}
-              >
-                Approve run
-              </Button>
-            </DialogFooter>
+          <DialogContent
+            onCancel={(event) => {
+              if (state.busy) event.preventDefault();
+            }}
+          >
+            <form
+              className="grid gap-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (state.busy || !state.confirmed) return;
+                void controller.action('approve');
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>Approve import run</DialogTitle>
+                <DialogDescription>
+                  Confirm the full plan hash for the plan you reviewed with the CLI.
+                </DialogDescription>
+              </DialogHeader>
+              <p className="break-all">
+                <code>{run.planHash}</code>
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="confirm-plan"
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={state.confirmed}
+                  disabled={state.busy}
+                  onChange={(event) => controller.confirmApproval(event.currentTarget.checked)}
+                />
+                <Label htmlFor="confirm-plan">I confirm this plan hash.</Label>
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={state.busy}
+                  onClick={() => controller.closeApproval()}
+                >
+                  Back
+                </Button>
+                <Button type="submit" disabled={!state.confirmed || state.busy}>
+                  Approve run
+                </Button>
+              </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
       ) : null}

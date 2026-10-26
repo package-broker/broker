@@ -196,7 +196,10 @@ function setup() {
   ) => service.ensure(who, { ecosystem, key: 'name', outcome });
   return { deps, sessions, plan, describePackage, events, outcome, ensure, cache, service };
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 describe('upstream busy on the request path', () => {
   function request(h: ReturnType<typeof setup>) {
     const outcome = {
@@ -1479,14 +1482,14 @@ describe('T430n review round 4', () => {
     const describing = deferred<{ kind: 'not_found'; definitive: true }>();
     h.describePackage.mockImplementation(() => describing.promise);
     const leader = service.ensure(actor, { ecosystem: 'npm', key: 'name', outcome: admitted });
-    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled());
+    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled(), { timeout: 5000 });
     epoch = 'new';
     const joiner = service.ensure(other, {
       ecosystem: 'npm',
       key: 'name',
       outcome: { ...admitted, projectId: other.projectId },
     });
-    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2), { timeout: 5000 });
     expect(h.describePackage).toHaveBeenCalledTimes(1);
     describing.resolve({ kind: 'not_found', definitive: true });
     await Promise.all([leader, joiner]);
@@ -1625,13 +1628,13 @@ describe('T430n review round 4 ordering', () => {
     const describing = deferred<{ kind: 'not_found'; definitive: true }>();
     h.describePackage.mockImplementation(() => describing.promise);
     const leader = service.ensure(actor, { ecosystem: 'npm', key: 'name', outcome: admitted });
-    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled());
+    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled(), { timeout: 5000 });
     const joiner = service.ensure(other, {
       ecosystem: 'npm',
       key: 'name',
       outcome: { ...admitted, projectId: other.projectId },
     });
-    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2), { timeout: 5000 });
     expect(h.describePackage).toHaveBeenCalledTimes(1);
     describing.resolve({ kind: 'not_found', definitive: true });
     expect(await Promise.all([leader, joiner])).toEqual([

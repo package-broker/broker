@@ -487,99 +487,136 @@ it('does not leak snapshot, member or map values in refused stderr and quiet std
     expect(call[0]).toMatch(/^(create|existing|warning|needs-input|unsupported): \d+$/);
   expect(await readdir(dir)).not.toContain('out');
 });
-it.each(['cycle', 'precedence', 'proxy compaction'])(
-  'surfaces refusal warnings or vendor guidance without writing outputs: %s',
-  async (scenario) => {
-    const { runImportPrivatePackagistPlan } = await import('./import-private-packagist.js');
-    const { canonical } = await import('../import/private-packagist/snapshot.js');
-    const { createHash } = await import('node:crypto');
-    const snapshot = JSON.parse(
-      await readFile(
-        new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
-        'utf8',
+it.each([
+  'cycle',
+  'precedence',
+  'proxy compaction',
+  'unapproved compaction',
+  'approved compaction',
+])('surfaces refusal warnings or vendor guidance without writing outputs: %s', async (scenario) => {
+  const { runImportPrivatePackagistPlan } = await import('./import-private-packagist.js');
+  const { canonical } = await import('../import/private-packagist/snapshot.js');
+  const { createHash } = await import('node:crypto');
+  const snapshot = JSON.parse(
+    await readFile(
+      new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const mirrored = (id: number, name: string, mirroredRepositoryId = 20) => ({
+    id,
+    name,
+    origin: 'private-mirror',
+    config: { mirroredRepositoryId },
+  });
+  const first = mirrored(100, 'acme/one');
+  const second = mirrored(101, 'acme/two');
+  const publicPackage = { id: 999, name: 'acme/two', origin: 'public-mirror', config: {} };
+  const packages = scenario.endsWith('compaction')
+    ? Array.from({ length: 65 }, (_, i) => mirrored(100 + i, `acme/p${i}`))
+    : [first, second];
+  const scoped =
+    scenario === 'cycle'
+      ? [first, mirrored(1001, 'acme/two', 21)]
+      : scenario === 'precedence'
+        ? [first, publicPackage]
+        : scenario === 'proxy compaction'
+          ? [...packages, publicPackage]
+          : packages;
+  const rows = {
+    suborganizations: [{ id: 1, name: 'Acme', urlName: 'acme' }],
+    mirroredRepositories: [20, 21].map((id) => ({
+      id,
+      url: `https://mirror${id}.example.test/`,
+    })),
+    packages:
+      scenario === 'cycle'
+        ? [...packages, mirrored(1000, 'acme/one', 21), mirrored(1001, 'acme/two', 21)]
+        : packages,
+    suborganizationPackages: scoped.map((pkg) => ({ ...pkg, suborganizationId: 1 })),
+  };
+  snapshot.objects = Object.fromEntries(
+    Object.entries(rows).map(([kind, entries]) => [
+      kind,
+      entries.map((data) => ({
+        data,
+        sha256: createHash('sha256').update(canonical(data)).digest('hex'),
+      })),
+    ]),
+  );
+  await writeFile(options.snapshot, JSON.stringify(snapshot), { mode: 0o600 });
+  const map = join(dir, 'map');
+  await writeFile(map, '{"version":1,"mirrorOrder":[20,21]}');
+  const out = join(dir, 'out');
+  const credentialsOut = join(dir, 'credentials');
+  const status =
+    scenario === 'unapproved compaction' || scenario === 'approved compaction'
+      ? await run([
+          'import',
+          'private-packagist',
+          'plan',
+          '--snapshot',
+          options.snapshot,
+          '--map',
+          map,
+          '--out',
+          out,
+          '--credentials-out',
+          credentialsOut,
+          '--compact-selection',
+          '--accept-project-widening',
+          'acme',
+          ...(scenario === 'approved compaction'
+            ? ['--compact-vendor', 'other', '--compact-vendor', 'acme']
+            : []),
+        ])
+      : await runImportPrivatePackagistPlan({
+          snapshot: options.snapshot,
+          map,
+          out,
+          credentialsOut,
+          compactSelection: true,
+          compactVendors: ['acme'],
+          acceptProjectWidening: ['acme'],
+        });
+  if (scenario === 'approved compaction') {
+    expect(status).toBe(0);
+    expect(JSON.stringify(stdout.mock.calls)).toContain('unused or future public packages');
+    expect(await readdir(dir)).toContain('out');
+    return;
+  }
+  expect(status).toBe(2);
+  if (scenario === 'unapproved compaction') {
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[SOURCE_CONFIG_LIST_LIMIT] Vendors requiring --compact-vendor opt-in: acme. See owner question A (project_package).',
       ),
     );
-    const mirrored = (id: number, name: string, mirroredRepositoryId = 20) => ({
-      id,
-      name,
-      origin: 'private-mirror',
-      config: { mirroredRepositoryId },
-    });
-    const first = mirrored(100, 'acme/one');
-    const second = mirrored(101, 'acme/two');
-    const publicPackage = { id: 999, name: 'acme/two', origin: 'public-mirror', config: {} };
-    const packages =
-      scenario === 'proxy compaction'
-        ? Array.from({ length: 65 }, (_, i) => mirrored(100 + i, `acme/p${i}`))
-        : [first, second];
-    const scoped =
-      scenario === 'cycle'
-        ? [first, mirrored(1001, 'acme/two', 21)]
-        : scenario === 'precedence'
-          ? [first, publicPackage]
-          : [...packages, publicPackage];
-    const rows = {
-      suborganizations: [{ id: 1, name: 'Acme', urlName: 'acme' }],
-      mirroredRepositories: [20, 21].map((id) => ({
-        id,
-        url: `https://mirror${id}.example.test/`,
-      })),
-      packages:
-        scenario === 'cycle'
-          ? [...packages, mirrored(1000, 'acme/one', 21), mirrored(1001, 'acme/two', 21)]
-          : packages,
-      suborganizationPackages: scoped.map((pkg) => ({ ...pkg, suborganizationId: 1 })),
-    };
-    snapshot.objects = Object.fromEntries(
-      Object.entries(rows).map(([kind, entries]) => [
-        kind,
-        entries.map((data) => ({
-          data,
-          sha256: createHash('sha256').update(canonical(data)).digest('hex'),
-        })),
-      ]),
+  } else if (scenario === 'proxy compaction') {
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SOURCE_CONFIG_LIST_LIMIT]'));
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Proxy-served vendors: acme. See owner question A (project_package).',
+      ),
     );
-    await writeFile(options.snapshot, JSON.stringify(snapshot), { mode: 0o600 });
-    const map = join(dir, 'map');
-    await writeFile(map, '{"version":1,"mirrorOrder":[20,21]}');
-    const out = join(dir, 'out');
-    const credentialsOut = join(dir, 'credentials');
-    expect(
-      await runImportPrivatePackagistPlan({
-        snapshot: options.snapshot,
-        map,
-        out,
-        credentialsOut,
-        compactSelection: true,
-        acceptProjectWidening: ['acme'],
-      }),
-    ).toBe(2);
-    if (scenario === 'proxy compaction') {
-      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('[SOURCE_CONFIG_LIST_LIMIT]'));
-      expect(stderr).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Proxy-served vendors: acme. See owner question A (project_package).',
-        ),
-      );
-    } else {
-      expect(stderr).toHaveBeenCalledWith('cross_source_conflict /objects/suborganizations/0');
-      const lines: unknown[][] = stdout.mock.calls;
-      const warnings = lines
-        .map(([line]) => String(line))
-        .filter((line) => line.includes('cross_source_conflict'))
-        .map((line) => JSON.parse(line) as { project: string; source: string });
-      expect(warnings).toHaveLength(2);
-      expect(new Set(warnings.map((entry) => entry.source)).size).toBe(2);
-      for (const entry of warnings)
-        expect(entry).toMatchObject({
-          project: 'acme',
-          source: expect.stringMatching(/^pp-[a-f0-9]{61}$/),
-        });
-    }
-    expect(await readdir(dir)).not.toContain('out');
-    expect(await readdir(dir)).not.toContain('credentials');
-  },
-);
+  } else {
+    expect(stderr).toHaveBeenCalledWith('cross_source_conflict /objects/suborganizations/0');
+    const lines: unknown[][] = stdout.mock.calls;
+    const warnings = lines
+      .map(([line]) => String(line))
+      .filter((line) => line.includes('cross_source_conflict'))
+      .map((line) => JSON.parse(line) as { project: string; source: string });
+    expect(warnings).toHaveLength(2);
+    expect(new Set(warnings.map((entry) => entry.source)).size).toBe(2);
+    for (const entry of warnings)
+      expect(entry).toMatchObject({
+        project: 'acme',
+        source: expect.stringMatching(/^pp-[a-f0-9]{61}$/),
+      });
+  }
+  expect(await readdir(dir)).not.toContain('out');
+  expect(await readdir(dir)).not.toContain('credentials');
+});
 it('accepts repeatable widening acknowledgements and refuses plan-only flag misuse', async () => {
   const { canonical } = await import('../import/private-packagist/snapshot.js');
   const { createHash } = await import('node:crypto');

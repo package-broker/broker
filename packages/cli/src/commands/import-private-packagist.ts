@@ -108,6 +108,7 @@ export interface ImportPrivatePackagistPlanOptions {
   readonly runtime?: 'workers' | 'node';
   readonly packagist?: string;
   readonly compactSelection?: boolean;
+  readonly compactVendors?: readonly string[];
   readonly acceptProjectWidening?: readonly string[];
   readonly quiet?: boolean;
 }

@@ -434,6 +434,67 @@ it('keeps 64 exact selections; refuses 65 without compaction', async () => {
     'SOURCE_CONFIG_LIST_LIMIT',
   );
 });
+it.each([undefined, [], ['unrelated']])(
+  'requires vendor opt-in even when the snapshot has no public packages (%j)',
+  async (compactVendors) => {
+    const rows = mirrorRows(Array.from({ length: 65 }, (_, i) => `unseen/p${i}`));
+    const result = await plan(rows, defaults, {
+      options: {
+        compactSelection: true,
+        ...(compactVendors === undefined ? {} : { compactVendors }),
+        acceptProjectWidening: ['acme'],
+      },
+    });
+    await refused(result, 'single_run_limit_exceeded', 'SOURCE_CONFIG_LIST_LIMIT');
+    expect(result.diagnostics[0]?.detail).toBe(
+      'Vendors requiring --compact-vendor opt-in: unseen. See owner question A (project_package).',
+    );
+    expect(result.summary.warning.filter((e) => e.code === 'selection_compacted')).toEqual([]);
+  },
+);
+it('compacts only named vendors and warns about unseen and future public packages', async () => {
+  const rows = mirrorRows([
+    ...Array.from({ length: 40 }, (_, i) => `unapproved/p${i}`),
+    ...Array.from({ length: 25 }, (_, i) => `approved/p${i}`),
+  ]);
+  const result = await success(
+    await plan(rows, defaults, {
+      options: { compactSelection: true, compactVendors: ['approved'] },
+    }),
+  );
+  expect(result.summary.warning.filter((e) => e.code === 'selection_compacted')).toEqual([
+    expect.objectContaining({
+      pattern: 'approved/*',
+      detail: expect.stringContaining('unused or future public packages'),
+    }),
+  ]);
+  expect(result.summary.warning.find((e) => e.code === 'selection_compacted')?.detail).toContain(
+    'prevent proxy fallback',
+  );
+  const source = result.manifest.items.find(
+    (i) => i.type === 'source' && i.source_type === 'composer_repository',
+  );
+  expect(source).toMatchObject({
+    config: {
+      selection: {
+        patterns: ['approved/*'],
+        packages: Array.from({ length: 40 }, (_, i) => `unapproved/p${i}`).sort(),
+      },
+    },
+  });
+});
+it('rejects malformed vendor opt-ins without echoing the value', async () => {
+  const result = await plan(
+    minimal(),
+    { version: 1 },
+    {
+      options: { compactSelection: true, compactVendors: ['secret@example.test'] },
+    },
+  );
+  expect(result.diagnostics).toEqual([
+    { code: 'invalid_compact_vendor', pointer: '/options/compactVendors/0' },
+  ]);
+});
 it('compacts largest vendors first and uses code-unit vendor order for ties', async () => {
   for (const names of [
     [
@@ -447,7 +508,12 @@ it('compacts largest vendors first and uses code-unit vendor order for ties', as
     ],
   ]) {
     const result = await success(
-      await plan(mirrorRows(names), defaults, { options: { compactSelection: true } }),
+      await plan(mirrorRows(names), defaults, {
+        options: {
+          compactSelection: true,
+          compactVendors: ['acme', 'example'],
+        },
+      }),
     );
     const expected =
       names.filter((n) => n.startsWith('example/')).length === 33 ? 'example/*' : 'acme/*';
@@ -469,7 +535,10 @@ it('never compacts a vendor shared with any other planned source', async () => {
   ];
   const result = await success(
     await plan(mirrorRows(names, ['acme/foreign']), defaults, {
-      options: { compactSelection: true },
+      options: {
+        compactSelection: true,
+        compactVendors: ['acme', 'example'],
+      },
     }),
   );
   expect(
@@ -482,7 +551,12 @@ it('never compacts a vendor shared with any other planned source', async () => {
         ['acme/foreign'],
       ),
       defaults,
-      { options: { compactSelection: true } },
+      {
+        options: {
+          compactSelection: true,
+          compactVendors: ['acme'],
+        },
+      },
     ),
     'single_run_limit_exceeded',
     'SOURCE_CONFIG_LIST_LIMIT',
@@ -559,6 +633,7 @@ it.each([undefined, 'existing:public'])(
     const result = await plan(rows, defaults, {
       options: {
         compactSelection: true,
+        compactVendors: ['magento'],
         acceptProjectWidening: ['acme'],
         ...(packagist === undefined ? {} : { packagist }),
       },
@@ -578,7 +653,14 @@ it('compacts another vendor when that is enough to leave a proxy-served vendor e
     ...Array.from({ length: 25 }, (_, i) => `safe/p${i}`),
   ]);
   rows.packages!.push({ id: 999, name: 'shared/public', origin: 'public-proxy', config: {} });
-  const result = await success(await plan(rows, defaults, { options: { compactSelection: true } }));
+  const result = await success(
+    await plan(rows, defaults, {
+      options: {
+        compactSelection: true,
+        compactVendors: ['shared', 'safe'],
+      },
+    }),
+  );
   expect(result.summary.warning.filter((e) => e.code === 'selection_compacted')).toEqual([
     expect.objectContaining({ pattern: 'safe/*' }),
   ]);
@@ -598,7 +680,12 @@ it('compacts another vendor when that is enough to leave a proxy-served vendor e
 it('still refuses uncompactable or oversized compacted lists', async () => {
   const names = Array.from({ length: 65 }, (_, i) => `vendor${i}/one`);
   await refused(
-    await plan(mirrorRows(names), defaults, { options: { compactSelection: true } }),
+    await plan(mirrorRows(names), defaults, {
+      options: {
+        compactSelection: true,
+        compactVendors: names.map((name) => name.split('/')[0]!),
+      },
+    }),
     'single_run_limit_exceeded',
     'SOURCE_CONFIG_LIST_LIMIT',
   );
@@ -633,12 +720,21 @@ it('requires acknowledgement even if a compacted vendor has no known extra packa
   const rows = mirrorRows(names);
   rows.suborganizationPackages = rows.packages!.map((p) => ({ ...p, suborganizationId: 1 }));
   await refused(
-    await plan(rows, defaults, { options: { compactSelection: true } }),
+    await plan(rows, defaults, {
+      options: {
+        compactSelection: true,
+        compactVendors: ['acme'],
+      },
+    }),
     'project_widening',
   );
   const result = await success(
     await plan(rows, defaults, {
-      options: { compactSelection: true, acceptProjectWidening: ['acme'] },
+      options: {
+        compactSelection: true,
+        compactVendors: ['acme'],
+        acceptProjectWidening: ['acme'],
+      },
     }),
   );
   expect(result.summary.warning).toContainEqual(

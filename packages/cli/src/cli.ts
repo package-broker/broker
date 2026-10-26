@@ -48,7 +48,7 @@ const USAGE =
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb import cutover-check --project-dir <dir> --old-repository <url> --new-repository <url> --old-auth-env <VAR> --new-auth-env <VAR> [--lock <file>]... [--timeout-seconds <seconds>] [--json]\n' +
   '       pb import private-packagist fetch --org <short-name> --snapshot <out.json> [--api-key-file <path>] [--api-secret-file <path>] [--versions] [--require-org-match] (or PP_API_KEY_FILE/PP_API_SECRET_FILE)\n' +
-  '       pb import private-packagist plan --snapshot <file> --map <file> --out <manifest> --credentials-out <file> [--members <csv>] [--baseline <manifest>] [--mode merge|override] [--include-org-admins] [--runtime workers|node] [--packagist existing:<name>] [--compact-selection] [--accept-project-widening <slug>...] [--quiet]\n' +
+  '       pb import private-packagist plan --snapshot <file> --map <file> --out <manifest> --credentials-out <file> [--members <csv>] [--baseline <manifest>] [--mode merge|override] [--include-org-admins] [--runtime workers|node] [--packagist existing:<name>] [--compact-selection --compact-vendor <vendor>...] [--accept-project-widening <slug>...] [--quiet]\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb import submit --manifest <file> --receipt <file> --principal <label> --broker <origin> [--resume] [--token-file <path>]\n' +
   '       pb import status <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
@@ -89,6 +89,7 @@ function parseCliArgs(argv: string[]) {
         runtime: { type: 'string' },
         packagist: { type: 'string' },
         'compact-selection': { type: 'boolean' },
+        'compact-vendor': { type: 'string', multiple: true },
         'accept-project-widening': { type: 'string', multiple: true },
         quiet: { type: 'boolean' },
         'api-key-file': { type: 'string' },
@@ -326,6 +327,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'runtime',
     'packagist',
     'compact-selection',
+    'compact-vendor',
     'accept-project-widening',
     'quiet',
   ],
@@ -517,6 +519,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         ...(values.packagist === undefined ? {} : { packagist: values.packagist }),
         includeOrgAdmins: values['include-org-admins'] ?? false,
         compactSelection: values['compact-selection'] ?? false,
+        compactVendors: values['compact-vendor'] ?? [],
         acceptProjectWidening: values['accept-project-widening'] ?? [],
         quiet: values.quiet ?? false,
       });

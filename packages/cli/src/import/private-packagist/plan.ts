@@ -68,6 +68,7 @@ export interface PrivatePackagistPlanInput {
     readonly runtime?: 'workers' | 'node';
     readonly packagist?: string;
     readonly compactSelection?: boolean;
+    readonly compactVendors?: readonly string[];
     readonly acceptProjectWidening?: readonly string[];
   };
 }
@@ -329,6 +330,10 @@ export async function planPrivatePackagistImport(
 async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
   const options = input.options ?? {};
   if (options.mode === 'override') refuse('override_mode_unsupported', '/options/mode');
+  for (const [index, vendor] of (options.compactVendors ?? []).entries())
+    if (!/^[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?$/.test(vendor))
+      refuse('invalid_compact_vendor', `/options/compactVendors/${index}`);
+  const compactVendors = new Set(options.compactVendors ?? []);
   const map = parsePackagistMap(input.map);
   const rows = rowsOf(input.snapshot);
   for (const [i, rule] of map.credentials.entries())
@@ -663,8 +668,10 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
     let packages = sorted(s.names);
     const vendors = new Map<string, string[]>();
     const proxyVendors = new Set<string>();
+    const unapprovedVendors = new Set<string>();
     for (const n of packages) {
       const vendor = n.split('/')[0]!;
+      if (!compactVendors.has(vendor)) unapprovedVendors.add(vendor);
       vendors.set(vendor, [...(vendors.get(vendor) ?? []), n]);
     }
     if (packages.length > 64 && options.compactSelection) {
@@ -674,6 +681,7 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
       for (const [vendor, names] of candidates) {
         if (packages.length + s.patterns.length <= 64) break;
         if (names.length < 2) continue;
+        if (!compactVendors.has(vendor)) continue;
         const shared = allSources.filter(
           (other) => other !== s && [...other.names].some((n) => n.startsWith(`${vendor}/`)),
         );
@@ -692,6 +700,8 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
           source: s.item.name,
           pattern,
           count: names.length,
+          detail:
+            'Vendor opt-in accepts residual risk: the snapshot cannot reveal unused or future public packages; this wildcard may serve them from the mirror and prevent proxy fallback.',
         });
       }
     }
@@ -700,9 +710,17 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
         'single_run_limit_exceeded',
         s.pointer,
         'SOURCE_CONFIG_LIST_LIMIT',
-        proxyVendors.size
-          ? `Proxy-served vendors: ${sorted(proxyVendors).join(', ')}. See owner question A (project_package).`
-          : undefined,
+        [
+          ...(unapprovedVendors.size
+            ? [
+                `Vendors requiring --compact-vendor opt-in: ${sorted(unapprovedVendors).join(', ')}.`,
+              ]
+            : []),
+          ...(proxyVendors.size
+            ? [`Proxy-served vendors: ${sorted(proxyVendors).join(', ')}.`]
+            : []),
+          'See owner question A (project_package).',
+        ].join(' '),
       );
     const hosts = sorted(
       new Set(

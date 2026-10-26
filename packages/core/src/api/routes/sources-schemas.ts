@@ -266,3 +266,29 @@ export const ACCEPT_REMOVAL_API_SPEC = {
     responses: { 204: null, 409: null },
   },
 } as const satisfies ApiRouteSpec;
+
+export const SOURCE_PACKAGE_API_SPEC = {
+  method: 'POST',
+  path: '/_pb/projects/:project/sources/:source/packages',
+  boundary: 'project',
+  permission: 'project:sources:write',
+  service: 'SourceError',
+  api: {
+    operationId: 'addProjectSourcePackage',
+    summary:
+      'Request a package with project:sources:write from a project or organization proxy attached to the project',
+    tags: ['sources'],
+    params: z.strictObject({ project, source: ulid }),
+    body: z.strictObject({ name: z.string().min(1).max(428) }),
+    responses: {
+      200: z.strictObject({ name: z.string(), state: z.literal('present') }),
+      202: z.strictObject({ name: z.string(), state: z.literal('queued'), jobId: z.string() }),
+      400: null,
+      403: null,
+      404: null,
+      409: null,
+      502: null,
+      503: null,
+    },
+  },
+} as const satisfies ApiRouteSpec;

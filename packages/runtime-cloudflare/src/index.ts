@@ -1852,6 +1852,9 @@ export function createWorker(
         : createApiRoutes({
             clientIp: clientIpOf,
             executor: executor as SqlExecutor,
+            ...(registryModule?.module.probePackage === undefined
+              ? {}
+              : { sourcePackageProbe: registryModule?.module.probePackage }),
             keyring: built.keyring,
             runtime: 'cloudflare',
             access: built.assembly,

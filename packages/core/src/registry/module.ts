@@ -1,3 +1,5 @@
+import type { SourcePackageProbe } from '../ingest/source-package.js';
+import { isUpstreamRefusal } from '../ingest/fill-shared.js';
 import { createComposerRepositoryProvider } from '../ingest/composer/composer-repository.js';
 import { isSelected } from '../ingest/composer/v1-index.js';
 import { displayName } from '../catalogue/names.js';
@@ -171,6 +173,7 @@ export interface RegistryModuleDeps {
 }
 
 export interface RegistryModule extends Partial<RegistryJobs> {
+  readonly probePackage: SourcePackageProbe;
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
   readonly packageSyncJob?: JobDefinition;
@@ -336,6 +339,16 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     key: string,
     requestObservability?: Observability,
   ): Promise<PackageFillPlan | null> {
+    const plan = await planPackage(ctx, sourceId, key, requestObservability);
+    return plan === 'unsupported_package' ? null : plan;
+  }
+
+  async function planPackage(
+    ctx: OrgContext,
+    sourceId: string,
+    key: string,
+    requestObservability?: Observability,
+  ): Promise<PackageFillPlan | 'unsupported_package' | null> {
     const record = await catalogue.sources.get(ctx, sourceId);
     if (record === null) return null;
     const bound = await bind(ctx, record, requestObservability);
@@ -350,10 +363,11 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       bound.source.type === 'npm_registry' &&
       !bound.source.config.scopes.some((scope) => key.startsWith(`${scope}/`))
     )
-      return null;
+      return 'unsupported_package';
     const proxy = PROXY_TYPES.has(record.type);
     const covered = proxy ? false : await catalogue.covers(ctx, record.id, key);
-    if (!proxy && !covered) return null;
+    if (!proxy && !covered)
+      return bound.source.type === 'npm_registry' ? 'unsupported_package' : null;
     const publishedValidators: DocumentValidators = {};
     if (sync !== undefined) {
       const packageId = await sync.packageId(ctx, record.id, key);
@@ -587,6 +601,19 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
 
   return Object.freeze({
     ecosystemRoutes,
+    async probePackage(ctx: OrgContext, sourceId: string, key: string, signal: AbortSignal) {
+      try {
+        const plan = await planPackage(ctx, sourceId, key);
+        if (plan === 'unsupported_package') return plan;
+        if (plan === null) return 'unavailable';
+        const result = await plan.describe({}, signal);
+        if (result.kind === 'not_found') return 'not_found';
+        return result.kind === 'found' ? 'found' : 'bad_gateway';
+      } catch (error) {
+        if (isUpstreamRefusal(error)) return 'upstream_refused';
+        return 'unavailable';
+      }
+    },
     visibilityPort,
     ...(packageSyncJob === undefined ? {} : { packageSyncJob }),
     ...(jobs === undefined || deps.registryJobs === undefined

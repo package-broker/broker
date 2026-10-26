@@ -86,6 +86,7 @@ const EXPECTED_ROUTES = [
   'PATCH /_pb/projects/:project/sources/:source',
   'POST /_pb/projects/:project/sources/:source/pause',
   'POST /_pb/projects/:project/sources/:source/sync',
+  'POST /_pb/projects/:project/sources/:source/packages',
   'POST /_pb/projects/:project/sources/:source/resume',
   'PUT /_pb/projects/:project/sources/:source/credential',
   'GET /_pb/sources/:source/names',
@@ -204,6 +205,14 @@ function dependencies(): ApiModuleDeps {
       ...common(),
       servicePrincipals: unused('create', 'setPermissions', 'suspend', 'restore'),
       principals: unused('get', 'list'),
+    },
+    sourcePackages: {
+      ...common(),
+      sources: unused('get'),
+      projects: unused('get'),
+      projectSources: unused('list'),
+      store: unused('request', 'present'),
+      probe: vi.fn(),
     },
     sources: {
       ...common(),

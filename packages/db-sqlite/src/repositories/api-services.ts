@@ -1,3 +1,5 @@
+import { createSourcePackageStore } from './source-package-request.js';
+import type { SourcePackageProbe } from '@package-broker/core/ingest/source-package';
 import { createProjectGrantReader } from './project-grant-read.js';
 import type { createVulnerabilityRuntime } from '@package-broker/core/runtime/vulnerability';
 import { createApiModule, ApiModuleDependencyError } from '@package-broker/core/api/module';
@@ -74,6 +76,7 @@ export interface ApiRoutesOptions {
   readonly lifetime: TokenLifetimePolicy;
   readonly log: KernelLog;
   readonly blob: BlobStore | undefined;
+  readonly sourcePackageProbe?: SourcePackageProbe;
   /** The VCS providers the runtime has registered and serves, read per request. */
   readonly vcsProviders?: () => readonly VcsProvider[];
   readonly refuseVcsProvider?: (provider: VcsProvider) => boolean;
@@ -178,6 +181,14 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         visibility: packages.visibility,
         projectSources: createProjectSourceReader(executor),
         projects,
+      },
+      sourcePackages: {
+        ...common,
+        sources,
+        projects,
+        projectSources: createProjectSourceReader(executor),
+        store: createSourcePackageStore(executor, anchors),
+        probe: input.sourcePackageProbe ?? (async () => 'unavailable'),
       },
       sourceAttachments: {
         ...common,

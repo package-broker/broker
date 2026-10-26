@@ -3,10 +3,11 @@ import { validateVersion } from '../../catalogue/versions.js';
 import { CATALOGUE_WINNER_KEYS_MAX, type CatalogueReader } from '../../db/catalogue.js';
 import type { OrgContext } from '../../db/port.js';
 import type { SourceRepository } from '../../db/source.js';
-import type {
-  AuthorizedNpmAudit,
-  NpmAuditAuthorizer,
-  NpmAuditRef,
+import {
+  VulnerabilitySnapshotError,
+  type AuthorizedNpmAudit,
+  type NpmAuditAuthorizer,
+  type NpmAuditRef,
 } from '../../db/vulnerability.js';
 import type { Observability } from '../../platform/observability.js';
 import { UpstreamError, type PolicyFetch } from '../../sources/policy-fetch.js';
@@ -14,6 +15,7 @@ import { sanitizeNpmAuditResponse, type NpmAuditAdvisory } from './audit-respons
 
 const RESPONSE_MAX = 4 * 1024 * 1024;
 const ORIGIN = 'https://registry.npmjs.org';
+const encoder = new TextEncoder();
 const HEADERS = {
   'content-type': 'application/json',
   'cache-control': 'private, no-store',
@@ -109,16 +111,20 @@ export async function forwardNpmAudit(
   }
   try {
     checkAbort();
-    const normalized = new Map<string, { spellings: Set<string>; versions: Set<string> }>();
+    const normalized = new Map<string, { name: string; versions: Set<string> }>();
     for (const [name, versions] of entries) {
-      const key = packageKey(name, { ecosystem: 'npm', legacyCase: true });
+      let key: string;
+      try {
+        key = packageKey(name, { ecosystem: 'npm', legacyCase: true });
+      } catch {
+        continue;
+      }
       const value = normalized.get(key) ?? {
-        spellings: new Set<string>(),
+        name,
         versions: new Set<string>(),
       };
-      value.spellings.add(name);
       for (const version of versions) {
-        if (new TextEncoder().encode(version).byteLength > 200) continue;
+        if (encoder.encode(version).byteLength > 200) continue;
         try {
           validateVersion({ ecosystem: 'npm', version, versionNormalized: version });
           value.versions.add(version);
@@ -161,9 +167,7 @@ export async function forwardNpmAudit(
     } catch (error) {
       checkAbort();
       reason =
-        error instanceof Error &&
-        (error.message === 'vulnerability evidence unavailable' ||
-          error.message === 'vulnerability snapshot malformed')
+        error instanceof VulnerabilitySnapshotError && error.code === 'overflow'
           ? 'verify_overflow'
           : 'verify_failed';
       return fail();
@@ -186,7 +190,7 @@ export async function forwardNpmAudit(
         method: 'POST',
         purpose: 'api',
         headers: { 'content-type': 'application/json' },
-        body: new TextEncoder().encode(serializeNpmAudit(grant)),
+        body: encoder.encode(serializeNpmAudit(grant)),
         destinations: [ORIGIN],
         redirects: 'error',
         maxBytes: RESPONSE_MAX,
@@ -213,7 +217,8 @@ export async function forwardNpmAudit(
       for (const [name, list] of Object.entries(clean.body)) {
         advisories += list.length;
         const key = packageKey(name, { ecosystem: 'npm', legacyCase: true });
-        for (const spelling of normalized.get(key)?.spellings ?? []) body[spelling] = list;
+        const spelling = normalized.get(key)?.name;
+        if (spelling !== undefined) body[spelling] = list;
       }
       unexpectedKeys = clean.unexpectedKeys;
       droppedAdvisories = clean.droppedAdvisories;

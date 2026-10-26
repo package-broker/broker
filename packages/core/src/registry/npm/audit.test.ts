@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { displayName, packageKey } from '../../catalogue/names.js';
 import type { CatalogueReader } from '../../db/catalogue.js';
 import { orgContext } from '../../db/port.js';
-import type {
-  AuthorizedNpmAudit,
-  NpmAuditAuthorizer,
-  NpmAuditTuple,
+import {
+  VulnerabilitySnapshotError,
+  type AuthorizedNpmAudit,
+  type NpmAuditAuthorizer,
+  type NpmAuditTuple,
 } from '../../db/vulnerability.js';
 import { createPolicyFetch, UpstreamError, type PolicyFetch } from '../../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
@@ -202,6 +203,34 @@ describe('npm audit forwarder', () => {
     expect(s.authorizeNpmAudit.mock.calls[0]![1]).toHaveLength(4);
   });
 
+  it.each([false, true])(
+    'refuses an invalid name while retaining valid entries (control: %s)',
+    async (control) => {
+      const s = setup();
+      const invalid = `${SENTINEL}/extra`;
+      const response = await s.send([[invalid, ['1.0.0']], ...(control ? CONTROL : [])]);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(control ? { pub: [advisory] } : {});
+      if (control) {
+        expect(s.classifyWinners).toHaveBeenCalledExactlyOnceWith(ctx, {
+          projectId: 'project',
+          ecosystem: 'npm',
+          keys: ['pub'],
+        });
+        expect(sentBody(s)).toBe('{"pub":["1.0.0"]}');
+      } else {
+        expect(s.classifyWinners).not.toHaveBeenCalled();
+        expect(s.policyFetch).not.toHaveBeenCalled();
+      }
+      expect(s.authorizeNpmAudit).toHaveBeenCalledExactlyOnceWith(
+        ctx,
+        control ? [{ sourceId: 'proxy', key: 'pub', version: '1.0.0' }] : [],
+      );
+      expectEvent(s, control ? 'ok' : 'empty', control ? 1 : 0, control ? 1 : 0, control ? 2 : 1);
+      expect(JSON.stringify(s.log.mock.calls)).not.toContain(SENTINEL);
+    },
+  );
+
   it('merges duplicate legacy keys, drops invalid/overlong versions and re-keys the sanitized result', async () => {
     const s = setup();
     s.policyFetch.mockResolvedValueOnce({
@@ -324,8 +353,9 @@ describe('npm audit forwarder', () => {
     ['attachment', 'db sentinel', 'verify_failed'],
     ['classification', 'db sentinel', 'verify_failed'],
     ['authorization', 'db sentinel', 'verify_failed'],
-    ['authorization', 'vulnerability evidence unavailable', 'verify_overflow'],
-    ['authorization', 'vulnerability snapshot malformed', 'verify_overflow'],
+    ['authorization', 'vulnerability evidence unavailable', 'verify_failed'],
+    ['authorization', 'vulnerability snapshot malformed', 'verify_failed'],
+    ['authorization', 'vulnerability snapshot unavailable', 'verify_failed'],
   ])('oracle 10: fails closed on %s / %s', async (stage, message, reason) => {
     const s = setup();
     const port =
@@ -341,6 +371,36 @@ describe('npm audit forwarder', () => {
     expect(Object.fromEntries(response.headers)).toEqual(HEADERS);
     expect(s.policyFetch).not.toHaveBeenCalled();
     expectEvent(s, reason);
+  });
+
+  it.each([
+    ['overflow', 'verify_overflow'],
+    ['evidence_unavailable', 'verify_failed'],
+    ['snapshot_malformed', 'verify_failed'],
+    ['snapshot_unavailable', 'verify_failed'],
+  ] as const)('classifies typed verification %s by code alone', async (code, reason) => {
+    const s = setup();
+    const error = new VulnerabilitySnapshotError(code);
+    error.message = SENTINEL;
+    s.authorizeNpmAudit.mockRejectedValueOnce(error);
+    const response = await s.send();
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe(ERROR);
+    expect(Object.fromEntries(response.headers)).toEqual(HEADERS);
+    expect(s.policyFetch).not.toHaveBeenCalled();
+    expectEvent(s, reason);
+    expect(JSON.stringify(s.log.mock.calls)).not.toContain(SENTINEL);
+  });
+
+  it('does not treat an untyped overflow code as verification overflow', async () => {
+    const s = setup();
+    s.authorizeNpmAudit.mockRejectedValueOnce({ code: 'overflow', message: SENTINEL });
+    const response = await s.send();
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe(ERROR);
+    expect(s.policyFetch).not.toHaveBeenCalled();
+    expectEvent(s, 'verify_failed');
+    expect(JSON.stringify(s.log.mock.calls)).not.toContain(SENTINEL);
   });
 
   it('refuses a grant from another organization', async () => {

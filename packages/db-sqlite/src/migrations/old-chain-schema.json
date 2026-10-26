@@ -1097,12 +1097,6 @@
       "name": "source_sync_job_state",
       "tbl_name": "job",
       "sql": "CREATE TRIGGER source_sync_job_state\nAFTER UPDATE OF state, last_error ON job\nBEGIN\n  UPDATE source_sync_package SET state = NEW.state,\n    error = CASE WHEN NEW.state IN ('running', 'succeeded') OR (NEW.state = 'queued' AND EXISTS (SELECT 1 FROM job_attempt WHERE org_id = NEW.org_id AND job_id = NEW.id AND fence = NEW.fence AND outcome = 'released')) THEN NULL\n      ELSE COALESCE(NEW.sync_error, CASE WHEN NEW.last_error = 'timeout' THEN 'timeout'\n        WHEN NEW.last_error IS NOT NULL THEN 'internal' END) END\n    WHERE org_id = NEW.org_id AND job_id = NEW.id;\n  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))\n    WHERE org_id = NEW.org_id AND id = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.sourceId')\n      AND NEW.type = 'core:source-sync:v1' AND NEW.state <> 'running'\n      AND NOT (NEW.state = 'queued' AND NEW.last_error IS 'lease_lost')\n      AND (NEW.state <> 'succeeded' OR NOT EXISTS (\n        SELECT 1 FROM job continuation\n        WHERE continuation.org_id = NEW.org_id AND continuation.resource_key = NEW.resource_key\n          AND continuation.id <> NEW.id AND continuation.type = 'core:source-sync:v1'\n          AND continuation.state IN ('queued', 'running')\n          AND json_extract(CASE WHEN json_valid(continuation.payload_json) THEN continuation.payload_json ELSE '{}' END, '$.syncGeneration') = source.sync_generation))\n      AND (json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration') IS NULL\n        OR sync_generation = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration'));\nEND"
-    },
-    {
-      "type": "trigger",
-      "name": "source_sync_pause",
-      "tbl_name": "source",
-      "sql": "CREATE TRIGGER source_sync_pause\nAFTER UPDATE OF status ON source\nWHEN NEW.status = 'paused'\nBEGIN\n  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))\n    WHERE org_id = NEW.org_id AND id = NEW.id;\nEND"
     }
   ],
   "indexes": [

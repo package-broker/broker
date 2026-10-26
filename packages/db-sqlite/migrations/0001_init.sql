@@ -1010,14 +1010,6 @@ BEGIN
   SELECT RAISE(ABORT, 'source ecosystem cannot change while the source holds packages');
 END;
 
-CREATE TRIGGER source_sync_pause
-AFTER UPDATE OF status ON source
-WHEN NEW.status = 'paused'
-BEGIN
-  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))
-    WHERE org_id = NEW.org_id AND id = NEW.id;
-END;
-
 CREATE TRIGGER source_sync_job_state
 AFTER UPDATE OF state, last_error ON job
 BEGIN

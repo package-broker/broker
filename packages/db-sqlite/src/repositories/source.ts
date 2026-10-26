@@ -179,7 +179,11 @@ function removalRefusalOf(row: SourceRow): SourceRecord['removalRefusal'] {
   return { at, absent, listed, successful };
 }
 
-function syncStatus(generation: string, counts: string): NonNullable<SourceRecord['sync']> {
+function syncStatus(
+  generation: string,
+  counts: string,
+  paused: boolean,
+): NonNullable<SourceRecord['sync']> {
   const { listing, queued, running, retrying, failed, completed, errors } = JSON.parse(counts) as {
     listing: boolean;
     queued: number;
@@ -191,7 +195,7 @@ function syncStatus(generation: string, counts: string): NonNullable<SourceRecor
   };
   return {
     generation,
-    listing,
+    listing: listing && !paused,
     queued,
     running,
     retrying,
@@ -226,7 +230,7 @@ function toRecord(row: SourceRow): SourceRecord {
     ...(row.sync_generation === null
       ? {}
       : {
-          sync: syncStatus(row.sync_generation, row.sync_counts),
+          sync: syncStatus(row.sync_generation, row.sync_counts, row.status === 'paused'),
         }),
     consecutiveFailures: row.consecutive_failures,
     rootHash: row.root_hash,

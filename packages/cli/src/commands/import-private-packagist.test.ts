@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -7,6 +7,11 @@ import {
   runImportPrivatePackagistFetch,
   type ImportPrivatePackagistOptions,
 } from './import-private-packagist.js';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 let dir: string;
 let options: ImportPrivatePackagistOptions;
@@ -317,6 +322,78 @@ it('dispatches an offline plan, writes canonical private files, and prints count
   expect(stderr).toHaveBeenCalledWith('output_exists');
   expect(await readFile(out, 'utf8')).toBe(bytes);
 });
+
+it.each(['short reads', 'truncated input', 'grown input'])(
+  'reads plan inputs to EOF and detects size changes: %s',
+  async (scenario) => {
+    const { runImportPrivatePackagistPlan } = await import('./import-private-packagist.js');
+    const { canonicalManifest, parseManifest } =
+      await import('@package-broker/core/import/manifest');
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const snapshot = await readFile(
+      new URL('../import/fixtures/private-packagist/plan-snapshot.json', import.meta.url),
+      'utf8',
+    );
+    await writeFile(options.snapshot, snapshot, { mode: 0o600 });
+    const map = join(dir, 'map.json');
+    await writeFile(map, '{"version":1,"mirrorOrder":[20,21]}');
+    const out = join(dir, 'manifest.json');
+    const credentialsOut = join(dir, 'credentials.json');
+    const reads = vi.fn();
+    const closed = vi.fn();
+    vi.mocked(open).mockImplementationOnce(async (...args) => {
+      const handle = await actual.open(...args);
+      const info = await handle.stat();
+      if (scenario !== 'short reads') {
+        Object.defineProperty(handle, 'stat', { value: async () => info });
+        await writeFile(
+          options.snapshot,
+          scenario === 'truncated input' ? snapshot.slice(0, -1) : `${snapshot} `,
+        );
+      }
+      const read = handle.read.bind(handle);
+      const close = handle.close.bind(handle);
+      Object.defineProperty(handle, 'read', {
+        value: async (buffer: Buffer, offset: number, length: number, position: number) => {
+          const result = await read(buffer, offset, Math.min(length, 17), position);
+          reads(offset, position, result.bytesRead);
+          return result;
+        },
+      });
+      Object.defineProperty(handle, 'close', {
+        value: async () => {
+          closed();
+          await close();
+        },
+      });
+      return handle;
+    });
+    expect(
+      await runImportPrivatePackagistPlan({ snapshot: options.snapshot, map, out, credentialsOut }),
+    ).toBe(scenario === 'short reads' ? 0 : 2);
+    expect(closed).toHaveBeenCalledOnce();
+    if (scenario === 'short reads') {
+      expect(reads.mock.calls.length).toBeGreaterThan(2);
+      let position = 0;
+      for (const [offset, readPosition, bytesRead] of reads.mock.calls) {
+        expect(offset).toBe(position);
+        expect(readPosition).toBe(position);
+        position += bytesRead;
+      }
+      expect(position).toBe(Buffer.byteLength(snapshot));
+      expect(reads.mock.lastCall?.[2]).toBe(0);
+      const bytes = await readFile(out, 'utf8');
+      const parsed = parseManifest(JSON.parse(bytes));
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(bytes).toBe(canonicalManifest(parsed.data));
+      expect(stderr).not.toHaveBeenCalled();
+    } else {
+      expect(stderr).toHaveBeenCalledWith('input_changed');
+      expect(await readdir(dir)).not.toContain('manifest.json');
+      expect(await readdir(dir)).not.toContain('credentials.json');
+    }
+  },
+);
 it('refuses readable snapshots, warns for readable members, and leaves no partial output', async () => {
   const { runImportPrivatePackagistPlan } = await import('./import-private-packagist.js');
   const snapshot = await readFile(

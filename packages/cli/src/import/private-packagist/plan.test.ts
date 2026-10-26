@@ -191,6 +191,167 @@ it('gives two packages in a monorepo distinct sources and stable identities', as
     expect(s.name).toBe(`pp-${digest.slice(0, 61)}`);
   }
 });
+
+it.each([
+  'git@github.com:Acme/Repo.git',
+  'ssh://git@github.com/Acme/Repo.git/',
+  'ssh://git@GitHub.com/Acme/Repo.git',
+])(
+  'uses the canonical GitHub identity for mapped SSH repository %# on both runtimes',
+  async (url) => {
+    const map = { version: 1, github: { installations: { acme: 42 } } };
+    const expected = await success(
+      await plan(
+        { ...minimal(), packages: [vcs(10, 'acme/private', 'https://github.com/acme/repo')] },
+        map,
+      ),
+    );
+    for (const runtime of ['workers', 'node'] as const) {
+      const result = await success(
+        await plan({ ...minimal(), packages: [vcs(10, 'acme/private', url)] }, map, {
+          options: { runtime },
+        }),
+      );
+      expect(result.canonical).toBe(expected.canonical);
+      expect(result.hash).toBe(expected.hash);
+      expect(result.manifest.items.find((item) => item.type === 'source')?.config).toMatchObject({
+        provider: 'github',
+        repository: 'acme/repo',
+        installationId: 42,
+      });
+    }
+  },
+);
+
+it.each(['git@github.com:Acme/Repo.git', 'ssh://git@github.com/Acme/Repo.git/'])(
+  'keeps unmapped GitHub SSH repositories on Node %#',
+  async (url) => {
+    const rows = { ...minimal(), packages: [vcs(10, 'acme/private', url)] };
+    const result = await success(
+      await plan(rows, { version: 1 }, { options: { runtime: 'node' } }),
+    );
+    expect(result.manifest.items.find((item) => item.type === 'source')?.config).toMatchObject({
+      provider: 'ssh',
+      repository: 'ssh://git@github.com/acme/repo',
+      installationId: null,
+    });
+    const refused = await plan(rows, { version: 1 }, { options: { runtime: 'workers' } });
+    expect(refused.diagnostics).toEqual([{ code: 'ssh_requires_node', pointer: '/packages/0' }]);
+  },
+);
+
+it.each([
+  'ssh://',
+  'ssh://git@[invalid/repo',
+  'ssh://git@example.test:invalid/repo',
+  'ssh://example.test/repo',
+  'ssh://git:secret@example.test/repo',
+  'ssh://git@example.test/repo?token=secret',
+  'ssh://git@example.test/repo#secret',
+  'ssh://git@example.test/repo\u0000',
+  'ssh://git@example.test/repo\u200B',
+])('refuses malformed SSH URLs with a package pointer before the runtime gate %#', async (url) => {
+  for (const runtime of ['node', 'workers'] as const) {
+    const result = await plan(
+      { ...minimal(), packages: [vcs(10, 'acme/private', url)] },
+      { version: 1 },
+      { options: { runtime } },
+    );
+    expect(result.diagnostics).toEqual([
+      { code: 'invalid_repository_url', pointer: '/packages/0' },
+    ]);
+  }
+});
+
+it.each([
+  ['vcs', 'https://user:secret@git.example.test/repo', 'invalid_repository_url'],
+  ['vcs', 'git@git.example.test:acme/repo', 'ssh_requires_node'],
+  ['mirror', 'https://user:secret@composer.example.test/', 'invalid_repository_url'],
+  ['mirror', 'ssh://git@composer.example.test/repo', 'ssh_requires_node'],
+] as const)('keeps package pointers for %s URL refusals %#', async (kind, url, code) => {
+  const rows = minimal();
+  rows.packages = [kind === 'vcs' ? vcs(10, 'acme/private', url) : mirrored(10, 'acme/private')];
+  rows.mirroredRepositories = [mirror(20, url)];
+  const result = await plan(rows, defaults);
+  expect(result.diagnostics).toEqual([{ code, pointer: '/packages/0' }]);
+});
+
+it.each(['manual', 'disabled'])(
+  'retains organization mirror behavior %s across scoped rows and shuffles',
+  async (mirroringBehavior) => {
+    const rows = minimal();
+    rows.suborganizations!.push({ id: 2, name: 'Example', urlName: 'example' });
+    rows.mirroredRepositories = [{ ...mirror(), mirroringBehavior }];
+    rows.suborganizationMirroredRepositories = [
+      { ...mirror(), mirroringBehavior: 'add_on_use', suborganizationId: 1 },
+      { ...mirror(), mirroringBehavior: 'admin_managed', suborganizationId: 2 },
+    ];
+    const result = await success(await plan(rows));
+    expect(result.summary.warning).toContainEqual({
+      code: mirroringBehavior === 'disabled' ? 'disabled_mirror_skipped' : 'mirroring_behavior',
+      pointer: '/mirrors/0',
+      detail: mirroringBehavior,
+      count: 0,
+    });
+    rows.suborganizationMirroredRepositories.reverse();
+    const shuffled = await success(await plan(rows));
+    expect(shuffled.summary).toEqual(result.summary);
+    expect(shuffled.canonical).toBe(result.canonical);
+  },
+);
+
+it.each([
+  'suborganizationPackages',
+  'suborganizationTeams',
+  'suborganizationMirroredRepositories',
+  'suborganizationTokens',
+])('validates project membership for every %s row', async (kind) => {
+  const row =
+    kind === 'suborganizationPackages'
+      ? vcs()
+      : kind === 'suborganizationTeams'
+        ? { id: 30, name: 'Acme', permission: 'view' }
+        : kind === 'suborganizationMirroredRepositories'
+          ? mirror()
+          : { id: 50 };
+  for (const suborganizationId of [999, undefined, '1']) {
+    const rows = { ...minimal(), [kind]: [{ ...row, suborganizationId }] };
+    const result = await plan(rows);
+    expect(result.diagnostics).toEqual([
+      { code: 'invalid_snapshot', pointer: `/objects/${kind}/0` },
+    ]);
+  }
+});
+
+it.each(['missing-comma', '"unterminated,email@example.test', 'user,email@example.test,extra'])(
+  'reports the CSV data row for malformed fields %#',
+  async (line) => {
+    const result = await plan(
+      minimal(),
+      { version: 1 },
+      { members: `username,email\nfirst,first@example.test\n${line}\r\n` },
+    );
+    expect(result.diagnostics).toEqual([{ code: 'invalid_members', pointer: '/members/1' }]);
+  },
+);
+
+it.each([
+  [' username,email\nuser,user@example.test', '/members'],
+  ['username,email\nuser,"user@example.test" ', '/members/0'],
+])('preserves unquoted outer CSV whitespace %#', async (members, pointer) => {
+  const result = await plan(minimal(), { version: 1 }, { members });
+  expect(result.diagnostics).toEqual([{ code: 'invalid_members', pointer }]);
+});
+
+it.each(['\n', '\r\n'])('accepts BOM and trailing CSV line endings %#', async (ending) => {
+  await success(
+    await plan(
+      minimal(),
+      { version: 1 },
+      { members: `\uFEFFusername,email${ending}user,user@example.test${ending}${ending}` },
+    ),
+  );
+});
 it.each(['gitlab.com', 'bitbucket.org', 'git.example.test'])(
   'normalizes HTTPS VCS suffixes on %s without changing mirror URLs',
   async (host) => {

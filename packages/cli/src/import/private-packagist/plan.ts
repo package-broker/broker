@@ -128,34 +128,38 @@ class Refusal extends Error {
 function refuse(code: string, pointer = '', cap?: string): never {
   throw new Refusal(code, pointer, cap);
 }
-function repository(value: unknown, node: boolean, vcs = false): string {
-  if (typeof value !== 'string' || /\s/.test(value)) return refuse('invalid_repository_url');
+function repository(value: unknown, pointer: string, vcs = false): string {
+  if (typeof value !== 'string' || /[\s\p{Cc}\p{Cf}]/u.test(value))
+    return refuse('invalid_repository_url', pointer);
   let url = value;
   if (/^[a-z0-9._-]+@[^:]+:.+$/i.test(url)) url = `ssh://${url.replace(':', '/')}`;
-  if (url.startsWith('ssh://')) {
-    if (!node) refuse('ssh_requires_node');
-    const parsed = new URL(url);
-    if (parsed.password || parsed.search || parsed.hash) refuse('invalid_repository_url');
-    return url;
-  }
-  if (!url.startsWith('https://')) refuse('invalid_repository_url');
+  const ssh = url.startsWith('ssh://');
+  if (!ssh && !url.startsWith('https://')) refuse('invalid_repository_url', pointer);
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return refuse('invalid_repository_url');
+    return refuse('invalid_repository_url', pointer);
   }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash)
-    refuse('invalid_repository_url');
+  if (
+    (ssh ? !/^[a-z0-9._-]{1,32}$/.test(parsed.username) : parsed.username) ||
+    parsed.password ||
+    /[?#]/.test(url) ||
+    !parsed.hostname
+  )
+    refuse('invalid_repository_url', pointer);
+  const github = parsed.hostname.toLowerCase() === 'github.com';
+  if (github) parsed.hostname = 'github.com';
   url = parsed.href;
-  if (!isCanonicalUrl(url)) refuse('invalid_repository_url');
-  if (vcs || parsed.hostname === 'github.com') {
+  if (!ssh && !isCanonicalUrl(url)) refuse('invalid_repository_url', pointer);
+  if ((!ssh && vcs) || github) {
     let path = parsed.pathname.replace(/\/+$/, '').replace(/\.git$/, '');
-    if (parsed.hostname === 'github.com') {
+    if (github) {
       path = path.toLowerCase();
-      if (!/^\/[a-z0-9-]+\/[a-z0-9._-]+$/.test(path)) refuse('invalid_repository_url');
+      if (!/^\/[a-z0-9-]+\/[a-z0-9._-]+$/.test(path)) refuse('invalid_repository_url', pointer);
     }
-    url = `${parsed.origin}${path || '/'}`;
+    parsed.pathname = path || '/';
+    url = parsed.href;
   }
   return url;
 }
@@ -164,19 +168,19 @@ function readMembers(text: string | undefined): Map<string, string> {
   if (text === undefined) return result;
   const lines = text
     .replace(/^\uFEFF/, '')
-    .trim()
+    .replace(/(?:\r?\n)+$/, '')
     .split(/\r?\n/);
-  const fieldsOf = (line: string): string[] => {
+  const fieldsOf = (line: string, pointer: string): string[] => {
     const match = /^("(?:[^"]|"")*"|[^",]*),("(?:[^"]|"")*"|[^",]*)$/.exec(line);
-    if (!match) return refuse('invalid_members', '/members');
+    if (!match) return refuse('invalid_members', pointer);
     return match
       .slice(1)
       .map((field) => (field.startsWith('"') ? field.slice(1, -1).replaceAll('""', '"') : field));
   };
-  if (stable(fieldsOf(lines.shift() ?? '')) !== stable(['username', 'email']))
+  if (stable(fieldsOf(lines.shift() ?? '', '/members')) !== stable(['username', 'email']))
     refuse('invalid_members', '/members');
   for (const [i, line] of lines.entries()) {
-    const fields = fieldsOf(line);
+    const fields = fieldsOf(line, `/members/${i}`);
     const username = fields[0];
     const email = normalizeEmail(fields[1] ?? '');
     if (
@@ -381,6 +385,15 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
   for (const [index, slug] of (options.acceptProjectWidening ?? []).entries())
     if (!projectSlugs.has(slug))
       refuse('unknown_project_acknowledgement', `/options/acceptProjectWidening/${index}`);
+  for (const kind of [
+    'suborganizationPackages',
+    'suborganizationTeams',
+    'suborganizationMirroredRepositories',
+    'suborganizationTokens',
+  ])
+    for (const [index, row] of (rows[kind] ?? []).entries())
+      if (!projects.has(row.suborganizationId as number))
+        refuse('invalid_snapshot', `/objects/${kind}/${index}`);
   const sources = new Map<string, Source>();
   const sourceNames = new Map<string, string>();
   function source(
@@ -439,7 +452,7 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
       refuse('unsupported_mirroring_behavior', `/mirrors/${index}`);
     const previous = mirrors.get(row.id);
     if (previous && previous.url !== row.url) refuse('conflicting_source');
-    mirrors.set(row.id, row);
+    if (!previous) mirrors.set(row.id, row);
     const ids = mirrorCredentials.get(row.id) ?? new Set<number>();
     if (typeof row.credentials === 'number') ids.add(row.credentials);
     mirrorCredentials.set(row.id, ids);
@@ -447,8 +460,6 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
   for (const [index, id] of map.mirrorOrder.entries())
     if (!mirrors.has(id))
       summary.warning.push({ code: 'stale_mirror_order', pointer: `/mirrorOrder/${index}` });
-  for (const row of [...(rows.suborganizationPackages ?? []), ...(rows.suborganizationTeams ?? [])])
-    if (!projects.has(row.suborganizationId as number)) refuse('invalid_snapshot');
   const packageSources = new Map<Row, Source>();
   const packageRows = [...(rows.packages ?? []), ...(rows.suborganizationPackages ?? [])];
   const reported = new Set<string>();
@@ -522,7 +533,8 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
     } else if (['private-mirror', 'private-proxy'].includes(String(pkg.origin))) {
       const mirror = mirrors.get(c.mirroredRepositoryId as number);
       if (!mirror) refuse('mirror_missing', pointer);
-      const url = repository(mirror.url, false);
+      const url = repository(mirror.url, pointer);
+      if (url.startsWith('ssh://')) refuse('ssh_requires_node', pointer);
       s = source(
         url,
         'composer_repository',
@@ -542,16 +554,16 @@ async function compile(input: PrivatePackagistPlanInput, summary: PlanSummary) {
         !['vcs', 'git', 'github', 'gitlab', 'bitbucket'].includes(String(c.type))
       )
         refuse('unsupported_package_type', pointer);
-      const url = repository(
-        own(map.packages, name)?.url ?? c.url,
-        options.runtime === 'node',
-        true,
-      );
+      let url = repository(own(map.packages, name)?.url ?? c.url, pointer, true);
       const parsed = new URL(url);
       const installationId =
         parsed.hostname === 'github.com'
           ? own(map.github.installations, parsed.pathname.split('/')[1]!)
           : undefined;
+      if (url.startsWith('ssh://')) {
+        if (installationId !== undefined) url = `https://github.com${parsed.pathname}`;
+        else if (options.runtime !== 'node') refuse('ssh_requires_node', pointer);
+      }
       const config = {
         provider:
           installationId !== undefined

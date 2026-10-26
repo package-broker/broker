@@ -102,3 +102,67 @@ it.each([
     expect((error as MapError).cap).toBe(cap);
   }
 });
+
+it.each([
+  [
+    Array.from({ length: 65 }, (_, i) => (i === 64 ? 'INVALID' : `h${i}.example.test`)),
+    'SOURCE_CONFIG_LIST_LIMIT',
+  ],
+  [['h'.repeat(201)], 'SOURCE_CONFIG_ENTRY_LENGTH_LIMIT'],
+  [['h'.repeat(254)], 'SOURCE_CONFIG_ENTRY_LENGTH_LIMIT'],
+])('names dist host caps before validating host syntax %#', (hosts, cap) => {
+  try {
+    parsePackagistMap({ version: 1, distHosts: { 20: hosts } });
+    expect.unreachable();
+  } catch (error) {
+    expect(error).toMatchObject({ pointer: '/distHosts/0', cap });
+  }
+});
+
+it.each(['', 'sentinel\nkey', 'sentinel\u200Bkey'])('refuses unsafe record keys %#', (key) => {
+  for (const [section, value] of [
+    ['projects', { slug: 'acme' }],
+    ['teams', { members: 'csv' }],
+    ['distHosts', ['dist.example.test']],
+  ] as const) {
+    expect(() => parsePackagistMap({ version: 1, [section]: { [key]: value } })).toThrow(MapError);
+    try {
+      parsePackagistMap({ version: 1, [section]: { [key]: value } });
+    } catch (error) {
+      expect(error).toMatchObject({ pointer: `/${section}/0` });
+      expect(JSON.stringify(error)).not.toContain('sentinel');
+    }
+  }
+});
+
+it.each([
+  'mirror-name',
+  '0',
+  '-1',
+  '01',
+  '1.5',
+  '9007199254740992',
+  'https://EXAMPLE.test/',
+  'https://example.test',
+  'https://user:secret@example.test/',
+])('refuses non-ID/noncanonical dist host keys %#', (key) => {
+  expect(() => parsePackagistMap({ version: 1, distHosts: { [key]: [] } })).toThrow(MapError);
+});
+
+it.each(['20', 'https://composer.example.test/'])(
+  'accepts a mirror ID or canonical URL dist host key %#',
+  (key) => {
+    expect(
+      parsePackagistMap({ version: 1, distHosts: { [key]: ['dist.example.test'] } }).distHosts,
+    ).toEqual({ [key]: ['dist.example.test'] });
+  },
+);
+
+it.each(['Acme', 'acme/project', 'acme\n', '-acme', ''])(
+  'refuses non-slug team project targets %#',
+  (slug) => {
+    expect(() =>
+      parsePackagistMap({ version: 1, teams: { Acme: { members: 'csv', projects: [slug] } } }),
+    ).toThrow(MapError);
+  },
+);

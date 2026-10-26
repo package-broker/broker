@@ -90,8 +90,9 @@ export function parsePackagistMap(input: unknown): PackagistMap {
   for (const key of ['projects', 'packages', 'teams', 'distHosts'])
     if (v[key] !== undefined && !object(v[key])) bad(`/${key}`);
   const projects = (v.projects ?? {}) as Record<string, unknown>;
-  for (const [i, entry] of Object.values(projects).entries()) {
+  for (const [i, [key, entry]] of Object.entries(projects).entries()) {
     if (
+      !text(key) ||
       !object(entry) ||
       !keys(entry, ['slug', 'existing']) ||
       Object.keys(entry).length !== 1 ||
@@ -118,8 +119,9 @@ export function parsePackagistMap(input: unknown): PackagistMap {
     if (!name(pkg) || !object(entry) || !keys(entry, ['url']) || !text(entry.url))
       bad(`/packages/${i}`);
   }
-  for (const [i, entry] of Object.values(v.teams ?? {}).entries()) {
+  for (const [i, [key, entry]] of Object.entries(v.teams ?? {}).entries()) {
     if (
+      !text(key) ||
       !object(entry) ||
       !keys(entry, ['group', 'members', 'projects', 'role']) ||
       (entry.group === undefined) === (entry.members === undefined)
@@ -137,7 +139,7 @@ export function parsePackagistMap(input: unknown): PackagistMap {
     if (
       entry.projects !== undefined &&
       (!Array.isArray(entry.projects) ||
-        !entry.projects.every(text) ||
+        !entry.projects.every((slug) => text(slug) && PROJECT_SLUG_PATTERN.test(slug)) ||
         new Set(entry.projects).size !== entry.projects.length)
     )
       bad(`/teams/${i}/projects`);
@@ -175,12 +177,20 @@ export function parsePackagistMap(input: unknown): PackagistMap {
       if (!positive(m.packagist_credential)) bad(`${p}/match`);
     } else if (!host(m.host)) bad(`${p}/match`);
   }
-  for (const [i, entry] of Object.values(v.distHosts ?? {}).entries()) {
-    if (!Array.isArray(entry) || !entry.every(host) || new Set(entry).size !== entry.length)
+  for (const [i, [key, entry]] of Object.entries(v.distHosts ?? {}).entries()) {
+    if (
+      !text(key) ||
+      !(
+        (/^[1-9][0-9]*$/.test(key) && positive(Number(key))) ||
+        (key.startsWith('https://') && isCanonicalUrl(key))
+      ) ||
+      !Array.isArray(entry)
+    )
       bad(`/distHosts/${i}`);
     if (entry.length > 64) bad(`/distHosts/${i}`, 'SOURCE_CONFIG_LIST_LIMIT');
-    if (entry.some((h) => h.length > 200))
+    if (entry.some((h: unknown) => typeof h === 'string' && h.length > 200))
       bad(`/distHosts/${i}`, 'SOURCE_CONFIG_ENTRY_LENGTH_LIMIT');
+    if (!entry.every(host) || new Set(entry).size !== entry.length) bad(`/distHosts/${i}`);
   }
   return {
     version: 1,

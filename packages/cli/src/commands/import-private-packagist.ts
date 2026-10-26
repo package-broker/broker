@@ -133,7 +133,12 @@ async function readPlanInput(
       const limit = 64 * 1024 * 1024;
       if (info.size > limit) throw new PlanFileError('input_too_large');
       const bytes = Buffer.alloc(info.size + 1);
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+      let bytesRead = 0;
+      while (bytesRead <= info.size) {
+        const chunk = await handle.read(bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+        if (chunk.bytesRead === 0) break;
+        bytesRead += chunk.bytesRead;
+      }
       if (bytesRead !== info.size) throw new PlanFileError('input_changed');
       return { text: bytes.subarray(0, bytesRead).toString('utf8'), readable };
     } finally {

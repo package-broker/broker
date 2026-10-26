@@ -428,6 +428,7 @@ export async function startLocal(
     outboundDestination?: (url: string, brokerOrigin: string) => string;
     patchBundle?: (bundle: string) => string;
     publicUrl?: string;
+    nodeEnv?: Record<string, string>;
   } = {},
 ): Promise<LocalBroker> {
   fixtureDestination(upstreamOrigins[0], fixtureOrigin);
@@ -686,7 +687,7 @@ syncBuiltinESMExports();
       );
       const child = spawn(process.execPath, ['--import', preload, script], {
         cwd: copy,
-        env: { ...env, PB_SQLITE_PATH: database, TMPDIR: nodeTmp },
+        env: { ...env, ...options.nodeEnv, PB_SQLITE_PATH: database, TMPDIR: nodeTmp },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout?.on('data', record);
@@ -707,13 +708,18 @@ syncBuiltinESMExports();
       worker = bootWorker!();
       await worker!.ready;
     }
-    await until(async () => {
-      try {
-        return (await fetch(`${origin}/health/ready`, { signal: AbortSignal.timeout(1000) })).ok;
-      } catch {
-        return false;
-      }
-    }, 'readiness');
+    try {
+      await until(async () => {
+        try {
+          return (await fetch(`${origin}/health/ready`, { signal: AbortSignal.timeout(1000) })).ok;
+        } catch {
+          return false;
+        }
+      }, 'readiness');
+    } catch (error) {
+      console.error(`broker output before readiness failure:\n${logs.slice(-4000)}`);
+      throw error;
+    }
     const read = async <T extends Record<string, unknown>>(
       sql: string,
       params: (string | number)[] = [],

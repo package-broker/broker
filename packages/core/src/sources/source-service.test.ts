@@ -2115,7 +2115,7 @@ describe('GitHub source editing metadata', () => {
     ['app', { installationId: 42 }],
     ['token', {}],
   ] as const)(
-    'returns only the %s authentication choice, without configuration',
+    'returns the %s authentication choice with allowlisted configuration',
     async (mode, extra) => {
       const f = setup();
       const reader = {
@@ -2138,7 +2138,16 @@ describe('GitHub source editing metadata', () => {
         value: { items: [{ githubAuthentication: mode }] },
       });
       expect(JSON.stringify(result)).not.toContain('private/repo');
-      expect(JSON.stringify(result)).not.toContain('installationId');
+      const editor = {
+        ...reader,
+        actor: { ...reader.actor, permissions: new Set(['org:sources:read', 'org:sources:write']) },
+      };
+      expect(await f.service.list(ctx, editor, { cursor: null, limit: 10 })).toMatchObject({
+        value: {
+          items: [{ config: { provider: 'github', repository: 'private/repo', ...extra } }],
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain('credentialId');
     },
   );
   it('uses the merged source type when checking a stored GitHub credential', async () => {
@@ -2163,4 +2172,282 @@ describe('GitHub source editing metadata', () => {
     expect(result).toMatchObject({ ok: false, problems: [{ field: 'installationId' }] });
     expect(f.sources.update).not.toHaveBeenCalled();
   });
+});
+
+describe('readable source DTO configuration', () => {
+  const cases = [
+    [
+      'vcs',
+      {
+        provider: 'github',
+        repository: 'owner/repo',
+        installationId: 42,
+        packageName: 'vendor/package',
+        refs: { tags: false, branches: ['main'] },
+      },
+    ],
+    [
+      'vcs',
+      {
+        provider: 'git',
+        repository: 'https://git.example.com/repo.git',
+        refs: { tags: true, branches: [] },
+      },
+    ],
+    [
+      'vcs',
+      {
+        provider: 'ssh',
+        repository: 'git@git.example.com:owner/repo.git',
+        refs: { tags: true, branches: [] },
+      },
+    ],
+    [
+      'composer_repository',
+      {
+        selection: { packages: ['vendor/package'], patterns: ['vendor/*'], expandPatterns: true },
+        distHosts: ['dist.example.com'],
+        mirrorsFallback: true,
+      },
+    ],
+    ['npm_registry', { scopes: ['@one', '@two'], distHosts: ['dist.example.com'] }],
+    ['packagist_proxy', { githubToken: true }],
+    ['npmjs_proxy', {}],
+    ['hosted', {}],
+  ] as const;
+
+  it.each(cases)(
+    'allowlists %s configuration independently of credentials: %j',
+    async (type, config) => {
+      const { service, sources, credentialRepository } = setup();
+      const reader = {
+        ...org,
+        actor: { ...org.actor, permissions: new Set(['org:sources:read', 'org:sources:write']) },
+      };
+      const base = {
+        ...input,
+        id: 'source',
+        type,
+        ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
+        credentialId: null,
+        configJson: JSON.stringify(config),
+        userAgent: 'Broker/2.0',
+        retentionDaysOverride: 730,
+        defaultVisibleToNewProjects: true,
+      } as SourceRecord;
+      const dto = async (record: SourceRecord) => {
+        sources.list.mockResolvedValue([record]);
+        sources.getVisible.mockResolvedValue({ ...record, projectId: 'project-a' });
+        const list = await service.list(ctx, reader, { cursor: null, limit: 10 });
+        const get = await service.getVisible(ctx, project, {
+          projectId: 'project-a',
+          sourceId: 'source',
+        });
+        if (!list.ok || !get.ok) throw new Error('Expected readable source');
+        expect(list.value.items[0]).toMatchObject({ ...get.value, projectId: null });
+        return get.value;
+      };
+      const hidden = {
+        credential: 'credential-sentinel',
+        token: 'token-sentinel',
+        credentialHash: 'hash-sentinel',
+        credentialKind: 'bearer',
+      };
+      const decorated = Object.fromEntries(
+        Object.entries(config).map(([key, value]) => [
+          key,
+          typeof value === 'object' && value !== null && !Array.isArray(value)
+            ? { ...value, ...hidden }
+            : value,
+        ]),
+      );
+      expect(await dto(base)).toMatchObject({ configComplete: true });
+      const plain = await dto({ ...base, configJson: JSON.stringify({ ...decorated, ...hidden }) });
+      expect(plain).toMatchObject({
+        config,
+        configComplete: false,
+        userAgent: 'Broker/2.0',
+        retentionDaysOverride: 730,
+        defaultVisibleToNewProjects: true,
+        hasCredential: false,
+      });
+      const protectedDto = await dto({
+        ...base,
+        credentialId: 'credential-sentinel',
+        configJson: JSON.stringify({ ...decorated, ...hidden }),
+      });
+      expect(protectedDto.hasCredential).toBe(true);
+      const { hasCredential: plainPresence, ...plainFields } = plain;
+      const { hasCredential: protectedPresence, ...protectedFields } = protectedDto;
+      expect([plainPresence, protectedPresence]).toEqual([false, true]);
+      expect(JSON.stringify(protectedFields)).toBe(JSON.stringify(plainFields));
+      expect(JSON.stringify(protectedFields)).not.toMatch(/sentinel|credentialHash|credentialKind/);
+      expect(credentialRepository.get).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['{', 'null', '[]', '"credential-sentinel"'])(
+    'fails closed for malformed stored config %s',
+    async (configJson) => {
+      const { service, sources } = setup();
+      sources.getVisible.mockResolvedValue({
+        ...input,
+        id: 'source',
+        projectId: 'project-a',
+        configJson,
+        credentialId: null,
+      });
+      expect(
+        await service.getVisible(ctx, project, { projectId: 'project-a', sourceId: 'source' }),
+      ).toMatchObject({ ok: true, value: { config: {} } });
+    },
+  );
+
+  it.each([
+    'https://user:password@git.example.com/repo.git?token=secret#fragment',
+    'https://git.example.com/%74oken%3Dsecret/repo.git',
+    'https://git.example.com/ghp_abcdefghijklmnop/repo.git',
+    'ssh://git:password@git.example.com/repo.git',
+    'git@git.example.com:repo.git?token=secret',
+    'ghp_abcdefghijklmnop@git.example.com:repo.git',
+    'ssh://git@git.example.com/repo%3Ftoken%3Dsecret',
+  ])('does not expose credentials in a stored repository address %s', async (repository) => {
+    const { service, sources } = setup();
+    sources.getVisible.mockResolvedValue({
+      ...input,
+      projectId: 'project-a',
+      id: 'source',
+      credentialId: null,
+      type: 'vcs',
+      configJson: JSON.stringify({ provider: 'git', repository }),
+      userAgent: 'Bearer ghp_abcdefghijklmnop',
+    });
+    const result = await service.getVisible(ctx, project, {
+      projectId: 'project-a',
+      sourceId: 'source',
+    });
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/password|secret|ghp_|fragment/);
+    expect(result).toMatchObject({ value: { userAgent: null } });
+  });
+});
+
+it('drops unsafe strings and objects hidden in allowlisted config fields', async () => {
+  const { service, sources } = setup();
+  sources.getVisible.mockResolvedValue({
+    ...input,
+    projectId: 'project-a',
+    id: 'source',
+    credentialId: null,
+    configJson: JSON.stringify({
+      selection: {
+        packages: ['vendor/package', { token: 'credential-sentinel' }],
+        patterns: ['token%3Dcredential-sentinel'],
+        expandPatterns: { credential: 'credential-sentinel' },
+      },
+      distHosts: ['ghp_abcdefghijklmnop'],
+      mirrorsFallback: true,
+    }),
+  });
+  const result = await service.getVisible(ctx, project, {
+    projectId: 'project-a',
+    sourceId: 'source',
+  });
+  expect(result).toMatchObject({
+    ok: true,
+    value: { config: { selection: {}, mirrorsFallback: true } },
+  });
+  if (!result.ok) throw new Error('Expected readable source');
+  expect(result.value.config).toEqual({ selection: {}, mirrorsFallback: true });
+  expect(JSON.stringify(result)).not.toMatch(/sentinel|ghp_/);
+});
+
+it.each([
+  [null, 'org', true],
+  [null, 'project', false],
+  ['project-a', 'org', false],
+  ['project-a', 'project', true],
+] as const)('exposes config for owner %s to %s editors only', async (projectId, kind, editable) => {
+  const { service, sources } = setup();
+  const record = {
+    ...input,
+    projectId,
+    id: 'source',
+    credentialId: null,
+    configJson: JSON.stringify({ selection: { packages: ['private/repo'] } }),
+  } as SourceRecord;
+  sources.list.mockResolvedValue([record]);
+  sources.getVisible.mockResolvedValue(record);
+  for (const write of [false, true]) {
+    const actor =
+      kind === 'org'
+        ? {
+            ...org,
+            actor: {
+              ...org.actor,
+              permissions: new Set(['org:sources:read', ...(write ? ['org:sources:write'] : [])]),
+            },
+          }
+        : {
+            ...project,
+            actor: {
+              ...project.actor,
+              permissions: new Set([
+                'project:sources:read',
+                ...(write ? ['project:sources:write'] : []),
+              ]),
+            },
+          };
+    const result = await service.list(ctx, actor, {
+      cursor: null,
+      limit: 10,
+      ...(kind === 'project' ? { projectId: 'project-a' } : {}),
+    });
+    if (!result.ok) throw new Error('Expected source list');
+    if (editable && write)
+      expect(result.value.items[0]).toMatchObject({
+        config: { selection: { packages: ['private/repo'] } },
+      });
+    else {
+      expect(result.value.items[0]).not.toHaveProperty('config');
+      expect(result.value.items[0]).not.toHaveProperty('configComplete');
+      expect(JSON.stringify(result)).not.toContain('private/repo');
+    }
+  }
+  if (kind === 'project') {
+    const result = await service.getVisible(ctx, project, {
+      projectId: 'project-a',
+      sourceId: 'source',
+    });
+    if (!result.ok) throw new Error('Expected visible source');
+    expect(Object.hasOwn(result.value, 'config')).toBe(editable);
+  }
+});
+
+it.each([
+  { selection: { packages: ['vendor/ghp_abcdefghijklmnop'] } },
+  { selection: { packages: ['vendor/package'], patterns: ['vendor/ghp_abcdefghijklmnop*'] } },
+])('preserves withheld configuration after unrelated edits: %j', async (config) => {
+  const { service, sources } = setup();
+  const record = {
+    ...input,
+    id: 'source',
+    credentialId: null,
+    configJson: JSON.stringify(config),
+  } as SourceRecord;
+  sources.get.mockResolvedValue(record);
+  sources.list.mockResolvedValue([record]);
+  const editor = {
+    ...org,
+    actor: { ...org.actor, permissions: new Set(['org:sources:read', 'org:sources:write']) },
+  };
+  const result = await service.list(ctx, editor, { cursor: null, limit: 10 });
+  expect(result).toMatchObject({ ok: true, value: { items: [{ configComplete: false }] } });
+  expect(JSON.stringify(result)).not.toContain('ghp_');
+  expect(
+    await service.update(ctx, editor, fence, 'source', { userAgent: 'Changed/3.0' }, call),
+  ).toMatchObject({ ok: true });
+  const changes = sources.update.mock.calls[0]?.[2].changes;
+  expect(changes).not.toHaveProperty('configJson');
+  expect({ ...record, ...changes }.configJson).toBe(JSON.stringify(config));
 });

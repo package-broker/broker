@@ -1,3 +1,4 @@
+import type { VcsConfig } from '@package-broker/core/sources/config';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -207,6 +208,36 @@ function syncStatus(
   };
 }
 
+const OPTIONAL_VCS_KEYS = [
+  'installationId',
+  'packageName',
+] as const satisfies readonly (keyof VcsConfig)[];
+
+export function runtimeConfigJson(row: Pick<SourceRow, 'type' | 'config_json'>): string {
+  if (row.type !== 'vcs') return row.config_json;
+  let config: unknown;
+  try {
+    config = JSON.parse(row.config_json);
+  } catch {
+    return row.config_json;
+  }
+  if (typeof config !== 'object' || config === null || Array.isArray(config))
+    return row.config_json;
+  let changed = false;
+  const normalized = JSON.stringify(config, function (this: unknown, key: string, value: unknown) {
+    if (
+      this === config &&
+      value === null &&
+      OPTIONAL_VCS_KEYS.some((optional) => optional === key)
+    ) {
+      changed = true;
+      return undefined;
+    }
+    return value;
+  });
+  return changed ? normalized : row.config_json;
+}
+
 function toRecord(row: SourceRow): SourceRecord {
   return {
     id: row.id,
@@ -216,7 +247,7 @@ function toRecord(row: SourceRow): SourceRecord {
     type: row.type,
     url: row.url,
     credentialId: row.credential_id,
-    configJson: row.config_json,
+    configJson: runtimeConfigJson(row),
     userAgent: row.user_agent,
     defaultVisibleToNewProjects: row.default_visible_to_new_projects === 1,
     removalPolicy: row.removal_policy,

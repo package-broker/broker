@@ -376,8 +376,8 @@ describe('npm audit forwarder', () => {
   it.each([
     ['overflow', 'verify_overflow'],
     ['evidence_unavailable', 'verify_failed'],
-    ['snapshot_malformed', 'verify_failed'],
-    ['snapshot_unavailable', 'verify_failed'],
+    ['malformed', 'verify_failed'],
+    ['unavailable', 'verify_failed'],
   ] as const)('classifies typed verification %s by code alone', async (code, reason) => {
     const s = setup();
     const error = new VulnerabilitySnapshotError(code);

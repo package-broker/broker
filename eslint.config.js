@@ -1,6 +1,7 @@
 import js from '@eslint/js';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
+import uiActions from './scripts/eslint-ui-actions.mjs';
 
 const rawSqlSelectors = [
   {
@@ -73,6 +74,23 @@ export default tseslint.config(
   {
     files: ['packages/ui/**/*.{ts,tsx,js,jsx}'],
     rules: { 'no-restricted-syntax': ['error', ...uiSelectors] },
+  },
+  {
+    files: ['packages/ui/src/pages/**/*.{ts,tsx,js,jsx}'],
+    plugins: { 'ui-actions': uiActions },
+    rules: {
+      'ui-actions/row-actions': [
+        'error',
+        {
+          allowlist: [
+            'packages/ui/src/pages/packages.tsx',
+            'packages/ui/src/pages/projects.tsx',
+            'packages/ui/src/pages/sources.tsx',
+            'packages/ui/src/pages/tokens.tsx',
+          ],
+        },
+      ],
+    },
   },
   {
     files: ['packages/ui/src/**/*.ts'],

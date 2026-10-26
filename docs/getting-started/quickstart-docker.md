@@ -17,7 +17,7 @@ Run a single broker container on your workstation, then install one private Comp
 
   <!-- source: Dockerfile:1 -->
 
-- PHP compatible with your package and Composer 2 on your workstation. Composer 1 is refused.
+- curl for the readiness check, plus PHP compatible with your package and Composer 2 on your workstation. Composer 1 is refused.
 
   <!-- source: packages/core/src/registry/composer/routes.ts:81 -->
 
@@ -119,6 +119,25 @@ Use `http://localhost:8787` in the browser, matching `PB_PUBLIC_URL` exactly. Th
 <!-- source: packages/runtime-node/src/startup.ts:240 -->
 <!-- source: Dockerfile:111 -->
 
+## Verify the deployment
+
+From your workstation, use curl to check the readiness route:
+
+```sh
+curl --silent --show-error --fail http://localhost:8787/health/ready
+```
+
+Expected output with HTTP 200:
+
+```json
+{ "status": "ready" }
+```
+
+A 503 means the broker is not ready; wait and repeat the check before continuing. The private package install below verifies authenticated Composer access.
+
+<!-- source: packages/core/src/kernel/health.ts:45 -->
+<!-- source: packages/core/src/kernel/health.ts:83 -->
+
 ## First administrator
 
 Once the container is healthy, replace `<admin-email>` and run bootstrap in an interactive terminal. It prints a one-time setup token; treat it as a password. Open `http://localhost:8787/_pb/ui/setup` and follow [Set up the first administrator](../workers-install.md) to spend the token in the browser or with curl, enroll your password and authenticator, then return here signed in. No identity provider is required.
@@ -216,6 +235,7 @@ Add `auth.json` to your application's `.gitignore`. With a private local editor,
 Add the package, then verify an install from the resulting lock file:
 
 ```sh
+chmod 600 auth.json
 composer require '<vendor>/<package>:<version>' --no-plugins --no-scripts
 composer install --no-plugins --no-scripts
 ```
@@ -227,6 +247,10 @@ Check that `composer.lock` contains the private package and a distribution URL o
 
 <!-- source: packages/core/src/registry/composer/render.ts:94 -->
 
+If an initial metadata fill returns 503, wait for the response's `Retry-After` interval and repeat the failed Composer command. Keep the broker repository configured so the private package still comes through it.
+
+<!-- source: packages/core/src/registry/composer/routes.ts:63 -->
+
 ## Sign-in for a team
 
 Team sign-in uses Cloudflare Access or an OpenID Connect provider such as Dex; grants to the provider's groups give users project access. Evaluating alone needs no identity provider: use the local administrator login. See the [access model](../reference/access-model.md) for group grants and token boundaries.
@@ -234,6 +258,13 @@ Team sign-in uses Cloudflare Access or an OpenID Connect provider such as Dex; g
 <!-- source: packages/core/src/identity/port.ts:131 -->
 <!-- source: packages/core/src/identity/providers.test.ts:26 -->
 <!-- source: docs/reference/access-model.md:31 -->
+
+## What you operate
+
+You own the Docker host, image builds and upgrades, storage capacity, data volume, matching master key, configuration, backups and restore checks. Preserve UID/GID `1000:1000` ownership when restoring the volume. Keep the database, archive store and master key in your recovery plan, and follow [Restore rehearsal](../operations/restore-rehearsal.md) to check recovery.
+
+<!-- source: Dockerfile:98 -->
+<!-- source: docs/operations/restore-rehearsal.md:1 -->
 
 ## Next steps
 

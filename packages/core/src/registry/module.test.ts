@@ -1122,14 +1122,48 @@ describe('unbindable source', () => {
     expect(t.write).not.toHaveBeenCalled();
   });
 
+  it('collapses credential_unavailable writes across packages while the write is pending', async () => {
+    const t = setup(credentialed);
+    let finishWrite!: () => void;
+    const pendingWrite = new Promise<undefined>((resolve) => {
+      finishWrite = () => resolve(undefined);
+    });
+    let startWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      startWrite = resolve;
+    });
+    t.write.mockImplementationOnce(() => {
+      startWrite();
+      return pendingWrite;
+    });
+
+    const first = t.get(scoped, '@acme/x');
+    try {
+      await writeStarted;
+      // A different package cannot join the first package's on-demand fill.
+      const second = { ...scoped, key: '@acme/y' } as PackageVisibility;
+      const response = await t.get(second, '@acme/y');
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('60');
+      expect(t.h.deps.ingest.credential).toHaveBeenCalledTimes(2);
+      expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
+    } finally {
+      finishWrite();
+      expect((await first).status).toBe(503);
+    }
+  });
+
   it('writes credential_unavailable once and not again while the source holds it', async () => {
     const t = setup(credentialed);
-    await Promise.all([t.get(scoped, '@acme/x'), t.get(scoped, '@acme/x')]);
-    expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
-    vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
-      ...credentialed,
-      lastError: 'credential_unavailable',
+    t.write.mockImplementation(async () => {
+      vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({
+        ...credentialed,
+        lastError: 'credential_unavailable',
+      });
     });
+    const responses = await Promise.all([t.get(scoped, '@acme/x'), t.get(scoped, '@acme/x')]);
+    for (const response of responses) expect(response.status).toBe(503);
+    expect(t.write).toHaveBeenCalledExactlyOnceWith(org, 'src-1');
     for (let i = 0; i < 3; i += 1) expect((await t.get(scoped, '@acme/x')).status).toBe(503);
     expect(t.write).toHaveBeenCalledTimes(1);
     vi.mocked(t.h.deps.catalogue.sources.get).mockResolvedValue({

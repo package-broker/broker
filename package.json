@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -b && pnpm --filter @package-broker/ui run build",
     "test": "vitest run",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "rehearsal": "pnpm build && pnpm bundle && vitest run --project runtime-node --project runtime-cloudflare src/restore-rehearsal",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
@@ -23,7 +24,9 @@
     "client-matrix": "node scripts/client-matrix.mjs",
     "smoke:cloudflare": "pnpm --filter @package-broker/runtime-cloudflare exec node scripts/worker-smoke.mjs",
     "smoke:node": "node scripts/node-bundle-smoke.mjs",
-    "smoke:docker": "node scripts/docker-smoke.mjs"
+    "smoke:docker": "node scripts/docker-smoke.mjs",
+    "stage:prebuilt": "node scripts/stage-prebuilt.mjs",
+    "bench:install": "node scripts/bench-install.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

@@ -92,7 +92,14 @@ for (const leaseHeldBack of [0, 2]) {
     await expect(
       definition.handler({ sourceId: 'source', reason: 'poll' }, job),
     ).resolves.toBeUndefined();
-    expect(pollState).toHaveBeenCalledExactlyOnceWith(ctx, expect.anything(), {
+    expect(pollState).toHaveBeenCalledTimes(2);
+    expect(pollState).toHaveBeenNthCalledWith(1, ctx, expect.anything(), {
+      id: 'source',
+      outcome: 'started',
+      reset: true,
+      generation: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(pollState).toHaveBeenLastCalledWith(ctx, expect.anything(), {
       id: 'source',
       outcome: 'success',
       listingHash: '"snapshot"',

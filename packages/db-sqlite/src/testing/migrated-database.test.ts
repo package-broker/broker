@@ -29,10 +29,10 @@ async function withDatabase(
 }
 
 describe('openMigratedDatabase', () => {
-  it('1: applies every core migration and reports 55 user tables', async () => {
+  it('1: applies every core migration and reports 56 user tables', async () => {
     await withDatabase(undefined, async ({ executor }) => {
       const rows = await executor.all<{ n: number }>({ sql: COUNT_TABLES, params: [] });
-      expect(rows).toEqual([{ n: 55 }]);
+      expect(rows).toEqual([{ n: 56 }]);
     });
   });
 

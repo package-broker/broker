@@ -43,6 +43,7 @@ export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   service_principal_permission: 'include',
   session: 'exclude',
   source: 'include',
+  source_sync_package: 'exclude',
   token: 'include',
   token_project: 'include',
   upstream_state: 'exclude',

@@ -10,7 +10,7 @@ import {
 } from '../plugin.js';
 import type { ObsRecord, ObsRecordSink } from '../platform/observability.js';
 import { filterLogLevel } from '../platform/observability.js';
-import { completionSpan } from '../platform/completion-span.js';
+import { completionSpan, upstreamSpan } from '../platform/completion-span.js';
 import type { OtlpSpanInput } from '../platform/otlp.js';
 import { createPolicyFetch } from '../sources/policy-fetch.js';
 import { createOutboundPolicy } from '../sources/url-policy.js';
@@ -689,7 +689,21 @@ describe('kernel observability option', () => {
           labels: expect.objectContaining({ outcome: 'refused' }),
         }),
       ]);
+      const upstream = inputs.flatMap((entry) =>
+        entry.kind === 'log' ? [upstreamSpan(entry.record)].filter((span) => span !== null) : [],
+      );
+      expect(upstream).toHaveLength(1);
+      expect(upstream[0]).toMatchObject({
+        parentSpanId: spans[1]!.spanId,
+        traceId: spans[1]!.traceId,
+        status: 'error',
+        attributes: {
+          outcome: 'upstream.destination',
+        },
+      });
       expect(JSON.stringify(inputs)).not.toMatch(/sentinel\.invalid|secret/);
+      expect(upstream[0]!.attributes).not.toHaveProperty('upstream.origin');
+      expect(JSON.stringify(upstream[0]!.attributes)).not.toMatch(/[?@]|private|secret/);
       expect(transport).not.toHaveBeenCalled();
     },
   );

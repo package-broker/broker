@@ -92,7 +92,7 @@ export function AuditView(props: {
 }) {
   return (
     <section aria-labelledby="page-heading" className="space-y-4">
-      <h1 id="page-heading" className="text-2xl font-semibold">
+      <h1 tabIndex={-1} id="page-heading" className="text-2xl font-semibold">
         Audit
       </h1>
       {props.head === null ? null : (
@@ -196,7 +196,11 @@ export function AuditView(props: {
       </FilterToolbar>
       {props.error === null ? null : (
         <ListState kind="error" title={props.error}>
-          <Button variant="outline" onClick={() => props.onNavigate({ ...props.filters })}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => props.onNavigate({ ...props.filters })}
+          >
             Retry
           </Button>
         </ListState>
@@ -273,6 +277,7 @@ export function AuditView(props: {
           <div className="flex gap-2">
             {props.filters.after ? (
               <Button
+                type="button"
                 variant="outline"
                 onClick={() => props.onNavigate({ ...props.filters, after: '' })}
               >
@@ -280,6 +285,7 @@ export function AuditView(props: {
               </Button>
             ) : null}
             <Button
+              type="button"
               disabled={props.data.next === null || props.loading}
               onClick={() => {
                 if (props.data?.next)

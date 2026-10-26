@@ -1,0 +1,21 @@
+{
+  "name": "package-broker/bench-install-project",
+  "description": "Pinned project for the install-speed comparison.",
+  "type": "project",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.3",
+    "laravel/framework": "12.*",
+    "guzzlehttp/guzzle": "7.*",
+    "doctrine/dbal": "4.*",
+    "symfony/console": "7.*"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "12.*",
+    "phpstan/phpstan": "2.*"
+  },
+  "config": {
+    "sort-packages": true,
+    "allow-plugins": false
+  }
+}

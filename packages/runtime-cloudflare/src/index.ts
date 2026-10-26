@@ -184,7 +184,7 @@ import type {
 } from '@package-broker/core/plugin';
 import type { PlatformServices } from '@package-broker/core/kernel/plugin-ports';
 import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
-import { completionSpan } from '@package-broker/core/platform/completion-span';
+import { completionSpan, upstreamSpan } from '@package-broker/core/platform/completion-span';
 import {
   createObservability,
   filterLogLevel,
@@ -1422,7 +1422,7 @@ export function createWorker(
       emit(record) {
         outputs.emit(record);
         if (record.kind !== 'log' || exporter === undefined) return;
-        const span = completionSpan(record.record, routeTemplates);
+        const span = completionSpan(record.record, routeTemplates) ?? upstreamSpan(record.record);
         if (span !== null) exporter.export('traces', span);
       },
     };

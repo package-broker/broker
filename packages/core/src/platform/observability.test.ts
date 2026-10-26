@@ -18,6 +18,8 @@ import {
   safeErrorName,
   safeRecord,
 } from './observability.js';
+import { upstreamSpan } from './completion-span.js';
+import { encodeTraces } from './otlp.js';
 import type { Observability } from './observability.js';
 
 import { reportableErrorName } from '../kernel/error-name.js';
@@ -266,6 +268,57 @@ describe('createObservability', () => {
     expect(records).toEqual([
       { kind: 'counter', name: 'pb.obs.dropped', labels: { signal: 'counter' }, value: 1 },
     ]);
+  });
+
+  it('parents plugin upstream spans to the scope despite forged caller ids', () => {
+    const { sink, records } = collector();
+    const obs = forPlugin(
+      sink,
+      scope({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) }),
+      'acme',
+      { ...REGISTRY, events: new Set(['upstream.fetch']) },
+    );
+    obs.log({
+      level: 'debug',
+      event: 'upstream.fetch',
+      upstream_trace_id: 'd'.repeat(32),
+      upstream_parent_span_id: 'e'.repeat(16),
+      upstream_span_id: 'c'.repeat(16),
+      upstream_method: 'GET',
+    });
+    const entry = records[0];
+    expect(entry?.kind).toBe('log');
+    if (entry?.kind !== 'log') throw new Error('missing log');
+    expect(entry.record).toMatchObject({
+      upstream_trace_id: 'a'.repeat(32),
+      upstream_parent_span_id: 'b'.repeat(16),
+    });
+    const span = upstreamSpan(entry.record);
+    expect(span).toMatchObject({
+      traceId: 'a'.repeat(32),
+      parentSpanId: 'b'.repeat(16),
+      spanId: 'c'.repeat(16),
+    });
+    expect(JSON.stringify(encodeTraces([span], {}))).toContain('"parentSpanId":"bbbbbbbbbbbbbbbb"');
+  });
+
+  it('keeps an upstream debug log without a trace and exports no span', () => {
+    const { sink, records } = collector();
+    createObservability(sink, scope(), {
+      ...REGISTRY,
+      events: new Set(['upstream.fetch']),
+    }).log({
+      level: 'debug',
+      event: 'upstream.fetch',
+      upstream_span_id: 'c'.repeat(16),
+      upstream_method: 'GET',
+    });
+    expect(records).toHaveLength(1);
+    const entry = records[0];
+    expect(entry?.kind).toBe('log');
+    if (entry?.kind !== 'log') throw new Error('missing log');
+    expect(entry.record.level).toBe('debug');
+    expect(upstreamSpan(entry.record)).toBeNull();
   });
 
   it('stamps scope fields and service', () => {
@@ -646,7 +699,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(29);
+    expect(missing).toHaveLength(37);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 

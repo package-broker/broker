@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { sha256 } from './stage-prebuilt.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_PACKAGES = [
@@ -474,8 +475,117 @@ function bridgeProblems(pkgJson, files) {
   return problems;
 }
 
+export function prebuiltProblems(dir, files, payload) {
+  const problems = [];
+  let record;
+  try {
+    record = JSON.parse(readFileSync(join(dir, 'prebuilt.json'), 'utf8'));
+  } catch {
+    return ['prebuilt.json is missing or invalid'];
+  }
+  if (record?.schemaVersion !== 1) problems.push('prebuilt.json schemaVersion must be 1');
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const nonempty = (value) => typeof value === 'string' && value.trim().length > 0;
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  for (const key of ['package', 'version'])
+    if (!nonempty(record?.[key]) || record[key] !== pkg[key === 'package' ? 'name' : key])
+      problems.push(`prebuilt.json ${key} must match package.json`);
+  for (const key of ['target', 'payload'])
+    if (record?.[key] !== payload) problems.push(`prebuilt.json ${key} must be ${payload}`);
+  for (const [key, pattern] of [
+    ['gitSha', /^[a-f0-9]{40}$/i],
+    ['lockfileSha256', /^[a-f0-9]{64}$/i],
+  ])
+    if (typeof record?.[key] !== 'string' || !pattern.test(record[key]))
+      problems.push(`prebuilt.json ${key} is invalid`);
+  if (
+    !object(record?.toolchain) ||
+    !['node', 'esbuild', 'os', 'arch'].every((key) => nonempty(record.toolchain[key]))
+  )
+    problems.push('prebuilt.json toolchain is invalid');
+  if (
+    !object(record?.plugins) ||
+    !Object.entries(record.plugins).every(([key, value]) => nonempty(key) && nonempty(value))
+  )
+    problems.push('prebuilt.json plugins is invalid');
+  if (
+    payload === 'cloudflare'
+      ? typeof record?.artifactSha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(record.artifactSha256)
+      : record?.artifactSha256 !== null
+  )
+    problems.push('prebuilt.json artifactSha256 is invalid');
+  if (!record?.files || typeof record.files !== 'object' || Array.isArray(record.files))
+    return [...problems, 'prebuilt.json files must be a map'];
+  if (!Object.keys(record.files).length) problems.push('prebuilt.json files must not be empty');
+  const present = new Set(files);
+  for (const [name, digest] of Object.entries(record.files)) {
+    if (
+      !name ||
+      name.startsWith('/') ||
+      name.includes('\\') ||
+      name.split('/').some((part) => ['', '.', '..'].includes(part))
+    ) {
+      problems.push('prebuilt.json contains an invalid payload path');
+      continue;
+    }
+    if (typeof digest !== 'string' || !/^sha256:[a-f0-9]{64}$/i.test(digest))
+      problems.push(`prebuilt.json invalid digest: ${name}`);
+    const path = `${payload}/${name}`;
+    if (!present.has(path)) problems.push(`prebuilt.json listed file missing: ${path}`);
+    else if (digest !== `sha256:${sha256(readFileSync(join(dir, path)))}`)
+      problems.push(`prebuilt.json digest mismatch: ${path}`);
+  }
+  for (const path of files.filter((name) => name.startsWith(`${payload}/`)))
+    if (!Object.hasOwn(record.files, path.slice(payload.length + 1)))
+      problems.push(`prebuilt.json unlisted payload file: ${path}`);
+  return problems;
+}
+
+export function stagingState(dir, payload) {
+  const manifest = existsSync(join(dir, 'prebuilt.json'));
+  const directory = existsSync(join(dir, payload));
+  if (manifest !== directory) throw new Error('prebuilt.json and payload must both be staged');
+  return manifest;
+}
+
+export function releaseAnchorProblems(expected, prebuiltBytes) {
+  try {
+    const anchor = JSON.parse(expected);
+    const record = JSON.parse(prebuiltBytes);
+    if (
+      anchor.schemaVersion !== 1 ||
+      anchor.prebuiltJsonSha256 !== sha256(prebuiltBytes) ||
+      anchor.artifactSha256 !== record.artifactSha256 ||
+      anchor.version !== record.version ||
+      anchor.package !== record.package
+    )
+      return ['release prebuilt anchor does not match packed dist-cloudflare prebuilt.json'];
+    return [];
+  } catch {
+    return [
+      'release prebuilt anchor or packed dist-cloudflare prebuilt.json is missing or invalid',
+    ];
+  }
+}
+
+const PREBUILT = { prebuilt: 'node', 'prebuilt-cloudflare': 'cloudflare' };
+
 function checkPackedPackage(pkg, pkgJson, files, dir) {
   const { problems, targets } = checkExports(pkg, pkgJson, files);
+  if (
+    typeof pkgJson.repository?.url !== 'string' ||
+    !pkgJson.repository.url.trim() ||
+    typeof pkgJson.repository?.directory !== 'string' ||
+    !pkgJson.repository.directory.trim()
+  )
+    problems.push('repository.url and repository.directory are required');
+  if (PREBUILT[pkg]) problems.push(...prebuiltProblems(dir, files, PREBUILT[pkg]));
+  if (
+    pkg === 'cli' &&
+    process.env.CHECK_PACK_RELEASE === '1' &&
+    !files.includes('dist/prebuilt-expected.json')
+  )
+    problems.push('dist/prebuilt-expected.json is missing from the release tarball');
   const entry = checkEntryFields(pkgJson, files);
   problems.push(...entry.problems);
 
@@ -523,108 +633,146 @@ function inspect(pkg) {
     const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     const result = checkPackedPackage(pkg, pkgJson, files, dir);
     if (pkg === 'core') result.problems.push(...checkCorePackageContext(dir, pkgJson, files));
-    return { ...result, pkgJson };
+    return {
+      ...result,
+      pkgJson,
+      expectedBytes:
+        pkg === 'cli' && files.includes('dist/prebuilt-expected.json')
+          ? readFileSync(join(dir, 'dist/prebuilt-expected.json'))
+          : undefined,
+      prebuiltBytes:
+        pkg === 'prebuilt-cloudflare' && files.includes('prebuilt.json')
+          ? readFileSync(join(dir, 'prebuilt.json'))
+          : undefined,
+    };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-const { names: packages, rejected } = planPackages();
+function main() {
+  const { names: packages, rejected } = planPackages();
 
-const outcomes = [];
-for (const pkg of packages) {
-  let result;
-  try {
-    if (rejected.has(pkg)) throw new Error(rejected.get(pkg));
-    result = inspect(pkg);
-  } catch (error) {
-    result = {
-      problems: [
-        rejected.has(pkg)
-          ? error.message
-          : `packing or reading the tarball failed: ${error.message}`,
-      ],
-      targets: 0,
-      files: 0,
+  const outcomes = [];
+  for (const pkg of packages) {
+    let result;
+    try {
+      if (rejected.has(pkg)) throw new Error(rejected.get(pkg));
+      if (PREBUILT[pkg] && !stagingState(join(ROOT, 'packages', pkg), PREBUILT[pkg])) {
+        const { json } = readPackageJson(pkg);
+        const validRepository =
+          typeof json?.repository?.url === 'string' &&
+          json.repository.url.trim() &&
+          typeof json?.repository?.directory === 'string' &&
+          json.repository.directory.trim();
+        result = {
+          problems: validRepository ? [] : ['repository.url and repository.directory are required'],
+          notStaged: true,
+        };
+      } else result = inspect(pkg);
+    } catch (error) {
+      result = {
+        problems: [
+          rejected.has(pkg)
+            ? error.message
+            : `packing or reading the tarball failed: ${error.message}`,
+        ],
+        targets: 0,
+        files: 0,
+      };
+    }
+    outcomes.push({ pkg, result });
+  }
+
+  if (process.env.CHECK_PACK_RELEASE === '1') {
+    const cli = outcomes.find(({ pkg }) => pkg === 'cli');
+    cli.result.problems.push(
+      ...releaseAnchorProblems(
+        cli.result.expectedBytes,
+        outcomes.find(({ pkg }) => pkg === 'prebuilt-cloudflare')?.result.prebuiltBytes,
+      ),
+    );
+  }
+
+  const packedCoreVersion =
+    outcomes.find(({ pkg }) => pkg === 'core')?.result.pkgJson?.version ?? CORE_VERSION;
+  const packedByName = new Map(
+    outcomes
+      .filter(({ result }) => result.pkgJson)
+      .map(({ result }) => [result.pkgJson.name, result.pkgJson]),
+  );
+  for (const root of ['cli', 'runtime-node', 'runtime-cloudflare']) {
+    const outcome = outcomes.find(({ pkg }) => pkg === root);
+    const visited = new Set();
+    const walk = (name, chain) => {
+      if (name === UI_PACKAGE || name === '@package-broker/ui-assets')
+        outcome.result.problems.push(`UI dependency through ${chain.join(' -> ')}`);
+      if (visited.has(name)) return;
+      visited.add(name);
+      const pkg = packedByName.get(name);
+      for (const dependency of Object.keys({
+        ...pkg?.dependencies,
+        ...pkg?.optionalDependencies,
+        ...pkg?.peerDependencies,
+      }))
+        walk(dependency, [...chain, dependency]);
     };
+    walk(`@package-broker/${root}`, [root]);
   }
-  outcomes.push({ pkg, result });
-}
+  const packedUiVersion =
+    outcomes.find(({ pkg }) => pkg === 'ui')?.result.pkgJson?.version ??
+    readPackageJson('ui').json?.version ??
+    '0.0.0';
+  for (const { pkg, result } of outcomes)
+    if (result.pkgJson) {
+      result.problems.push(...checkCorePeer(pkg, result.pkgJson, packedCoreVersion));
+      result.problems.push(...checkUiRange(pkg, result.pkgJson, packedUiVersion));
+    }
 
-const packedCoreVersion =
-  outcomes.find(({ pkg }) => pkg === 'core')?.result.pkgJson?.version ?? CORE_VERSION;
-const packedByName = new Map(
-  outcomes
-    .filter(({ result }) => result.pkgJson)
-    .map(({ result }) => [result.pkgJson.name, result.pkgJson]),
-);
-for (const root of ['cli', 'runtime-node', 'runtime-cloudflare']) {
-  const outcome = outcomes.find(({ pkg }) => pkg === root);
-  const visited = new Set();
-  const walk = (name, chain) => {
-    if (name === UI_PACKAGE || name === '@package-broker/ui-assets')
-      outcome.result.problems.push(`UI dependency through ${chain.join(' -> ')}`);
-    if (visited.has(name)) return;
-    visited.add(name);
-    const pkg = packedByName.get(name);
-    for (const dependency of Object.keys({
-      ...pkg?.dependencies,
-      ...pkg?.optionalDependencies,
-      ...pkg?.peerDependencies,
-    }))
-      walk(dependency, [...chain, dependency]);
-  };
-  walk(`@package-broker/${root}`, [root]);
-}
-const packedUiVersion =
-  outcomes.find(({ pkg }) => pkg === 'ui')?.result.pkgJson?.version ??
-  readPackageJson('ui').json?.version ??
-  '0.0.0';
-for (const { pkg, result } of outcomes)
-  if (result.pkgJson) {
-    result.problems.push(...checkCorePeer(pkg, result.pkgJson, packedCoreVersion));
-    result.problems.push(...checkUiRange(pkg, result.pkgJson, packedUiVersion));
-  }
-
-const coreOutcome = outcomes.find(({ pkg }) => pkg === 'core');
-if (coreOutcome && coreOutcome.result.problems.length === 0) {
-  try {
-    const output = execFileSync(
-      process.execPath,
-      [
-        '--input-type=module',
-        '-e',
-        `import { generateOpenApi } from '@package-broker/core/api/openapi';
+  const coreOutcome = outcomes.find(({ pkg }) => pkg === 'core');
+  if (coreOutcome && coreOutcome.result.problems.length === 0) {
+    try {
+      const output = execFileSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          `import { generateOpenApi } from '@package-broker/core/api/openapi';
          import { openApiRoute } from '@package-broker/core/api/openapi-route';
          const document = generateOpenApi([], { title: 'Package Broker', version: '2.0.0' });
          console.log(JSON.stringify({ version: document.openapi, path: openApiRoute(document).path }));`,
-      ],
-      { cwd: join(ROOT, 'packages', 'cli'), encoding: 'utf8' },
-    );
-    const resolved = JSON.parse(output);
-    if (resolved.version !== '3.1.0' || resolved.path !== '/_pb/openapi.json')
-      coreOutcome.result.problems.push(
-        `./api/* imported from the cli package returned ${output.trim()}`,
+        ],
+        { cwd: join(ROOT, 'packages', 'cli'), encoding: 'utf8' },
       );
-  } catch (error) {
-    coreOutcome.result.problems.push(
-      `./api/* is not importable from the cli package: ${error.message}`,
-    );
+      const resolved = JSON.parse(output);
+      if (resolved.version !== '3.1.0' || resolved.path !== '/_pb/openapi.json')
+        coreOutcome.result.problems.push(
+          `./api/* imported from the cli package returned ${output.trim()}`,
+        );
+    } catch (error) {
+      coreOutcome.result.problems.push(
+        `./api/* is not importable from the cli package: ${error.message}`,
+      );
+    }
   }
-}
 
-for (const { pkg, result } of outcomes) {
-  if (result.problems.length > 0) {
-    process.exitCode = 1;
-    console.error(`${pkg}: FAILED (${result.problems.length} problem(s))`);
-    for (const problem of result.problems) console.error(`  ${problem}`);
-  } else {
-    console.log(
-      `${pkg}: ok (${result.files} packed files, ${result.targets} entry targets resolved)`,
-    );
-    if (pkg === 'core') {
-      console.log('  ./api/*: ./api/openapi, ./api/openapi-route (types and default resolved)');
-      console.log('  ./runtime/*: ./runtime/core-jobs (types and default resolved)');
+  for (const { pkg, result } of outcomes) {
+    if (result.problems.length > 0) {
+      process.exitCode = 1;
+      console.error(`${pkg}: FAILED (${result.problems.length} problem(s))`);
+      for (const problem of result.problems) console.error(`  ${problem}`);
+    } else if (result.notStaged) {
+      console.log(`${pkg}: not staged (skipped)`);
+    } else {
+      console.log(
+        `${pkg}: ok (${result.files} packed files, ${result.targets} entry targets resolved)`,
+      );
+      if (pkg === 'core') {
+        console.log('  ./api/*: ./api/openapi, ./api/openapi-route (types and default resolved)');
+        console.log('  ./runtime/*: ./runtime/core-jobs (types and default resolved)');
+      }
     }
   }
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

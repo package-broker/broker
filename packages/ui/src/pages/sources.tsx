@@ -1,5 +1,5 @@
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
-import { pollSync, syncStatusChanged } from './sources/sync-poll.js';
+import { pollSync, syncPollResult } from './sources/sync-poll.js';
 import type { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { responseHeader, type ApiResult } from '../api.js';
@@ -412,7 +412,8 @@ export function createSourcesModel(
       });
     },
     closeEditor() {
-      if (!state.busy) set({ editor: null, fieldErrors: {}, formError: null });
+      if (state.busy) return;
+      set({ editor: null, fieldErrors: {}, formError: null });
     },
     async saveSource(body: CreateSource | SourceChanges) {
       if (state.busy || state.editor === null) return;
@@ -551,7 +552,8 @@ export function createSourcesModel(
       }
     },
     closeCredential() {
-      if (!state.busy) set({ credentialSource: null });
+      if (state.busy) return;
+      set({ credentialSource: null });
     },
     closeNames() {
       if (state.busy) return;
@@ -639,7 +641,7 @@ export function createSourcesModel(
               }),
         async () => {
           if (generation !== syncGeneration) return;
-          const refresh = async () => {
+          const refresh = async (): Promise<boolean | 'pending'> => {
             const version = listVersion;
             const ownership = state.ownership;
             let after: string | null = null;
@@ -666,23 +668,24 @@ export function createSourcesModel(
                     item.id === source.id ? { ...current, url: displayUrl(current.url) } : item,
                   ),
                 });
-                return syncStatusChanged(source, current);
+                return syncPollResult(source, current);
               }
               after = result.data.next;
             } while (after !== null);
             return true;
           };
-          let complete: boolean;
+          let complete: boolean | 'pending';
           if (state.loading && state.items.length === 0) {
             await load();
             const current = await findLoadedSource(source.id);
-            complete = state.listError || !current || syncStatusChanged(source, current);
+            complete = state.listError || !current || syncPollResult(source, current);
           } else {
             complete = await refresh();
           }
           if (generation !== syncGeneration) return;
           set({ notice: 'Sync requested.' });
-          if (!complete && generation === syncGeneration) stopSyncPolling = pollSync(refresh);
+          if (complete !== true && generation === syncGeneration)
+            stopSyncPolling = pollSync(refresh);
         },
       );
     },
@@ -845,6 +848,7 @@ function CredentialEditor({
       autoComplete="off"
       onSubmit={(event) => {
         event.preventDefault();
+        if (busy) return;
         void submitCredential(model, source, event.currentTarget as unknown as CredentialForm);
       }}
     >
@@ -863,7 +867,9 @@ function CredentialEditor({
         ))}
       </Select>
       <CredentialFields key={kind} kind={kind} busy={busy} />
-      <Button disabled={busy}>Save credential</Button>
+      <Button type="submit" disabled={busy}>
+        Save credential
+      </Button>
     </form>
   );
 }
@@ -880,6 +886,7 @@ export const SYNC_ERROR_LABELS: Record<(typeof SOURCE_ERROR_CODES)[number], stri
   rate_limited: 'Rate limited',
   not_found: 'Not found',
   invalid_response: 'Invalid response',
+  tag_limit_exceeded: 'Tag limit exceeded',
   mass_absence: 'Mass package absence',
   too_large: 'Response too large',
   policy_denied: 'Policy denied',
@@ -908,6 +915,20 @@ function SyncStatus({ source }: { source: Source }) {
           </>
         )}
       </p>
+      {source.sync && (
+        <>
+          <p>
+            Latest sync: {source.sync.queued} queued · {source.sync.running} running ·{' '}
+            {source.sync.retrying} retrying · {source.sync.failed} failed · {source.sync.completed}{' '}
+            completed
+          </p>
+          {source.sync.errors.slice(0, 3).map(({ code, count }) => (
+            <p key={code}>
+              {SYNC_ERROR_LABELS[code]} · <code>{code}</code>: {count}
+            </p>
+          ))}
+        </>
+      )}
       {isProxy(source) ? <p>{PROXY_DEMAND_MESSAGE}</p> : null}
       <p>
         Next poll: <Time value={source.nextPollAt} fallback="None" />
@@ -945,15 +966,7 @@ export function SourceActions({
           ) : null}
         </>
       ) : null}
-      <DropdownMenu
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && event.currentTarget.contains(event.target as Node)) {
-            event.preventDefault();
-            event.currentTarget.open = false;
-            event.currentTarget.querySelector('summary')?.focus();
-          }
-        }}
-      >
+      <DropdownMenu>
         <DropdownMenuTrigger>More</DropdownMenuTrigger>
         <DropdownMenuContent className="grid gap-1">
           {owned || organizationProject ? (
@@ -1043,7 +1056,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   return (
     <section aria-labelledby="page-heading" className="grid gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 id="page-heading" className="text-xl font-semibold">
+        <h1 tabIndex={-1} id="page-heading" className="text-xl font-semibold">
           Sources
         </h1>
         <Button type="button" disabled={state.busy} onClick={() => model.openEditor()}>
@@ -1197,6 +1210,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                     <div className="flex flex-wrap items-center gap-1">
                       <strong>{index + 1}</strong>
                       <Button
+                        type="button"
                         size="sm"
                         variant="ghost"
                         aria-label={`Move up ${source.name}`}
@@ -1206,6 +1220,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                         Move up
                       </Button>
                       <Button
+                        type="button"
                         size="sm"
                         variant="ghost"
                         aria-label={`Move down ${source.name}`}
@@ -1317,6 +1332,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       ) : null}
       {state.next !== null ? (
         <Button
+          type="button"
           disabled={state.loading || state.busy}
           onClick={() => {
             void model.load(true);
@@ -1327,6 +1343,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       ) : null}
       {state.availableNext !== null ? (
         <Button
+          type="button"
           disabled={state.availableLoading || state.busy}
           onClick={() => void model.loadAvailable(true)}
         >
@@ -1416,6 +1433,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               </ul>
               {state.names.next !== null ? (
                 <Button
+                  type="button"
                   disabled={state.busy}
                   onClick={() => {
                     void model.names(state.names!.source, true);
@@ -1428,6 +1446,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 className="grid gap-3"
                 onSubmit={(event) => {
                   event.preventDefault();
+                  if (state.busy) return;
                   const form = event.currentTarget;
                   const pattern = formValue(form, 'pattern');
                   form.reset();
@@ -1436,7 +1455,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               >
                 <Label htmlFor="registered-pattern">Registered pattern</Label>
                 <Input id="registered-pattern" name="pattern" maxLength={50} required />
-                <Button disabled={state.busy}>Add name</Button>
+                <Button type="submit" disabled={state.busy}>
+                  Add name
+                </Button>
               </form>
             </div>
           </DialogContent>
@@ -1452,6 +1473,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             {state.next !== null ? <p>Load all sources before changing their order.</p> : null}
 
             <Button
+              type="button"
               disabled={state.loading || state.busy || state.next !== null || state.etag === null}
               onClick={() => {
                 void model.saveOrder();
@@ -1472,12 +1494,15 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               className="grid gap-3"
               onSubmit={(event) => {
                 event.preventDefault();
+                if (state.busy) return;
                 void model.resolve(formValue(event.currentTarget, 'name'));
               }}
             >
               <Label htmlFor="resolve-name">Package name</Label>
               <Input id="resolve-name" name="name" maxLength={214} required />
-              <Button>Preview</Button>
+              <Button type="submit" disabled={state.busy}>
+                Preview
+              </Button>
             </form>
             {state.preview ? (
               <div aria-live="polite">

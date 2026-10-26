@@ -22,7 +22,7 @@ import {
   createBlobUploadAdmission,
   type ByteStore,
 } from '@package-broker/core/platform/blob';
-import { completionSpan } from '@package-broker/core/platform/completion-span';
+import { completionSpan, upstreamSpan } from '@package-broker/core/platform/completion-span';
 import {
   createObservability,
   safeErrorName,
@@ -467,7 +467,7 @@ function createTelemetry(ports: PlatformPortConfig, options: StartOptions): Tele
       outputs.emit(record);
       if (record.kind !== 'log' || exporter === undefined) return;
       try {
-        const span = completionSpan(record.record, routes);
+        const span = completionSpan(record.record, routes) ?? upstreamSpan(record.record);
         if (span !== null) exporter.export('traces', span);
       } catch {
         return;

@@ -20,7 +20,7 @@ import { encodeQr, type QrMatrix } from './qr.js';
 import { buildListFilterHash, type HashRoute } from './page-hash.js';
 import { Alert, AlertDescription } from './components/ui/alert.js';
 import { Button } from './components/ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card.js';
+import { Card, CardContent, CardDescription, CardHeader } from './components/ui/card.js';
 import {
   Dialog,
   DialogContent,
@@ -544,7 +544,9 @@ export function LoginView(props: {
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
-        <CardTitle>Sign in</CardTitle>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
+          Sign in
+        </h1>
         <CardDescription>Package Broker</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -566,6 +568,8 @@ export function LoginView(props: {
           <form
             className="grid gap-4"
             onSubmit={(event) => {
+              event.preventDefault();
+              if (busy) return;
               const data = values(event);
               props.onSubmit({
                 email: data['email'] ?? '',
@@ -614,7 +618,9 @@ export function ReauthView(props: {
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
-        <CardTitle>Confirm it is you</CardTitle>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
+          Confirm it is you
+        </h1>
         <CardDescription>This action needs a fresh sign-in.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -629,6 +635,8 @@ export function ReauthView(props: {
           <form
             className="grid gap-4"
             onSubmit={(event) => {
+              event.preventDefault();
+              if (props.busy) return;
               const data = values(event);
               props.onSubmit({
                 password: data['password'] ?? '',
@@ -803,10 +811,11 @@ export function ReauthConfirmContent(props: {
         </details>
       ) : null}
       <DialogFooter>
-        <Button variant="outline" onClick={props.onDecline}>
+        <Button type="button" variant="outline" onClick={props.onDecline}>
           Discard
         </Button>
         <Button
+          type="button"
           variant={description.destructive ? 'destructive' : 'default'}
           onClick={props.onConfirm}
         >
@@ -852,7 +861,9 @@ export function SetupView(props: {
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
-        <CardTitle>First-run setup</CardTitle>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
+          First-run setup
+        </h1>
       </CardHeader>
       <CardContent className="grid gap-4">
         {state.notice === null ? null : (
@@ -863,7 +874,11 @@ export function SetupView(props: {
         {state.stage === 'token' ? (
           <form
             className="grid gap-4"
-            onSubmit={(event) => props.onToken(values(event)['token'] ?? '')}
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (state.busy) return;
+              props.onToken(values(event)['token'] ?? '');
+            }}
           >
             <TextField
               id="token"
@@ -879,6 +894,8 @@ export function SetupView(props: {
           <form
             className="grid gap-4"
             onSubmit={(event) => {
+              event.preventDefault();
+              if (state.busy) return;
               const data = values(event);
               props.onFinish({
                 password: data['password'] ?? '',
@@ -1044,7 +1061,7 @@ export function ReauthConfirm(props: { flow: ReturnType<typeof createReauthFlow>
               ? 'Your action could not be saved. Try the action again after dismissing this message.'
               : 'Your action could not be completed. Review the current data and try the action again.'}
         </AlertDescription>
-        <Button variant="outline" onClick={() => props.flow.decline()}>
+        <Button type="button" variant="outline" onClick={() => props.flow.decline()}>
           Dismiss
         </Button>
       </Alert>

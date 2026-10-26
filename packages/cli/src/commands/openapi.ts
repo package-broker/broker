@@ -40,8 +40,10 @@ export function openapiCommand(deps: {
 }
 
 const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+// Release PRs bump package versions without regenerating the committed document; the API major stays stable across them.
+export const openApiVersion = pkg.version.split('.')[0]!;
 export const runOpenApi = openapiCommand({
   specs: servedApiSpecs,
-  info: { title: 'Package Broker', version: pkg.version },
+  info: { title: 'Package Broker', version: openApiVersion },
   write: (path, bytes) => writeFile(path, bytes, 'utf8'),
 });

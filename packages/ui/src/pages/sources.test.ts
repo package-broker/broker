@@ -1288,7 +1288,7 @@ describe('source creation and configuration editing', () => {
     expect(model.snapshot().fieldErrors).toEqual({});
   });
 
-  it('blocks duplicate submits and closing while a creation is pending', async () => {
+  it('blocks duplicate submits and dismissal while a creation is pending', async () => {
     let finish!: (response: Response) => void;
     const fetch = vi
       .fn()
@@ -1771,25 +1771,45 @@ describe('source row action controls', () => {
     const details = {
       open: true,
       contains: vi.fn(() => true),
+      closest: vi.fn(() => null),
       querySelector: vi.fn(() => ({ focus })),
     };
     const preventDefault = vi.fn();
-    (menu.props.onKeyDown as (event: unknown) => void)({
+    const handler = DropdownMenu(menu.props).props.onKeyDown as (event: unknown) => void;
+    handler({
       key: 'Escape',
       currentTarget: details,
       preventDefault,
+      stopPropagation: vi.fn(),
     });
     expect(details.open).toBe(false);
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(focus).toHaveBeenCalledOnce();
-    details.open = true;
-    details.contains.mockReturnValue(false);
+    details.open = false;
     preventDefault.mockClear();
-    (menu.props.onKeyDown as (event: unknown) => void)({
+    handler({
       key: 'Escape',
       currentTarget: details,
       preventDefault,
+      stopPropagation: vi.fn(),
     });
+    expect(details.open).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('Escape from outside the menu does not close it', () => {
+    const { model } = setup();
+    const menu = elements(SourceActions({ source, model, busy: false })).find(
+      (node) => node.type === DropdownMenu,
+    )!;
+    const details = { open: true, contains: vi.fn(() => false) };
+    const preventDefault = vi.fn();
+    DropdownMenu(menu.props).props.onKeyDown!({
+      key: 'Escape',
+      currentTarget: details,
+      target: {},
+      preventDefault,
+    } as never);
     expect(details.open).toBe(true);
     expect(preventDefault).not.toHaveBeenCalled();
   });

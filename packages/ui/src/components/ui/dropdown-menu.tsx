@@ -1,8 +1,28 @@
 import type { ComponentProps } from 'react';
 import { cn } from '../../lib/utils.js';
 
-export function DropdownMenu({ className, ...props }: ComponentProps<'details'>) {
-  return <details className={cn('relative', className)} {...props} />;
+export function DropdownMenu({ className, onKeyDown, ...props }: ComponentProps<'details'>) {
+  return (
+    <details
+      className={cn('relative', className)}
+      {...props}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (
+          !event.defaultPrevented &&
+          event.key === 'Escape' &&
+          event.currentTarget.open &&
+          event.currentTarget.contains(event.target as Node)
+        ) {
+          // A cancelled Escape keydown is not turned into a close request for the enclosing modal dialog.
+          event.preventDefault();
+          event.stopPropagation();
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector('summary')?.focus();
+        }
+      }}
+    />
+  );
 }
 
 export function DropdownMenuTrigger({ className, ...props }: ComponentProps<'summary'>) {

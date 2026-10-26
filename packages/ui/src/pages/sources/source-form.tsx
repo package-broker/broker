@@ -1,3 +1,4 @@
+import { Textarea } from '../../components/ui/textarea.js';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { operations } from '../../api-types.js';
 import type { ApiErrorDetail } from '../../api.js';
@@ -382,7 +383,7 @@ export function SourceForm({
     return field(
       name,
       options.multiline ? (
-        <textarea
+        <Textarea
           {...props}
           rows={3}
           className="w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-base sm:text-sm"
@@ -500,6 +501,7 @@ export function SourceForm({
           className="flex min-h-0 min-w-0 flex-1 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
+            if (busy) return;
             const data = new FormData(event.currentTarget);
             const next = validateSourceForm(data, type, editing);
             setLocalErrors(next);
@@ -836,7 +838,7 @@ export function SourceForm({
             >
               Cancel
             </Button>
-            <Button className="min-h-11" disabled={busy}>
+            <Button type="submit" className="min-h-11" disabled={busy}>
               {editing ? 'Save source' : 'Add source'}
             </Button>
           </DialogFooter>

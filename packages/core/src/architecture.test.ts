@@ -536,6 +536,114 @@ describe('classifier', () => {
     ).toHaveLength(1);
   });
 
+  function keyboardViolations(source: string) {
+    const tree = ts.createSourceFile(
+      'scan.tsx',
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    const violations: string[] = [];
+    let forms = 0;
+    function validTabIndex(value: ts.Node | undefined): boolean {
+      if (!value) return false;
+      if (ts.isParenthesizedExpression(value)) return validTabIndex(value.expression);
+      if (ts.isConditionalExpression(value))
+        return validTabIndex(value.whenTrue) && validTabIndex(value.whenFalse);
+      return ['-1', '0', 'undefined'].includes(
+        ts.isStringLiteral(value) ? value.text : value.getText(tree),
+      );
+    }
+    function checkSpread(node: ts.Node) {
+      if (ts.isObjectLiteralExpression(node)) {
+        for (const prop of node.properties) {
+          if (
+            prop.name &&
+            (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+            prop.name.text === 'tabIndex'
+          ) {
+            if (!ts.isPropertyAssignment(prop) || !validTabIndex(prop.initializer))
+              violations.push(prop.getText(tree));
+          }
+        }
+      }
+      ts.forEachChild(node, checkSpread);
+    }
+    function visit(node: ts.Node, inForm = false) {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const attrs = node.attributes.properties;
+        const tag = node.tagName.getText(tree);
+        if (tag === 'form') {
+          forms++;
+          if (
+            !attrs.some((attr) => ts.isJsxAttribute(attr) && attr.name.getText(tree) === 'onSubmit')
+          )
+            violations.push('form without onSubmit');
+        }
+        if (
+          inForm &&
+          (tag === 'Button' || tag === 'button') &&
+          !attrs.some(
+            (attr) =>
+              ts.isJsxAttribute(attr) && attr.name.getText(tree) === 'type' && attr.initializer,
+          )
+        )
+          violations.push(`${tag} without type`);
+        for (const attr of attrs) {
+          if (ts.isJsxSpreadAttribute(attr)) checkSpread(attr.expression);
+          else if (attr.name.getText(tree) === 'tabIndex') {
+            const value =
+              attr.initializer && ts.isJsxExpression(attr.initializer)
+                ? attr.initializer.expression
+                : attr.initializer;
+            if (!validTabIndex(value)) violations.push(attr.getText(tree));
+          }
+        }
+      }
+      const childInForm =
+        inForm || (ts.isJsxElement(node) && node.openingElement.tagName.getText(tree) === 'form');
+      ts.forEachChild(node, (child) => visit(child, childInForm));
+    }
+    visit(tree);
+    return { violations, forms };
+  }
+
+  it.each([
+    '<div tabIndex />',
+    '<div tabIndex={1} />',
+    '<div tabIndex={value} />',
+    '<div tabIndex={ok ? 0 : 2} />',
+    '<form />',
+    '<form onSubmit={submit}><button>Cancel</button></form>',
+    '<div {...{tabIndex: 1}} />',
+    '<div {...(ok ? {tabIndex: 0} : {tabIndex: 2})} />',
+    '<div {...{tabIndex: ok ? 0 : 2}} />',
+    '<form onSubmit={submit}><Button>Cancel</Button></form>',
+    '<form onSubmit={submit}><div><Button /></div></form>',
+  ])('rejects unsafe keyboard markup: %s', (source) => {
+    expect(keyboardViolations(source).violations.length).toBeGreaterThan(0);
+  });
+
+  it('accepts optional tab stops and explicitly typed form buttons', () => {
+    expect(
+      keyboardViolations(
+        '<form onSubmit={submit}><Button type="button" /><div tabIndex={label ? 0 : undefined} {...(ok ? {tabIndex: -1} : {tabIndex: undefined})} /></form>',
+      ).violations,
+    ).toEqual([]);
+  });
+
+  it('requires form submit handlers, explicit form button types and nonpositive tab stops throughout UI sources', () => {
+    const paths = sourceFiles('ui').filter((file) => file.startsWith('packages/ui/src/'));
+    let forms = 0;
+    for (const file of paths) {
+      const result = keyboardViolations(readFileSync(path.join(REPO_ROOT, file), 'utf8'));
+      expect(result.violations, file).toEqual([]);
+      forms += result.forms;
+    }
+    expect(forms).toBeGreaterThan(20);
+  });
+
   it('discovers ui root config files and the configured build entry', () => {
     const files = sourceFiles('ui');
     expect(files).toContain('packages/ui/tailwind.config.js');

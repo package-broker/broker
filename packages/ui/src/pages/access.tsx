@@ -381,16 +381,22 @@ export function AccessView({
                           <form
                             className="grid gap-2"
                             onSubmit={(event) => {
+                              event.preventDefault();
+                              if (state.busy) return;
                               const values = formValues(event);
                               void controller.updateRole(role.id, { name: values['name'] ?? '' });
                             }}
                           >
                             <Field name="name" label="Role name" value={role.name} />
-                            <Button disabled={state.busy}>Rename role</Button>
+                            <Button type="submit" disabled={state.busy}>
+                              Rename role
+                            </Button>
                           </form>
                           <form
                             className="grid gap-2"
                             onSubmit={(event) => {
+                              event.preventDefault();
+                              if (state.busy) return;
                               const values = formValues(event);
                               void controller.updateRole(role.id, {
                                 permissions: permissionsOf(values['permissions']),
@@ -403,7 +409,9 @@ export function AccessView({
                               value={role.permissions.join(', ')}
                               required={false}
                             />
-                            <Button disabled={state.busy}>Save permissions</Button>
+                            <Button type="submit" disabled={state.busy}>
+                              Save permissions
+                            </Button>
                           </form>
                           <ConfirmAction
                             key={`${role.id}:${role.revision}`}
@@ -427,6 +435,8 @@ export function AccessView({
               <form
                 className="my-6 grid gap-3"
                 onSubmit={(event) => {
+                  event.preventDefault();
+                  if (state.busy) return;
                   const values = formValues(event);
                   void controller.createRole({
                     key: values['key'] ?? '',
@@ -447,7 +457,9 @@ export function AccessView({
                   </Select>
                 </Label>
                 <Field name="permissions" label="Permissions (comma separated)" required={false} />
-                <Button disabled={state.busy}>Create role</Button>
+                <Button type="submit" disabled={state.busy}>
+                  Create role
+                </Button>
               </form>
             </details>
           ) : null}
@@ -512,12 +524,16 @@ export function AccessView({
                           <form
                             className="grid gap-2"
                             onSubmit={(event) => {
+                              event.preventDefault();
+                              if (state.busy) return;
                               const values = formValues(event);
                               void controller.changeGrant(grant.id, values['roleId'] ?? '');
                             }}
                           >
                             <Field name="roleId" label="Role ID" value={grant.roleId} />
-                            <Button disabled={state.busy}>Change role</Button>
+                            <Button type="submit" disabled={state.busy}>
+                              Change role
+                            </Button>
                           </form>
                           <ConfirmAction
                             key={`${grant.id}:${grant.revision}`}
@@ -545,6 +561,8 @@ export function AccessView({
               <form
                 className="my-6 grid gap-3"
                 onSubmit={(event) => {
+                  event.preventDefault();
+                  if (state.busy) return;
                   const values = formValues(event);
                   void controller.createGrant({
                     roleId: values['roleId'] ?? '',
@@ -570,7 +588,9 @@ export function AccessView({
                 </Label>
                 <Field name="subject" label="Subject value" />
                 <Field name="provider" label="Provider (groups only)" required={false} />
-                <Button disabled={state.busy}>Create grant</Button>
+                <Button type="submit" disabled={state.busy}>
+                  Create grant
+                </Button>
               </form>
             </details>
           ) : null}
@@ -607,7 +627,7 @@ export function AccessPage() {
   const query = parseAccessHash(hash);
   return (
     <section aria-labelledby="page-heading">
-      <h1 id="page-heading" className="text-xl font-semibold">
+      <h1 tabIndex={-1} id="page-heading" className="text-xl font-semibold">
         Access
       </h1>
       <p className="mt-1 text-neutral-600">

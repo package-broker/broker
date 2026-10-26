@@ -605,7 +605,12 @@ export function TokenList({ state: s, controller: c }: { state: State; controlle
           {items.length} tokens on this page ·{' '}
           {items.filter((token) => token.status === 'active').length} active
         </p>
-        <Button variant="outline" disabled={s.loading || s.busy} onClick={() => void c.load()}>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={s.loading || s.busy}
+          onClick={() => void c.load()}
+        >
           Reload tokens
         </Button>
       </div>
@@ -706,6 +711,7 @@ export function TokenList({ state: s, controller: c }: { state: State; controlle
               render: (token) => (
                 <div className="flex flex-wrap gap-2">
                   <Button
+                    type="button"
                     size="sm"
                     variant="outline"
                     disabled={
@@ -734,6 +740,7 @@ export function TokenList({ state: s, controller: c }: { state: State; controlle
       )}
       {s.next === null ? null : (
         <Button
+          type="button"
           disabled={s.busy || s.loading}
           onClick={() => void c.load(s.target, s.project, s.next!)}
         >
@@ -778,6 +785,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
     : s.principals.filter((p) => p.status === 'active');
   function issue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (s.busy) return;
     const form = event.currentTarget;
     const data = new FormData(form);
     const scope =
@@ -797,7 +805,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
   }
   return (
     <section aria-labelledby="page-heading" className="space-y-4">
-      <h1 id="page-heading" className="text-xl font-semibold">
+      <h1 tabIndex={-1} id="page-heading" className="text-xl font-semibold">
         Tokens
       </h1>
       <p className="text-neutral-600">
@@ -844,12 +852,13 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           <h2>Confirm token issue</h2>
           <p>Your identity was checked. Issue this token now?</p>
           <Button
+            type="button"
             disabled={s.busy || s.loading || s.lifetime === null}
             onClick={() => void c.confirm()}
           >
             Confirm token issue
           </Button>
-          <Button variant="outline" onClick={() => c.decline()}>
+          <Button type="button" variant="outline" onClick={() => c.decline()}>
             Cancel
           </Button>
         </section>
@@ -864,8 +873,10 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           <pre className="rounded-md border bg-neutral-50 p-3 overflow-x-auto whitespace-pre-wrap break-all">
             <code>{s.secret}</code>
           </pre>
-          <Button onClick={() => void c.copy()}>Copy token</Button>
-          <Button variant="outline" onClick={() => c.closeSecret()}>
+          <Button type="button" onClick={() => void c.copy()}>
+            Copy token
+          </Button>
+          <Button type="button" variant="outline" onClick={() => c.closeSecret()}>
             Close secret panel
           </Button>
           {clientConfig === null ? (
@@ -880,14 +891,14 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
               <pre className="overflow-x-auto rounded-md border bg-neutral-50 p-3">
                 <code>{clientConfig.composer}</code>
               </pre>
-              <Button variant="outline" onClick={() => void c.copy('composer')}>
+              <Button type="button" variant="outline" onClick={() => void c.copy('composer')}>
                 Copy Composer configuration
               </Button>
               <h3>npm (.npmrc)</h3>
               <pre className="overflow-x-auto rounded-md border bg-neutral-50 p-3">
                 <code>{clientConfig.npm}</code>
               </pre>
-              <Button variant="outline" onClick={() => void c.copy('npm')}>
+              <Button type="button" variant="outline" onClick={() => void c.copy('npm')}>
                 Copy npm configuration
               </Button>
             </>
@@ -1010,7 +1021,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
                 </p>
               </>
             )}
-            <Button disabled={s.busy || s.loading || policy === undefined}>
+            <Button type="submit" disabled={s.busy || s.loading || policy === undefined}>
               {renewal === null ? 'Issue token' : 'Renew token'}
             </Button>
             {renewal === null ? null : (
@@ -1034,6 +1045,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           className="grid gap-2"
           onSubmit={(event) => {
             event.preventDefault();
+            if (s.busy) return;
             const form = event.currentTarget;
             const data = new FormData(form);
             void c.createPrincipal(
@@ -1050,9 +1062,16 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           <Input id="principal-project" name="project" />
           <Label htmlFor="principal-permissions">Permissions (space separated)</Label>
           <Input id="principal-permissions" name="permissions" />
-          <Button disabled={s.busy}>Create service principal</Button>
+          <Button type="submit" disabled={s.busy}>
+            Create service principal
+          </Button>
         </form>
-        <Button variant="outline" disabled={s.busy} onClick={() => void c.loadPrincipals()}>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={s.busy}
+          onClick={() => void c.loadPrincipals()}
+        >
           Reload service principals
         </Button>
         {s.principalsRestricted ? (
@@ -1106,7 +1125,11 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           />
         )}
         {s.principalsNext === null ? null : (
-          <Button disabled={s.busy} onClick={() => void c.loadPrincipals(s.principalsNext!)}>
+          <Button
+            type="button"
+            disabled={s.busy}
+            onClick={() => void c.loadPrincipals(s.principalsNext!)}
+          >
             Next service principals
           </Button>
         )}

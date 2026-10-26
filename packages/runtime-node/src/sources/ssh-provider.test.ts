@@ -5,7 +5,12 @@ import { existsSync, readdirSync, watch } from 'node:fs';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
+import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { Observability } from '@package-broker/core/platform/observability';
+import { fetchAndVerifyDist } from '@package-broker/core/ingest/dist-fetch';
+import { nodeCodecs } from '../codec/node-codec.js';
 import { orgContext } from '@package-broker/core/db/port';
 import { fixedClock } from '@package-broker/core/ids';
 import {
@@ -18,14 +23,15 @@ import type {
   VersionCandidate,
 } from '@package-broker/core/sources/provider';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { createFilesystemArchiveStore } from './ssh-archive-store.js';
+import { UpstreamError } from '@package-broker/core/sources/policy-fetch';
+import { createFilesystemArchiveStore, SshArchiveStoreError } from './ssh-archive-store.js';
 import { createDnsGuard } from './dns-guard.js';
 import { openSshGitSession, type SpawnGit } from './ssh-git.js';
 import {
   createSshGitProvider,
   informationalUrl,
   parseSshRepository,
-  type SshArchiveStore,
+  type SshArchiveReader,
 } from './ssh-provider.js';
 
 const REPOSITORY = 'git@git.example.com:acme/lib.git';
@@ -198,16 +204,21 @@ const stubSpawn =
     return child;
   };
 
-function memoryStore(): SshArchiveStore & { stored: Map<string, Uint8Array> } {
+function memoryStore(): SshArchiveReader & { stored: Map<string, Uint8Array> } {
   const stored = new Map<string, Uint8Array>();
   const records = new Map<string, { sha1: string; time: string | null }>();
   return {
     stored,
-    async find(_ctx, _source, _name, versionNormalized, commit) {
-      return records.get(`${versionNormalized}@${commit}`) ?? null;
+    async find(scope, from, name, versionNormalized, commit) {
+      return (
+        records.get(`${scope.orgId}/${from.id}/${name}/${versionNormalized}@${commit}`) ?? null
+      );
     },
-    async store(_ctx, _source, _name, archive) {
-      const key = `${archive.versionNormalized}@${archive.commit}`;
+    async readZip(scope, from, name, versionNormalized, commit) {
+      return stored.get(`${scope.orgId}/${from.id}/${name}/${versionNormalized}@${commit}`) ?? null;
+    },
+    async store(scope, from, name, archive) {
+      const key = `${scope.orgId}/${from.id}/${name}/${archive.versionNormalized}@${archive.commit}`;
       stored.set(key, archive.zip);
       records.set(key, { sha1: archive.sha1, time: archive.time });
     },
@@ -229,14 +240,21 @@ const source = (
   },
 });
 
+const observability: Observability = {
+  log: () => undefined,
+  counter: () => undefined,
+  histogram: () => undefined,
+};
+
 const ctx = {
   org: orgContext('org-1'),
   signal: new AbortController().signal,
   clock: fixedClock('2026-10-16T12:00:00.000Z'),
+  observability,
 } as ProviderContext;
 
 function provider(
-  store: SshArchiveStore,
+  store: SshArchiveReader,
   fail = false,
   maxStdoutBytes?: number,
   stub: StubOptions = {},
@@ -254,7 +272,7 @@ function provider(
   });
 }
 
-async function members(store: SshArchiveStore, name = 'acme/lib') {
+async function members(store: SshArchiveReader, name = 'acme/lib') {
   const result = await provider(store).describe(ctx, source(), name, {});
   if (result.kind !== 'found') throw new Error(`expected found, got ${result.kind}`);
   const out: VersionCandidate[] = [];
@@ -365,6 +383,265 @@ describe('createSshGitProvider', () => {
     }
   });
 
+  it('opens built archives without contacting the upstream, including branch and prerelease versions', async () => {
+    const store = await createFilesystemArchiveStore(join(await realpath(root), 'dist-store'), {
+      maxZipBytes: 4 * 1024 * 1024,
+    });
+    const result = await provider(store).describe(ctx, source(), 'acme/lib', {});
+    if (result.kind !== 'found') throw new Error('expected found');
+    let count = 0;
+    for await (const member of result.description.members) {
+      const raw = JSON.parse(member.raw) as {
+        version_normalized: string;
+        dist: { reference: string; shasum: string };
+      };
+      const opened = await provider(store, true).openDist(ctx, source(), {
+        packageName: 'acme/lib',
+        version: member.version,
+        sourceRef: raw.dist.reference,
+        distType: 'zip',
+        url: null,
+      });
+      const bytes = new Uint8Array(await new Response(opened.body).arrayBuffer());
+      expect(bytes).toEqual(
+        await store.readZip(
+          ctx.org,
+          source(),
+          'acme/lib',
+          raw.version_normalized,
+          raw.dist.reference,
+        ),
+      );
+      expect(opened.size).toBe(bytes.byteLength);
+      expect(createHash('sha1').update(bytes).digest('hex')).toBe(raw.dist.shasum);
+      count += 1;
+    }
+    expect(count).toBe(4);
+  });
+
+  it('opens a numeric branch using its normalized archive version', async () => {
+    const store = await createFilesystemArchiveStore(join(await realpath(root), 'dist-branch'), {
+      maxZipBytes: 4 * 1024 * 1024,
+    });
+    const numericBare = join(root, 'numeric.git');
+    git(root, ['clone', '-q', '--bare', bare, numericBare]);
+    git(numericBare, ['branch', 'v1.x', commits['main']!]);
+    const src = source({ tags: false, branches: ['v1.x'] });
+    const result = await provider(store, false, undefined, { target: numericBare }).describe(
+      ctx,
+      src,
+      'acme/lib',
+      {},
+    );
+    if (result.kind !== 'found') throw new Error('expected found');
+    const versions: string[] = [];
+    for await (const member of result.description.members) versions.push(member.version);
+    expect(versions).toContain('v1.x-dev');
+    const zip = await store.readZip(
+      ctx.org,
+      src,
+      'acme/lib',
+      '1.9999999.9999999.9999999-dev',
+      commits['main']!,
+    );
+    expect(zip).not.toBeNull();
+    const opened = await provider(store, true).openDist(ctx, source(), {
+      packageName: 'acme/lib',
+      version: 'v1.x-dev',
+      sourceRef: commits['main']!,
+      distType: 'zip',
+      url: null,
+    });
+    expect(new Uint8Array(await new Response(opened.body).arrayBuffer())).toEqual(zip);
+    expect(opened.size).toBe(zip!.byteLength);
+  });
+
+  it('refuses absent and foreign archive tuples without falling back to upstream', async () => {
+    const store = await createFilesystemArchiveStore(join(await realpath(root), 'dist-isolation'), {
+      maxZipBytes: 1024,
+    });
+    await store.store(ctx.org, source(), 'acme/lib', {
+      version: 'v1.0.0',
+      versionNormalized: '1.0.0.0',
+      commit: commits['main']!,
+      zip: new Uint8Array([80, 75]),
+      sha1: '0'.repeat(40),
+      time: null,
+    });
+    const target = {
+      packageName: 'acme/lib',
+      version: 'v1.0.0',
+      sourceRef: commits['main']!,
+      distType: 'zip' as const,
+      url: 'https://git.example.com/acme/lib.git',
+    };
+    const offline = provider(store, true);
+    const cases = [
+      { context: { ...ctx, org: orgContext('foreign-org') }, src: source(), target },
+      { context: ctx, src: { ...source(), id: 'foreign-source' }, target },
+      { context: ctx, src: source(), target: { ...target, packageName: 'other/lib' } },
+      { context: ctx, src: source(), target: { ...target, version: 'v2.0.0' } },
+      { context: ctx, src: source(), target: { ...target, sourceRef: 'f'.repeat(40) } },
+    ];
+    for (const entry of cases) {
+      await expect(offline.openDist(entry.context, entry.src, entry.target)).rejects.toMatchObject({
+        name: 'UpstreamError',
+        code: 'http_status',
+        status: 404,
+      });
+    }
+  });
+
+  it('logs a data-free event for a missing archive and maps store failures to a network error', async () => {
+    const store = memoryStore();
+    const log = vi.fn();
+    const target = {
+      packageName: 'acme/lib',
+      version: 'v1.0.0',
+      sourceRef: commits['main']!,
+      distType: 'zip' as const,
+      url: null,
+    };
+    const observed = { ...ctx, observability: { ...ctx.observability, log } };
+    await expect(provider(store, true).openDist(observed, source(), target)).rejects.toMatchObject({
+      name: 'UpstreamError',
+      code: 'http_status',
+      status: 404,
+    });
+    expect(log.mock.calls).toEqual([[{ level: 'warn', event: 'dist.archive_missing' }]]);
+    log.mockClear();
+    for (const failure of ['io', 'unsafe_root', 'invalid_metadata'] as const) {
+      vi.spyOn(store, 'readZip').mockRejectedValueOnce(new SshArchiveStoreError(failure, 'EIO'));
+      const error = await provider(store, true)
+        .openDist(observed, source(), target)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(UpstreamError);
+      expect(error).toMatchObject({ code: 'network', message: 'upstream network' });
+      expect(log.mock.calls).toEqual([
+        [{ level: 'warn', event: 'dist.archive_store_error', reason_code: failure }],
+      ]);
+      log.mockClear();
+    }
+    vi.spyOn(store, 'readZip').mockRejectedValueOnce(new RangeError('programming error'));
+    await expect(provider(store, true).openDist(observed, source(), target)).rejects.toThrow(
+      RangeError,
+    );
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('keys the in-memory archive helper by organization, source and package name', async () => {
+    const store = memoryStore();
+    const zip = new Uint8Array([80, 75, 5, 6]);
+    await store.store(ctx.org, source(), 'acme/lib', {
+      version: 'v1.0.0',
+      versionNormalized: '1.0.0.0',
+      commit: commits['main']!,
+      zip,
+      sha1: createHash('sha1').update(zip).digest('hex'),
+      time: null,
+    });
+    const read = (org: string, id: string, name: string) =>
+      store.readZip(orgContext(org), { ...source(), id }, name, '1.0.0.0', commits['main']!);
+    expect(await read('org-1', 'src-1', 'acme/lib')).toEqual(zip);
+    expect(await read('org-2', 'src-1', 'acme/lib')).toBeNull();
+    expect(await read('org-1', 'src-2', 'acme/lib')).toBeNull();
+    expect(await read('org-1', 'src-1', 'acme/other')).toBeNull();
+  });
+
+  it('refuses invalid dist targets with data-free errors and honours cancellation', async () => {
+    const store = memoryStore();
+    const read = vi.spyOn(store, 'readZip');
+    const target = {
+      packageName: 'acme/lib',
+      version: 'v1.0.0',
+      sourceRef: 'a'.repeat(40),
+      distType: 'zip' as const,
+      url: null,
+    };
+    for (const change of [
+      { sourceRef: null },
+      { sourceRef: 'secret-commit' },
+      { distType: 'tar' as const },
+      { version: 'secret-invalid' },
+      { packageName: 'secret-invalid' },
+    ]) {
+      await expect(
+        provider(store).openDist(ctx, source(), { ...target, ...change }),
+      ).rejects.toMatchObject({ name: 'UpstreamError', message: 'upstream refused' });
+    }
+    const abort = new AbortController();
+    abort.abort();
+    await expect(
+      provider(store).openDist({ ...ctx, signal: abort.signal }, source(), target),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('quarantines a stored SSH archive whose bytes mismatch the published digest', async () => {
+    const store = await createFilesystemArchiveStore(join(await realpath(root), 'dist-corrupt'), {
+      maxZipBytes: 1024,
+    });
+    await store.store(ctx.org, source(), 'acme/lib', {
+      version: 'v1.0.0',
+      versionNormalized: '1.0.0.0',
+      commit: commits['main']!,
+      zip: new Uint8Array([80, 75, 99]),
+      sha1: '0'.repeat(40),
+      time: null,
+    });
+    const quarantine = vi.fn(async () => ({ changed: true, statements: 1 }));
+    const attachDist = vi.fn();
+    const put = vi.fn();
+    const log = vi.fn();
+    const guard = {} as CatalogueWriteGuard;
+    expect(
+      await fetchAndVerifyDist(
+        {
+          provider: provider(store, true),
+          providerContext: {
+            ...ctx,
+            codecs: nodeCodecs,
+            observability: { log, counter: vi.fn(), histogram: vi.fn() },
+          } as ProviderContext,
+          source: source(),
+          store: { put } as unknown as BlobStore,
+          writer: { quarantine, attachDist },
+          blobReplacer: { replaceBlob: vi.fn() },
+          maxBytes: 1024,
+        },
+        ctx.org,
+        guard,
+        {
+          versionId: 'version-1',
+          revision: 1,
+          packageName: 'acme/lib',
+          version: 'v1.0.0',
+          previousBlob: null,
+          fetch: {
+            sourceRef: commits['main']!,
+            distType: 'zip',
+            upstreamDistUrl: null,
+            composerShasum: '0'.repeat(40),
+            npmIntegrity: null,
+            npmShasum: null,
+          },
+        },
+      ),
+    ).toBe('quarantined');
+    expect(quarantine).toHaveBeenCalledWith(ctx.org, guard, {
+      versionId: 'version-1',
+      reason: 'digest_mismatch',
+    });
+    expect(attachDist).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'dist.quarantined',
+      reason_code: 'digest_mismatch',
+      source_id: 'src-1',
+    });
+  });
+
   it('builds each archive once and never rebuilds an existing version', async () => {
     const store = memoryStore();
     archiveCalls = 0;
@@ -472,7 +749,7 @@ describe('createSshGitProvider', () => {
     ]);
   });
 
-  async function describeAlt(store: SshArchiveStore, maxStdoutBytes?: number) {
+  async function describeAlt(store: SshArchiveReader, maxStdoutBytes?: number) {
     const result = await provider(store, false, maxStdoutBytes, { target: altBare }).describe(
       ctx,
       source(),

@@ -13,6 +13,8 @@ import { createPolicyFetch } from '../sources/policy-fetch.js';
 import type { PlatformPorts, RequestContext } from '../plugin.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
 import type { SourceRecord } from '../db/source.js';
+import type { AuthorizedNpmAudit, NpmAuditAuthorizer } from '../db/vulnerability.js';
+import type { PolicyFetch } from '../sources/policy-fetch.js';
 import { PACKAGES_READ, createPackageAccess } from '../catalogue/package-access.js';
 import { packageSyncEnqueueInput } from '../ingest/package-sync-job.js';
 import { createRegistryModule, type RegistryModuleDeps } from './module.js';
@@ -424,6 +426,8 @@ describe('createRegistryModule assembly', () => {
         'GET /:project/npm/-/ping',
         `GET ${SEARCH}`,
         'POST /:project/npm/-/npm/v1/security/advisories/bulk',
+        'POST /:project/npm/-/npm/v1/security/audits/quick',
+        'POST /:project/npm/-/npm/v1/security/audits',
         'GET /:project/npm/-/package/:a/dist-tags',
         ...shapes.flatMap((path) => ['GET', 'PUT', 'POST', 'DELETE'].map((m) => `${m} ${path}`)),
       ].sort(),
@@ -464,6 +468,102 @@ describe('visibilityPort', () => {
 });
 
 describe('npm route seams', () => {
+  const bulk = '/:project/npm/-/npm/v1/security/advisories/bulk';
+  const auditContext = () => ({
+    ...context('https://broker.test/request-project/npm/-/npm/v1/security/advisories/bulk', {}),
+    org: orgContext('request-org'),
+    projectId: 'request-project',
+    request: new Request(
+      'https://broker.test/request-project/npm/-/npm/v1/security/advisories/bulk',
+      {
+        method: 'POST',
+        body: JSON.stringify({ lodash: ['4.17.20'] }),
+      },
+    ),
+  });
+
+  it.each([false, true])(
+    'assembles audit forwarding with request org/project and request observability=%s',
+    async (scoped) => {
+      const h = harness();
+      const ctx = auditContext();
+      const requestObservability = { log: vi.fn() };
+      if (scoped)
+        Object.assign(ctx, {
+          ports: { ...ctx.ports, platform: { observability: requestObservability } },
+        });
+      const observability = scoped ? requestObservability : h.deps.ports.observability;
+      const classifyWinners = vi.fn<CatalogueReader['classifyWinners']>(async () => [
+        {
+          key: 'lodash',
+          winner: { sourceId: 'npmjs', sourceType: 'npmjs_proxy' },
+        },
+      ]);
+      const hasAttachedProxy = vi.fn(async () => true);
+      const authorizeNpmAudit = vi.fn<NpmAuditAuthorizer['authorizeNpmAudit']>(
+        async (org) =>
+          ({
+            orgId: org.orgId,
+            tuples: [{ name: 'lodash', version: '4.17.20' }],
+          }) as unknown as AuthorizedNpmAudit,
+      );
+      const advisory = {
+        id: 1,
+        title: 'Public advisory',
+        severity: 'high',
+        vulnerable_versions: '<4.17.21',
+      };
+      const fetch = vi.fn<PolicyFetch>(async () => ({
+        status: 200,
+        headers: new Headers(),
+        body: new Response(JSON.stringify({ lodash: [advisory] })).body,
+      }));
+      const policyFetch = vi.fn<RegistryModuleDeps['policyFetch']>(() => fetch);
+      const module = createRegistryModule({
+        ...h.deps,
+        registry: { ...h.deps.registry, npmAudit: { enabled: true } },
+        catalogue: { ...h.deps.catalogue, reader: { ...h.deps.catalogue.reader, classifyWinners } },
+        npmAudit: { sources: { hasAttachedProxy }, provenance: { authorizeNpmAudit } },
+        policyFetch,
+      });
+      const response = await routeOf(module.ecosystemRoutes, 'POST', bulk).handler(ctx);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ lodash: [advisory] });
+      expect(hasAttachedProxy).toHaveBeenCalledExactlyOnceWith(ctx.org, 'request-project', 'npm');
+      expect(classifyWinners).toHaveBeenCalledExactlyOnceWith(ctx.org, {
+        projectId: 'request-project',
+        ecosystem: 'npm',
+        keys: ['lodash'],
+      });
+      expect(authorizeNpmAudit).toHaveBeenCalledExactlyOnceWith(ctx.org, [
+        { sourceId: 'npmjs', key: 'lodash', version: '4.17.20' },
+      ]);
+      expect(policyFetch).toHaveBeenCalledExactlyOnceWith(h.deps.registry.userAgent.default, {
+        observability,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(new TextDecoder().decode(fetch.mock.calls[0]![0].body)).toBe('{"lodash":["4.17.20"]}');
+      expect(observability!.log).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('refuses audit with 501 when enabled without npmAudit dependencies', async () => {
+    const h = harness();
+    const module = createRegistryModule({
+      ...h.deps,
+      registry: { ...h.deps.registry, npmAudit: { enabled: true } },
+    });
+    const response = await routeOf(module.ecosystemRoutes, 'POST', bulk).handler(auditContext());
+    expect(response.status).toBe(501);
+    expect(await response.json()).toEqual({
+      error: 'npm audit is unavailable on this broker',
+      code: 'unsupported',
+      requestId: 'req-1',
+    });
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(h.policyFetch).not.toHaveBeenCalled();
+  });
+
   it('builds the actor from the access context with exactly the read permission', async () => {
     const h = harness();
     const { ecosystemRoutes } = h.module();

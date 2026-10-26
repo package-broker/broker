@@ -238,15 +238,18 @@ export function nodeSecurityTransport(
   const sentinel = new URL(sentinelOrigin);
   const ipv6 = new URL(ipv6Origin);
   return `
+const forward = http.request;
+const known = ${JSON.stringify(securityUpstreamHosts)};
+const bare = (value) => (value && value.startsWith('[') ? value.slice(1, -1) : value);
+const routable = (name) =>
+  net.isIP(name) !== 0 || known.includes(name) || name.endsWith('.security.test');
 const dns = (await import('node:dns/promises')).default;
 dns.lookup = async (host) => {
+  if (!routable(host)) throw new Error('UnexpectedSecurityUpstream');
   const response = await fetch(${JSON.stringify(fixtureOrigin)} + '/_dns/' + host);
   if (!response.ok) throw new Error('UnexpectedSecurityDNS');
   return response.json();
 };
-const forward = http.request;
-const known = ${JSON.stringify(securityUpstreamHosts)};
-const bare = (value) => (value && value.startsWith('[') ? value.slice(1, -1) : value);
 const intercept = (input, extra) => {
   const options =
     typeof input === 'string' || input instanceof URL
@@ -258,8 +261,7 @@ const intercept = (input, extra) => {
   const target = bare(options.host ?? options.hostname);
   const name = bare(options.servername || target);
   const literal = net.isIP(target) !== 0 ? target : undefined;
-  if (!literal && net.isIP(name) === 0 && !known.includes(name) && !name.endsWith('.security.test'))
-    throw new Error('UnexpectedSecurityUpstream');
+  if (!literal && !routable(name)) throw new Error('UnexpectedSecurityUpstream');
   const route = (addresses) => {
     if (!literal && name === ${JSON.stringify(selfHost)}) return ['127.0.0.1', ${sentinel.port}];
     const unsafe = addresses.find((address) => address !== ${JSON.stringify(publicAddress)});

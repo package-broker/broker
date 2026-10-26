@@ -10,6 +10,9 @@ import {
 } from '../plugin.js';
 import type { ObsRecord, ObsRecordSink } from '../platform/observability.js';
 import { filterLogLevel } from '../platform/observability.js';
+import { NPM_AUDIT_REASON_CODES } from '../platform/observability.js';
+import { forwardNpmAudit } from '../registry/npm/audit.js';
+import type { AuthorizedNpmAudit } from '../db/vulnerability.js';
 import { completionSpan, upstreamSpan } from '../platform/completion-span.js';
 import type { OtlpSpanInput } from '../platform/otlp.js';
 import { createPolicyFetch } from '../sources/policy-fetch.js';
@@ -131,6 +134,94 @@ afterEach(() => {
 });
 
 describe('kernel completion record', () => {
+  it('delivers audit reasons and all count fields through the production sink', async () => {
+    const { sink, records } = countingSink();
+    const counts = {
+      requested_names: 2,
+      forwarded_names: 1,
+      advisories: 1,
+      unexpected_keys: 1,
+      dropped_advisories: 1,
+    };
+    const kernel = await createKernel(
+      options([], [], {
+        observability: { deploymentId: 'test', sink },
+        platformServices: {
+          blob: {} as never,
+          cache: {} as never,
+          jobStore: { enqueue: vi.fn(), status: vi.fn() },
+        },
+        ecosystemRoutes: [
+          {
+            method: 'POST',
+            path: '/:project/audit',
+            permission: null,
+            handler: async (ctx) => {
+              const observability = ctx.ports.platform!.observability;
+              const response = await forwardNpmAudit(
+                [
+                  ['pub', ['1.0.0']],
+                  ['private-sentinel', ['1.0.0']],
+                ],
+                ctx.request,
+                ORG,
+                'project',
+                ctx.requestId,
+                {
+                  hasAttachedProxy: async () => true,
+                  classifyWinners: async () => [
+                    {
+                      key: 'pub',
+                      winner: { sourceId: 'proxy', sourceType: 'npmjs_proxy' },
+                    },
+                  ],
+                  authorizeNpmAudit: async () =>
+                    ({
+                      orgId: ORG.orgId,
+                      tuples: [{ name: 'pub', version: '1.0.0' }],
+                    }) as unknown as AuthorizedNpmAudit,
+                  policyFetch: async () => ({
+                    status: 200,
+                    headers: new Headers(),
+                    body: Response.json({
+                      pub: [{ id: 1 }, { id: 2, severity: 'unknown' }],
+                      'private-sentinel': [{ id: 3 }],
+                    }).body,
+                  }),
+                  observability,
+                },
+              );
+              for (const reason_code of NPM_AUDIT_REASON_CODES) {
+                observability.log({
+                  level: 'info',
+                  event: 'registry.npm_audit',
+                  reason_code,
+                  ...counts,
+                });
+              }
+              return response;
+            },
+          },
+        ],
+      }),
+    );
+    const response = await kernel.fetch(new Request(`${BASE}/demo/audit`, { method: 'POST' }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ pub: [{ id: 1 }] });
+    const logs = records.filter((r) => r.kind === 'log' && r.record.event === 'registry.npm_audit');
+    expect(logs).toHaveLength(NPM_AUDIT_REASON_CODES.length + 1);
+    expect(logs[0]).toMatchObject({ kind: 'log', record: { reason_code: 'ok', ...counts } });
+    for (const reason_code of NPM_AUDIT_REASON_CODES) {
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          record: expect.objectContaining({ reason_code, ...counts }),
+        }),
+      );
+    }
+    expect(JSON.stringify(records)).not.toContain('private-sentinel');
+    expect(records.some((r) => r.kind === 'counter' && r.name === 'pb.obs.dropped')).toBe(false);
+  });
+
   it('attributes GET / completion to the root route', async () => {
     const logs: Entry[] = [];
     const kernel = await createKernel(options([], logs));

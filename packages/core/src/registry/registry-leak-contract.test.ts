@@ -30,6 +30,10 @@ import { composerRoutes } from './composer/routes.js';
 import type { DistService } from './dist-service.js';
 import { parseNpmPath } from './npm/paths.js';
 import { npmRoutes } from './npm/routes.js';
+import type { NpmRouteDeps } from './npm/routes.js';
+import { forwardNpmAudit } from './npm/audit.js';
+import type { AuthorizedNpmAudit, NpmAuditAuthorizer } from '../db/vulnerability.js';
+import type { PolicyFetch } from '../sources/policy-fetch.js';
 
 const org = orgContext('org-1');
 const VERSION_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
@@ -273,7 +277,12 @@ const AUTHS: Auth[] = ['cookie', 'bearer'];
 
 async function harness(
   auth: Auth = 'cookie',
-  options: { capped?: boolean; tokenKind?: 'pat' | 'svc'; permissions?: readonly string[] } = {},
+  options: {
+    capped?: boolean;
+    tokenKind?: 'pat' | 'svc';
+    permissions?: readonly string[];
+    audit?: NpmRouteDeps['audit'];
+  } = {},
 ) {
   const { reader, projectsQueried, admissible } = fixture();
   const access = createPackageAccess(reader);
@@ -312,6 +321,7 @@ async function harness(
       handleOf: () => 'alice',
       publicUrl: 'https://broker.test',
       codecs: { gunzip: () => new TransformStream() },
+      audit: options.audit ?? { enabled: true },
     }),
   ];
   const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
@@ -909,16 +919,78 @@ describe('registry cross-project leak contract', () => {
       expect([...h.projectsQueried]).toEqual(['proj-a']);
     });
 
-    it('does not echo or forward names in audit forwarding (placeholder until forwarding exists)', async () => {
+    it('does not echo or forward names when audit dependencies are unavailable', async () => {
       const h = await harness('bearer');
       const response = await h.call('/alpha/npm/-/npm/v1/security/advisories/bulk', {
         method: 'POST',
         body: JSON.stringify({ 'secret-pkg': ['1.0.0'], 'own-pkg': ['1.0.0'] }),
         headers: { 'content-type': 'application/json' },
       });
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(501);
       expect(await response.text()).not.toContain('secret');
       expect(h.projectsQueried.size).toBe(0);
+    });
+
+    it('never sends a private-name sentinel in the outbound body with the audit forwarder mounted', async () => {
+      const sentinel = 'private-name-sentinel-t866f';
+      const classifyWinners = vi.fn<CatalogueReader['classifyWinners']>(async (_org, query) =>
+        query.keys.map((key) => ({
+          key,
+          winner: {
+            sourceId: key === sentinel ? 'private-source' : 'npmjs',
+            sourceType: key === sentinel ? 'npm_registry' : 'npmjs_proxy',
+          },
+        })),
+      );
+      const authorizeNpmAudit = vi.fn<NpmAuditAuthorizer['authorizeNpmAudit']>(
+        async (_org, refs) =>
+          ({
+            orgId: org.orgId,
+            tuples: refs.map(({ key, version }: { key: string; version: string }) => ({
+              name: displayName(key),
+              version,
+            })),
+          }) as unknown as AuthorizedNpmAudit,
+      );
+      const policyFetch = vi.fn<PolicyFetch>(async () => ({
+        status: 200,
+        headers: new Headers(),
+        body: new Response('{}').body,
+      }));
+      const log = vi.fn();
+      const forward = vi.fn<NonNullable<NpmRouteDeps['audit']['forward']>>((entries, ctx) =>
+        forwardNpmAudit(entries, ctx.request, ctx.org!, ctx.projectId!, ctx.requestId, {
+          classifyWinners,
+          authorizeNpmAudit,
+          hasAttachedProxy: async () => true,
+          policyFetch,
+          observability: { log },
+        }),
+      );
+      const h = await harness('bearer', { audit: { enabled: true, forward } });
+      const response = await h.call('/alpha/npm/-/npm/v1/security/advisories/bulk', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ [sentinel]: ['1.0.0'], lodash: ['4.17.20'] }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).not.toContain(sentinel);
+      expect(forward).toHaveBeenCalledTimes(1);
+      expect(classifyWinners).toHaveBeenCalledExactlyOnceWith(org, {
+        projectId: 'proj-a',
+        ecosystem: 'npm',
+        keys: [sentinel, 'lodash'],
+      });
+      expect(authorizeNpmAudit).toHaveBeenCalledExactlyOnceWith(org, [
+        { sourceId: 'npmjs', key: 'lodash', version: '4.17.20' },
+      ]);
+      expect(policyFetch).toHaveBeenCalledTimes(1);
+      for (const [request] of policyFetch.mock.calls) {
+        const body = new TextDecoder().decode(request.body);
+        expect(body).toBe('{"lodash":["4.17.20"]}');
+        expect(body).not.toContain(sentinel);
+      }
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
     });
   });
 

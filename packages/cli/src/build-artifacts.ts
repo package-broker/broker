@@ -1,6 +1,6 @@
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import type { Platform } from '@package-broker/core/plugin';
-import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
+import { TRACE_FIELDS, type PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import { looksLikeCredential } from '@package-broker/core/platform/credential';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 
@@ -99,7 +99,14 @@ const DESCRIBED_KEYS: Record<keyof PlatformPortConfig, readonly string[]> = {
   ],
   cache: ['adapter', 'namespace', 'maxBytes'],
   jobs: ['adapter', 'binding', 'maxRunning'],
-  observability: ['adapter', 'analyticsBinding', 'deploymentIdEnv', 'endpointEnv', 'headersEnv'],
+  observability: [
+    'adapter',
+    'analyticsBinding',
+    'deploymentIdEnv',
+    'endpointEnv',
+    'headersEnv',
+    'traces',
+  ],
 };
 
 export function credentialProblems(
@@ -115,6 +122,13 @@ export function credentialProblems(
       }
     }
   }
+  const destinations = described.observability?.traces?.destinations;
+  if (
+    Array.isArray(destinations) &&
+    destinations.some((value) => typeof value === 'string' && looksLikeCredential(value))
+  ) {
+    problems.push(`${target}.observability.traces.destinations: looks like a credential value`);
+  }
   return problems;
 }
 
@@ -122,17 +136,47 @@ export function describePlatformPorts(
   ports: PlatformPortConfig | undefined,
 ): PlatformPortConfig | null {
   if (typeof ports !== 'object' || ports === null) return null;
-  const described: Record<string, Record<string, string | number | boolean>> = {};
+  const described: Record<string, Record<string, unknown>> = {};
   for (const [port, keys] of Object.entries(DESCRIBED_KEYS)) {
-    const section: Record<string, string | number | boolean> = {};
+    const section: Record<string, unknown> = {};
     const source = (ports as unknown as Record<string, unknown>)[port];
     if (typeof source !== 'object' || source === null) continue;
     for (const key of keys) {
       const value = Object.hasOwn(source, key)
         ? (source as Record<string, unknown>)[key]
         : undefined;
+      if (
+        port === 'observability' &&
+        key === 'traces' &&
+        (typeof value !== 'object' || value === null)
+      )
+        continue;
       if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
         section[key] = value;
+      } else if (
+        port === 'observability' &&
+        key === 'traces' &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        section[key] = Object.fromEntries(
+          Object.keys(TRACE_FIELDS)
+            .filter((field) => {
+              if (!Object.hasOwn(value, field)) return false;
+              const setting = (value as Record<string, unknown>)[field];
+              if (field === 'destinations')
+                return (
+                  Array.isArray(setting) &&
+                  Array.from(setting).every((entry) => typeof entry === 'string')
+                );
+              return typeof setting === (field === 'headSamplingRate' ? 'number' : 'boolean');
+            })
+            .map((field) => {
+              const setting = (value as Record<string, unknown>)[field];
+              return [field, Array.isArray(setting) ? [...setting] : setting];
+            }),
+        );
       }
     }
     described[port] = section;

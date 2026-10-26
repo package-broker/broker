@@ -9,6 +9,7 @@ import { stageAssets } from '../../build-assets.js';
 import { CloudflareApi, object } from './api.js';
 import {
   deploy,
+  tracesMetadata,
   cloudflareDeployContract,
   cloudflareAssetHash,
   validateDeploymentArtifact,
@@ -3682,3 +3683,47 @@ it.each(['SENTINEL', 1, {}, []])(
     expect(JSON.stringify(result)).not.toContain('SENTINEL');
   },
 );
+
+it.each([
+  [undefined, undefined],
+  [{ enabled: true }, { enabled: true }],
+  [{ enabled: false }, { enabled: false }],
+  [
+    { enabled: true, headSamplingRate: 0.05, destinations: ['collector'], persist: false },
+    { enabled: true, head_sampling_rate: 0.05, destinations: ['collector'], persist: false },
+  ],
+])('uploads only configured automatic tracing fields: %j', async (traces, expected) => {
+  const manifestPath = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  if (traces !== undefined) manifest.platformPorts.observability.traces = traces;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const { h, o } = firstInstall();
+  expect((await deploy(o)).output.error).toBeNull();
+  const uploads = h.calls.filter(
+    (call) => call.body instanceof FormData && call.body.has('metadata'),
+  );
+  expect(uploads.length).toBeGreaterThan(0);
+  for (const upload of uploads) {
+    const metadata = JSON.parse(String((upload.body as FormData).get('metadata')));
+    expect(metadata.observability).toEqual({
+      enabled: true,
+      logs: { invocation_logs: false },
+      ...(expected === undefined ? {} : { traces: expected }),
+    });
+    if (expected === undefined) expect(metadata.observability).not.toHaveProperty('traces');
+  }
+});
+
+it.each([
+  [undefined, undefined],
+  [{ enabled: true }, { enabled: true }],
+  [{ enabled: false }, { enabled: false }],
+  [
+    { enabled: true, headSamplingRate: 0.05, destinations: ['collector'], persist: false },
+    { enabled: true, head_sampling_rate: 0.05, destinations: ['collector'], persist: false },
+  ],
+])('maps configured trace metadata without changing the input: %j', (traces, expected) => {
+  const original = structuredClone(traces);
+  expect(tracesMetadata(traces)).toEqual(expected);
+  expect(traces).toEqual(original);
+});

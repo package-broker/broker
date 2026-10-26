@@ -119,3 +119,46 @@ The provision API's R2 jurisdiction query parameter still requires live
 verification during T830 against `cf-r2-jurisdiction`. Fixture tests do not prove
 that the provider honors the query parameter. T830 must also verify notification
 discovery in the default, EU and FedRAMP jurisdictions with the target token.
+
+## Tracing
+
+Workers automatic tracing is opt-in. To enable it, add `traces` to the existing
+Cloudflare observability port in `broker.config.ts`, then rebuild and deploy:
+
+```ts
+platformPorts: {
+  cloudflare: {
+    // Keep the other configured ports here.
+    observability: {
+      adapter: 'workers',
+      deploymentIdEnv: 'DEPLOYMENT_ID',
+      traces: {
+        enabled: true,
+        headSamplingRate: 0.05,
+        destinations: ['my-otlp-destination'],
+        persist: false,
+      },
+    },
+  },
+},
+```
+
+Omitting `traces` uploads no tracing settings; Cloudflare's default is off.
+Only `enabled` is required when configuring traces. Start with a low sampling
+rate such as `0.05` (5%) and adjust for traffic and diagnostic needs. The rate
+must be greater than zero and at most one; Cloudflare defaults to one when it is
+omitted. `destinations` optionally names one to ten unique OTLP destinations
+configured in the Cloudflare dashboard. `persist: false` disables Cloudflare
+trace persistence; its default is true. For billing from 2026-12-01, see
+[Cloudflare observability pricing](https://developers.cloudflare.com/workers/observability/pricing/).
+
+Cloudflare automatically instruments handler calls, outbound fetches, binding
+calls and RPC without an SDK. Automatic fetch spans can record the full outbound URL,
+query string included. Signed or token-bearing upstream URLs, including private
+registry URLs and npm tarballs behind signed URLs, can end up in traces and in
+any OTLP destination. Operators who export traces to a third party should check
+what the fetch spans keep.
+
+The broker's own OTLP spans, including `traceparent` propagation and
+`upstream.fetch`, are independent of this setting. Their endpoint and header
+environment references remain configured through `endpointEnv` and `headersEnv`.

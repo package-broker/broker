@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "versions": false,
+  "fetchedAt": "2026-10-26T00:00:00.000Z",
+  "org": "acme",
+  "objects": {
+    "suborganizations": [
+      {
+        "data": {
+          "id": 1,
+          "name": "Acme",
+          "urlName": "acme",
+          "links": {
+            "repository": "https://repo.example.test/acme/"
+          }
+        },
+        "sha256": "38359ad48ea963549b7dc32902c83e18809f257dc14e069815e21498717b5421"
+      },
+      {
+        "data": {
+          "id": 2,
+          "name": "Example",
+          "urlName": "example"
+        },
+        "sha256": "0062489691d791f501d575ffa8a46708f0fec3cef92d57cf8d929f14dcee639b"
+      }
+    ],
+    "packages": [
+      {
+        "data": {
+          "id": 10,
+          "name": "acme/private",
+          "origin": "private",
+          "config": {
+            "type": "vcs",
+            "url": "https://git.example.test/acme/private",
+            "credentialsId": "",
+            "artifactIds": []
+          }
+        },
+        "sha256": "c79d794a4f15b737b545809c6c78b1f9bf957b62d67a6aa3d148a0d085bebec6"
+      },
+      {
+        "data": {
+          "id": 11,
+          "name": "example/artifact",
+          "origin": "private",
+          "config": {
+            "type": "artifact",
+            "artifactIds": [101]
+          }
+        },
+        "sha256": "1eb612bec159e6ba54b2c296a90ef44c33dadbdb6af8dee7cb831e39e9ab0180"
+      },
+      {
+        "data": {
+          "id": 13,
+          "name": "example/mirrored",
+          "origin": "private-mirror",
+          "config": {
+            "mirroredRepositoryId": 20
+          }
+        },
+        "sha256": "609cea2b020f3f456cd61cb181bda7aa31feeaa14a12a30155b321d7daba2b2b"
+      }
+    ],
+    "mirroredRepositories": [
+      {
+        "data": {
+          "id": 20,
+          "name": "Acme",
+          "url": "https://composer.example.test/",
+          "mirroringBehavior": "manual",
+          "credentials": 40
+        },
+        "sha256": "5bbf2dc017aa1490fd7304c22b0183755b468ecb3c8aec5ad453d5623826652c"
+      },
+      {
+        "data": {
+          "id": 21,
+          "name": "Example",
+          "url": "https://mirror.example.test/",
+          "mirroringBehavior": "disabled",
+          "credentials": ""
+        },
+        "sha256": "8e793fcc76fe66acb87b63b88a1a15eb9f541591464e2248d68fbe8d560843b3"
+      }
+    ],
+    "teams": [
+      {
+        "data": {
+          "id": 30,
+          "name": "Acme",
+          "permission": "admin",
+          "members": [
+            {
+              "id": 300,
+              "username": "acme-user",
+              "remoteIds": {
+                "example": "acme"
+              }
+            }
+          ]
+        },
+        "sha256": "3a679e810880b3399a638a1c1f00718d059e8395adc3e0dff3bb641a1a646e84"
+      }
+    ],
+    "tokens": [
+      {
+        "data": {
+          "id": 50,
+          "description": "Acme",
+          "access": "read",
+          "token": "",
+          "url": "https://repo.example.test/acme/",
+          "expiresAt": null,
+          "teamId": 30
+        },
+        "sha256": "5095164aee7860de483ecb6426fe7fd76763e76388c3439b6f1cbac7937bbc34"
+      }
+    ],
+    "credentials": [
+      {
+        "data": {
+          "id": 40,
+          "type": "http-basic",
+          "description": "Acme",
+          "domain": "composer.example.test"
+        },
+        "sha256": "5246900bb332c4f40d79034fdc3ce5771125f935bf885d69d50d120ac6c365bf"
+      }
+    ],
+    "synchronizations": [
+      {
+        "data": {
+          "name": "Acme",
+          "isPrimary": true,
+          "integration": {
+            "target": "github",
+            "url": "https://git.example.test/acme"
+          }
+        },
+        "sha256": "c0ad6ea30e265f1f613c2599fa959e890b4478c42b9ab66e1b709e9eacfea4a0"
+      }
+    ],
+    "customers": [
+      {
+        "data": {
+          "id": 60,
+          "name": "Acme"
+        },
+        "sha256": "54a0cd2fe5b53a256c6626c0e537bf3b6cb20eae661ecc356f6b540253542648"
+      }
+    ],
+    "vendorBundles": [
+      {
+        "data": {
+          "id": 70,
+          "name": "Example"
+        },
+        "sha256": "f97626fe1272cada984b33605f56fb67b9e5449a4efa78861a9e48bd8ac199b7"
+      }
+    ],
+    "suborganizationPackages": [
+      {
+        "data": {
+          "id": 10,
+          "name": "acme/private",
+          "origin": "private",
+          "config": {
+            "type": "vcs",
+            "url": "https://git.example.test/acme/private"
+          },
+          "suborganizationId": 1
+        },
+        "sha256": "c338aa78312b68621c8780e69fde4e356a365dfb38b5968fa782dfc8f0e65d80"
+      },
+      {
+        "data": {
+          "id": 14,
+          "name": "acme/suborganization-only",
+          "origin": "private",
+          "config": {
+            "url": "https://git.example.test/acme/suborganization-only"
+          },
+          "suborganizationId": 1
+        },
+        "sha256": "44adf8f5f42159622aa94586ca3cb2b541a337fdc6f216c74a55e8a5191e3200"
+      },
+      {
+        "data": {
+          "id": 15,
+          "name": "example/mirrored",
+          "origin": "private-mirror",
+          "config": {
+            "mirroredRepositoryId": 21
+          },
+          "suborganizationId": 1
+        },
+        "sha256": "f8ffb7a71c90b3523d06f44efa0eec021de694b763c66ef4f6b9c9de3864e2d8"
+      }
+    ],
+    "suborganizationMirroredRepositories": [
+      {
+        "data": {
+          "id": 20,
+          "name": "Acme",
+          "url": "https://composer.example.test/",
+          "credentials": 40,
+          "mirroringBehavior": "add_on_use",
+          "suborganizationId": 1
+        },
+        "sha256": "6c321cb12cc919186bf9daf6ad3712a4d2dc1506b907c4e00a45405b66d83817"
+      }
+    ],
+    "suborganizationTeams": [
+      {
+        "data": {
+          "id": 30,
+          "name": "Acme",
+          "permission": "owner",
+          "members": [
+            {
+              "id": 300,
+              "username": "acme-user"
+            }
+          ],
+          "suborganizationId": 1
+        },
+        "sha256": "e1a12e8f145597195fb2d942b42b52b91e954cd9ca554496ac66d1e33be8fc0a"
+      }
+    ],
+    "suborganizationTokens": [
+      {
+        "data": {
+          "id": 51,
+          "description": "Acme",
+          "access": "read",
+          "token": "",
+          "url": "https://repo.example.test/acme/acme/",
+          "suborganizationId": 1
+        },
+        "sha256": "892f86dd91c71d5eb25b78244b89227a425bb5f029f2d20660a4ec01c3d19bf9"
+      }
+    ],
+    "artifacts": [
+      {
+        "data": {
+          "id": 101,
+          "packageId": 11,
+          "originalFileName": "example-1.0.zip",
+          "version": "1.0"
+        },
+        "sha256": "8c292a1a01518a93fafd8b1d72d4e543a8dfa3928a9921ad106aeab64e32d02d"
+      }
+    ]
+  }
+}

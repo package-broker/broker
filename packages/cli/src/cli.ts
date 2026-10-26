@@ -21,7 +21,10 @@ import { commandEnvelope, failCommand, CloudflareError } from './commands/cloudf
 import { runImport } from './commands/import.js';
 import { runImportCutover } from './commands/import-cutover.js';
 import { runImportSatisPlan } from './commands/import-satis.js';
-import { runImportPrivatePackagistFetch } from './commands/import-private-packagist.js';
+import {
+  runImportPrivatePackagistFetch,
+  runImportPrivatePackagistPlan,
+} from './commands/import-private-packagist.js';
 import { runSourceAcceptRemoval } from './commands/source.js';
 import { runOpenApi } from './commands/openapi.js';
 import { runBootstrapSqlite, runMigrateSqlite } from './commands/sqlite.js';
@@ -45,6 +48,7 @@ const USAGE =
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb import cutover-check --project-dir <dir> --old-repository <url> --new-repository <url> --old-auth-env <VAR> --new-auth-env <VAR> [--lock <file>]... [--timeout-seconds <seconds>] [--json]\n' +
   '       pb import private-packagist fetch --org <short-name> --snapshot <out.json> [--api-key-file <path>] [--api-secret-file <path>] [--versions] [--require-org-match] (or PP_API_KEY_FILE/PP_API_SECRET_FILE)\n' +
+  '       pb import private-packagist plan --snapshot <file> --map <file> --out <manifest> --credentials-out <file> [--members <csv>] [--baseline <manifest>] [--mode merge|override] [--include-org-admins] [--runtime workers|node] [--packagist existing:<name>] [--compact-selection --compact-vendor <vendor>...] [--accept-project-widening <slug>...] [--quiet]\n' +
   '       pb import satis plan --config <satis.json> --out <manifest> [--project <slug>] [--repository-map <file>] [--credentials <file>] [--baseline <manifest>] [--mode merge|override]\n' +
   '       pb import submit --manifest <file> --receipt <file> --principal <label> --broker <origin> [--resume] [--token-file <path>]\n' +
   '       pb import status <run> --broker <origin> [--wait | --wait-seconds <0..300>] [--token-file <path>]\n' +
@@ -78,6 +82,16 @@ function parseCliArgs(argv: string[]) {
         lock: { type: 'string', multiple: true },
         org: { type: 'string' },
         snapshot: { type: 'string' },
+        map: { type: 'string' },
+        'credentials-out': { type: 'string' },
+        members: { type: 'string' },
+        'include-org-admins': { type: 'boolean' },
+        runtime: { type: 'string' },
+        packagist: { type: 'string' },
+        'compact-selection': { type: 'boolean' },
+        'compact-vendor': { type: 'string', multiple: true },
+        'accept-project-widening': { type: 'string', multiple: true },
+        quiet: { type: 'boolean' },
         'api-key-file': { type: 'string' },
         'api-secret-file': { type: 'string' },
         versions: { type: 'boolean' },
@@ -301,6 +315,22 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'baseline',
     'mode',
   ],
+  'import private-packagist plan': [
+    'snapshot',
+    'map',
+    'out',
+    'credentials-out',
+    'members',
+    'baseline',
+    'mode',
+    'include-org-admins',
+    'runtime',
+    'packagist',
+    'compact-selection',
+    'compact-vendor',
+    'accept-project-widening',
+    'quiet',
+  ],
   'import private-packagist fetch': [
     'org',
     'snapshot',
@@ -467,6 +497,33 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
 
   if (command === 'import' && subcommand === 'private-packagist') {
+    if (positionals[2] === 'plan') {
+      if (
+        !values.snapshot ||
+        !values.map ||
+        !values.out ||
+        !values['credentials-out'] ||
+        (values.mode !== undefined && values.mode !== 'merge' && values.mode !== 'override') ||
+        (values.runtime !== undefined && values.runtime !== 'workers' && values.runtime !== 'node')
+      )
+        return usageError();
+      return runImportPrivatePackagistPlan({
+        snapshot: values.snapshot,
+        map: values.map,
+        out: values.out,
+        credentialsOut: values['credentials-out'],
+        ...(values.members === undefined ? {} : { members: values.members }),
+        ...(values.baseline === undefined ? {} : { baseline: values.baseline }),
+        ...(values.mode === undefined ? {} : { mode: values.mode }),
+        ...(values.runtime === undefined ? {} : { runtime: values.runtime }),
+        ...(values.packagist === undefined ? {} : { packagist: values.packagist }),
+        includeOrgAdmins: values['include-org-admins'] ?? false,
+        compactSelection: values['compact-selection'] ?? false,
+        compactVendors: values['compact-vendor'] ?? [],
+        acceptProjectWidening: values['accept-project-widening'] ?? [],
+        quiet: values.quiet ?? false,
+      });
+    }
     if (!values.org || !values.snapshot) return usageError();
     return runImportPrivatePackagistFetch({
       org: values.org,

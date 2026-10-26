@@ -140,8 +140,14 @@ describe('mounted review regressions', () => {
         const { page, browserExpect } = await mounted(context, 'menuDialog');
         const dialog = page.getByRole('dialog', { name: 'Menu dialog' });
         await browserExpect(dialog).toBeVisible();
-        if (click) await dialog.getByRole('heading', { name: 'Menu dialog' }).click();
         await browserExpect(dialog.getByRole('menu')).toBeVisible();
+        if (click) {
+          await dialog.getByRole('heading', { name: 'Menu dialog' }).click();
+          await browserExpect(dialog.getByRole('menu')).toHaveCount(0);
+          await browserExpect(dialog).toBeVisible();
+          await dialog.getByRole('button', { name: 'Actions' }).click();
+          await browserExpect(dialog.getByRole('menu')).toBeVisible();
+        }
         const item = dialog.getByRole('menuitem', { name: 'Menu action' });
         await item.focus();
         await browserExpect(item).toBeFocused();

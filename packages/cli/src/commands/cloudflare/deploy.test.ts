@@ -157,6 +157,9 @@ beforeEach(async () => {
   await artifact();
   store = await InventoryStore.create({ project, outDir: out, identity });
   const j = emptyInventory(identity, Date.now());
+  j.migrations.ledger = [
+    { id: 'core:0001_init', checksum: digest('-- fixture migration\n'), phase: 'expand' },
+  ];
   for (const [key, id] of [
     ['d1', DB],
     ['r2', `${script}-blobs`],
@@ -446,6 +449,105 @@ function options(h: ReturnType<typeof harness>, extra: Partial<DeployOptions> = 
   };
 }
 const mutations = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.method !== 'GET');
+
+it.each([false, true])(
+  'refuses pending migrations before provider calls (dry run: %s)',
+  async (dryRun) => {
+    const j = (await store.read())!;
+    j.migrations.ledger = [];
+    await store.write(j);
+    const before = await readFile(store.path, 'utf8');
+    const h = harness();
+    const result = await deploy(options(h, { dryRun }));
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: {
+        status: 'error',
+        error: {
+          code: 'migrations_pending',
+          stage: 'deploy',
+          retryable: false,
+          message: expect.stringContaining('pb cloudflare migrate'),
+        },
+      },
+    });
+    expect(h.calls).toHaveLength(0);
+    expect(await readFile(store.path, 'utf8')).toBe(before);
+  },
+);
+
+it.each(['pending', 'checksum drift'])(
+  'refuses a later plugin migration with %s even when the core migration is applied',
+  async (mode) => {
+    const sql = '-- plugin migration\n';
+    const file = join(out, 'generated/manifest.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.migrations.push({
+      id: 'example:0001_init',
+      name: '0001_init.sql',
+      checksum: digest(sql),
+      phase: 'expand',
+    });
+    await mkdir(join(out, 'migrations/example'), { recursive: true });
+    await writeFile(join(out, 'migrations/example/0001_init.sql'), sql);
+    await writeFile(file, JSON.stringify(manifest));
+    if (mode === 'checksum drift') {
+      const j = (await store.read())!;
+      j.migrations.ledger.push({
+        id: 'example:0001_init',
+        checksum: digest('-- different plugin migration\n'),
+        phase: 'expand',
+      });
+      await store.write(j);
+    }
+    const before = await readFile(store.path, 'utf8');
+    const h = harness();
+    const result = await deploy(options(h));
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: {
+          code: 'migrations_pending',
+          message: expect.stringContaining('pb cloudflare migrate'),
+        },
+      },
+    });
+    expect(h.calls).toHaveLength(0);
+    expect(await readFile(store.path, 'utf8')).toBe(before);
+  },
+);
+
+it('deploys when every artifact migration is applied, allowing additional ledger entries', async () => {
+  const j = (await store.read())!;
+  j.migrations.ledger.unshift({
+    id: 'retired:0001_init',
+    checksum: digest('-- retired migration\n'),
+    phase: 'expand',
+  });
+  await store.write(j);
+  const h = harness();
+  expect(await deploy(options(h))).toMatchObject({
+    exitCode: 0,
+    output: { error: null, version_id: CANDIDATE },
+  });
+  expect(h.calls.some((c) => c.path === base + '/versions' && c.method === 'POST')).toBe(true);
+});
+
+it('checks migrations before reusing a verified deployment receipt', async () => {
+  const h = harness();
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const j = (await store.read())!;
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  j.migrations.ledger = [];
+  await store.write(j);
+  h.calls.length = 0;
+  expect(await deploy(options(h))).toMatchObject({
+    exitCode: 2,
+    output: { error: { code: 'migrations_pending' } },
+  });
+  expect(h.calls).toHaveLength(0);
+});
 
 it.each([
   ['', 'no-extension', 'e3b0c44298fc1c149afbf4c8996fb924'],

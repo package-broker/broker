@@ -17,6 +17,7 @@ import {
 } from '../../prebuilt.js';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
 import { normalizeQueueConsumer } from './queue-consumer.js';
+import { assertMigrationsApplied } from './migrations-check.js';
 import { d1BindingId, workerSettingsDifferences } from './worker-settings.js';
 import {
   CloudflareApi,
@@ -204,7 +205,7 @@ export async function validateDeploymentArtifact(out: string) {
         return invalid();
       await read(`migrations/${e.id.split(':')[0]}/${e.name}`);
     }
-    await loadBuiltMigrations(root);
+    const migrations = await loadBuiltMigrations(root);
     const routes = await builtRouteProblems(root);
     if (routes === null || routes.length) return invalid();
     // T811's exact record contains the relative deployment descriptor; no second asset schema.
@@ -246,7 +247,7 @@ export async function validateDeploymentArtifact(out: string) {
         ports,
       }),
     );
-    return { module, info, ports, assets, assetsHash: exactAssetsHash, artifactHash };
+    return { module, info, ports, assets, assetsHash: exactAssetsHash, artifactHash, migrations };
   } catch {
     return invalid();
   }
@@ -1380,6 +1381,7 @@ export async function deploy(
       !['binding_pending', 'bound'].includes(journal.resources.analytics?.state ?? '')
     )
       return invalid();
+    assertMigrationsApplied(artifact.migrations, journal.migrations.ledger);
     const ledgerHash = digest(canonical(journal.migrations.ledger));
     const contract = o.contract ?? cloudflareDeployContract;
     api = new CloudflareApi({

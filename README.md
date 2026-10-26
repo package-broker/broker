@@ -13,15 +13,15 @@ Visit [package.broker](https://package.broker), follow the [Cloudflare quickstar
 
 ## Packages
 
-| Package                              | Purpose                                             |
-| ------------------------------------ | --------------------------------------------------- |
-| `@package-broker/core`               | Plugin API (`./plugin`) and config API (`./config`) |
-| `@package-broker/runtime-cloudflare` | Worker entry                                        |
-| `@package-broker/runtime-node`       | Node HTTP entry                                     |
-| `@package-broker/cli`                | `pb` command: `build`, `version`                    |
-| `@package-broker/ui`                 | Static UI assets                                    |
-| `@package-broker/ui-assets`          | Build-time bridge that hands the UI to `pb build`   |
-| `@package-broker/plugin-*`           | First-party plugins (`sso-oidc`, `github`)          |
+| Package                              | Purpose                                                                                                                    |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `@package-broker/core`               | Plugin API (`./plugin`) and config API (`./config`)                                                                        |
+| `@package-broker/runtime-cloudflare` | Worker entry                                                                                                               |
+| `@package-broker/runtime-node`       | Node HTTP entry                                                                                                            |
+| `@package-broker/cli`                | `pb` commands: `build`, `migrate`, `bootstrap`, `cloudflare`, `secrets`, `admin`, `import`, `source`, `openapi`, `version` |
+| `@package-broker/ui`                 | Static UI assets                                                                                                           |
+| `@package-broker/ui-assets`          | Build-time bridge that hands the UI to `pb build`                                                                          |
+| `@package-broker/plugin-*`           | First-party plugins (`sso-oidc`, `github`)                                                                                 |
 
 ## Source selection
 

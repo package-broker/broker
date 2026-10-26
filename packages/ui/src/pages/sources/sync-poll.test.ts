@@ -115,3 +115,22 @@ it('does not refresh past the wall-clock cap after a suspended timer resumes', a
   expect(refresh).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it('returns to normal polling and a fresh attempt cap after pending work', async () => {
+  vi.useFakeTimers();
+  const refresh = vi
+    .fn<() => Promise<boolean | 'pending'>>()
+    .mockResolvedValueOnce(false)
+    .mockResolvedValueOnce('pending')
+    .mockResolvedValue(false);
+  pollSync(refresh);
+  await vi.advanceTimersByTimeAsync(2_000 + 2_000 + 4_000);
+  expect(refresh).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(SYNC_POLL_INTERVAL_MS - 1);
+  expect(refresh).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(refresh).toHaveBeenCalledTimes(4);
+  await vi.advanceTimersByTimeAsync(SYNC_POLL_INTERVAL_MS * 30);
+  expect(refresh).toHaveBeenCalledTimes(2 + SYNC_POLL_ATTEMPTS);
+  expect(vi.getTimerCount()).toBe(0);
+});

@@ -460,7 +460,7 @@ it('cascades tracking pointers when a job is deleted', async () => {
 });
 
 it.each(['failed', 'timeout', 'released', 'reaped', 'paused', 'succeeded'] as const)(
-  'clears listing when a source run is %s',
+  'tracks listing when a source run is %s',
   async (ending) => {
     await executor.batch([
       statement(
@@ -512,7 +512,18 @@ it.each(['failed', 'timeout', 'released', 'reaped', 'paused', 'succeeded'] as co
         permanent: false,
       });
     }
-    expect((await status()).listing).toBe(false);
+    expect((await status()).listing).toBe(ending === 'reaped');
+    if (ending === 'reaped') {
+      expect(
+        await executor.all(
+          statement(
+            'SELECT state, last_error FROM job WHERE org_id = ? AND id = ?',
+            org.orgId,
+            'source-run',
+          ),
+        ),
+      ).toEqual([{ state: 'queued', last_error: 'lease_lost' }]);
+    }
   },
 );
 

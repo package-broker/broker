@@ -1029,6 +1029,7 @@ BEGIN
   UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))
     WHERE org_id = NEW.org_id AND id = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.sourceId')
       AND NEW.type = 'core:source-sync:v1' AND NEW.state <> 'running'
+      AND NOT (NEW.state = 'queued' AND NEW.last_error IS 'lease_lost')
       AND (NEW.state <> 'succeeded' OR NOT EXISTS (
         SELECT 1 FROM job continuation
         WHERE continuation.org_id = NEW.org_id AND continuation.resource_key = NEW.resource_key

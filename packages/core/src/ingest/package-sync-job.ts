@@ -358,13 +358,15 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
           await end(isSnapshotGone(error) || session.stamp === null).catch(() => undefined);
         }
         if (error instanceof JobRelease || context.signal.aborted) throw error;
-        const failure = error instanceof JobError ? error : retry();
-        if (payload.syncGeneration !== undefined) {
+        const failure = isSnapshotGone(error) || isUpstreamFailure(error) ? retry() : error;
+        if (
+          payload.syncGeneration !== undefined &&
+          typeof failure === 'object' &&
+          failure !== null
+        ) {
           throw withJobSourceError(failure, sourceErrorCode(error));
         }
-        if (error instanceof JobError) throw error;
-        if (isSnapshotGone(error) || isUpstreamFailure(error)) throw retry();
-        throw error;
+        throw failure;
       }
     },
   });

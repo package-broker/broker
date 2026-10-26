@@ -48,6 +48,7 @@ export function pollSync(
   let pending = false;
   let interval = SYNC_POLL_INTERVAL_MS;
   let timer: ReturnType<typeof setTimeout>;
+  const deadline = setTimeout(() => stop(), PENDING_POLL_MAX_MS);
   const stop = () => {
     stopped = true;
     clearTimeout(timer);
@@ -75,15 +76,18 @@ export function pollSync(
       attempts++;
       void refresh().then((complete) => {
         if (complete === 'pending') {
+          attempts = 0;
           pending = true;
           interval = Math.min(interval * 2, PENDING_POLL_MAX_INTERVAL_MS);
+        } else {
+          pending = false;
+          interval = SYNC_POLL_INTERVAL_MS;
         }
         if (complete === true) stop();
         else schedule();
       }, stop);
     }, interval);
   };
-  const deadline = setTimeout(stop, PENDING_POLL_MAX_MS);
   visibility?.addEventListener('visibilitychange', changed);
   schedule();
   return stop;

@@ -388,20 +388,38 @@ it.each([
 );
 
 it('maps the native fetch redirect rejection to a fixed redirect_refused error', async () => {
-  const dispatch = vi.fn(
-    (
-      _options: unknown,
-      handler: {
-        onConnect: (abort: () => void) => void;
-        onHeaders: (
-          status: number,
-          headers: string[],
-          resume: () => void,
-          statusText: string,
-        ) => void;
-        onComplete: (trailers: string[]) => void;
-      },
-    ) => {
+  type LegacyHandler = {
+    onConnect: (abort: () => void) => void;
+    onHeaders: (status: number, headers: string[], resume: () => void, statusText: string) => void;
+    onComplete: (trailers: string[]) => void;
+  };
+  type CurrentHandler = {
+    onRequestStart: (controller: { abort: () => void }, context: object) => void;
+    onResponseStart: (
+      controller: { pause: () => void; resume: () => void },
+      status: number,
+      headers: Record<string, string>,
+      statusText: string,
+    ) => void;
+    onResponseEnd: (controller: object, trailers: Record<string, string>) => void;
+  };
+  // Node 24's bundled undici calls dispatchers with the legacy handler API, Node 26's with the current one.
+  const dispatch = vi.fn((_options: unknown, handler: LegacyHandler | CurrentHandler) => {
+    if ('onRequestStart' in handler) {
+      const controller = {
+        abort: () => undefined,
+        pause: () => undefined,
+        resume: () => undefined,
+      };
+      handler.onRequestStart(controller, {});
+      handler.onResponseStart(
+        controller,
+        302,
+        { location: 'https://redirect.example.test/' },
+        'Found',
+      );
+      handler.onResponseEnd(controller, {});
+    } else {
       handler.onConnect(() => undefined);
       handler.onHeaders(
         302,
@@ -410,9 +428,9 @@ it('maps the native fetch redirect rejection to a fixed redirect_refused error',
         'Found',
       );
       handler.onComplete([]);
-      return true;
-    },
-  );
+    }
+    return true;
+  });
   const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const dispatcher = { dispatch } as unknown as NonNullable<RequestInit['dispatcher']>;
     return globalThis.fetch(input, { ...init, dispatcher });

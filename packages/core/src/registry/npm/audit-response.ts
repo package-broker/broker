@@ -55,7 +55,9 @@ function boundedString(value: unknown, max: number): string {
 }
 
 function isControl(code: number): boolean {
-  return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+  return (
+    code <= 0x1f || (code >= 0x7f && code <= 0x9f) || /\p{Cf}/u.test(String.fromCodePoint(code))
+  );
 }
 
 function text(value: unknown, max: number): string {
@@ -99,7 +101,11 @@ function httpsUrl(value: unknown): string {
 
 function cwe(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > CWE_COUNT_MAX) throw new Malformed();
-  return value.map((entry) => text(entry, CWE_MAX));
+  return value.map((entry) => {
+    const clean = text(entry, CWE_MAX);
+    if (clean.trim() === '') throw new Malformed();
+    return clean;
+  });
 }
 
 function cvss(value: unknown): NpmAuditCvss | undefined {

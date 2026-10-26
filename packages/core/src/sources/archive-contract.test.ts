@@ -16,6 +16,7 @@ import {
   type DigestAlgorithm,
 } from '../platform/codec.js';
 import { npmRoutes } from '../registry/npm/routes.js';
+import { forwardNpmAudit, type NpmAuditEntries } from '../registry/npm/audit.js';
 import type { RequestContext } from '../plugin.js';
 import type { ProviderContext, ProviderSource } from './provider.js';
 import { ArchiveError, buildZipFromTree, type ArchiveIo } from './git/archive.js';
@@ -549,6 +550,19 @@ describe('dist body cap contract', () => {
 
 describe('npm audit gzip bomb contract', () => {
   it('refuses a body that inflates past the decompressed cap before classifying or forwarding', async () => {
+    const classifyWinners = vi.fn();
+    const hasAttachedProxy = vi.fn();
+    const authorizeNpmAudit = vi.fn();
+    const policyFetch = vi.fn();
+    const forward = vi.fn((entries: NpmAuditEntries, ctx: RequestContext) =>
+      forwardNpmAudit(entries, ctx.request, ctx.org!, ctx.projectId!, ctx.requestId, {
+        classifyWinners,
+        hasAttachedProxy,
+        authorizeNpmAudit,
+        policyFetch,
+        observability: { log: vi.fn() },
+      }),
+    );
     const versions = vi.fn();
     const serve = vi.fn();
     const ensure = vi.fn();
@@ -570,6 +584,7 @@ describe('npm audit gzip bomb contract', () => {
       handleOf: () => null,
       publicUrl: 'https://broker.test',
       codecs: nodeCodecs,
+      audit: { enabled: true, forward },
     }).find((route) => route.path.endsWith('/security/advisories/bulk'))!;
     const response = await route.handler({
       request: new Request('https://broker.test/project/npm/-/npm/v1/security/advisories/bulk', {
@@ -590,5 +605,10 @@ describe('npm audit gzip bomb contract', () => {
     expect(serve).not.toHaveBeenCalled();
     expect(ensure).not.toHaveBeenCalled();
     expect(reresolve).not.toHaveBeenCalled();
+    expect(forward).not.toHaveBeenCalled();
+    expect(classifyWinners).not.toHaveBeenCalled();
+    expect(hasAttachedProxy).not.toHaveBeenCalled();
+    expect(authorizeNpmAudit).not.toHaveBeenCalled();
+    expect(policyFetch).not.toHaveBeenCalled();
   });
 });

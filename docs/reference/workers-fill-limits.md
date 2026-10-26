@@ -92,7 +92,7 @@ package sync reads the manifests again. With 250 KB manifests one step applies
 about 33 versions, so a full sync of N such refs takes about
 `ceil(N / 33) × (N / 5 + N / 50 + 3)` API requests: about 480 for 256 refs
 (64 MB). The 1,000-request Workers ceiling assumes the Workers Paid limit of
-1,000 subrequests per invocation; verify it on hosted Workers (T855) before
+1,000 subrequests per invocation; verify it on hosted Workers before
 changing it.
 
 Run the GitHub fill measurement without building:

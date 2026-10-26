@@ -306,6 +306,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/source-removal.ts',
   'db-sqlite/src/repositories/source-selection-revision.ts',
   'db-sqlite/src/repositories/source-selection.ts',
+  'db-sqlite/src/repositories/source.ts',
   'db-sqlite/src/repositories/upstream-state.ts',
   'db-sqlite/src/repositories/visibility-attach.ts',
   'db-sqlite/src/repositories/visibility-audit.ts',

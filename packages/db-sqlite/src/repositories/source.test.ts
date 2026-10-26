@@ -1,3 +1,5 @@
+import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { settleIdempotent, type IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { createIdempotencyRepository, idempotencyInsertStatement } from './idempotency.js';
@@ -1154,6 +1156,46 @@ describe('other organizations', () => {
     );
     expect(await repository.pollState(a, guard, { id: SRC_ORG, outcome: 'success' })).toBe('stale');
     expect(await snapshot()).toBe(before);
+  });
+});
+
+describe('legacy stored source config', () => {
+  it.each([
+    { installationId: null, packageName: null },
+    { installationId: null, packageName: 'acme/widget' },
+    { installationId: 7, packageName: null },
+    { packageName: null },
+  ])('normalizes optional nulls on read: %j', async (optional) => {
+    const config = {
+      provider: 'github',
+      repository: 'acme/widget',
+      refs: { tags: true, branches: ['main'] },
+      ...optional,
+    };
+    const stored = JSON.stringify(config);
+    await executor.batch([
+      stmt(
+        "INSERT INTO source (id, org_id, name, ecosystem, type, config_json) VALUES (?, ?, 'legacy', 'composer', 'vcs', ?)",
+        SRC_NEW,
+        a.orgId,
+        stored,
+      ),
+    ]);
+    const record = await repository.get(a, SRC_NEW);
+    expect(record).not.toBeNull();
+    const normalized = Object.fromEntries(
+      Object.entries(config).filter(([, value]) => value !== null),
+    );
+    expect(JSON.parse(record!.configJson)).toEqual(normalized);
+    expect(
+      parseSourceConfig('vcs', 'composer', null, record!.configJson, {
+        runtime: 'node',
+        hasCredential: false,
+        policy: createOutboundPolicy({ runtime: 'node', allowPrivateHosts: [], selfOrigins: [] }),
+      }),
+    ).toEqual({ ok: true, config: normalized });
+    expect(await sourceRow(SRC_NEW)).toMatchObject({ config_json: stored });
+    expect(await repository.get(b, SRC_NEW)).toBeNull();
   });
 });
 

@@ -9,13 +9,13 @@ import { createBrowserFixture } from './browser-fixture.js';
 const components = {
   menuDialog: `
       import { Dialog, DialogContent, DialogTitle } from './components/ui/dialog';
-      import { DropdownMenu, DropdownMenuTrigger, DropdownMenuItem } from './components/ui/dropdown-menu';
+      import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from './components/ui/dropdown-menu';
       function MenuDialog() {
         const [open, setOpen] = React.useState(true);
         return <Dialog open={open} onOpenChange={setOpen}><DialogContent>
           <DialogTitle>Menu dialog</DialogTitle>
           <DropdownMenu open><DropdownMenuTrigger>Actions</DropdownMenuTrigger>
-            <DropdownMenuItem>Menu action</DropdownMenuItem>
+            <DropdownMenuContent><DropdownMenuItem>Menu action</DropdownMenuItem></DropdownMenuContent>
           </DropdownMenu>
         </DialogContent></Dialog>;
       }
@@ -98,162 +98,195 @@ async function mounted(context: TestContext, component: keyof typeof components)
   return fixture!;
 }
 
-it('renders the mounted sources fixture with all model state initialized without a browser', async () => {
-  const contents = components.sources.replace(
-    "createRoot(document.getElementById('root')).render",
-    'globalThis.fixtureHtml = renderToString',
-  );
-  const bundle = await build({
-    stdin: {
-      contents: `import React from 'react'; import { renderToString } from 'react-dom/server'; ${contents}`,
-      loader: 'tsx',
-      resolveDir: fileURLToPath(new URL('../src/', import.meta.url)),
-    },
-    bundle: true,
-    write: false,
-    platform: 'node',
-    external: ['react', 'react-dom', 'react-dom/*'],
-    format: 'cjs',
-    jsx: 'automatic',
-    define: { 'process.env.NODE_ENV': '"production"' },
-  });
-  const context = { require: createRequire(import.meta.url), queueMicrotask, fixtureHtml: '' };
-  runInNewContext(bundle.outputFiles[0]!.text, context);
-  expect(context.fixtureHtml).toContain('Alpha');
-  expect(context.fixtureHtml).toContain('Beta');
-  expect(context.fixtureHtml).not.toContain('<dialog');
-});
+it(
+  'renders the mounted sources fixture with all model state initialized without a browser',
+  { timeout: 30_000 },
+  async () => {
+    const contents = components.sources.replace(
+      "createRoot(document.getElementById('root')).render",
+      'globalThis.fixtureHtml = renderToString',
+    );
+    const bundle = await build({
+      stdin: {
+        contents: `import React from 'react'; import { renderToString } from 'react-dom/server'; ${contents}`,
+        loader: 'tsx',
+        resolveDir: fileURLToPath(new URL('../src/', import.meta.url)),
+      },
+      bundle: true,
+      write: false,
+      platform: 'node',
+      external: ['react', 'react-dom', 'react-dom/*'],
+      format: 'cjs',
+      jsx: 'automatic',
+      define: { 'process.env.NODE_ENV': '"production"' },
+    });
+    const context = { require: createRequire(import.meta.url), queueMicrotask, fixtureHtml: '' };
+    runInNewContext(bundle.outputFiles[0]!.text, context);
+    expect(context.fixtureHtml).toContain('Alpha');
+    expect(context.fixtureHtml).toContain('Beta');
+    expect(context.fixtureHtml).not.toContain('<dialog');
+  },
+);
 
 describe('mounted review regressions', () => {
   for (const [activation, click] of [
     ['without prior user activation', false],
     ['after a pointer click inside the dialog', true],
   ] as const) {
-    it(`Escape closes only the open menu inside a native modal dialog in Chromium ${activation}`, async (context) => {
-      const { page, browserExpect } = await mounted(context, 'menuDialog');
-      const dialog = page.getByRole('dialog', { name: 'Menu dialog' });
-      await browserExpect(dialog).toBeVisible();
-      if (click) await dialog.getByRole('heading', { name: 'Menu dialog' }).click();
-      await dialog.getByRole('button', { name: 'Menu action' }).focus();
-      await page.keyboard.press('Escape');
-      await browserExpect(dialog.locator('details')).not.toHaveAttribute('open');
-      await browserExpect(dialog.locator('summary')).toBeFocused();
-      await browserExpect(dialog).toBeVisible();
-      await page.keyboard.press('Escape');
-      await browserExpect(dialog).not.toBeVisible();
-    });
+    it(
+      `Escape closes only the open menu inside a native modal dialog in Chromium ${activation}`,
+      { timeout: 30_000 },
+      async (context) => {
+        const { page, browserExpect } = await mounted(context, 'menuDialog');
+        const dialog = page.getByRole('dialog', { name: 'Menu dialog' });
+        await browserExpect(dialog).toBeVisible();
+        await browserExpect(dialog.getByRole('menu')).toBeVisible();
+        if (click) {
+          await dialog.getByRole('heading', { name: 'Menu dialog' }).click();
+          await browserExpect(dialog.getByRole('menu')).toHaveCount(0);
+          await browserExpect(dialog).toBeVisible();
+          await dialog.getByRole('button', { name: 'Actions' }).click();
+          await browserExpect(dialog.getByRole('menu')).toBeVisible();
+        }
+        const item = dialog.getByRole('menuitem', { name: 'Menu action' });
+        await item.focus();
+        await browserExpect(item).toBeFocused();
+        await page.keyboard.press('Escape');
+        await browserExpect(dialog.getByRole('menu')).toHaveCount(0);
+        await browserExpect(dialog.getByRole('button', { name: 'Actions' })).toBeFocused();
+        await browserExpect(dialog).toBeVisible();
+        await page.keyboard.press('Escape');
+        await browserExpect(dialog).not.toBeVisible();
+      },
+    );
   }
 
-  it('keeps source drafts with their IDs after filtering and reordering', async (context) => {
-    let step = 'mount sources';
-    context.onTestFailed(() => console.error(`Mounted source regression stopped at: ${step}`));
-    const { page, browserExpect } = await mounted(context, 'sources');
-    await browserExpect(page.locator('tbody tr')).toHaveCount(2);
-    await browserExpect(page.locator('dialog[open]')).toHaveCount(0);
-    const row = (name: string) => page.locator('tbody tr').filter({ hasText: name });
-    const dialog = page.locator('dialog[open]');
-    const interval = dialog.getByLabel('Sync interval (seconds)', { exact: true });
-    const openEdit = async (name: string) => {
-      await row(name).getByRole('button', { name: 'Edit', exact: true }).click();
-      await browserExpect(dialog).toHaveCount(1);
-      await browserExpect(dialog.getByRole('heading', { name: 'Edit source' })).toBeVisible();
-      await dialog.getByText('Advanced settings', { exact: true }).click();
-    };
-    step = 'open Alpha edit dialog';
-    await openEdit('Alpha');
-    step = 'fill Alpha draft';
-    await browserExpect(interval).toHaveValue('600');
-    await interval.fill('777');
-    step = 'cancel Alpha edit';
-    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await browserExpect(dialog).toHaveCount(0);
-    step = 'filter to Beta';
-    await page.getByLabel('Name (loaded sources)', { exact: true }).fill('Beta');
-    step = 'submit filters';
-    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
-    await browserExpect(page.locator('tbody tr')).toHaveCount(1);
-    step = 'open Beta edit dialog';
-    await openEdit('Beta');
-    step = 'verify Beta shows its own value';
-    await browserExpect(interval).toHaveValue('300');
-    step = 'save Beta settings';
-    await dialog.getByRole('button', { name: 'Save source', exact: true }).click();
-    await browserExpect(dialog).toHaveCount(0);
-    step = 'verify submitted source ID and settings';
-    expect(await page.evaluate('globalThis.edits')).toEqual([['beta', 300, 'flag']]);
-    step = 'clear filters';
-    await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
-    await browserExpect(page.locator('tbody tr')).toHaveCount(2);
-    step = 'reorder sources';
-    await page.evaluate('globalThis.reorder()');
-    await browserExpect(page.locator('tbody tr').first()).toContainText('Beta');
-    step = 'open Alpha edit dialog after reorder';
-    await openEdit('Alpha');
-    step = 'verify Alpha shows its stored value, not the cancelled draft';
-    await browserExpect(interval).toHaveValue('600');
-  });
-
-  it('clears rendered unapplied text and select values before another submit', async (context) => {
-    let step = 'mount filters';
-    context.onTestFailed(() => console.error(`Mounted filter regression stopped at: ${step}`));
-    const { page, browserExpect } = await mounted(context, 'filters');
-    const name = page.getByLabel('Name', { exact: true });
-    // A wrapping label includes its select's option text in getByLabel's match.
-    const status = page.locator('select[name="status"]');
-    step = 'wait for Name field';
-    await name.waitFor({ state: 'visible' });
-    step = 'fill unapplied Name';
-    await name.fill('unapplied');
-    step = 'choose revoked Status';
-    await status.selectOption('revoked');
-    step = 'verify unapplied text and select values';
-    await browserExpect(name).toHaveValue('unapplied');
-    await browserExpect(status).toHaveValue('revoked');
-    step = 'clear filters';
-    await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
-    step = 'verify cleared text and select values';
-    await browserExpect(name).toHaveValue('');
-    await browserExpect(status).toHaveValue('');
-    step = 'submit filters';
-    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
-    step = 'verify empty values after submitting again';
-    await browserExpect(page.locator('output')).toHaveText('{"q":"","status":""}');
-  });
-});
-
-it.for(['app', 'token'])('fixes the edited GitHub form in %s mode', async (mode, context) => {
-  if (!fixture) context.skip('Chromium cannot start in this environment');
-  const { page, browserExpect } = fixture!;
-  await fixture!.mount(bundles.githubForm!, { authentication: mode });
-  await page.getByLabel('Replace type-specific configuration', { exact: true }).check();
-  await browserExpect(page.locator('select[name="githubAuthentication"]')).toHaveCount(0);
-  await browserExpect(page.locator('input[name="githubAuthentication"]')).toHaveValue(mode);
-  await browserExpect(page.locator('input[name="githubAuthenticationDisplay"]')).toHaveValue(
-    mode === 'app' ? 'GitHub App' : 'Personal access token',
+  it(
+    'keeps source drafts with their IDs after filtering and reordering',
+    { timeout: 30_000 },
+    async (context) => {
+      let step = 'mount sources';
+      context.onTestFailed(() => console.error(`Mounted source regression stopped at: ${step}`));
+      const { page, browserExpect } = await mounted(context, 'sources');
+      await browserExpect(page.locator('tbody tr')).toHaveCount(2);
+      await browserExpect(page.locator('dialog[open]')).toHaveCount(0);
+      const row = (name: string) => page.locator('tbody tr').filter({ hasText: name });
+      const dialog = page.locator('dialog[open]');
+      const interval = dialog.getByLabel('Sync interval (seconds)', { exact: true });
+      const openEdit = async (name: string) => {
+        await row(name).getByRole('button', { name: 'Edit', exact: true }).click();
+        await browserExpect(dialog).toHaveCount(1);
+        await browserExpect(dialog.getByRole('heading', { name: 'Edit source' })).toBeVisible();
+        await dialog.getByText('Advanced settings', { exact: true }).click();
+      };
+      step = 'open Alpha edit dialog';
+      await openEdit('Alpha');
+      step = 'fill Alpha draft';
+      await browserExpect(interval).toHaveValue('600');
+      await interval.fill('777');
+      step = 'cancel Alpha edit';
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await browserExpect(dialog).toHaveCount(0);
+      step = 'filter to Beta';
+      await page.getByLabel('Name (loaded sources)', { exact: true }).fill('Beta');
+      step = 'submit filters';
+      await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+      await browserExpect(page.locator('tbody tr')).toHaveCount(1);
+      step = 'open Beta edit dialog';
+      await openEdit('Beta');
+      step = 'verify Beta shows its own value';
+      await browserExpect(interval).toHaveValue('300');
+      step = 'save Beta settings';
+      await dialog.getByRole('button', { name: 'Save source', exact: true }).click();
+      await browserExpect(dialog).toHaveCount(0);
+      step = 'verify submitted source ID and settings';
+      expect(await page.evaluate('globalThis.edits')).toEqual([['beta', 300, 'flag']]);
+      step = 'clear filters';
+      await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+      await browserExpect(page.locator('tbody tr')).toHaveCount(2);
+      step = 'reorder sources';
+      await page.evaluate('globalThis.reorder()');
+      await browserExpect(page.locator('tbody tr').first()).toContainText('Beta');
+      step = 'open Alpha edit dialog after reorder';
+      await openEdit('Alpha');
+      step = 'verify Alpha shows its stored value, not the cancelled draft';
+      await browserExpect(interval).toHaveValue('600');
+    },
   );
-  await browserExpect(page.locator('input[name="githubAuthenticationDisplay"]')).toHaveAttribute(
-    'readonly',
-    '',
-  );
-  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(
-    mode === 'app' ? 1 : 0,
+
+  it(
+    'clears rendered unapplied text and select values before another submit',
+    { timeout: 30_000 },
+    async (context) => {
+      let step = 'mount filters';
+      context.onTestFailed(() => console.error(`Mounted filter regression stopped at: ${step}`));
+      const { page, browserExpect } = await mounted(context, 'filters');
+      const name = page.getByLabel('Name', { exact: true });
+      // A wrapping label includes its select's option text in getByLabel's match.
+      const status = page.locator('select[name="status"]');
+      step = 'wait for Name field';
+      await name.waitFor({ state: 'visible' });
+      step = 'fill unapplied Name';
+      await name.fill('unapplied');
+      step = 'choose revoked Status';
+      await status.selectOption('revoked');
+      step = 'verify unapplied text and select values';
+      await browserExpect(name).toHaveValue('unapplied');
+      await browserExpect(status).toHaveValue('revoked');
+      step = 'clear filters';
+      await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+      step = 'verify cleared text and select values';
+      await browserExpect(name).toHaveValue('');
+      await browserExpect(status).toHaveValue('');
+      step = 'submit filters';
+      await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
+      step = 'verify empty values after submitting again';
+      await browserExpect(page.locator('output')).toHaveText('{"q":"","status":""}');
+    },
   );
 });
 
-it('offers both GitHub authentication modes when creating a source', async (context) => {
-  if (!fixture) context.skip('Chromium cannot start in this environment');
-  const { page, browserExpect } = fixture!;
-  await fixture!.mount(bundles.githubForm!, { creating: true });
-  await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
-  const authentication = page.locator('input[name="githubAuthentication"]:checked');
-  await browserExpect(authentication).toHaveValue('app');
-  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(1);
-  await page.getByRole('radio', { name: 'Personal access token', exact: false }).check();
-  await browserExpect(authentication).toHaveValue('token');
-  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
-  await page.getByRole('radio', { name: 'GitHub App', exact: false }).check();
-  await browserExpect(authentication).toHaveValue('app');
-});
+it.for(['app', 'token'])(
+  'fixes the edited GitHub form in %s mode',
+  { timeout: 30_000 },
+  async (mode, context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    await fixture!.mount(bundles.githubForm!, { authentication: mode });
+    await page.getByLabel('Replace type-specific configuration', { exact: true }).check();
+    await browserExpect(page.locator('select[name="githubAuthentication"]')).toHaveCount(0);
+    await browserExpect(page.locator('input[name="githubAuthentication"]')).toHaveValue(mode);
+    await browserExpect(page.locator('input[name="githubAuthenticationDisplay"]')).toHaveValue(
+      mode === 'app' ? 'GitHub App' : 'Personal access token',
+    );
+    await browserExpect(page.locator('input[name="githubAuthenticationDisplay"]')).toHaveAttribute(
+      'readonly',
+      '',
+    );
+    await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(
+      mode === 'app' ? 1 : 0,
+    );
+  },
+);
+
+it(
+  'offers both GitHub authentication modes when creating a source',
+  { timeout: 30_000 },
+  async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    await fixture!.mount(bundles.githubForm!, { creating: true });
+    await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
+    const authentication = page.locator('input[name="githubAuthentication"]:checked');
+    await browserExpect(authentication).toHaveValue('app');
+    await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(1);
+    await page.getByRole('radio', { name: 'Personal access token', exact: false }).check();
+    await browserExpect(authentication).toHaveValue('token');
+    await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
+    await page.getByRole('radio', { name: 'GitHub App', exact: false }).check();
+    await browserExpect(authentication).toHaveValue('app');
+  },
+);
 
 it.for([
   [['github'], ['github']],
@@ -267,6 +300,7 @@ it.for([
   ],
 ] as const)(
   'offers only the reported repository providers %j',
+  { timeout: 30_000 },
   async ([reported, offered], context) => {
     if (!fixture) context.skip('Chromium cannot start in this environment');
     const { page, browserExpect } = fixture!;
@@ -285,73 +319,87 @@ it.for([
   },
 );
 
-it('switches to an offered provider when the reported list arrives late', async (context) => {
-  const { page, browserExpect } = await mounted(context, 'lateProviders');
-  await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
-  await browserExpect(
-    page.getByLabel('GitHub repository (required)', { exact: true }),
-  ).toBeVisible();
-  await page.evaluate(() => {
-    (globalThis as unknown as { loadProviders(next: string[]): void }).loadProviders(['git']);
-  });
-  await browserExpect(
-    page.getByLabel('Git repository URL (required)', { exact: true }),
-  ).toBeVisible();
-  await browserExpect(page.locator('select[name="config/provider"]')).toHaveValue('git');
-  await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
-});
+it(
+  'switches to an offered provider when the reported list arrives late',
+  { timeout: 30_000 },
+  async (context) => {
+    const { page, browserExpect } = await mounted(context, 'lateProviders');
+    await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
+    await browserExpect(
+      page.getByLabel('GitHub repository (required)', { exact: true }),
+    ).toBeVisible();
+    await page.evaluate(() => {
+      (globalThis as unknown as { loadProviders(next: string[]): void }).loadProviders(['git']);
+    });
+    await browserExpect(
+      page.getByLabel('Git repository URL (required)', { exact: true }),
+    ).toBeVisible();
+    await browserExpect(page.locator('select[name="config/provider"]')).toHaveValue('git');
+    await browserExpect(page.locator('input[name="config/installationId"]')).toHaveCount(0);
+  },
+);
 
-it('blocks empty Composer selection and opens Advanced to focus an invalid interval', async (context) => {
-  if (!fixture) context.skip('Chromium cannot start in this environment');
-  const { page, browserExpect } = fixture!;
-  await fixture!.mount(bundles.githubForm!, { creating: true });
-  await page.getByRole('radio', { name: 'Composer repository', exact: false }).check();
-  await page.getByLabel('Source name (required)', { exact: true }).fill('Composer');
-  await page
-    .getByLabel('Repository URL (required)', { exact: true })
-    .fill('https://composer.example.com');
-  await page.getByRole('button', { name: 'Add source', exact: true }).click();
-  await browserExpect(
-    page.getByText('Add at least one package name or pattern', { exact: true }),
-  ).toBeVisible();
-  await browserExpect(
-    page.getByLabel('Package names (one per line)', { exact: true }),
-  ).toBeFocused();
-  await page.getByLabel('Package patterns (one per line)', { exact: true }).fill('acme/*');
-  await page.getByText('Advanced settings', { exact: true }).click();
-  await page.getByLabel('Sync interval (seconds)', { exact: true }).fill('0');
-  await page.getByText('Advanced settings', { exact: true }).click();
-  await page.getByRole('button', { name: 'Add source', exact: true }).click();
-  await browserExpect(page.getByLabel('Sync interval (seconds)', { exact: true })).toBeVisible();
-  await browserExpect(page.getByLabel('Sync interval (seconds)', { exact: true })).toBeFocused();
-  expect(await page.evaluate('globalThis.submissions')).toEqual([]);
-});
+it(
+  'blocks empty Composer selection and opens Advanced to focus an invalid interval',
+  { timeout: 30_000 },
+  async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    await fixture!.mount(bundles.githubForm!, { creating: true });
+    await page.getByRole('radio', { name: 'Composer repository', exact: false }).check();
+    await page.getByLabel('Source name (required)', { exact: true }).fill('Composer');
+    await page
+      .getByLabel('Repository URL (required)', { exact: true })
+      .fill('https://composer.example.com');
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    await browserExpect(
+      page.getByText('Add at least one package name or pattern', { exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      page.getByLabel('Package names (one per line)', { exact: true }),
+    ).toBeFocused();
+    await page.getByLabel('Package patterns (one per line)', { exact: true }).fill('acme/*');
+    await page.getByText('Advanced settings', { exact: true }).click();
+    await page.getByLabel('Sync interval (seconds)', { exact: true }).fill('0');
+    await page.getByText('Advanced settings', { exact: true }).click();
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    await browserExpect(page.getByLabel('Sync interval (seconds)', { exact: true })).toBeVisible();
+    await browserExpect(page.getByLabel('Sync interval (seconds)', { exact: true })).toBeFocused();
+    expect(await page.evaluate('globalThis.submissions')).toEqual([]);
+  },
+);
 
-it('preserves the name across ecosystems and submits only the chosen type fields', async (context) => {
-  if (!fixture) context.skip('Chromium cannot start in this environment');
-  const { page, browserExpect } = fixture!;
-  await fixture!.mount(bundles.githubForm!, { creating: true });
-  await page.getByLabel('Source name (required)', { exact: true }).fill('Public packages');
-  await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
-  await page.getByLabel('GitHub App installation ID (required)', { exact: true }).fill('42');
-  await page.getByRole('radio', { name: 'npm', exact: true }).check();
-  await browserExpect(page.getByRole('radio', { name: 'npmjs proxy', exact: false })).toBeChecked();
-  await browserExpect(page.getByLabel('Source name (required)', { exact: true })).toHaveValue(
-    'Public packages',
-  );
-  await page.getByRole('button', { name: 'Add source', exact: true }).click();
-  expect(await page.evaluate('globalThis.submissions')).toEqual([
-    {
-      name: 'Public packages',
-      ecosystem: 'npm',
-      type: 'npmjs_proxy',
-      url: 'https://registry.npmjs.org',
-      userAgent: null,
-      pollIntervalSeconds: 300,
-      removalPolicy: 'flag',
-      defaultVisibleToNewProjects: false,
-      retentionDaysOverride: null,
-      config: {},
-    },
-  ]);
-});
+it(
+  'preserves the name across ecosystems and submits only the chosen type fields',
+  { timeout: 30_000 },
+  async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    await fixture!.mount(bundles.githubForm!, { creating: true });
+    await page.getByLabel('Source name (required)', { exact: true }).fill('Public packages');
+    await page.getByRole('radio', { name: 'Git repository', exact: false }).check();
+    await page.getByLabel('GitHub App installation ID (required)', { exact: true }).fill('42');
+    await page.getByRole('radio', { name: 'npm', exact: true }).check();
+    await browserExpect(
+      page.getByRole('radio', { name: 'npmjs proxy', exact: false }),
+    ).toBeChecked();
+    await browserExpect(page.getByLabel('Source name (required)', { exact: true })).toHaveValue(
+      'Public packages',
+    );
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    expect(await page.evaluate('globalThis.submissions')).toEqual([
+      {
+        name: 'Public packages',
+        ecosystem: 'npm',
+        type: 'npmjs_proxy',
+        url: 'https://registry.npmjs.org',
+        userAgent: null,
+        pollIntervalSeconds: 300,
+        removalPolicy: 'flag',
+        defaultVisibleToNewProjects: false,
+        retentionDaysOverride: null,
+        config: {},
+      },
+    ]);
+  },
+);

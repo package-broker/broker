@@ -16,6 +16,9 @@ export function ConfirmAction({
   description,
   disabled = false,
   onConfirm,
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger = false,
 }: {
   action: string;
   target: string;
@@ -23,20 +26,30 @@ export function ConfirmAction({
   description: string;
   disabled?: boolean;
   onConfirm: () => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  hideTrigger?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = controlledOpen ?? localOpen;
+  const setOpen = (next: boolean) => {
+    setLocalOpen(next);
+    onOpenChange?.(next);
+  };
   return (
     <>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="text-red-700 hover:bg-red-50 hover:text-red-800"
-        disabled={disabled}
-        onClick={() => setOpen(true)}
-      >
-        {action}
-      </Button>
+      {hideTrigger ? null : (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-red-700 hover:bg-red-50 hover:text-red-800"
+          disabled={disabled}
+          onClick={() => setOpen(true)}
+        >
+          {action}
+        </Button>
+      )}
       {open ? (
         <Dialog open onOpenChange={setOpen}>
           <DialogContent>

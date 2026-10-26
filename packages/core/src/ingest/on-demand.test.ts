@@ -196,7 +196,10 @@ function setup() {
   ) => service.ensure(who, { ecosystem, key: 'name', outcome });
   return { deps, sessions, plan, describePackage, events, outcome, ensure, cache, service };
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 describe('upstream busy on the request path', () => {
   function request(h: ReturnType<typeof setup>) {
     const outcome = {
@@ -1473,20 +1476,23 @@ describe('T430n review round 4', () => {
       { deploymentId: 'test' },
     );
     const service = createOnDemandFill({ ...h.deps, cache });
+    const coalescer = vi.mocked(createCoalescer).mock.results.at(-1)!.value;
+    const run = vi.spyOn(coalescer, 'run');
     const other = { ...actor, projectId: 'other' };
     const describing = deferred<{ kind: 'not_found'; definitive: true }>();
     h.describePackage.mockImplementation(() => describing.promise);
     const leader = service.ensure(actor, { ecosystem: 'npm', key: 'name', outcome: admitted });
-    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled());
+    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled(), { timeout: 5000 });
     epoch = 'new';
     const joiner = service.ensure(other, {
       ecosystem: 'npm',
       key: 'name',
       outcome: { ...admitted, projectId: other.projectId },
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2), { timeout: 5000 });
     describing.resolve({ kind: 'not_found', definitive: true });
     await Promise.all([leader, joiner]);
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
     expect(rawSet).not.toHaveBeenCalled();
   });
 });
@@ -1616,22 +1622,25 @@ describe('T430n review round 4 ordering', () => {
       { deploymentId: 'test' },
     );
     const service = createOnDemandFill({ ...h.deps, cache });
+    const coalescer = vi.mocked(createCoalescer).mock.results.at(-1)!.value;
+    const run = vi.spyOn(coalescer, 'run');
     const other = { ...actor, projectId: 'other' };
     const describing = deferred<{ kind: 'not_found'; definitive: true }>();
     h.describePackage.mockImplementation(() => describing.promise);
     const leader = service.ensure(actor, { ecosystem: 'npm', key: 'name', outcome: admitted });
-    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled());
+    await vi.waitFor(() => expect(h.describePackage).toHaveBeenCalled(), { timeout: 5000 });
     const joiner = service.ensure(other, {
       ecosystem: 'npm',
       key: 'name',
       outcome: { ...admitted, projectId: other.projectId },
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2), { timeout: 5000 });
     describing.resolve({ kind: 'not_found', definitive: true });
     expect(await Promise.all([leader, joiner])).toEqual([
       { kind: 'not_found' },
       { kind: 'not_found' },
     ]);
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
     expect(rawSet).toHaveBeenCalledTimes(1);
   });
 });

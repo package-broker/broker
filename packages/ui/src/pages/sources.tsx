@@ -1,5 +1,6 @@
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { pollSync, syncPollResult } from './sources/sync-poll.js';
+import { AddPackageDialog } from './sources/add-package-dialog.js';
 import type { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { responseHeader, type ApiResult } from '../api.js';
@@ -12,6 +13,7 @@ import { Badge } from '../components/ui/badge.js';
 import { LoadedListFilters } from '../components/ui/toolbar.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
+import { RowActions, type RowAction } from '../components/ui/row-actions.js';
 import {
   Dialog,
   DialogContent,
@@ -19,12 +21,6 @@ import {
   DialogTitle,
   DialogDescription,
 } from '../components/ui/dialog.js';
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from '../components/ui/dropdown-menu.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Input } from '../components/ui/input.js';
@@ -62,6 +58,58 @@ const CREDENTIAL_FIELDS = {
   ssh_key: ['privateKeyPem', 'knownHosts'],
 } as const satisfies Record<CredentialKind, readonly string[]>;
 const CREDENTIAL_KINDS = Object.keys(CREDENTIAL_FIELDS) as CredentialKind[];
+
+export interface CredentialRules {
+  scope: 'organization' | 'project';
+  github: boolean;
+  vcsProviders: readonly VcsProvider[] | undefined;
+}
+
+export function sourceCredentialKinds(
+  type: Source['type'],
+  { scope, github, vcsProviders }: CredentialRules,
+): readonly CredentialKind[] {
+  switch (type) {
+    case 'packagist_proxy':
+      return ['bearer'];
+    case 'npmjs_proxy':
+    case 'hosted':
+      return [];
+    case 'composer_repository':
+      return ['http_basic', 'bearer', 'header', 'query', 'npm_token'];
+    case 'npm_registry':
+      return ['npm_token', 'http_basic', 'bearer', 'header'];
+    case 'vcs':
+      if (github) return scope === 'organization' ? ['bearer', 'github_app'] : ['bearer'];
+      // The server accepts ssh_key only on the Node runtime, which is the only one reporting the ssh provider.
+      return [
+        'bearer',
+        'http_basic',
+        'header',
+        'npm_token',
+        ...(vcsProviders?.includes('ssh') ? (['ssh_key'] as const) : []),
+      ];
+  }
+}
+
+function credentialRules(
+  source: Source,
+  vcsProviders: readonly VcsProvider[] | undefined,
+): CredentialRules {
+  return {
+    scope: source.projectId === null ? 'organization' : 'project',
+    github: source.githubAuthentication !== undefined,
+    vcsProviders,
+  };
+}
+
+function acceptsPackage(source: Source) {
+  return (
+    ['packagist_proxy', 'npmjs_proxy', 'npm_registry'].includes(source.type) &&
+    'attached' in source &&
+    source.attached === true
+  );
+}
 
 export function sourceCredentialKind(body: CreateSource): CredentialKind {
   if (body.type === 'composer_repository') return 'http_basic';
@@ -104,6 +152,10 @@ interface SourcesState {
   credentialSource: string | null;
   credentialVersion: number;
   credentialKind: CredentialKind;
+  credentialKinds: readonly CredentialKind[];
+  packageSource: Source | null;
+  packageFieldError: string | null;
+  packageAlert: string | null;
   savedCredential: { source: string; at: string } | null;
   names: (Names & { source: string }) | null;
   preview: Preview | null;
@@ -158,6 +210,10 @@ export function createSourcesModel(
     credentialSource: null,
     credentialVersion: 0,
     credentialKind: 'bearer',
+    credentialKinds: CREDENTIAL_KINDS,
+    packageSource: null,
+    packageFieldError: null,
+    packageAlert: null,
     savedCredential: null,
     names: null,
     preview: null,
@@ -321,18 +377,21 @@ export function createSourcesModel(
     const created = await findLoadedSource(source);
     if (created) set({ createdSource: source, notice: `Next steps for ${created.name}` });
     if (created && !isProxy(created) && created.type !== 'hosted') {
+      const kinds = sourceCredentialKinds(
+        created.type,
+        credentialRules(created, state.vcsProviders),
+      );
+      const preferred = body
+        ? sourceCredentialKind(body)
+        : created.githubAuthentication === 'app'
+          ? 'github_app'
+          : kinds[0];
       set({
         credentialSource: source,
         credentialVersion: state.credentialVersion + 1,
-        credentialKind: body
-          ? sourceCredentialKind(body)
-          : created.type === 'composer_repository'
-            ? 'http_basic'
-            : created.type === 'npm_registry'
-              ? 'npm_token'
-              : created.githubAuthentication === 'app'
-                ? 'github_app'
-                : 'bearer',
+        credentialKinds: kinds,
+        credentialKind:
+          preferred !== undefined && kinds.includes(preferred) ? preferred : kinds[0]!,
       });
     }
   }
@@ -561,15 +620,90 @@ export function createSourcesModel(
       set({ names: null });
     },
     chooseCredential(source: string) {
+      if (state.busy) return;
+      const selected = state.items.find((item) => item.id === source);
+      const kinds = selected
+        ? sourceCredentialKinds(selected.type, credentialRules(selected, state.vcsProviders))
+        : (['bearer'] as const);
+      if (kinds.length === 0) return;
       ++namesVersion;
       set({
         credentialSource: source,
         names: null,
         savedCredential: null,
         credentialVersion: state.credentialVersion + 1,
-        credentialKind: 'bearer',
+        credentialKind:
+          selected?.githubAuthentication === 'app' && kinds.includes('github_app')
+            ? 'github_app'
+            : kinds[0]!,
+        credentialKinds: kinds,
         error: null,
       });
+    },
+    openPackage(source: Source) {
+      if (state.busy || project === null || !acceptsPackage(source) || source.status === 'paused')
+        return;
+      set({ packageSource: source, packageFieldError: null, packageAlert: null, notice: null });
+    },
+    closePackage() {
+      if (!state.busy) set({ packageSource: null, packageFieldError: null, packageAlert: null });
+    },
+    async addPackage(name: string) {
+      const source = state.packageSource;
+      if (state.busy || project === null || !source || !acceptsPackage(source)) return;
+      name = name.trim();
+      if (!name || name.length > 428) {
+        set({ packageFieldError: 'Enter a package name of 1 to 428 characters.' });
+        return;
+      }
+      set({ busy: true, packageFieldError: null, packageAlert: null, notice: null });
+      try {
+        const result = await client.request(
+          'post',
+          '/_pb/projects/{project}/sources/{source}/packages',
+          {
+            params: { project, source: source.id },
+            body: { name },
+          },
+        );
+        if (result.ok) {
+          set({
+            packageSource: null,
+            notice:
+              result.status === 202
+                ? `Queued: ${result.data.name} will appear in Packages shortly`
+                : 'Already available',
+          });
+        } else if (result.status === 400 && result.code === 'invalid_request') {
+          set({ packageFieldError: 'Enter a valid package name for this source.' });
+        } else if (result.status === 400) {
+          set({
+            packageFieldError:
+              'This source does not support that package. Check the name or use another source.',
+          });
+        } else if (result.code === 'forbidden') {
+          set({ packageAlert: 'You do not have permission to add packages to this project.' });
+        } else if (result.status === 502) {
+          set({
+            packageAlert:
+              'The upstream registry refused or failed the request. Check the source credential or try again later.',
+          });
+        } else if (result.status === 404) {
+          set({
+            packageAlert:
+              'The package or attached source could not be found. Check the name and refresh sources.',
+          });
+        } else if (result.status === 503) {
+          set({ packageAlert: 'Package requests are temporarily unavailable. Try again shortly.' });
+        } else if (result.status === 409) {
+          set({ packageAlert: 'This source is paused. Enable it before adding a package.' });
+        } else {
+          failure(result);
+          set({ packageAlert: state.error, error: null });
+        }
+      } finally {
+        set({ busy: false });
+      }
     },
     async credential(source: string, kind: CredentialKind, material: string) {
       if (state.busy) return;
@@ -835,11 +969,13 @@ function CredentialEditor({
   source,
   busy,
   initialKind,
+  kinds,
 }: {
   model: SourcesModel;
   source: string;
   busy: boolean;
   initialKind: CredentialKind;
+  kinds: readonly CredentialKind[];
 }) {
   const [kind, setKind] = useState<CredentialKind>(initialKind);
   return (
@@ -860,14 +996,14 @@ function CredentialEditor({
         disabled={busy}
         onChange={(event) => setKind(event.currentTarget.value as CredentialKind)}
       >
-        {CREDENTIAL_KINDS.map((value) => (
+        {kinds.map((value) => (
           <option key={value} value={value}>
             {value}
           </option>
         ))}
       </Select>
       <CredentialFields key={kind} kind={kind} busy={busy} />
-      <Button type="submit" disabled={busy}>
+      <Button type="submit" className="w-fit" disabled={busy}>
         Save credential
       </Button>
     </form>
@@ -966,70 +1102,81 @@ export function SourceActions({
       : [enableDenied && ENABLE_ADMIN_MESSAGE, enableConflict && ENABLE_CONFLICT_MESSAGE]
           .filter(Boolean)
           .join(' ');
+  const actions: RowAction[] = owned
+    ? [
+        { id: 'edit', label: 'Edit', disabled: busy, onSelect: () => model.openEditor(source) },
+        {
+          id: 'sync',
+          label: 'Sync now',
+          disabled: busy || source.status === 'paused',
+          ...(source.status === 'paused' ? { describedBy: `sync-paused-${source.id}` } : {}),
+          onSelect: () => void model.syncNow(source),
+        },
+      ]
+    : [];
+  const overflow: RowAction[] = [];
+  if (owned || organizationProject) {
+    if (!(organizationProject && (source.status !== 'paused' || isProxy(source)))) {
+      overflow.push(
+        source.status === 'paused'
+          ? {
+              id: 'enable',
+              label: 'Enable',
+              disabled: busy || enableDenied,
+              ...(enableDenied || enableConflict ? { describedBy: explanationId } : {}),
+              onSelect: () => void model.togglePause(source),
+            }
+          : {
+              id: 'pause',
+              label: 'Pause source…',
+              disabled: busy,
+              onSelect: () => setPauseSource(source),
+            },
+      );
+    }
+    if (
+      owned &&
+      sourceCredentialKinds(source.type, credentialRules(source, model.snapshot().vcsProviders))
+        .length > 0
+    )
+      overflow.push({
+        id: 'credential',
+        label: source.type === 'packagist_proxy' ? 'Add GitHub token (optional)' : 'Set credential',
+        disabled: busy,
+        onSelect: () => model.chooseCredential(source.id),
+      });
+  } else {
+    overflow.push({
+      id: 'manage',
+      label: 'Manage source',
+      disabled: true,
+      describedBy: explanationId,
+      onSelect: () => {},
+    });
+  }
+  if (model.project !== null && acceptsPackage(source))
+    overflow.push({
+      id: 'add-package',
+      label: 'Add package',
+      disabled: busy || source.status === 'paused',
+      ...(source.status === 'paused' ? { describedBy: `add-package-paused-${source.id}` } : {}),
+      onSelect: () => model.openPackage(source),
+    });
+  overflow.push({
+    id: 'names',
+    label: 'Registered names',
+    disabled: busy,
+    onSelect: () => void model.names(source.id),
+  });
   return (
     <>
-      {owned ? (
-        <>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={busy || source.status === 'paused'}
-            aria-describedby={source.status === 'paused' ? `sync-paused-${source.id}` : undefined}
-            onClick={() => void model.syncNow(source)}
-          >
-            Sync now
-          </Button>
-          {source.status === 'paused' ? (
-            <p id={`sync-paused-${source.id}`}>Enable before syncing.</p>
-          ) : null}
-        </>
+      <RowActions entityLabel={source.name} actions={actions} overflow={overflow} />
+      {owned && source.status === 'paused' ? (
+        <p id={`sync-paused-${source.id}`}>Enable before syncing.</p>
       ) : null}
-      <DropdownMenu>
-        <DropdownMenuTrigger aria-label={`More actions for ${source.name}`}>
-          More
-        </DropdownMenuTrigger>
-        <DropdownMenuContent className="grid gap-1">
-          {owned || organizationProject ? (
-            <>
-              {organizationProject &&
-              (source.status !== 'paused' || isProxy(source)) ? null : source.status !== 'paused' ||
-                isProxy(source) ||
-                !model.enableNeedsAdmin(source) ? (
-                source.status === 'paused' ? (
-                  <DropdownMenuItem
-                    disabled={busy}
-                    aria-describedby={enableConflict ? explanationId : undefined}
-                    onClick={() => void model.togglePause(source)}
-                  >
-                    Enable
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem disabled={busy} onClick={() => setPauseSource(source)}>
-                    Pause source…
-                  </DropdownMenuItem>
-                )
-              ) : (
-                <DropdownMenuItem disabled aria-describedby={explanationId}>
-                  Enable
-                </DropdownMenuItem>
-              )}
-
-              {owned ? (
-                <DropdownMenuItem disabled={busy} onClick={() => model.chooseCredential(source.id)}>
-                  Set credential
-                </DropdownMenuItem>
-              ) : null}
-            </>
-          ) : (
-            <DropdownMenuItem disabled aria-describedby={explanationId}>
-              Manage source
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem disabled={busy} onClick={() => void model.names(source.id)}>
-            Registered names
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {model.project !== null && acceptsPackage(source) && source.status === 'paused' ? (
+        <p id={`add-package-paused-${source.id}`}>Enable before adding a package.</p>
+      ) : null}
       {explanation ? <p id={explanationId}>{explanation}</p> : null}
       <ConfirmAction
         action="Pause"
@@ -1072,6 +1219,8 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   const filtered = !!(filters.q || filters.type || filters.scope);
   const created = state.items.find((item) => item.id === state.createdSource);
   const membershipKnown = !state.loading && !state.listError && state.next === null;
+  const credentialForPackagist =
+    state.items.find((source) => source.id === state.credentialSource)?.type === 'packagist_proxy';
   const combined = [
     ...state.items,
     ...(membershipKnown
@@ -1113,10 +1262,6 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         Upstream registries and private repositories. Attached sources are tried in precedence
         order.
       </p>
-      <p className="rounded-md border border-blue-200 bg-blue-50 p-3">
-        Credentials are write-only. The broker never shows them again; set a new credential to
-        rotate a secret.
-      </p>
       {model.project === null ? (
         <Label>
           Ownership
@@ -1132,7 +1277,16 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         </Label>
       ) : null}
       <LoadedListFilters
-        values={{ ...filters, type: SOURCE_TYPE_LABELS[filters.type as Source['type']] ?? '' }}
+        values={{
+          ...filters,
+          scope:
+            filters.scope === 'organization'
+              ? 'Organization'
+              : filters.scope === 'project'
+                ? 'Project'
+                : '',
+          type: SOURCE_TYPE_LABELS[filters.type as Source['type']] ?? '',
+        }}
         fields={[
           { key: 'q', label: 'Name (loaded sources)' },
           {
@@ -1142,12 +1296,19 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           },
           ...(model.project === null
             ? []
-            : [{ key: 'scope', label: 'Source scope', options: ['organization', 'project'] }]),
+            : [{ key: 'scope', label: 'Source scope', options: ['Organization', 'Project'] }]),
         ]}
         onChange={(next) =>
           setFilters({
             q: next.q ?? '',
-            scope: model.project === null ? '' : (next.scope ?? ''),
+            scope:
+              model.project === null
+                ? ''
+                : next.scope === 'Organization'
+                  ? 'organization'
+                  : next.scope === 'Project'
+                    ? 'project'
+                    : '',
             type:
               Object.keys(SOURCE_TYPE_LABELS).find(
                 (key) => SOURCE_TYPE_LABELS[key as Source['type']] === next.type,
@@ -1168,18 +1329,34 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               : 'Register names, then Enable the source.'}
         </p>
       ) : null}
-      {state.error ? <ListState kind="error" title={state.error} /> : null}
-      <Button
-        type="button"
-        variant="outline"
-        disabled={state.loading || state.busy}
-        onClick={() => {
-          void model.load();
-          void model.loadAvailable();
-        }}
-      >
-        Refresh sources
-      </Button>
+      {state.error && !state.listError ? <ListState kind="error" title={state.error} /> : null}
+      {state.listError ? (
+        <ListState kind="error" title="Sources could not be loaded.">
+          {state.error ? <p>{state.error}</p> : null}
+          <Button
+            type="button"
+            className="w-fit"
+            disabled={state.loading || state.busy}
+            onClick={() => void model.load()}
+          >
+            Retry sources
+          </Button>
+        </ListState>
+      ) : null}
+      {!state.listError && !state.availableError ? (
+        <Button
+          type="button"
+          className="w-fit"
+          variant="outline"
+          disabled={state.loading || state.busy}
+          onClick={() => {
+            void model.load();
+            void model.loadAvailable();
+          }}
+        >
+          Refresh sources
+        </Button>
+      ) : null}
       {model.project !== null && !membershipKnown && state.available.length > 0 ? (
         <p className="text-sm text-neutral-600">
           Load all project sources before attaching organization sources.
@@ -1189,10 +1366,16 @@ export function SourcesView({ model }: { model: SourcesModel }) {
         <ListState kind="loading" title="Loading organization sources…" />
       ) : null}
       {state.availableError ? (
-        <ListState
-          kind="error"
-          title="Organization sources could not be loaded. Project sources are still shown."
-        />
+        <ListState kind="error" title="Organization sources could not be loaded.">
+          <Button
+            type="button"
+            className="w-fit"
+            disabled={state.availableLoading || state.busy}
+            onClick={() => void model.loadAvailable()}
+          >
+            Retry organization sources
+          </Button>
+        </ListState>
       ) : null}
       {state.loading ? (
         <ListState kind="loading" title="Loading sources…" />
@@ -1319,19 +1502,6 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 sortable: false,
                 render: (source) => (
                   <div className="flex flex-wrap items-start gap-2">
-                    {(
-                      model.project === null ? source.projectId === null : source.projectId !== null
-                    ) ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={state.busy}
-                        onClick={() => model.openEditor(source)}
-                      >
-                        Edit
-                      </Button>
-                    ) : null}
                     {model.project !== null && 'attached' in source ? (
                       source.attached ? (
                         <ConfirmAction
@@ -1365,6 +1535,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       {state.next !== null ? (
         <Button
           type="button"
+          className="w-fit"
           disabled={state.loading || state.busy}
           onClick={() => {
             void model.load(true);
@@ -1376,11 +1547,23 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       {state.availableNext !== null ? (
         <Button
           type="button"
+          className="w-fit"
           disabled={state.availableLoading || state.busy}
           onClick={() => void model.loadAvailable(true)}
         >
           Load more organization sources
         </Button>
+      ) : null}
+      {state.packageSource !== null ? (
+        <AddPackageDialog
+          key={state.packageSource.id}
+          source={state.packageSource}
+          busy={state.busy}
+          fieldError={state.packageFieldError}
+          alert={state.packageAlert}
+          onSubmit={(name) => void model.addPackage(name)}
+          onClose={() => model.closePackage()}
+        />
       ) : null}
       {state.credentialSource !== null ? (
         <Dialog
@@ -1396,9 +1579,14 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             }}
           >
             <DialogHeader className="shrink-0 p-6 pr-16">
-              <DialogTitle>Set credential</DialogTitle>
+              <DialogTitle>
+                {credentialForPackagist ? 'Add GitHub token (optional)' : 'Set credential'}
+              </DialogTitle>
               <DialogDescription>
                 Credentials are write-only. Save a new credential to rotate a secret.
+                {credentialForPackagist
+                  ? ' This optional bearer token is used only for GitHub archive downloads and their rate limits. Enable Use GitHub token in Edit after saving it.'
+                  : ''}
               </DialogDescription>
             </DialogHeader>
             <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
@@ -1408,6 +1596,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 model={model}
                 source={state.credentialSource}
                 initialKind={state.credentialKind}
+                kinds={state.credentialKinds}
                 busy={state.busy}
               />
               {state.error ? <p role="alert">{state.error}</p> : null}
@@ -1487,7 +1676,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               >
                 <Label htmlFor="registered-pattern">Registered pattern</Label>
                 <Input id="registered-pattern" name="pattern" maxLength={50} required />
-                <Button type="submit" disabled={state.busy}>
+                <Button type="submit" className="w-fit" disabled={state.busy}>
                   Add name
                 </Button>
               </form>
@@ -1495,7 +1684,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           </DialogContent>
         </Dialog>
       ) : null}
-      {model.project !== null ? (
+      {model.project !== null &&
+      !state.listError &&
+      state.items.some((item) => 'attached' in item && item.attached) ? (
         <Card>
           <CardHeader>
             <CardTitle>Source order</CardTitle>
@@ -1506,6 +1697,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
 
             <Button
               type="button"
+              className="w-fit"
               disabled={state.loading || state.busy || state.next !== null || state.etag === null}
               onClick={() => {
                 void model.saveOrder();
@@ -1532,7 +1724,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             >
               <Label htmlFor="resolve-name">Package name</Label>
               <Input id="resolve-name" name="name" maxLength={214} required />
-              <Button type="submit" disabled={state.busy}>
+              <Button type="submit" className="w-fit" disabled={state.busy}>
                 Preview
               </Button>
             </form>

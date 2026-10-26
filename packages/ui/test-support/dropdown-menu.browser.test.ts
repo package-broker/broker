@@ -87,6 +87,7 @@ describe('portalled row menus in Chromium', () => {
       .fixture-edge { position: fixed; right: 0; bottom: 24px; width: 480px; }
       .fixture-edge table { width: 100%; }
       .fixture-edge td:last-child { text-align: right; padding-right: 0; }
+      .fixture-edge td:last-child [role='group'] { justify-content: flex-end; }
       .fixture-modal-scroll { overflow: auto; height: 48px; }
       td { padding: 8px; }
     `,
@@ -473,7 +474,7 @@ describe('portalled row menus in Chromium', () => {
         const page = await mounted(context, '', globals);
         await page.getByRole('button', { name: 'More actions for Alpha' }).click();
         const menu = page.getByRole('menu');
-        const item = menu.getByRole('menuitem', { name: label, exact: true });
+        const item = menu.getByRole('menuitem', { name: `${label} Alpha`, exact: true });
         await browserExpect(item).toHaveAccessibleDescription(message);
         if (disabled) await browserExpect(item).toHaveAttribute('aria-disabled', 'true');
         else await browserExpect(item).not.toHaveAttribute('aria-disabled', 'true');

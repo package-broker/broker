@@ -5,6 +5,7 @@ import { createElement, isValidElement, type ReactNode, type ReactElement } from
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { createApiClient } from '../api.js';
+import { RowActions, type RowActionsProps } from '../components/ui/row-actions.js';
 import { DropdownMenuItem } from '../components/ui/dropdown-menu.js';
 import type { paths } from '../api-types.js';
 import { createReauthFlow, type ShellServices } from '../auth.js';
@@ -13,6 +14,7 @@ import {
   createSourcesModel,
   filterSources,
   sourceCredentialKind,
+  sourceCredentialKinds,
   SourceActions,
   CredentialFields,
   SourcesView,
@@ -82,6 +84,8 @@ function setup(
 function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
   if (Array.isArray(node)) return node.flatMap(elements);
   if (!isValidElement<Record<string, unknown>>(node)) return [];
+  if (node.type === RowActions)
+    return elements(RowActions(node.props as unknown as RowActionsProps));
   return [node, ...elements(node.props.children as ReactNode)];
 }
 
@@ -1644,7 +1648,7 @@ describe('source sync', () => {
     const markup = renderToString(
       createElement(SourceActions, { model, source: paused, busy: false }),
     );
-    expect(markup).toMatch(/disabled="" aria-describedby="sync-paused-/);
+    expect(markup).toMatch(/disabled=""[^>]*aria-describedby="sync-paused-/);
     expect(markup).toContain('Enable before syncing.');
     await model.syncNow(paused);
     expect(fetch).not.toHaveBeenCalled();
@@ -1780,6 +1784,7 @@ it.each([
 
 describe('source row action controls', () => {
   it.each([
+    ['Edit', 'openEditor'],
     ['Sync now', 'syncNow'],
     ['Set credential', 'chooseCredential'],
     ['Registered names', 'names'],
@@ -1790,7 +1795,9 @@ describe('source row action controls', () => {
     const button = controls.find((node) => node.props.children === label);
     expect(button).toBeDefined();
     (button!.props.onClick as () => void)();
-    expect(action).toHaveBeenCalledWith(method === 'syncNow' ? source : SOURCE);
+    expect(action).toHaveBeenCalledWith(
+      method === 'syncNow' || method === 'openEditor' ? source : SOURCE,
+    );
   });
 
   it.each(['active', 'paused'] as const)(
@@ -1811,10 +1818,8 @@ describe('source row action controls', () => {
 
   it('labels More with the source it controls', () => {
     const { model } = setup();
-    const controls = elements(actions(model));
-    expect(controls.find((node) => node.props.children === 'More')?.props['aria-label']).toBe(
-      `More actions for ${source.name}`,
-    );
+    const markup = renderToString(createElement(SourceActions, { model, source, busy: false }));
+    expect(markup).toContain(`aria-label="More actions for ${source.name}"`);
   });
 
   it('keeps row settings exclusively in Edit and includes the read-only identity summary', async () => {
@@ -2509,4 +2514,393 @@ it('keeps polling package work after listing success and stops when the generati
   } finally {
     vi.useRealTimers();
   }
+});
+
+describe('UX4 source credentials by type', () => {
+  const ORGANIZATION_RULES = {
+    scope: 'organization',
+    github: false,
+    vcsProviders: ['github'],
+  } as const;
+
+  it.each([
+    ['packagist_proxy', ['bearer']],
+    ['npmjs_proxy', []],
+    ['npm_registry', ['npm_token', 'http_basic', 'bearer', 'header']],
+    ['composer_repository', ['http_basic', 'bearer', 'header', 'query', 'npm_token']],
+    ['hosted', []],
+  ] as const)('offers supported credential kinds for %s', (type, kinds) => {
+    expect(sourceCredentialKinds(type, ORGANIZATION_RULES)).toEqual(kinds);
+    expect(sourceCredentialKinds(type, { ...ORGANIZATION_RULES, scope: 'project' })).toEqual(kinds);
+  });
+
+  it.each([
+    ['GitHub, organization', { scope: 'organization', github: true }, ['bearer', 'github_app']],
+    ['GitHub, project', { scope: 'project', github: true }, ['bearer']],
+    [
+      'git, organization, ssh reported',
+      { scope: 'organization', github: false, vcsProviders: ['github', 'git', 'ssh'] },
+      ['bearer', 'http_basic', 'header', 'npm_token', 'ssh_key'],
+    ],
+    [
+      'git, project, ssh reported',
+      { scope: 'project', github: false, vcsProviders: ['github', 'git', 'ssh'] },
+      ['bearer', 'http_basic', 'header', 'npm_token', 'ssh_key'],
+    ],
+    [
+      'git, organization, ssh not reported',
+      { scope: 'organization', github: false, vcsProviders: ['github'] },
+      ['bearer', 'http_basic', 'header', 'npm_token'],
+    ],
+    [
+      'git, providers not loaded',
+      { scope: 'organization', github: false, vcsProviders: undefined },
+      ['bearer', 'http_basic', 'header', 'npm_token'],
+    ],
+  ] as const)('offers server-accepted vcs credential kinds for %s', (_, rules, kinds) => {
+    expect(sourceCredentialKinds('vcs', { vcsProviders: undefined, ...rules })).toEqual(kinds);
+  });
+
+  it.each([
+    ['organization GitHub App source', null, 'app', ['bearer', 'github_app'], 'github_app'],
+    ['organization GitHub token source', null, 'token', ['bearer', 'github_app'], 'bearer'],
+    ['project GitHub source', 'proj', 'app', ['bearer'], 'bearer'],
+  ] as const)(
+    'preselects only an allowed kind for %s',
+    async (_, projectId, githubAuthentication, kinds, kind) => {
+      const vcs: Source = {
+        ...source,
+        type: 'vcs',
+        ecosystem: 'composer',
+        projectId,
+        githubAuthentication,
+      };
+      const { model } = setup(
+        vi.fn().mockResolvedValue(json({ items: [vcs], next: null, vcsProviders: ['github'] })),
+        projectId === null ? null : 'proj',
+      );
+      await model.load();
+      model.chooseCredential(SOURCE);
+      expect(model.snapshot().credentialKinds).toEqual(kinds);
+      expect(model.snapshot().credentialKind).toBe(kind);
+    },
+  );
+
+  it.each([
+    ['packagist_proxy', 'Add GitHub token (optional)', 'bearer'],
+    ['npm_registry', 'Set credential', 'npm_token'],
+    ['composer_repository', 'Set credential', 'http_basic'],
+  ] as const)(
+    'opens %s credentials with the appropriate default and options',
+    async (type, label, kind) => {
+      const { model, html } = setup(
+        vi.fn().mockResolvedValue(json({ items: [{ ...source, type }], next: null })),
+      );
+      await model.load();
+      const control = menuControl(model, label);
+      expect(control).toBeDefined();
+      (control!.onClick as (event: unknown) => void)({ preventDefault: vi.fn() });
+      expect(model.snapshot().credentialKind).toBe(kind);
+      expect(model.snapshot().credentialKinds).toEqual(
+        sourceCredentialKinds(type, ORGANIZATION_RULES),
+      );
+      const select = html().match(/<select[^>]*id="credential-kind"[^>]*>(.*?)<\/select>/)?.[1];
+      expect(select).toBeDefined();
+      for (const allowed of sourceCredentialKinds(type, ORGANIZATION_RULES))
+        expect(select).toContain(`value="${allowed}"`);
+      expect(select?.match(/<option /g)).toHaveLength(
+        sourceCredentialKinds(type, ORGANIZATION_RULES).length,
+      );
+      expect(select).toContain(`value="${kind}" selected=""`);
+      if (type === 'packagist_proxy') {
+        expect(html()).toContain('optional bearer token');
+        expect(html()).toContain('GitHub archive downloads');
+      }
+    },
+  );
+
+  it('has no credential action or editor for npmjs.org', async () => {
+    const { model } = setup(
+      vi.fn().mockResolvedValue(json({ items: [{ ...source, type: 'npmjs_proxy' }], next: null })),
+    );
+    await model.load();
+    expect(menuControl(model, 'Set credential')).toBeUndefined();
+    expect(menuControl(model, 'Add GitHub token (optional)')).toBeUndefined();
+    model.chooseCredential(SOURCE);
+    expect(model.snapshot().credentialSource).toBeNull();
+  });
+});
+
+describe('UX4 add package', () => {
+  const attached = { ...source, attached: true, projectId: 'project-id', precedence: 0 };
+
+  it.each(['packagist_proxy', 'npmjs_proxy', 'npm_registry'] as const)(
+    'offers Add package on attached %s sources including organization sources',
+    async (type) => {
+      const { model } = setup(
+        vi.fn().mockResolvedValue(
+          json({
+            items: [
+              { ...attached, type },
+              { ...attached, id: 'org-source', type, projectId: null },
+            ],
+            next: null,
+          }),
+        ),
+        'acme',
+      );
+      await model.load();
+      for (const selected of model.snapshot().items) {
+        const controls = elements(actions(model, selected));
+        const control = controls.find(
+          (node) => node.type === DropdownMenuItem && node.props.children === 'Add package',
+        );
+        expect(control).toBeDefined();
+        (control!.props.onClick as (event: unknown) => void)({ preventDefault: vi.fn() });
+        expect(model.snapshot().packageSource?.id).toBe(selected.id);
+        model.closePackage();
+      }
+    },
+  );
+
+  it.each([
+    [null, attached],
+    ['acme', { ...attached, attached: false }],
+    ['acme', { ...attached, type: 'composer_repository' as const }],
+    ['acme', { ...attached, type: 'vcs' as const }],
+    ['acme', { ...attached, type: 'hosted' as const }],
+  ])('hides the action outside attached project proxies (%s, %j)', (project, selected) => {
+    const { model, fetch } = setup(vi.fn(), project);
+    const controls = elements(actions(model, selected));
+    expect(controls.find((node) => node.props.children === 'Add package')).toBeUndefined();
+    model.openPackage(selected);
+    expect(model.snapshot().packageSource).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('disables paused sources and refuses to open their package dialog', () => {
+    const { model } = setup(vi.fn(), 'acme');
+    const selected = { ...attached, status: 'paused' as const };
+    const control = elements(actions(model, selected)).find(
+      (node) => node.props.children === 'Add package',
+    );
+    expect(control?.props.disabled).toBe(true);
+    model.openPackage(selected);
+    expect(model.snapshot().packageSource).toBeNull();
+  });
+
+  it.each([200, 202])(
+    'uses the project/source route and announces the %s outcome',
+    async (status) => {
+      const { model, fetch, html } = setup(
+        vi
+          .fn()
+          .mockResolvedValue(
+            json(
+              { name: '@acme/widget', state: status === 202 ? 'queued' : 'present', jobId: 'job' },
+              status,
+            ),
+          ),
+        'acme',
+      );
+      model.openPackage(attached);
+      expect(html()).toContain('Add package</h2>');
+      await model.addPackage('  @acme/widget  ');
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls[0]).toMatchObject([
+        `/_pb/projects/acme/sources/${SOURCE}/packages`,
+        { method: 'POST', body: JSON.stringify({ name: '@acme/widget' }) },
+      ]);
+      expect(model.snapshot().packageSource).toBeNull();
+      expect(model.snapshot().notice).toBe(
+        status === 202
+          ? 'Queued: @acme/widget will appear in Packages shortly'
+          : 'Already available',
+      );
+      expect(html()).toContain(model.snapshot().notice);
+    },
+  );
+
+  it.each([
+    [400, 'invalid_request', 'packageFieldError', 'Enter a valid package name for this source.'],
+    [
+      400,
+      'unsupported_package',
+      'packageFieldError',
+      'This source does not support that package. Check the name or use another source.',
+    ],
+    [
+      400,
+      'unsupported_source_kind',
+      'packageFieldError',
+      'This source does not support that package. Check the name or use another source.',
+    ],
+    [
+      404,
+      'not_found',
+      'packageAlert',
+      'The package or attached source could not be found. Check the name and refresh sources.',
+    ],
+    [
+      503,
+      'unavailable',
+      'packageAlert',
+      'Package requests are temporarily unavailable. Try again shortly.',
+    ],
+    [
+      409,
+      'source_paused',
+      'packageAlert',
+      'This source is paused. Enable it before adding a package.',
+    ],
+    [
+      403,
+      'forbidden',
+      'packageAlert',
+      'You do not have permission to add packages to this project.',
+    ],
+    [
+      502,
+      'upstream_refused',
+      'packageAlert',
+      'The upstream registry refused or failed the request. Check the source credential or try again later.',
+    ],
+    [
+      502,
+      'bad_gateway',
+      'packageAlert',
+      'The upstream registry refused or failed the request. Check the source credential or try again later.',
+    ],
+    [
+      500,
+      'internal',
+      'packageAlert',
+      'The request could not be saved or loaded. Refresh and try again.',
+    ],
+  ] as const)(
+    'maps %s %s errors without reflecting server data',
+    async (status, code, field, message) => {
+      const { model, html } = setup(
+        vi.fn().mockResolvedValue(
+          json(
+            {
+              error: {
+                code,
+                message: SECRET,
+                details: [{ path: '/body/name', code: 'invalid', message: SECRET }],
+              },
+            },
+            status,
+          ),
+        ),
+        'acme',
+      );
+      model.openPackage(attached);
+      await model.addPackage('@acme/widget');
+      expect(model.snapshot()[field]).toBe(message);
+      expect(model.snapshot().packageSource).toEqual(attached);
+      expect(model.snapshot().busy).toBe(false);
+      expect(html()).toContain(message);
+      expect(html()).not.toContain(SECRET);
+      expect(JSON.stringify(model.snapshot())).not.toContain(SECRET);
+      expect(model.snapshot().error).toBeNull();
+    },
+  );
+
+  it.each(['', ' ', 'x'.repeat(429)])('rejects invalid local name length: %j', async (name) => {
+    const { model, fetch } = setup(vi.fn(), 'acme');
+    model.openPackage(attached);
+    await model.addPackage(name);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(model.snapshot().packageFieldError).toBeTruthy();
+  });
+
+  it('guards duplicate submits and dismissal until the request finishes', async () => {
+    let finish!: (response: Response) => void;
+    const { model, fetch } = setup(
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+      'acme',
+    );
+    model.openPackage(attached);
+    const pending = model.addPackage('@acme/widget');
+    await model.addPackage('@acme/duplicate');
+    model.closePackage();
+    expect(model.snapshot().packageSource).toEqual(attached);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    finish(json({ name: '@acme/widget', state: 'queued', jobId: 'job' }, 202));
+    await pending;
+    expect(model.snapshot().busy).toBe(false);
+    expect(model.snapshot().packageSource).toBeNull();
+    await model.addPackage('@acme/closed');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears package errors when dismissed or reopened', async () => {
+    const { model } = setup(
+      vi.fn().mockResolvedValue(json({ error: { code: 'unavailable' } }, 503)),
+      'acme',
+    );
+    model.openPackage(attached);
+    await model.addPackage('@acme/widget');
+    expect(model.snapshot().packageAlert).toBeTruthy();
+    model.closePackage();
+    model.openPackage(attached);
+    expect(model.snapshot().packageAlert).toBeNull();
+    expect(model.snapshot().packageFieldError).toBeNull();
+  });
+});
+
+describe('UX4 resource failures and compact controls', () => {
+  it.each([true, false])(
+    'shows independent retries with project failure %s',
+    async (projectFails) => {
+      const { model, html } = setup(
+        vi.fn((path: string) =>
+          Promise.resolve(
+            path.startsWith('/_pb/projects/') && !projectFails
+              ? json({ items: [{ ...source, attached: true }], next: null }, 200, { ETag: '"1"' })
+              : json({ error: { code: 'unavailable', message: SECRET } }, 503),
+          ),
+        ),
+        'acme',
+      );
+      await Promise.all([model.load(), model.loadAvailable()]);
+      const markup = html();
+      expect(markup).not.toContain('Project sources are still shown');
+      expect(markup).not.toContain('Refresh sources');
+      expect(markup.match(/>Retry organization sources<\/button>/g)).toHaveLength(1);
+      expect(markup.match(/>Retry sources<\/button>/g)?.length ?? 0).toBe(projectFails ? 1 : 0);
+      expect(markup.includes('<strong>Sources could not be loaded.</strong>')).toBe(projectFails);
+      expect(markup.includes('<table')).toBe(!projectFails);
+      expect(markup).not.toContain(SECRET);
+      if (projectFails) expect(markup).not.toContain('Save source order');
+    },
+  );
+
+  it('keeps Refresh intrinsic and omits empty source order controls', async () => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(json({ items: [], next: null }, 200, { ETag: '"1"' })),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toMatch(/<button[^>]*class="[^"]*w-fit[^>]*>Refresh sources<\/button>/);
+    expect(html()).not.toContain('Save source order');
+    expect(html()).not.toContain('The broker never shows them again');
+  });
+
+  it('labels project source scopes readably', async () => {
+    const { model, html } = setup(
+      vi.fn().mockResolvedValue(json({ items: [], next: null })),
+      'acme',
+    );
+    await model.load();
+    expect(html()).toContain('<option value="Organization">Organization</option>');
+    expect(html()).toContain('<option value="Project">Project</option>');
+    expect(html()).not.toContain('<option value="organization">organization</option>');
+  });
 });

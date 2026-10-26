@@ -119,6 +119,7 @@ export function DropdownMenuItem({
   className,
   disabled,
   onClick,
+  'aria-disabled': ariaDisabled,
   ...props
 }: ComponentProps<'button'>) {
   const context = useContext(MenuTriggerContext);
@@ -130,6 +131,8 @@ export function DropdownMenuItem({
         <button
           type="button"
           {...props}
+          // An explicit undefined would replace the aria-disabled Base UI sets for disabled items.
+          {...(ariaDisabled === undefined ? {} : { 'aria-disabled': ariaDisabled })}
           onClick={(event) => {
             if (disabled) {
               event.preventDefault();

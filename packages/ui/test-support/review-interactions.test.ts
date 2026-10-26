@@ -174,7 +174,9 @@ describe('mounted review regressions', () => {
       const dialog = page.locator('dialog[open]');
       const interval = dialog.getByLabel('Sync interval (seconds)', { exact: true });
       const openEdit = async (name: string) => {
-        await row(name).getByRole('button', { name: 'Edit', exact: true }).click();
+        await row(name)
+          .getByRole('button', { name: `Edit ${name}`, exact: true })
+          .click();
         await browserExpect(dialog).toHaveCount(1);
         await browserExpect(dialog.getByRole('heading', { name: 'Edit source' })).toBeVisible();
         await dialog.getByText('Advanced settings', { exact: true }).click();

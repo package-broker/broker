@@ -15,6 +15,8 @@ import {
   JOB_HANDLER_BUDGET_SECONDS,
   StaleFenceError,
 } from '@package-broker/core/platform/job-repository';
+import { withJobSourceError } from '@package-broker/core/platform/job-source-error';
+import { JobError } from '@package-broker/core/platform/jobs';
 import { JobRelease } from '@package-broker/core/platform/job-release';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import {
@@ -1015,4 +1017,39 @@ describe('createJobLoop', () => {
     expect(status?.history[0]?.outcome).not.toBe('released');
     expect(status?.attempts).toBe(1);
   });
+});
+
+it('settles a core package error and its stable source code in the same batch', async () => {
+  const h = await harness();
+  const id = await h.enqueue('core:package-sync:v1', 'child-code');
+  const batches: string[][] = [];
+  h.loop(
+    [
+      job('package-sync', async () => {
+        throw withJobSourceError(new JobError('handler_error'), 'rate_limited');
+      }),
+    ],
+    {
+      ...h.executor,
+      async batch(statements) {
+        batches.push(statements.map((statement) => statement.sql));
+        return h.executor.batch(statements);
+      },
+    },
+  ).start();
+  await vi.waitFor(
+    async () => expect((await h.status(id))?.history[0]?.outcome).toBe('failed'),
+    WAIT,
+  );
+  expect(
+    await h.executor.all({
+      sql: 'SELECT sync_error FROM job WHERE org_id = ? AND id = ?',
+      params: [ORG.orgId, id],
+    }),
+  ).toEqual([{ sync_error: 'rate_limited' }]);
+  const settlement = batches.find((batch) =>
+    batch.some((sql) => sql.includes("outcome = 'failed'")),
+  );
+  expect(settlement).toHaveLength(2);
+  expect(settlement![1]).toContain('sync_error =');
 });

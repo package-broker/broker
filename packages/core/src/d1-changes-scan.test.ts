@@ -149,21 +149,6 @@ const REVIEWED: Readonly<Record<string, Review>> = {
       'Job inserts and state/lease/attempt updates; referenced job id is unchanged, job_attempt has no inbound FK.',
     parents: ['job', 'job_attempt'],
   },
-  'db-sqlite/src/repositories/job.ts:requeued?.changes #1': {
-    reason:
-      'Job inserts and state/lease/attempt updates; referenced job id is unchanged, job_attempt has no inbound FK.',
-    parents: ['job', 'job_attempt'],
-  },
-  'db-sqlite/src/repositories/job.ts:orphans?.changes #1': {
-    reason:
-      'Job inserts and state/lease/attempt updates; referenced job id is unchanged, job_attempt has no inbound FK.',
-    parents: ['job', 'job_attempt'],
-  },
-  'db-sqlite/src/repositories/job.ts:result?.changes #1': {
-    reason:
-      'Job inserts and state/lease/attempt updates; referenced job id is unchanged, job_attempt has no inbound FK.',
-    parents: ['job', 'job_attempt'],
-  },
   'db-sqlite/src/repositories/keyring-verifier.ts:result?.changes #1': {
     reason: 'Verifier inserts; no FK actions on insert and no inbound foreign keys.',
     parents: ['keyring_verifier'],
@@ -218,10 +203,6 @@ const REVIEWED: Readonly<Record<string, Review>> = {
     parents: [],
   },
   'db-sqlite/src/repositories/source.ts:result?.changes #1': {
-    reason: 'Source poll/defer update leaves referenced id and org_id unchanged.',
-    parents: ['source'],
-  },
-  'db-sqlite/src/repositories/source.ts:results[results.length - 1]?.changes #1': {
     reason: 'Source poll/defer update leaves referenced id and org_id unchanged.',
     parents: ['source'],
   },
@@ -402,7 +383,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/job-schedule.ts':
     'INSERT INTO job; INSERT INTO job_schedule x2; UPDATE job_schedule x3',
   'db-sqlite/src/repositories/job.ts':
-    'INSERT INTO job; INSERT INTO job_attempt; UPDATE job x7; UPDATE job_attempt x4',
+    'INSERT INTO job; INSERT INTO job_attempt; INSERT INTO source_sync_package; UPDATE job x7; UPDATE job_attempt x4',
   'db-sqlite/src/repositories/keyring-verifier.ts': 'INSERT INTO keyring_verifier x2',
   'db-sqlite/src/repositories/local-login-setup.ts':
     "deleteFrom('credential'); insertInto('credential'); updateTable('local_login') x3",
@@ -423,7 +404,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
   'db-sqlite/src/repositories/source.ts':
-    "deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x8",
+    "DELETE FROM source_sync_package; deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x9",
   'db-sqlite/src/repositories/upstream-state.ts':
     "insertInto('upstream_state') [onConflict:doUpdateSet]; updateTable('upstream_state') x2",
   'db-sqlite/src/repositories/visibility-attach.ts':
@@ -470,7 +451,10 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
   fetch_lease: [],
   identity_provider_binding: [],
   ingest_session: [],
-  job: ['job_attempt(job_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION'],
+  job: [
+    'job_attempt(job_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'source_sync_package(job_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+  ],
   job_attempt: [],
   local_login: [],
   package: [
@@ -502,6 +486,7 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'project_source(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'registered_name(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'registered_name(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'source_sync_package(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'webhook_delivery(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
   ],
   upstream_state: [],
@@ -682,9 +667,28 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'These fixed source-error lookups read JSON counter values, never executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/source.ts:unresolved computed access: errors[code] #1',
+        'db-sqlite/src/repositories/source.ts:unresolved computed access: errors[code] #2',
+      ],
+    },
+    {
+      reason:
+        'Generation tracking inserts one org-pinned package pointer with no executor count read; source JSON updates contain no timestamp or request-derived errors. The pointer write metadata is unused; generation and reaper row counts use RETURNING to exclude trigger writes.',
+      sites: [
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO source_sync_package\n            (org_id, source_id, package_key, generation, job_id, state)\n            SELECT j.org_id, s.id, json_extract(j.payload_json, '$.key'), s.sync_generation, j.id, j.state\n            FROM job j JOIN source s ON s.org_id = j.org_id\n              AND s.id = json_extract(j.payload_json, '$.sourceId')\n            WHERE j.org_id = ${ctx.orgId} AND j.id = ${id}\n              AND j.type = 'core:package-sync:v1' AND j.state = 'queued'\n              AND s.sync_generation = json_extract(j.payload_json, '$.syncGeneration')\n              AND json_type(j.payload_json, '$.key') = 'text'\n            ON CONFLICT (org_id, source_id, package_key) DO UPDATE SET\n              job_id = excluded.job_id, state = excluded.state, error = NULL\n            WHERE source_sync_package.org_id = ${ctx.orgId}\n              AND source_sync_package.generation = excluded.generation\n              AND source_sync_package.job_id <> excluded.job_id\n              AND EXISTS (SELECT 1 FROM job parent\n                WHERE parent.org_id = ${ctx.orgId} AND parent.id = source_sync_package.job_id\n                  AND parent.id = json_extract(${payloadJson}, '$.parentJob.id')\n                  AND parent.lease_owner = json_extract(${payloadJson}, '$.parentJob.owner')\n                  AND parent.fence = json_extract(${payloadJson}, '$.parentJob.fence')\n                  AND parent.state = 'running' AND parent.lease_until > ${NOW})` #1",
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<string>`json_set(sync_counts, '$.listing', json('true'))` #1",
+        'db-sqlite/src/repositories/source.ts:SQL template: sql`DELETE FROM source_sync_package WHERE org_id = ${ctx.orgId} AND source_id = ${input.id}` #1',
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<string>`json_set(sync_counts, '$.listing', json('false'))` #1",
+      ],
+    },
+    {
+      reason:
         'The error-code import is a static allowlist with no executor counts. Sync requests update scheduling timestamps under the owner fence and bump the cache epoch only for proxies to invalidate negative entries; source keys are unchanged.',
       sites: [
         "db-sqlite/src/repositories/source.ts:opaque dependency: import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
+        "db-sqlite/src/repositories/job.ts:opaque dependency: import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
         "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source\n        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')` #1",
         "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx, sql<SqlBool>`${isProxy(current.type) ? 1 : 0}`),\n        [\n          ...assertCheck(active),\n          compile(\n            db\n              .updateTable('source')\n              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('status', '!=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        { authority: probe(held, true), conflict: probe(collision, false) },\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'requested'; #1",
@@ -2152,12 +2156,12 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/job.ts:SQL template: sql<\n      string | null\n    >`CASE WHEN ${attempts} >= ${max} THEN NULL ELSE ${plus(NOW, delay)} END` #1',
         "db-sqlite/src/repositories/job.ts:SQL template: sql<string | null>`(SELECT ${backoffAt(sql.raw('j.attempts'), sql.raw('j.max_attempts'))}\n      FROM job j WHERE j.id = job_attempt.job_id)` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job_attempt SET outcome = 'lease_expired', error = 'lease_lost',\n      finished_at = ${NOW}, next_run_at = ${nextRunOf()}\n      WHERE job_attempt.org_id = ${ctx.orgId} AND job_attempt.outcome = 'running'\n      AND job_attempt.job_id IN (${ids})\n      AND EXISTS (SELECT 1 FROM job x WHERE x.id = job_attempt.job_id\n        AND x.fence = job_attempt.fence AND x.state = 'running' AND x.lease_until <= ${NOW})` #1",
-        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n      state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'queued' END,\n      run_at = COALESCE(${backoffAt(attempts, max)}, run_at),\n      last_error = 'lease_lost',\n      finished_at = CASE WHEN attempts >= max_attempts THEN ${NOW} ELSE NULL END,\n      lease_owner = NULL, lease_until = NULL, updated_at = ${NOW}\n      WHERE job.org_id = ${ctx.orgId} AND job.state = 'running' AND job.lease_until <= ${NOW}\n      AND job.id IN (${ids})\n      AND NOT EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence\n        AND a.outcome = 'running')` #1",
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n      state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'queued' END,\n      run_at = COALESCE(${backoffAt(attempts, max)}, run_at),\n      last_error = 'lease_lost', sync_error = NULL,\n      finished_at = CASE WHEN attempts >= max_attempts THEN ${NOW} ELSE NULL END,\n      lease_owner = NULL, lease_until = NULL, updated_at = ${NOW}\n      WHERE job.org_id = ${ctx.orgId} AND job.state = 'running' AND job.lease_until <= ${NOW}\n      AND job.id IN (${ids})\n      AND NOT EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence\n        AND a.outcome = 'running') RETURNING id` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`job.org_id = ${ctx.orgId} AND job.state = 'running' AND job.lease_until <= ${NOW}` #1",
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT json_valid(${value}) AS ok` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`0` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`${next} IS NULL` #1',
-        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n      state = CASE WHEN ${dead} THEN 'dead' ELSE 'queued' END,\n      attempts = ${outcome === 'released' ? sql`max(attempts - 1, 0)` : sql`attempts`},\n      run_at = COALESCE(${next}, run_at),\n      last_error = ${lastError === null ? sql`last_error` : sql`${lastError}`},\n      finished_at = CASE WHEN ${dead} THEN ${finished} ELSE NULL END,\n      lease_owner = NULL,\n      lease_until = NULL,\n      updated_at = ${finished}\n      WHERE ${where}\n      AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence\n        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL)` #1",
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n      state = CASE WHEN ${dead} THEN 'dead' ELSE 'queued' END,\n      attempts = ${outcome === 'released' ? sql`max(attempts - 1, 0)` : sql`attempts`},\n      run_at = COALESCE(${next}, run_at),\n      sync_error = CASE WHEN job.type = 'core:package-sync:v1' AND job.lease_until > ${finished}\n        THEN ${syncError} ELSE NULL END,\n      last_error = ${lastError === null ? sql`last_error` : sql`${lastError}`},\n      finished_at = CASE WHEN ${dead} THEN ${finished} ELSE NULL END,\n      lease_owner = NULL,\n      lease_until = NULL,\n      updated_at = ${finished}\n      WHERE ${where}\n      AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence\n        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL) RETURNING id` #1",
         'db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO job\n          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,\n           project_id, initiator_token_id)\n          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},\n            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}\n          WHERE ${projectId} IS NULL\n            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})\n          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id, type, payload_json, project_id, resource_key FROM job\n          WHERE org_id = ${ctx.orgId} AND idempotency_key = ${key}` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id FROM project WHERE org_id = ${ctx.orgId} AND id = ${projectId}` #1',
@@ -2171,8 +2175,8 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/job.ts:SQL template: sql`json_valid(c.payload_json) AND instr(c.payload_json, char(0)) = 0` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT c.id FROM job c WHERE ${eligible} AND NOT (${validPayload})\n        ORDER BY c.run_at, c.id LIMIT ${CORRUPT_SCAN_LIMIT}` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT count(*) AS n FROM job_attempt WHERE id = ${who}` #1',
-        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET state = 'dead', last_error = 'invalid_payload',\n          finished_at = ${NOW}, updated_at = ${NOW}\n          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND ${unused}\n          AND run_at <= ${NOW}\n          AND id IN (${corrupt})` #1",
-        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n          state = 'running',\n          attempts = attempts + 1,\n          fence = fence + 1,\n          lease_owner = ${who},\n          lease_until = ${plus(NOW, sql`${lease}`)},\n          updated_at = ${NOW}\n          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND ${unused} AND id = (\n            SELECT c.id FROM job c\n            WHERE ${eligible} AND (${validPayload})\n              AND (c.resource_key IS NULL OR NOT EXISTS (\n                SELECT 1 FROM job r WHERE r.org_id = c.org_id AND r.resource_key = c.resource_key\n                  AND r.state = 'running'))\n              AND (SELECT count(*) FROM job r WHERE r.org_id = ${ctx.orgId}\n                AND r.state = 'running' AND r.lease_until > ${NOW}) < ${cap}\n            ORDER BY c.run_at, c.id LIMIT 1)` #1",
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET state = 'dead', sync_error = NULL, last_error = 'invalid_payload',\n          finished_at = ${NOW}, updated_at = ${NOW}\n          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND ${unused}\n          AND run_at <= ${NOW}\n          AND id IN (${corrupt})` #1",
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n          state = 'running', sync_error = NULL,\n          attempts = attempts + 1,\n          fence = fence + 1,\n          lease_owner = ${who},\n          lease_until = ${plus(NOW, sql`${lease}`)},\n          updated_at = ${NOW}\n          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND ${unused} AND id = (\n            SELECT c.id FROM job c\n            WHERE ${eligible} AND (${validPayload})\n              AND (c.resource_key IS NULL OR NOT EXISTS (\n                SELECT 1 FROM job r WHERE r.org_id = c.org_id AND r.resource_key = c.resource_key\n                  AND r.state = 'running'))\n              AND (SELECT count(*) FROM job r WHERE r.org_id = ${ctx.orgId}\n                AND r.state = 'running' AND r.lease_until > ${NOW}) < ${cap}\n            ORDER BY c.run_at, c.id LIMIT 1)` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO job_attempt (id, org_id, job_id, attempt, fence, worker, outcome)\n          SELECT ${who}, org_id, id, attempts, fence, lease_owner, 'running' FROM job\n          WHERE org_id = ${ctx.orgId} AND lease_owner = ${who} AND state = 'running'\n          AND ${unused}` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id, type, payload_json, idempotency_key, resource_key, project_id,\n            initiator_token_id, attempts, max_attempts, fence, lease_owner, lease_until\n          FROM job WHERE org_id = ${ctx.orgId} AND lease_owner = ${who} AND state = 'running'` #1",
         'db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n          lease_until = max(lease_until, ${plus(NOW, sql`${JOB_LEASE_SECONDS}`)}), updated_at = ${NOW}\n          WHERE job.org_id = ${ctx.orgId} AND ${guardOf(ctx, guard)} AND job.lease_until > ${NOW}` #1',
@@ -2180,7 +2184,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/job.ts:SQL template: sql`job_attempt.org_id = ${ctx.orgId} AND job_attempt.job_id = ${guard.id}\n        AND job_attempt.fence = ${guard.fence} AND job_attempt.worker = ${guard.owner}\n        AND job_attempt.outcome = 'running' AND ${live}` #1",
         'db-sqlite/src/repositories/job.ts:SQL template: sql`job.org_id = ${ctx.orgId} AND ${guardOf(ctx, guard)}` #1',
         "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job_attempt SET outcome = 'succeeded', finished_at = ${NOW}\n            WHERE ${attemptWhere}` #1",
-        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET state = 'succeeded', lease_owner = NULL, lease_until = NULL,\n            last_error = NULL, finished_at = ${marker('succeeded', 'finished_at')},\n            updated_at = ${marker('succeeded', 'finished_at')}\n            WHERE ${jobWhere} AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id\n              AND a.fence = job.fence AND a.worker = job.lease_owner AND a.outcome = 'succeeded')` #1",
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET state = 'succeeded', lease_owner = NULL, lease_until = NULL,\n            last_error = NULL, sync_error = NULL, finished_at = ${marker('succeeded', 'finished_at')},\n            updated_at = ${marker('succeeded', 'finished_at')}\n            WHERE ${jobWhere} AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id\n              AND a.fence = job.fence AND a.worker = job.lease_owner AND a.outcome = 'succeeded')` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job_attempt SET outcome = 'released', finished_at = ${NOW},\n            next_run_at = ${plus(NOW, sql`${delay}`)} WHERE ${attemptWhere}` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job_attempt SET outcome = 'failed', error = ${code}, finished_at = ${NOW},\n          next_run_at = CASE WHEN ${outcome.permanent === true ? 1 : 0} = 1 THEN NULL\n            ELSE ${nextRunOf()} END\n          WHERE ${attemptWhere}` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT p.id FROM job p\n        WHERE p.org_id = ${ctx.orgId} AND p.state = 'running' AND p.lease_until <= ${NOW}\n        AND ${live} (SELECT 1 FROM job_attempt q WHERE q.job_id = p.id AND q.fence = p.fence\n          AND q.outcome = 'running')\n        ORDER BY p.lease_until, p.id LIMIT ${page}` #1",
@@ -2190,7 +2194,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/job.ts:SQL template: sql`AND (j.run_at, j.id) > (SELECT c.run_at, c.id FROM job c\n              WHERE c.org_id = ${ctx.orgId} AND c.id = ${text('afterId', input.afterId)}\n              AND c.state = 'queued')` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT j.id FROM job j\n          WHERE j.state = 'queued' AND j.run_at <= ${NOW} AND j.org_id = ${ctx.orgId}\n          AND j.type IN (SELECT value FROM json_each(${types}))\n          AND (j.resource_key IS NULL OR (\n            NOT EXISTS (SELECT 1 FROM job r WHERE r.org_id = j.org_id\n              AND r.resource_key = j.resource_key AND r.state = 'running')\n            AND NOT EXISTS (SELECT 1 FROM job e WHERE e.org_id = j.org_id\n              AND e.resource_key = j.resource_key AND e.state = 'queued' AND e.run_at <= ${NOW}\n              AND e.type IN (SELECT value FROM json_each(${types}))\n              AND (e.run_at, e.id) < (j.run_at, j.id))))\n          ${after}\n          ORDER BY j.run_at, j.id LIMIT ${page}` #1",
         "db-sqlite/src/repositories/job.ts:SQL template: sql`strftime(${sql.raw(`'${FORMAT}'`)}, 'now', printf('-%d seconds', ${grace}))` #1",
-        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET state = 'dead', last_error = 'unknown_job_type',\n          finished_at = ${NOW}, updated_at = ${NOW}\n          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND id IN (\n            SELECT u.id FROM job u\n            WHERE u.state = 'queued' AND u.org_id = ${ctx.orgId}\n              AND u.run_at <= ${cutoff}\n              AND u.type NOT IN (SELECT value FROM json_each(${types}))\n              AND NOT EXISTS (SELECT 1 FROM job_attempt a JOIN job t ON t.id = a.job_id\n                WHERE a.org_id = ${ctx.orgId} AND t.type = u.type\n                AND (a.started_at > ${cutoff} OR a.finished_at > ${cutoff}))\n            ORDER BY u.run_at, u.id LIMIT ${page})` #1",
+        "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET state = 'dead', sync_error = NULL, last_error = 'unknown_job_type',\n          finished_at = ${NOW}, updated_at = ${NOW}\n          WHERE org_id = ${ctx.orgId} AND state = 'queued' AND id IN (\n            SELECT u.id FROM job u\n            WHERE u.state = 'queued' AND u.org_id = ${ctx.orgId}\n              AND u.run_at <= ${cutoff}\n              AND u.type NOT IN (SELECT value FROM json_each(${types}))\n              AND NOT EXISTS (SELECT 1 FROM job_attempt a JOIN job t ON t.id = a.job_id\n                WHERE a.org_id = ${ctx.orgId} AND t.type = u.type\n                AND (a.started_at > ${cutoff} OR a.finished_at > ${cutoff}))\n            ORDER BY u.run_at, u.id LIMIT ${page}) RETURNING id` #1",
       ],
     },
     {

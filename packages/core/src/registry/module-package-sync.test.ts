@@ -1,4 +1,5 @@
 import * as composerRepository from '../ingest/composer/composer-repository.js';
+import { jobSourceError } from '../platform/job-source-error.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { orgContext, type OrgContext } from '../db/port.js';
@@ -479,4 +480,18 @@ it('uses a plugin claiming composer_repository before the built-in default', asy
     { validators: {} },
   );
   expect(h.transport).not.toHaveBeenCalled();
+});
+
+it('passes a stable child error from registry package jobs to settlement', async () => {
+  const h = harness();
+  h.transport.mockRejectedValue(new Error('private upstream failure'));
+  const definition = createRegistryModule(h.deps).packageSyncJob!;
+  const error = await definition
+    .handler(
+      definition.validate({ sourceId: 'src-1', key: h.key, syncGeneration: 'a'.repeat(64) }),
+      h.context,
+    )
+    .catch((error: unknown) => error);
+  expect(jobSourceError(error)).toBe('network');
+  expect(h.batch).not.toHaveBeenCalledWith([{ sql: 'record-source-error', params: [] }]);
 });

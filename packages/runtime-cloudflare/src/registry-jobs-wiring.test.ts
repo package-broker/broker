@@ -320,7 +320,11 @@ describe.each([
           params: [org.orgId, 'core:package-sync:v1'],
         });
         expect(children.map((child) => JSON.parse(child.payload_json))).toEqual(
-          names.map((key) => ({ sourceId: listingSource, key })),
+          names.map((key) => ({
+            sourceId: listingSource,
+            key,
+            syncGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+          })),
         );
         for (const child of children)
           await deliver(notifications.find((notification) => notification.job === child.id)!);

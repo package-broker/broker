@@ -4,6 +4,7 @@ import { ABSENCE_MIN_NOT_FOUND, ABSENCE_MIN_SPAN_MS } from '../db/catalogue.js';
 import type { CatalogueWriteGuard } from '../db/catalogue.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../db/errors.js';
 import type { OrgId, Statement } from '../db/port.js';
+import { jobSourceError } from '../platform/job-source-error.js';
 import { jobFences, jobLeaseOf } from '../platform/job-fences.js';
 import { JobRelease, releaseDelayOf } from '../platform/job-release.js';
 import { JOB_HANDLER_BUDGET_SECONDS } from '../platform/job-repository.js';
@@ -361,8 +362,18 @@ describe('apply', () => {
     expect(h.deps.jobs.enqueue).toHaveBeenCalledWith(
       org,
       'core:package-sync:v1',
-      { sourceId: 'A', key: 'name', sessionId: 'session', generation: 1, step: 4 },
-      { idempotencyKey: sha(['session', 1, 4]), resourceKey: sha(['v1', 'A', 'name']) },
+      {
+        sourceId: 'A',
+        key: 'name',
+        parentJob: lease,
+        sessionId: 'session',
+        generation: 1,
+        step: 4,
+      },
+      {
+        idempotencyKey: sha(['session', 1, 4, lease.id, lease.owner, lease.fence]),
+        resourceKey: sha(['v1', 'A', 'name']),
+      },
     );
   });
 
@@ -756,4 +767,40 @@ describe('fix round 1', () => {
     );
     await expect(h.run()).rejects.toMatchObject({ code: 'lease_lost' });
   });
+});
+
+it('abandons the acquired stamped session when a continuation generation is stale', async () => {
+  const h = setup();
+  h.sessions.acquire.mockResolvedValue({ ...staged, generation: 2 });
+  await h.run({ sourceId: 'A', key: 'name', sessionId: staged.id, generation: 1 });
+  expect(h.sessions.abandon).toHaveBeenCalledExactlyOnceWith(
+    org,
+    expect.objectContaining({ generation: 2 }),
+  );
+  expect(h.sessions.release).not.toHaveBeenCalled();
+});
+
+it.each([
+  [new UpstreamError('http_status', 503), 'http_error'],
+  [new SnapshotCorruptError(), 'internal'],
+] as const)('retries and annotates expected generation failures: %s', async (failure, code) => {
+  const h = setup();
+  h.describePackage.mockRejectedValue(failure);
+  const error = await h
+    .run({ sourceId: 'A', key: 'name', syncGeneration: 'a'.repeat(64) })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(JobError);
+  expect(error).toMatchObject({ code: 'handler_error' });
+  expect(jobSourceError(error)).toBe(code);
+});
+
+it('annotates and rethrows an unexpected generation failure unchanged', async () => {
+  const h = setup();
+  const failure = new TypeError('unexpected');
+  h.describePackage.mockRejectedValue(failure);
+  const error = await h
+    .run({ sourceId: 'A', key: 'name', syncGeneration: 'a'.repeat(64) })
+    .catch((e: unknown) => e);
+  expect(error).toBe(failure);
+  expect(jobSourceError(error)).toBe('internal');
 });

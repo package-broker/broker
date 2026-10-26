@@ -35,7 +35,6 @@ export type ErrorCode =
   | 'r2_unavailable'
   | 'analytics_engine_unavailable'
   | 'migration_failed'
-  | 'migrations_pending'
   | 'smoke_failed'
   | 'rollback_blocked_contract'
   | 'rollback_unavailable_first_deploy'
@@ -96,8 +95,6 @@ const MESSAGES: Record<ErrorCode, string> = {
   r2_unavailable: `Enable R2 manually, then rerun. ${GUIDANCE}`,
   analytics_engine_unavailable: GUIDANCE,
   migration_failed: 'Migration failed; inspect the migration state before continuing.',
-  migrations_pending:
-    'Artifact migrations are unapplied or their checksums differ; run pb cloudflare migrate before deploying.',
   smoke_failed: 'Smoke assertions failed; inspect the named checks and rollback result.',
   rollback_blocked_contract:
     'A contract migration boundary blocks code rollback; restore or forward repair is required.',

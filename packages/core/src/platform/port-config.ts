@@ -6,6 +6,12 @@ export const MAX_JOBS_RUNNING = 2;
 export const MAX_CACHE_BYTES = 32 * 1024 * 1024;
 export const MAX_ENV_NAME_LENGTH = 48;
 export const MAX_IDENTIFIER_LENGTH = 64;
+export const TRACE_FIELDS = {
+  enabled: 'enabled',
+  headSamplingRate: 'head_sampling_rate',
+  destinations: 'destinations',
+  persist: 'persist',
+} as const;
 
 export interface BlobPortConfig {
   adapter: 'r2' | 'filesystem' | 's3';
@@ -39,6 +45,12 @@ export interface ObservabilityPortConfig {
   deploymentIdEnv: 'DEPLOYMENT_ID';
   endpointEnv?: string;
   headersEnv?: string;
+  traces?: {
+    enabled: boolean;
+    headSamplingRate?: number;
+    destinations?: string[];
+    persist?: boolean;
+  };
 }
 
 export interface PlatformPortConfig {
@@ -90,7 +102,14 @@ const ALLOWED: Record<PortName, Record<string, readonly string[]>> = {
     database: ['adapter', 'maxRunning'],
   },
   observability: {
-    workers: ['adapter', 'analyticsBinding', 'deploymentIdEnv', 'endpointEnv', 'headersEnv'],
+    workers: [
+      'adapter',
+      'analyticsBinding',
+      'deploymentIdEnv',
+      'endpointEnv',
+      'headersEnv',
+      'traces',
+    ],
     stdio: ['adapter', 'deploymentIdEnv', 'endpointEnv', 'headersEnv'],
   },
 };
@@ -111,7 +130,14 @@ const ALL_KEYS: Record<PortName, readonly string[]> = {
   ],
   cache: ['adapter', 'namespace', 'maxBytes'],
   jobs: ['adapter', 'binding', 'maxRunning'],
-  observability: ['adapter', 'analyticsBinding', 'deploymentIdEnv', 'endpointEnv', 'headersEnv'],
+  observability: [
+    'adapter',
+    'analyticsBinding',
+    'deploymentIdEnv',
+    'endpointEnv',
+    'headersEnv',
+    'traces',
+  ],
 };
 
 const BLOB_ENV_KEYS = [
@@ -301,6 +327,75 @@ function validateStanza(stanza: Obj, target: Platform, prefix: string): string[]
   if (observability) {
     if (own(observability, 'deploymentIdEnv') !== 'DEPLOYMENT_ID') {
       problems.push(`${prefix}observability.deploymentIdEnv: must be DEPLOYMENT_ID`);
+    }
+    const traces = own(observability, 'traces');
+    if (
+      traces !== undefined &&
+      target === 'cloudflare' &&
+      own(observability, 'adapter') === 'workers'
+    ) {
+      const at = `${prefix}observability.traces`;
+      if (!isObject(traces)) {
+        problems.push(`${at}: must be an object`);
+      } else {
+        for (const key of Object.keys(traces)) {
+          if (!Object.hasOwn(TRACE_FIELDS, key))
+            problems.push(`${at}.${safeKey(key)}: unknown key`);
+        }
+        if (typeof own(traces, 'enabled') !== 'boolean')
+          problems.push(`${at}.enabled: must be a boolean`);
+        const rate = own(traces, 'headSamplingRate');
+        if (
+          rate !== undefined &&
+          (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0 || rate > 1)
+        )
+          problems.push(`${at}.headSamplingRate: must be finite and greater than 0 and at most 1`);
+        const destinations = own(traces, 'destinations');
+        if (destinations !== undefined) {
+          if (!Array.isArray(destinations)) {
+            problems.push(`${at}.destinations: must be an array`);
+          } else {
+            if (destinations.length < 1 || destinations.length > 10)
+              problems.push(`${at}.destinations: must contain 1 to 10 entries`);
+            const trimmed = Array.from(destinations, (value: unknown) =>
+              typeof value === 'string' ? value.trim() : value,
+            );
+            if (
+              trimmed.some(
+                (value) =>
+                  typeof value !== 'string' ||
+                  value.length < 1 ||
+                  value.length > MAX_IDENTIFIER_LENGTH,
+              )
+            )
+              problems.push(
+                `${at}.destinations: entries must be strings of trimmed length 1 to ${MAX_IDENTIFIER_LENGTH}`,
+              );
+            if (destinations.some((value) => typeof value === 'string' && value !== value.trim()))
+              problems.push(
+                `${at}.destinations: entries must not have leading or trailing whitespace`,
+              );
+            if (
+              trimmed.some(
+                (value) => typeof value === 'string' && value.length > 0 && !SAFE_KEY.test(value),
+              )
+            )
+              problems.push(
+                `${at}.destinations: entries may contain only A-Z, a-z, 0-9, dot, underscore and hyphen`,
+              );
+            const validNames = trimmed.filter(
+              (value): value is string =>
+                typeof value === 'string' &&
+                value.length >= 1 &&
+                value.length <= MAX_IDENTIFIER_LENGTH,
+            );
+            if (new Set(validNames).size !== validNames.length)
+              problems.push(`${at}.destinations: entries must be unique after trimming`);
+          }
+        }
+        if (own(traces, 'persist') !== undefined && typeof own(traces, 'persist') !== 'boolean')
+          problems.push(`${at}.persist: must be a boolean`);
+      }
     }
     binding('observability', observability, 'analyticsBinding');
     envRef('observability', observability, 'endpointEnv');

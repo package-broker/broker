@@ -262,7 +262,7 @@ leg(
       const { vcsProviders } = (await (
         await api('/_pb/sources', undefined, 200, 'GET')
       ).json()) as { vcsProviders: string[] };
-      expect(vcsProviders).toContain('ssh');
+      expect(vcsProviders).toEqual(['github', 'git', 'ssh']);
       const { id: sourceId } = (await (
         await api(
           '/_pb/sources',

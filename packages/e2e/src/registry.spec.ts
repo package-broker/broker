@@ -652,7 +652,7 @@ export async function registryScenario(
     };
     assert.deepEqual(
       vcsProviders,
-      runtime === 'node' ? ['github', 'git'] : ['github'],
+      runtime === 'node' ? ['github', 'git', 'ssh'] : ['github'],
       `vcs-providers:${vcsProviders.join(',')}`,
     );
     if (runtime === 'cloudflare')

@@ -432,3 +432,96 @@ describe('BrokerConfig.platformPorts', () => {
     expect(withPorts.platformPorts?.node).toBeDefined();
   });
 });
+
+describe('Workers automatic tracing', () => {
+  it.each([
+    { enabled: true },
+    { enabled: false },
+    { enabled: true, headSamplingRate: 0.05, destinations: ['collector'], persist: false },
+    { enabled: true, headSamplingRate: 1, destinations: ['collector'], persist: true },
+    { enabled: true, destinations: ['a.A_0-', 'b'.repeat(64)] },
+    { enabled: true, destinations: Array.from({ length: 10 }, (_, i) => `collector-${i}`) },
+  ])('accepts tracing config %j', (traces) => {
+    const stanza = cloudflare();
+    stanza.observability.traces = traces;
+    expect(check(stanza, 'cloudflare')).toEqual([]);
+  });
+
+  it.each<[unknown, string]>([
+    [null, 'must be an object'],
+    [[], 'must be an object'],
+    [true, 'must be an object'],
+    [{}, 'enabled: must be a boolean'],
+    [{ enabled: 'PRIVATE_SENTINEL' }, 'enabled: must be a boolean'],
+    ...[0, -1, 1.01, NaN, Infinity, -Infinity, 'PRIVATE_SENTINEL', null].map(
+      (value): [unknown, string] => [
+        { enabled: true, headSamplingRate: value },
+        'headSamplingRate: must be finite and greater than 0 and at most 1',
+      ],
+    ),
+    ...[
+      ['PRIVATE_SENTINEL', 'must be an array'],
+      [[], 'must contain 1 to 10 entries'],
+      [Array.from({ length: 11 }, (_, i) => `collector-${i}`), 'must contain 1 to 10 entries'],
+      ...[[null], [null, null], Array(1), [''], [1], ['x'.repeat(65)]].map((value) => [
+        value,
+        'entries must be strings of trimmed length 1 to 64',
+      ]),
+      ...[['a/b'], ['a b'], ['a?token'], ['é']].map((value) => [
+        value,
+        'entries may contain only A-Z, a-z, 0-9, dot, underscore and hyphen',
+      ]),
+      [['same', 'same'], 'entries must be unique after trimming'],
+      [[' a.A_0- '], 'entries must not have leading or trailing whitespace'],
+      [[' a.A_0-'], 'entries must not have leading or trailing whitespace'],
+      [['a.A_0- '], 'entries must not have leading or trailing whitespace'],
+    ].map(([value, rule]): [unknown, string] => [
+      { enabled: true, destinations: value },
+      `destinations: ${rule}`,
+    ]),
+    [{ enabled: true, persist: 'PRIVATE_SENTINEL' }, 'persist: must be a boolean'],
+    [{ enabled: true, extra: 'PRIVATE_SENTINEL' }, 'extra: unknown key'],
+    [{ enabled: true, 'https://PRIVATE_SENTINEL': true }, '<redacted>: unknown key'],
+  ])('rejects invalid tracing config %j', (traces, diagnostic) => {
+    const stanza = cloudflare();
+    stanza.observability.traces = traces;
+    const output = problems(stanza, 'cloudflare');
+    expect(check(stanza, 'cloudflare')).toEqual([
+      `cloudflare.observability.traces${diagnostic.startsWith('must be') ? ': ' : '.'}${diagnostic}`,
+    ]);
+    expect(output).not.toContain('PRIVATE_SENTINEL');
+  });
+
+  it.each([
+    [
+      ['', '   '],
+      [
+        'entries must be strings of trimmed length 1 to 64',
+        'entries must not have leading or trailing whitespace',
+      ],
+    ],
+    [
+      [' same ', 'same'],
+      [
+        'entries must not have leading or trailing whitespace',
+        'entries must be unique after trimming',
+      ],
+    ],
+  ])('reports each violated destination rule once for %j', (destinations, rules) => {
+    const stanza = cloudflare();
+    stanza.observability.traces = { enabled: true, destinations };
+    expect(check(stanza, 'cloudflare')).toEqual(
+      rules.map((rule) => `cloudflare.observability.traces.destinations: ${rule}`),
+    );
+  });
+
+  it.each([
+    { enabled: true },
+    { enabled: 'bad', headSamplingRate: -1, destinations: [], persist: null, extra: true },
+    null,
+  ])('rejects tracing on node with one diagnostic: %j', (traces) => {
+    const stanza = node();
+    stanza.observability.traces = traces;
+    expect(check(stanza, 'node')).toEqual(['node.observability.traces: not used by stdio']);
+  });
+});

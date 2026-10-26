@@ -1,0 +1,40 @@
+extensions:
+  bearertokenauth:
+    token: ${env:OTLP_INGRESS_TOKEN}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+        tls:
+          cert_file: ${env:OTLP_TLS_CERT_FILE}
+          key_file: ${env:OTLP_TLS_KEY_FILE}
+        auth:
+          authenticator: bearertokenauth
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+    spike_limit_mib: 32
+  batch: {}
+
+exporters:
+  nop: {}
+
+service:
+  extensions: [bearertokenauth]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [nop]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [nop]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [nop]

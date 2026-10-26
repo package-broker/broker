@@ -4,6 +4,7 @@ import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { createOtlpExporter } from '@package-broker/core/platform/otlp';
 import { parseUiManifest } from '@package-broker/core/platform/ui-manifest';
 import {
+  TRACE_FIELDS,
   validatePlatformPorts,
   type PlatformPortConfig,
 } from '@package-broker/core/platform/port-config';
@@ -38,6 +39,17 @@ import {
   type ManagedRoute,
   type ManagedDomain,
 } from './inventory.js';
+
+export function tracesMetadata(
+  traces: PlatformPortConfig['observability']['traces'],
+): Record<string, unknown> | undefined {
+  if (traces === undefined) return undefined;
+  return Object.fromEntries(
+    Object.entries(TRACE_FIELDS)
+      .filter(([key]) => traces[key as keyof typeof traces] !== undefined)
+      .map(([key, field]) => [field, traces[key as keyof typeof traces]]),
+  );
+}
 
 const COMPATIBILITY = { compatibility_date: '2026-10-01', compatibility_flags: ['nodejs_compat'] };
 const ASSET_CONFIG = { run_worker_first: true, html_handling: 'none', not_found_handling: 'none' };
@@ -1715,7 +1727,11 @@ export async function deploy(o: DeployOptions): Promise<CommandResult> {
               annotations: {
                 ...versionAnnotations(a, creation),
               },
-              observability: { enabled: true, logs: { invocation_logs: false } },
+              observability: {
+                enabled: true,
+                logs: { invocation_logs: false },
+                traces: tracesMetadata(artifact.ports?.observability.traces),
+              },
             }),
           );
           form.set(

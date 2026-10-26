@@ -1,12 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { createOutboundPolicy } from '../sources/url-policy.js';
-import { parseSourceConfig, type SourceType as RuntimeType } from '../sources/config.js';
+import {
+  parseSourceConfig,
+  type SourceConfig,
+  type SourceType as RuntimeType,
+} from '../sources/config.js';
 import {
   ECOSYSTEM_OF,
   SOURCE_CONFIG_SCHEMAS,
   SOURCE_TYPES,
   isConfigOf,
   sortConfigLists,
+  toRuntimeSourceConfig,
   type SourceType,
 } from './source-config.js';
 
@@ -303,6 +308,56 @@ describe('source config schemas agree with parseSourceConfig', () => {
       expect(runtime.ok).toBe(c.valid || c.stricterThanRuntime === true);
     });
   }
+});
+
+describe('import to runtime source config contract', () => {
+  it('returns the runtime config type', () => {
+    expectTypeOf(toRuntimeSourceConfig).returns.toEqualTypeOf<SourceConfig>();
+  });
+
+  it.each(cases.filter((c) => c.type === 'vcs' && c.valid))(
+    'binds the $label VCS import fixture after conversion',
+    ({ config }) => {
+      const wire = SOURCE_CONFIG_SCHEMAS.vcs.parse(config);
+      const original = structuredClone(wire);
+      const converted = toRuntimeSourceConfig(wire);
+      const parsed = parseSourceConfig('vcs', 'composer', null, JSON.stringify(converted), options);
+      expect(parsed).toEqual({ ok: true, config: converted });
+      expect(converted).toEqual({
+        provider: wire.provider,
+        repository: wire.repository,
+        refs: wire.refs,
+        ...(wire.installationId === null ? {} : { installationId: wire.installationId }),
+        ...(wire.packageName === null ? {} : { packageName: wire.packageName }),
+      });
+      expect(wire).toEqual(original);
+    },
+  );
+
+  it('keeps the runtime parser strict about null optional fields', () => {
+    const parsed = parseSourceConfig('vcs', 'composer', null, JSON.stringify(vcs()), options);
+    expect(parsed).toMatchObject({
+      ok: false,
+      problems: expect.arrayContaining([
+        expect.objectContaining({ field: 'installationId' }),
+        expect.objectContaining({ field: 'packageName' }),
+      ]),
+    });
+  });
+
+  it.each(cases.filter((c) => c.type !== 'vcs' && c.valid))(
+    'preserves the $label import config',
+    ({ type, config, url }) => {
+      const wire = SOURCE_CONFIG_SCHEMAS[type].parse(config);
+      const converted = toRuntimeSourceConfig(wire);
+      expect(converted).toEqual(
+        type === 'npm_registry' ? { ...(config as object), distHosts: [] } : config,
+      );
+      expect(
+        parseSourceConfig(type, ECOSYSTEM_OF[type], url, JSON.stringify(converted), options).ok,
+      ).toBe(true);
+    },
+  );
 });
 
 describe('ECOSYSTEM_OF mirror', () => {

@@ -231,15 +231,6 @@ leg(
         nodeTransport: pinSshHost,
         nodeEnv: { PB_SSH_ARCHIVE_ROOT: join(archives, 'store') },
         patchBundle(bundle) {
-          // Enable SSH only in the fixture copy of the bundle.
-          const hidden = /node: Object\.freeze\(\["github", "git"\]\)/g;
-          if (hidden.test(bundle))
-            bundle = bundle.replace(hidden, 'node: Object.freeze(["github", "git", "ssh"])');
-          else
-            assert(
-              /node: Object\.freeze\(\["github", "git", "ssh"\]\)/.test(bundle),
-              'SshProviderListMissing',
-            );
           if (process.env['PB_E2E_REJECT_SSH_DIST'] === '1') {
             const reader = /async openDist\((\w+), (\w+), (\w+)\) \{\s+sshConfig\(\2\);/g;
             assert.equal([...bundle.matchAll(reader)].length, 1, 'SshReaderMutationTargetMissing');
@@ -268,6 +259,10 @@ leg(
       const { id: projectId } = (await (
         await api('/_pb/projects', { slug: 'ssh', name: 'SSH' }, 201)
       ).json()) as { id: string };
+      const { vcsProviders } = (await (
+        await api('/_pb/sources', undefined, 200, 'GET')
+      ).json()) as { vcsProviders: string[] };
+      expect(vcsProviders).toContain('ssh');
       const { id: sourceId } = (await (
         await api(
           '/_pb/sources',

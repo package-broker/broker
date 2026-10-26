@@ -883,12 +883,12 @@ test.describe('Node management UI', () => {
       (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/_pb/sources',
     );
     await go(page, 'sources');
-    expect((await (await listed).json()).vcsProviders).toEqual(['github', 'git']);
+    expect((await (await listed).json()).vcsProviders).toEqual(['github', 'git', 'ssh']);
     await page.getByRole('button', { name: 'Add source', exact: true }).click();
     const create = activeDialog(page, 'Add source');
     await create.getByRole('radio', { name: /^Git repository/ }).check();
     const provider = create.getByLabel('Repository provider', { exact: true });
-    await expect(provider.locator('option')).toHaveText(['GitHub', 'Git over HTTP(S)']);
+    await expect(provider.locator('option')).toHaveText(['GitHub', 'Git over HTTP(S)', 'Git over SSH']);
     await expect(create.getByText(/Node runtime/)).toHaveCount(0);
     await provider.selectOption('git');
     await expect(create.getByLabel('Git repository URL (required)', { exact: true })).toBeVisible();

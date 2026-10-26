@@ -9,6 +9,12 @@ import {
   type MigrateResult,
 } from '@package-broker/db-sqlite/migrations/runner';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import {
+  assertPrebuiltConfiguration,
+  materializePrebuilt,
+  prebuiltEnvelope,
+  removePrebuilt,
+} from '../prebuilt.js';
 import { createD1HttpExecutor } from '../cloudflare/d1-http-executor.js';
 import { redact } from '../cloudflare/d1-http-response.js';
 import {
@@ -136,6 +142,7 @@ export interface CloudflareOperationResult<T> {
   diagnostics: string[];
 }
 export interface CloudflareMigrateOptions {
+  prebuilt?: boolean;
   databaseId?: string;
   workerName?: string;
   configPath?: string;
@@ -145,7 +152,7 @@ export interface CloudflareMigrateOptions {
   runIdentity?: string;
   transaction?: InventoryTransaction;
   jurisdiction?: Jurisdiction;
-  outDir: string;
+  outDir?: string;
   dryRun: boolean;
   env: Env;
   fetch?: typeof fetch;
@@ -161,6 +168,7 @@ export interface CloudflareMigrateOptions {
 
 export async function migrateCloudflare(
   o: CloudflareMigrateOptions,
+  operations: { materializePrebuilt?: typeof materializePrebuilt } = {},
 ): Promise<CloudflareOperationResult<MigrateResult>> {
   const diagnostics: string[] = [];
   const emit = (message: string) => {
@@ -213,6 +221,7 @@ export async function migrateCloudflare(
     result.value = value;
     return result;
   };
+  let prebuiltOut: string | undefined;
   let release: (() => Promise<void>) | undefined;
   let secrets: string[] = [o.env.CLOUDFLARE_API_TOKEN ?? '', o.env.CLOUDFLARE_ACCOUNT_ID ?? ''];
   try {
@@ -221,7 +230,19 @@ export async function migrateCloudflare(
     let store: InventoryStore | undefined;
     const now = o.now ?? Date.now;
     const project = dirname(resolve(o.configPath ?? 'broker.config.ts'));
-    const outDir = resolve(o.outDir);
+    let outDir = o.prebuilt
+      ? resolve(project, o.outDir ?? '.pb/prebuilt/cloudflare')
+      : resolve(o.outDir ?? '.pb/cloudflare');
+    if (o.prebuilt) {
+      await assertPrebuiltConfiguration(project, o.configPath);
+      const materialized = await (operations.materializePrebuilt ?? materializePrebuilt)({
+        project,
+        outDir,
+      });
+      outDir = prebuiltOut = materialized.outDir;
+      output.prebuilt = prebuiltEnvelope(materialized);
+      output.artifact_sha256 = output.prebuilt.artifact_sha256;
+    }
     if (o.transaction && o.workerName === undefined) throw new CloudflareError('invalid_input', 2);
     if (o.workerName !== undefined || o.inventory !== undefined) {
       if (!o.workerName) throw new CloudflareError('invalid_input', 2);
@@ -367,14 +388,16 @@ export async function migrateCloudflare(
       const result = finish(error.exitCode);
       failCommand(
         result.output,
-        new CloudflareError(
-          error.code,
-          error.exitCode,
-          error.retryable,
-          'migrate',
-          error.status,
-          error.check,
-        ),
+        error.stage === 'prebuilt'
+          ? error
+          : new CloudflareError(
+              error.code,
+              error.exitCode,
+              error.retryable,
+              'migrate',
+              error.status,
+              error.check,
+            ),
       );
       return result;
     }
@@ -393,6 +416,7 @@ export async function migrateCloudflare(
       return finish(2);
     return finish(1);
   } finally {
+    if (prebuiltOut) await removePrebuilt(prebuiltOut).catch(() => undefined);
     if (release) {
       try {
         await release();

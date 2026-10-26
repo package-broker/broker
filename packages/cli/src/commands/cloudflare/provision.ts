@@ -5,6 +5,12 @@ import { createInterface } from 'node:readline/promises';
 import { validatePlatformPorts } from '@package-broker/core/platform/port-config';
 import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
+import {
+  assertPrebuiltConfiguration,
+  materializePrebuilt,
+  prebuiltEnvelope,
+  removePrebuilt,
+} from '../../prebuilt.js';
 import type { BuildInfo } from '../../build-artifacts.js';
 import { queueConsumerScript } from './queue-consumer.js';
 import {
@@ -164,6 +170,7 @@ export const cloudflareProviderContract: ProviderContract = {
 };
 export interface ProvisionOptions {
   workerName: string;
+  prebuilt?: boolean;
   configPath?: string;
   project?: string;
   outDir?: string;
@@ -647,7 +654,11 @@ async function defaultPrompt(message: string): Promise<string> {
     prompt.close();
   }
 }
-export async function provision(o: ProvisionOptions): Promise<CommandResult> {
+export async function provision(
+  o: ProvisionOptions,
+  operations: { materializePrebuilt?: typeof materializePrebuilt } = {},
+): Promise<CommandResult> {
+  let prebuiltOut: string | undefined;
   const output = commandEnvelope('provision', o.dryRun ?? false);
   let release: (() => Promise<void>) | undefined;
   let inventory: Inventory | undefined;
@@ -659,6 +670,11 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       .map((r) => r!.name);
   };
   try {
+    if (o.prebuilt)
+      await assertPrebuiltConfiguration(
+        resolve(o.project ?? dirname(resolve(o.configPath ?? 'broker.config.ts'))),
+        o.configPath,
+      );
     const auth = cloudflareCredentials(o.env);
     const identity = installIdentity({
       ...auth,
@@ -676,7 +692,18 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       throw new CloudflareError('invalid_input', 2);
     const adoptions = checkAdoptions(o.adoptResource ?? []);
     const project = resolve(o.project ?? dirname(resolve(o.configPath ?? 'broker.config.ts')));
-    const outDir = resolve(o.outDir ?? '.pb/cloudflare');
+    let outDir = o.prebuilt
+      ? resolve(project, o.outDir ?? '.pb/prebuilt/cloudflare')
+      : resolve(o.outDir ?? '.pb/cloudflare');
+    if (o.prebuilt) {
+      const materialized = await (operations.materializePrebuilt ?? materializePrebuilt)({
+        project,
+        outDir,
+      });
+      outDir = prebuiltOut = materialized.outDir;
+      output.prebuilt = prebuiltEnvelope(materialized);
+      output.artifact_sha256 = output.prebuilt.artifact_sha256;
+    }
     const store = await InventoryStore.create({
       project,
       outDir,
@@ -1204,6 +1231,8 @@ export async function provision(o: ProvisionOptions): Promise<CommandResult> {
       }
     }
     return failCommand(output, localFailure(error));
+  } finally {
+    if (prebuiltOut) await removePrebuilt(prebuiltOut).catch(() => undefined);
   }
 }
 export async function runCloudflareProvision(o: ProvisionOptions): Promise<number> {

@@ -1,9 +1,14 @@
 import { expect, it, vi } from 'vitest';
 import { run } from './cli.js';
+import { runCloudflareSetup } from './commands/cloudflare/setup.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
 
 vi.mock('./commands/cloudflare/provision.js', () => ({
   runCloudflareProvision: vi.fn(async () => 0),
+}));
+
+vi.mock('./commands/cloudflare/setup.js', () => ({
+  runCloudflareSetup: vi.fn(async () => 0),
 }));
 
 it('lists only working commands in --help', async () => {
@@ -67,4 +72,14 @@ it('accepts --abandon-intent only on provision and requires a value', async () =
   } finally {
     error.mockRestore();
   }
+});
+
+it('setup --project keeps the build project at cwd and passes only the smoke slug', async () => {
+  const setup = vi.mocked(runCloudflareSetup);
+  setup.mockClear();
+  expect(await run(['cloudflare', 'setup', '--project', 'acme', '--dry-run', '--json'])).toBe(0);
+  expect(setup).toHaveBeenCalledWith(
+    expect.objectContaining({ smokeProject: 'acme', prebuilt: false }),
+  );
+  expect(setup.mock.calls[0]![0]).not.toHaveProperty('project');
 });

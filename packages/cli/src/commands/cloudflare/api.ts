@@ -1,6 +1,17 @@
 import type { BuildInfo } from '../../build-artifacts.js';
 
 export type ErrorCode =
+  | 'prebuilt_invalid'
+  | 'prebuilt_dirty'
+  | 'prebuilt_git_sha_mismatch'
+  | 'prebuilt_lockfile_mismatch'
+  | 'prebuilt_dependencies_refused'
+  | 'prebuilt_io_failure'
+  | 'prebuilt_unavailable'
+  | 'prebuilt_version_mismatch'
+  | 'prebuilt_unverifiable'
+  | 'checksum_mismatch'
+  | 'migrations_pending'
   | 'invalid_input'
   | 'unsafe_path'
   | 'invalid_inventory'
@@ -36,6 +47,22 @@ export type ErrorCode =
 const GUIDANCE =
   'Workers Paid with Queues is the supported target. Enable the required service, verify token permissions, then rerun pb cloudflare setup. Resources were not created. For a different deployment target, use the documented single-replica Node installation.';
 const MESSAGES: Record<ErrorCode, string> = {
+  prebuilt_invalid: 'Prebuilt metadata is invalid; reinstall trusted packages.',
+  prebuilt_dirty: 'Prebuilt build provenance is dirty or unknown; reinstall trusted packages.',
+  prebuilt_git_sha_mismatch:
+    'Prebuilt git SHA does not match its build provenance; reinstall trusted packages.',
+  prebuilt_lockfile_mismatch:
+    'Prebuilt lockfile digest does not match its build provenance; reinstall trusted packages.',
+  prebuilt_dependencies_refused:
+    'Prebuilt packages must not declare dependencies or install hooks; reinstall trusted packages.',
+  prebuilt_io_failure: 'Local prebuilt I/O failed; check permissions and free space, then rerun.',
+  prebuilt_unavailable:
+    'Prebuilt package is unavailable; install @package-broker/dist-cloudflare@<cli version> or run without --prebuilt.',
+  prebuilt_version_mismatch: 'Prebuilt package version must equal the CLI version.',
+  prebuilt_unverifiable: 'The CLI has no expected prebuilt record; use a published CLI package.',
+  checksum_mismatch: 'Prebuilt checksum verification failed; reinstall trusted packages.',
+  migrations_pending:
+    'Prebuilt migrations are pending; run pb cloudflare migrate --prebuilt --worker-name <worker name> before deploying.',
   invalid_input:
     'Invalid input or incomplete Cloudflare build; build the selected configuration first.',
   unsafe_path: 'State must be ignored, contained, regular and separate from build output.',
@@ -119,7 +146,7 @@ export interface PlanEntry {
 }
 
 export function commandEnvelope(command: string, dryRun = false) {
-  return {
+  const output = {
     schema_version: 1 as const,
     command,
     status: 'ok' as 'ok' | 'planned' | 'error',
@@ -141,6 +168,9 @@ export function commandEnvelope(command: string, dryRun = false) {
     rollback: { status: 'not_needed' as string, target_version_id: null as string | null },
     bootstrap_url: null as string | null,
     error: null as { code: ErrorCode; message: string; retryable: boolean; stage: string } | null,
+  };
+  return output as typeof output & {
+    prebuilt?: { package: string; version: string; gitSha: string; artifact_sha256: string };
   };
 }
 export type CommandEnvelope = ReturnType<typeof commandEnvelope>;

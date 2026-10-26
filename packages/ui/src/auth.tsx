@@ -20,7 +20,7 @@ import { encodeQr, type QrMatrix } from './qr.js';
 import { buildListFilterHash, type HashRoute } from './page-hash.js';
 import { Alert, AlertDescription } from './components/ui/alert.js';
 import { Button } from './components/ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card.js';
+import { Card, CardContent, CardDescription, CardHeader } from './components/ui/card.js';
 import {
   Dialog,
   DialogContent,
@@ -544,9 +544,9 @@ export function LoginView(props: {
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
-        <CardTitle id="page-heading" tabIndex={-1}>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
           Sign in
-        </CardTitle>
+        </h1>
         <CardDescription>Package Broker</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -618,9 +618,9 @@ export function ReauthView(props: {
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
-        <CardTitle id="page-heading" tabIndex={-1}>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
           Confirm it is you
-        </CardTitle>
+        </h1>
         <CardDescription>This action needs a fresh sign-in.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -861,9 +861,9 @@ export function SetupView(props: {
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
-        <CardTitle id="page-heading" tabIndex={-1}>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
           First-run setup
-        </CardTitle>
+        </h1>
       </CardHeader>
       <CardContent className="grid gap-4">
         {state.notice === null ? null : (

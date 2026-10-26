@@ -1,6 +1,7 @@
 import { METRIC_LABEL_KEYS } from './metrics.js';
 import {
   APPROVED_ERROR_NAMES,
+  isUpstreamOrigin,
   DROPPED_COUNTER,
   type DroppedSignal,
   metricLabelValueAllowed,
@@ -166,6 +167,10 @@ const SPAN_ATTRIBUTES = new Set<string>([
   'error_name',
   'reason_code',
   'provider',
+  'upstream.origin',
+  'redirects',
+  'cross_origin',
+  'outcome',
 ]);
 
 const APPROVED_ERRORS: ReadonlySet<string> = new Set(APPROVED_ERROR_NAMES);
@@ -197,6 +202,10 @@ const ATTRIBUTE_CHECKS: Readonly<
   error_name: (v) => typeof v === 'string' && APPROVED_ERRORS.has(v),
   reason_code: matches(CODE),
   provider: matches(PROVIDER_SLUG),
+  'upstream.origin': isUpstreamOrigin,
+  redirects: (v) => isInt(v, 0, 5),
+  cross_origin: (v) => typeof v === 'boolean',
+  outcome: matches(CODE),
 };
 
 function validAttributes(

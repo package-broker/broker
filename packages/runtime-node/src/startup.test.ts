@@ -1,3 +1,5 @@
+import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
+import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { formatToken } from '@package-broker/core/secrets/token-format';
@@ -1052,6 +1054,116 @@ describe('startNode', () => {
           .map((call) => call.body)
           .join('');
         expect(otlpLogs.includes('/health/live')).toBe(level === 'debug');
+      },
+    );
+
+    it.each([undefined, 'debug', 'info', 'warn', 'error'] as const)(
+      'exports exactly one upstream child independently of log level %s',
+      async (level) => {
+        const calls: Array<{ url: string; body: string }> = [];
+        const plugin: PluginDefinition = {
+          id: 'upstream',
+          package: 'test/upstream',
+          apiVersion: 3,
+          platforms: ['node'],
+          register(registry) {
+            registry.route({
+              method: 'GET',
+              path: '/upstream',
+              permission: null,
+              needsOrg: false,
+              handler: async (ctx) => {
+                const fetch = createPolicyFetch({
+                  fetchImpl: async (_input, init) => {
+                    expect(new Headers(init?.headers).has('traceparent')).toBe(false);
+                    return new Response(null, { status: 201 });
+                  },
+                  policy: createOutboundPolicy({
+                    runtime: 'node',
+                    selfOrigins: [],
+                    allowPrivateHosts: [],
+                  }),
+                  userAgent: 'test',
+                  observability: ctx.ports.platform!.observability,
+                });
+                await fetch({
+                  url: 'https://upstream.example.com/private-segment?secret=1',
+                  method: 'POST',
+                  purpose: 'api',
+                  maxBytes: 1024,
+                  timeoutMs: 1000,
+                });
+                return new Response('ok');
+              },
+            });
+          },
+        };
+        const out = capture();
+        const broker = await start(
+          { PB_OTLP_ENDPOINT: 'https://collector.test' },
+          { ...ports, observability: { ...ports.observability, endpointEnv: 'PB_OTLP_ENDPOINT' } },
+          {
+            plugins: [plugin],
+            observability: level === undefined ? {} : { level },
+            stdout: out.stream,
+            fetch: async (input, init) => {
+              calls.push({ url: String(input), body: String(init?.body) });
+              return new Response('{}');
+            },
+          },
+        );
+        running.push(broker);
+        expect(
+          (await (await broker.ready()).fetch(new Request('http://broker.test/upstream'))).status,
+        ).toBe(200);
+        await broker.close();
+        const spans = calls
+          .filter((call) => call.url.endsWith('/v1/traces'))
+          .flatMap((call) => {
+            const body = JSON.parse(call.body) as {
+              resourceSpans: {
+                scopeSpans: {
+                  spans: {
+                    name: string;
+                    traceId: string;
+                    spanId: string;
+                    parentSpanId?: string;
+                    kind: number;
+                    attributes: {
+                      key: string;
+                      value: { stringValue?: string; intValue?: string; boolValue?: boolean };
+                    }[];
+                  }[];
+                }[];
+              }[];
+            };
+            return body.resourceSpans.flatMap((r) => r.scopeSpans.flatMap((s) => s.spans));
+          });
+        expect(spans).toHaveLength(2);
+        const server = spans.find((span) => span.kind === 2)!;
+        const children = spans.filter((span) => span.name === 'upstream.fetch');
+        expect(children).toHaveLength(1);
+        expect(children[0]).toMatchObject({
+          kind: 3,
+          traceId: server.traceId,
+          parentSpanId: server.spanId,
+        });
+        expect(children[0]!.spanId).not.toBe(server.spanId);
+        expect(children[0]!.attributes).toEqual(
+          expect.arrayContaining([
+            { key: 'upstream.origin', value: { stringValue: 'https://upstream.example.com' } },
+            { key: 'method', value: { stringValue: 'POST' } },
+            { key: 'status', value: { intValue: '201' } },
+            { key: 'redirects', value: { intValue: '0' } },
+            { key: 'cross_origin', value: { boolValue: false } },
+          ]),
+        );
+        for (const attribute of children[0]!.attributes) {
+          expect(JSON.stringify(attribute.value)).not.toMatch(/[?@]|private-segment|secret/);
+        }
+        expect(out.lines().filter((line) => line['event'] === 'upstream.fetch')).toHaveLength(
+          level === 'debug' ? 1 : 0,
+        );
       },
     );
 

@@ -48,6 +48,14 @@ export interface SafeLogRecord {
   readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
   readonly package_key?: string;
   readonly source_id?: string;
+  readonly upstream_trace_id?: string;
+  readonly upstream_parent_span_id?: string;
+  readonly upstream_span_id?: string;
+  readonly upstream_origin?: string;
+  readonly upstream_method?: string;
+  readonly redirects?: number;
+  readonly cross_origin?: boolean;
+  readonly outcome?: string;
 }
 
 export const LOG_FIELDS = [
@@ -80,6 +88,14 @@ export const LOG_FIELDS = [
   'reason',
   'package_key',
   'source_id',
+  'upstream_trace_id',
+  'upstream_parent_span_id',
+  'upstream_span_id',
+  'upstream_origin',
+  'upstream_method',
+  'redirects',
+  'cross_origin',
+  'outcome',
 ] as const satisfies readonly (keyof SafeLogRecord)[];
 
 export type LogField = (typeof LOG_FIELDS)[number];
@@ -163,6 +179,17 @@ export const DROPPED_SIGNALS = [
 ] as const;
 export type DroppedSignal = (typeof DROPPED_SIGNALS)[number];
 export const HTTP_REQUEST_EVENT = 'http.request';
+export const UPSTREAM_FETCH_EVENT = 'upstream.fetch';
+
+export function isUpstreamOrigin(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && url.origin === value;
+  } catch {
+    return false;
+  }
+}
 
 export const APPROVED_ERROR_NAMES = [
   'Error',
@@ -313,7 +340,7 @@ const FIELD_CHECKS: Readonly<
   route: matches(ROUTE),
   method: (v) => isString(v) && METHODS.has(v),
   status: (v) => isInt(v, 100, 599),
-  duration_ms: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
+  duration_ms: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 86_400_000,
   project_id: nullable(matches(ENTITY_ID)),
   token_id: nullable(matches(ENTITY_ID)),
   user_id: nullable(matches(ENTITY_ID)),
@@ -328,6 +355,14 @@ const FIELD_CHECKS: Readonly<
   reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
   package_key: packageKey,
   source_id: matches(ENTITY_ID),
+  upstream_trace_id: matches(TRACE_ID),
+  upstream_parent_span_id: matches(SPAN_ID),
+  upstream_span_id: matches(SPAN_ID),
+  upstream_origin: isUpstreamOrigin,
+  upstream_method: (v) => isString(v) && METHODS.has(v),
+  redirects: (v) => isInt(v, 0, 5),
+  cross_origin: (v) => typeof v === 'boolean',
+  outcome: matches(CODE),
 };
 
 const CHECKS_BY_NAME: Readonly<Record<string, FieldCheck | undefined>> = FIELD_CHECKS;
@@ -521,6 +556,12 @@ export function createObservability(
       }
       const merged: Record<string, unknown> = { ...caller };
       for (const key of [...SCOPE_ONLY, 'route']) delete merged[key];
+      if (caller.event === UPSTREAM_FETCH_EVENT && snapshot.traceId !== undefined) {
+        delete merged.upstream_trace_id;
+        delete merged.upstream_parent_span_id;
+        merged.upstream_trace_id = snapshot.traceId;
+        if (snapshot.spanId !== undefined) merged.upstream_parent_span_id = snapshot.spanId;
+      }
       Object.assign(merged, frozen, { timestamp: new Date().toISOString() });
       const safe = safeRecord(merged);
       if (safe === null) return dropped('log');

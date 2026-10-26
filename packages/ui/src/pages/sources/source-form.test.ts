@@ -1,4 +1,4 @@
-import { parseSourceConfig } from '@package-broker/core/sources/config';
+import { parseSourceConfig, servedVcsProviders } from '@package-broker/core/sources/config';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import type { Source } from '../sources.js';
 import { createElement } from 'react';
@@ -528,11 +528,12 @@ it('leaves the shared dialog layout unchanged unless the source variant is reque
 describe('repository provider choices', () => {
   it('lists only the providers the broker reports, in display order', () => {
     expect(vcsProviderOptions(['github'])).toEqual([['github', 'GitHub']]);
+    expect(vcsProviderOptions(servedVcsProviders('cloudflare'))).toEqual([['github', 'GitHub']]);
     expect(vcsProviderOptions(['git', 'github'])).toEqual([
       ['github', 'GitHub'],
       ['git', 'Git over HTTP(S)'],
     ]);
-    expect(vcsProviderOptions(['github', 'git', 'ssh'])).toEqual([
+    expect(vcsProviderOptions(servedVcsProviders('node'))).toEqual([
       ['github', 'GitHub'],
       ['git', 'Git over HTTP(S)'],
       ['ssh', 'Git over SSH'],

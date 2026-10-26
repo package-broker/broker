@@ -12,15 +12,16 @@ Use a Packagist proxy for public Composer packages from `repo.packagist.org`, or
 
 ## Add a proxy source
 
-Use an organization admin session for setup. Select the project that will use the proxy, open **Sources**, then **Add source**. Enter a source name and choose the matching ecosystem and source type:
+Creating a project-owned source requires `project:sources:write`; creating an organization-owned source requires organization admin authority. Select the project that will use the proxy, open **Sources**, then **Add source**. Enter a source name and choose the matching ecosystem and source type:
 
-| Ecosystem  | Source type                         | Repository URL               |
+| Ecosystem  | Source type                         | Registry URL                 |
 | ---------- | ----------------------------------- | ---------------------------- |
 | `composer` | Packagist proxy (`packagist_proxy`) | `https://repo.packagist.org` |
 | `npm`      | npmjs proxy (`npmjs_proxy`)         | `https://registry.npmjs.org` |
 
-The form supplies the registry URL. These source types accept only the exact URLs above; use a Composer repository or private npm registry source for another host. Leave **Use GitHub token** off for a Packagist proxy without a credential. An npmjs proxy takes no credential.
+The form displays the registry URL; you do not enter it. These source types accept only the exact URLs above; use a Composer repository or private npm registry source for another host. Leave **Use GitHub token** off for a Packagist proxy without a credential. An npmjs proxy takes no credential.
 
+<!-- source: packages/core/src/api/routes/sources-schemas.ts:164 -->
 <!-- source: packages/ui/src/pages/sources/source-form.tsx:41 -->
 <!-- source: packages/core/src/sources/config.ts:490 -->
 <!-- source: packages/core/src/sources/config.test.ts:353 -->
@@ -59,12 +60,18 @@ See the [proxy cache and outage decision](../decisions/registry-and-sources.md#a
 
 ## Retention and removal
 
-The source form's **Archive retention (days)** field uses the organization setting when blank. An override can lengthen retention but cannot shorten it. Retention jobs schedule eligible removed-package archives for deletion and purge bytes after their deadline. The default retention is 365 days; a longer source override extends that period. Retention is not a promise of permanent storage.
+The source form's **Archive retention (days)** field uses the organization setting when blank. An override can lengthen retention but cannot shorten it. Retention jobs schedule eligible removed-package archives for deletion and purge bytes after their deadline. For packages removed at the registry, the organization setting `retention_removed_upstream_days` defaults to 365 days; a longer source override extends that period. Retention is not a promise of permanent storage.
 
 <!-- source: packages/ui/src/pages/sources/source-form.tsx:119 -->
 <!-- source: packages/core/src/sources/config.test.ts:570 -->
+<!-- source: packages/db-sqlite/migrations/0001_init.sql:37 -->
 <!-- source: packages/db-sqlite/src/repositories/retention-jobs.test.ts:166 -->
 <!-- source: packages/db-sqlite/src/repositories/retention-jobs.test.ts:202 -->
+
+Unreferenced, refetchable blobs are also eligible for cleanup after the seven-day grace period defined by `ORPHAN_GRACE_DAYS`.
+
+<!-- source: packages/db-sqlite/src/repositories/blob-references.ts:9 -->
+<!-- source: packages/db-sqlite/src/repositories/retention-jobs.test.ts:183 -->
 
 The source removal policy also affects installs: `flag` can keep a version removed from its registry eligible, while `exclude` makes it ineligible. Stored bytes do not bypass that policy or project access checks. See [source behavior and cache](mirror-vendor-repositories.md#source-behavior-and-cache).
 
@@ -80,5 +87,5 @@ The source removal policy also affects installs: `flag` can keep a version remov
 <!-- source: packages/core/src/ingest/proxy-contract.test.ts:664 -->
 <!-- source: packages/core/src/ingest/proxy-contract.test.ts:681 -->
 <!-- source: packages/core/src/ingest/proxy-contract.test.ts:743 -->
-<!-- source: docs/clients/composer.md:108 -->
+<!-- source: docs/clients/composer.md:126 -->
 <!-- source: docs/clients/npm-pnpm-yarn.md -->

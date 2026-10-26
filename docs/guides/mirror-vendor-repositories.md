@@ -158,4 +158,4 @@ If sync or install fails, check the source's last error and whether it has a cre
 
 ## Next
 
-Use [Access model](../reference/access-model.md) to check roles and token scopes, [Composer](../clients/composer.md) for client setup, or return to [Troubleshoot credentials](#troubleshoot-credentials) for vendor credential failures. A separate troubleshooting page is planned.
+Use [Access model](../reference/access-model.md) to check roles and token scopes, [Composer](../clients/composer.md) for client setup, or return to [Troubleshoot credentials](#troubleshoot-credentials) for vendor credential failures. See [Troubleshooting Composer and npm installs](../troubleshooting/index.md) for error-specific checks.

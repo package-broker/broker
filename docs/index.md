@@ -7,7 +7,7 @@ description: Choose a runtime, connect Composer and npm clients, add sources and
 
 Package Broker is a self-hosted, open-source (AGPL-3.0-only) private Composer and npm registry with role-based access control per project.
 
-Run it on Cloudflare Workers or your own Node host with Docker.
+It runs on Cloudflare Workers or your own Node host with Docker.
 
 ## Choose a runtime
 

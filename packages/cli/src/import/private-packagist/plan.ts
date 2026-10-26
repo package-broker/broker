@@ -126,7 +126,7 @@ const stable = (v: unknown): string => {
       .join(',')}}`;
   return JSON.stringify(v);
 };
-class Refusal extends Error {
+export class Refusal extends Error {
   constructor(
     readonly code: string,
     readonly pointer: string,
@@ -139,7 +139,7 @@ class Refusal extends Error {
 function refuse(code: string, pointer = '', cap?: string, detail?: string): never {
   throw new Refusal(code, pointer, cap, detail);
 }
-function repository(value: unknown, pointer: string, vcs = false): string {
+export function repository(value: unknown, pointer: string, vcs = false): string {
   if (typeof value !== 'string' || /[\s\p{Cc}\p{Cf}]/u.test(value))
     return refuse('invalid_repository_url', pointer);
   let url = value;

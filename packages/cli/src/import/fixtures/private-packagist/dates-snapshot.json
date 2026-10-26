@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "versions": true,
+  "org": "acme",
+  "fetchedAt": "2026-10-26T00:00:00.000Z",
+  "objects": {
+    "packages": [
+      {
+        "data": {
+          "id": 10,
+          "name": "acme/one",
+          "origin": "private",
+          "config": {
+            "type": "vcs",
+            "url": "https://git.example.test/acme/one"
+          }
+        },
+        "sha256": "9d4b7e624c063905de66f40c76d407e7a210efbcc55f3d5ad186693c92ce9601"
+      },
+      {
+        "data": {
+          "id": 11,
+          "name": "acme/two",
+          "origin": "private",
+          "config": {
+            "url": "https://git.example.test/acme/two"
+          }
+        },
+        "sha256": "631c7aae9bcd7ec02503969f604be00f1a31f68687a42b45d77b409083be6c6c"
+      },
+      {
+        "data": {
+          "id": 20,
+          "name": "example/p20",
+          "origin": "private-mirror",
+          "config": {
+            "mirroredRepositoryId": 30
+          }
+        },
+        "sha256": "390060e09b5ecc0fa8dca16a9eea7abeaa93787d8fbeada15ccacdfb2ea5f024"
+      },
+      {
+        "data": {
+          "id": 21,
+          "name": "example/p21",
+          "origin": "private-proxy",
+          "config": {
+            "mirroredRepositoryId": 30
+          }
+        },
+        "sha256": "7550f6cec806dbeb47f88ce58e13a757c11c7efae0f037a4889c252cec7dd410"
+      },
+      {
+        "data": {
+          "id": 22,
+          "name": "example/p22",
+          "origin": "public-mirror",
+          "config": {}
+        },
+        "sha256": "bffe1b885c922c61bef1648d669c66797668bb543fbbd84278ba5797c7dcbf55"
+      },
+      {
+        "data": {
+          "id": 23,
+          "name": "example/p23",
+          "origin": "public-proxy",
+          "config": {}
+        },
+        "sha256": "261929c46bf369175e237276be8142609a74513064308edc915ad8749fbb006c"
+      }
+    ],
+    "suborganizations": [
+      {
+        "data": {
+          "id": 1,
+          "urlName": "acme",
+          "name": "Acme"
+        },
+        "sha256": "30d4727582511f1b993937b321322821e0f7d4be379f8ec42c3eb15456eeae0a"
+      }
+    ],
+    "suborganizationPackages": [
+      {
+        "data": {
+          "id": 10,
+          "name": "acme/one",
+          "origin": "private",
+          "config": {
+            "type": "vcs",
+            "url": "https://git.example.test/acme/one"
+          },
+          "suborganizationId": 1
+        },
+        "sha256": "05fd4a41dc5d64d1e8c05ae3906ef4a91e2d0e5418050895e7f38d05db131e4c"
+      },
+      {
+        "data": {
+          "id": 12,
+          "name": "acme/scoped",
+          "origin": "private",
+          "config": {
+            "url": "https://git.example.test/acme/scoped"
+          },
+          "suborganizationId": 1
+        },
+        "sha256": "3b7da15de4b58e367331ede6322b0b81febb0f9a252edb0885f80fa0567d9b3d"
+      }
+    ],
+    "mirroredRepositories": [
+      {
+        "data": {
+          "id": 30,
+          "url": "https://composer.example.test/",
+          "mirroringBehavior": "manual"
+        },
+        "sha256": "7798fa6360c34aa06cd7e4d1a0b4e78cf871a5c48c260a2d753708ad900643e6"
+      }
+    ],
+    "packageDetails": [
+      {
+        "data": {
+          "id": 10,
+          "versions": [
+            {
+              "version": "v1.0.0",
+              "versionNormalized": "1.0.0.0",
+              "releasedAt": "2020-01-02T03:04:05.123+02:30"
+            },
+            {
+              "version": "dev-main",
+              "versionNormalized": "dev-main",
+              "releasedAt": null
+            }
+          ]
+        },
+        "sha256": "58dca21cd92892e7fd37f6d36a764d15b9054f04a39c6da3a5321857198438f3"
+      },
+      {
+        "data": {
+          "id": 11,
+          "versions": [
+            {
+              "version": "1.2.0",
+              "versionNormalized": "1.2.0.0",
+              "releasedAt": "2020-02-01T00:00:00Z"
+            }
+          ]
+        },
+        "sha256": "0e1c160cf7668c2ac56907948c9c79e4ee32c4263ad0f3801c0dccd1b944c41c"
+      },
+      {
+        "data": {
+          "id": 12,
+          "versions": [
+            {
+              "version": "dev-main",
+              "versionNormalized": "dev-main",
+              "releasedAt": "2021-01-01T00:00:00Z"
+            }
+          ]
+        },
+        "sha256": "683f7412d9d4cb68584fa248a7968c116a86129488ec78d7608321de6971d177"
+      },
+      {
+        "data": {
+          "id": 20,
+          "versions": [
+            {
+              "version": "1.0.0",
+              "versionNormalized": "1.0.0.0",
+              "releasedAt": "2019-01-01T00:00:00Z"
+            }
+          ]
+        },
+        "sha256": "857a5457471d538fc4595c18b5a414f44ca3cd4a9080e28e79005abeb0711dd8"
+      },
+      {
+        "data": {
+          "id": 21,
+          "versions": [
+            {
+              "version": "1.0.0",
+              "versionNormalized": "1.0.0.0",
+              "releasedAt": "2019-01-01T00:00:00Z"
+            }
+          ]
+        },
+        "sha256": "a21e708bc071630882ab05767ea21c4779fcb9d5dbc14a0860f3ed6aa8458b79"
+      },
+      {
+        "data": {
+          "id": 22,
+          "versions": [
+            {
+              "version": "1.0.0",
+              "versionNormalized": "1.0.0.0",
+              "releasedAt": "2019-01-01T00:00:00Z"
+            }
+          ]
+        },
+        "sha256": "21fefee2909dff0ec65744f1cbf1b142f015d5a8ae07d0b3f5151ff26e889e74"
+      },
+      {
+        "data": {
+          "id": 23,
+          "versions": [
+            {
+              "version": "1.0.0",
+              "versionNormalized": "1.0.0.0",
+              "releasedAt": "2019-01-01T00:00:00Z"
+            }
+          ]
+        },
+        "sha256": "9380cf4c1753446cd6c13b567be2691e96950df32bfcb70b2b5739f5112ebe4c"
+      }
+    ]
+  }
+}

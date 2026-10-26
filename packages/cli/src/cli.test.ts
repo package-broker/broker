@@ -35,6 +35,7 @@ it('lists only working commands in --help', async () => {
       'import cutover-check',
       'import private-packagist fetch',
       'import private-packagist plan',
+      'import private-packagist dates',
       'import satis plan',
       'import submit',
       'import status <run>',

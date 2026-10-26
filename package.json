@@ -26,7 +26,6 @@
     "smoke:node": "node scripts/node-bundle-smoke.mjs",
     "smoke:docker": "node scripts/docker-smoke.mjs",
     "stage:prebuilt": "node scripts/stage-prebuilt.mjs",
-    "test:scripts": "node --test scripts/stage-prebuilt.test.mjs",
     "bench:install": "node scripts/bench-install.mjs"
   },
   "devDependencies": {

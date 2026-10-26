@@ -51,10 +51,11 @@ export function ConfirmAction({
               <dd>{scope}</dd>
             </dl>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setOpen(false)}>
+              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
               <Button
+                type="button"
                 variant="destructive"
                 disabled={disabled}
                 onClick={() => {

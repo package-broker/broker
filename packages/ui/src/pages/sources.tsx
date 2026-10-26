@@ -412,7 +412,8 @@ export function createSourcesModel(
       });
     },
     closeEditor() {
-      if (!state.busy) set({ editor: null, fieldErrors: {}, formError: null });
+      if (state.busy) return;
+      set({ editor: null, fieldErrors: {}, formError: null });
     },
     async saveSource(body: CreateSource | SourceChanges) {
       if (state.busy || state.editor === null) return;
@@ -551,7 +552,8 @@ export function createSourcesModel(
       }
     },
     closeCredential() {
-      if (!state.busy) set({ credentialSource: null });
+      if (state.busy) return;
+      set({ credentialSource: null });
     },
     closeNames() {
       if (state.busy) return;
@@ -845,6 +847,7 @@ function CredentialEditor({
       autoComplete="off"
       onSubmit={(event) => {
         event.preventDefault();
+        if (busy) return;
         void submitCredential(model, source, event.currentTarget as unknown as CredentialForm);
       }}
     >
@@ -863,7 +866,9 @@ function CredentialEditor({
         ))}
       </Select>
       <CredentialFields key={kind} kind={kind} busy={busy} />
-      <Button disabled={busy}>Save credential</Button>
+      <Button type="submit" disabled={busy}>
+        Save credential
+      </Button>
     </form>
   );
 }
@@ -945,15 +950,7 @@ export function SourceActions({
           ) : null}
         </>
       ) : null}
-      <DropdownMenu
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && event.currentTarget.contains(event.target as Node)) {
-            event.preventDefault();
-            event.currentTarget.open = false;
-            event.currentTarget.querySelector('summary')?.focus();
-          }
-        }}
-      >
+      <DropdownMenu>
         <DropdownMenuTrigger>More</DropdownMenuTrigger>
         <DropdownMenuContent className="grid gap-1">
           {owned || organizationProject ? (
@@ -1043,7 +1040,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   return (
     <section aria-labelledby="page-heading" className="grid gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 id="page-heading" className="text-xl font-semibold">
+        <h1 tabIndex={-1} id="page-heading" className="text-xl font-semibold">
           Sources
         </h1>
         <Button type="button" disabled={state.busy} onClick={() => model.openEditor()}>
@@ -1197,6 +1194,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                     <div className="flex flex-wrap items-center gap-1">
                       <strong>{index + 1}</strong>
                       <Button
+                        type="button"
                         size="sm"
                         variant="ghost"
                         aria-label={`Move up ${source.name}`}
@@ -1206,6 +1204,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                         Move up
                       </Button>
                       <Button
+                        type="button"
                         size="sm"
                         variant="ghost"
                         aria-label={`Move down ${source.name}`}
@@ -1317,6 +1316,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       ) : null}
       {state.next !== null ? (
         <Button
+          type="button"
           disabled={state.loading || state.busy}
           onClick={() => {
             void model.load(true);
@@ -1327,6 +1327,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       ) : null}
       {state.availableNext !== null ? (
         <Button
+          type="button"
           disabled={state.availableLoading || state.busy}
           onClick={() => void model.loadAvailable(true)}
         >
@@ -1416,6 +1417,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               </ul>
               {state.names.next !== null ? (
                 <Button
+                  type="button"
                   disabled={state.busy}
                   onClick={() => {
                     void model.names(state.names!.source, true);
@@ -1428,6 +1430,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 className="grid gap-3"
                 onSubmit={(event) => {
                   event.preventDefault();
+                  if (state.busy) return;
                   const form = event.currentTarget;
                   const pattern = formValue(form, 'pattern');
                   form.reset();
@@ -1436,7 +1439,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               >
                 <Label htmlFor="registered-pattern">Registered pattern</Label>
                 <Input id="registered-pattern" name="pattern" maxLength={50} required />
-                <Button disabled={state.busy}>Add name</Button>
+                <Button type="submit" disabled={state.busy}>
+                  Add name
+                </Button>
               </form>
             </div>
           </DialogContent>
@@ -1452,6 +1457,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             {state.next !== null ? <p>Load all sources before changing their order.</p> : null}
 
             <Button
+              type="button"
               disabled={state.loading || state.busy || state.next !== null || state.etag === null}
               onClick={() => {
                 void model.saveOrder();
@@ -1472,12 +1478,15 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               className="grid gap-3"
               onSubmit={(event) => {
                 event.preventDefault();
+                if (state.busy) return;
                 void model.resolve(formValue(event.currentTarget, 'name'));
               }}
             >
               <Label htmlFor="resolve-name">Package name</Label>
               <Input id="resolve-name" name="name" maxLength={214} required />
-              <Button>Preview</Button>
+              <Button type="submit" disabled={state.busy}>
+                Preview
+              </Button>
             </form>
             {state.preview ? (
               <div aria-live="polite">

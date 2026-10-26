@@ -105,6 +105,7 @@ export function ManagementNotice(props: {
         </Alert>
       ) : null}
       <Button
+        type="button"
         variant="outline"
         className="my-4"
         disabled={props.loading || props.busy}

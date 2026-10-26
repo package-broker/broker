@@ -21,6 +21,20 @@ async function launchBrowser() {
 }
 
 const components = {
+  menuDialog: `
+      import { Dialog, DialogContent, DialogTitle } from './components/ui/dialog';
+      import { DropdownMenu, DropdownMenuTrigger, DropdownMenuItem } from './components/ui/dropdown-menu';
+      function MenuDialog() {
+        const [open, setOpen] = React.useState(true);
+        return <Dialog open={open} onOpenChange={setOpen}><DialogContent>
+          <DialogTitle>Menu dialog</DialogTitle>
+          <DropdownMenu open><DropdownMenuTrigger>Actions</DropdownMenuTrigger>
+            <DropdownMenuItem>Menu action</DropdownMenuItem>
+          </DropdownMenu>
+        </DialogContent></Dialog>;
+      }
+      createRoot(document.getElementById('root')).render(<MenuDialog />);
+    `,
   githubForm: `
       import { SourceForm } from './pages/sources/source-form';
       const source = { id: 'github', name: 'GitHub', ecosystem: 'composer', type: 'vcs', githubAuthentication: globalThis.authentication, pollIntervalSeconds: 300, removalPolicy: 'flag' };
@@ -132,6 +146,25 @@ it('renders the mounted sources fixture with all model state initialized without
 });
 
 describe('mounted review regressions', () => {
+  for (const [activation, click] of [
+    ['without prior user activation', false],
+    ['after a pointer click inside the dialog', true],
+  ] as const) {
+    it(`Escape closes only the open menu inside a native modal dialog in Chromium ${activation}`, async (context) => {
+      const { page, browserExpect } = await mounted(context, 'menuDialog');
+      const dialog = page.getByRole('dialog', { name: 'Menu dialog' });
+      await browserExpect(dialog).toBeVisible();
+      if (click) await dialog.getByRole('heading', { name: 'Menu dialog' }).click();
+      await dialog.getByRole('button', { name: 'Menu action' }).focus();
+      await page.keyboard.press('Escape');
+      await browserExpect(dialog.locator('details')).not.toHaveAttribute('open');
+      await browserExpect(dialog.locator('summary')).toBeFocused();
+      await browserExpect(dialog).toBeVisible();
+      await page.keyboard.press('Escape');
+      await browserExpect(dialog).not.toBeVisible();
+    });
+  }
+
   it('keeps source drafts with their IDs after filtering and reordering', async (context) => {
     let step = 'mount sources';
     context.onTestFailed(() => console.error(`Mounted source regression stopped at: ${step}`));

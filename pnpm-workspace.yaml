@@ -4,6 +4,7 @@ packages:
 catalogMode: strict
 
 catalog:
+  '@axe-core/playwright': 4.14.0
   '@cloudflare/workers-types': 5.20261013.1
   '@eslint/js': 10.0.1
   '@hono/node-server': 2.1.4

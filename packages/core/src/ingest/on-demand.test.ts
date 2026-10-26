@@ -1490,9 +1490,9 @@ describe('T430n review round 4', () => {
       outcome: { ...admitted, projectId: other.projectId },
     });
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2), { timeout: 5000 });
-    expect(h.describePackage).toHaveBeenCalledTimes(1);
     describing.resolve({ kind: 'not_found', definitive: true });
     await Promise.all([leader, joiner]);
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
     expect(rawSet).not.toHaveBeenCalled();
   });
 });
@@ -1635,12 +1635,12 @@ describe('T430n review round 4 ordering', () => {
       outcome: { ...admitted, projectId: other.projectId },
     });
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2), { timeout: 5000 });
-    expect(h.describePackage).toHaveBeenCalledTimes(1);
     describing.resolve({ kind: 'not_found', definitive: true });
     expect(await Promise.all([leader, joiner])).toEqual([
       { kind: 'not_found' },
       { kind: 'not_found' },
     ]);
+    expect(h.describePackage).toHaveBeenCalledTimes(1);
     expect(rawSet).toHaveBeenCalledTimes(1);
   });
 });

@@ -1404,10 +1404,6 @@ export async function deploy(
           kind: migration.phase,
         });
     }
-    if (o.dryRun && pendingMigrations.some(({ phase }) => phase === 'expand')) {
-      output.status = 'planned';
-      return succeed();
-    }
     const ledgerHash = digest(canonical(journal.migrations.ledger));
     const contract = o.contract ?? cloudflareDeployContract;
     api = new CloudflareApi({

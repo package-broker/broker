@@ -450,37 +450,35 @@ function options(h: ReturnType<typeof harness>, extra: Partial<DeployOptions> = 
 }
 const mutations = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.method !== 'GET');
 
-it.each([false])(
-  'refuses pending expand migrations before provider calls (dry run: %s)',
-  async (dryRun) => {
-    const j = (await store.read())!;
-    j.migrations.ledger = [];
-    await store.write(j);
-    const before = await readFile(store.path, 'utf8');
-    const h = harness();
-    const result = await deploy(options(h, { dryRun }));
-    expect(result).toMatchObject({
-      exitCode: 2,
-      output: {
-        status: 'error',
-        error: {
-          code: 'migrations_pending',
-          stage: 'deploy',
-          retryable: false,
-          message: expect.stringContaining('pb cloudflare migrate'),
-        },
-      },
-    });
-    expect(h.calls).toHaveLength(0);
-    expect(await readFile(store.path, 'utf8')).toBe(before);
-  },
-);
-
-it('plans pending expand migrations on dry run without provider calls or state changes', async () => {
+it('refuses pending expand migrations before provider calls', async () => {
   const j = (await store.read())!;
   j.migrations.ledger = [];
   await store.write(j);
   const before = await readFile(store.path, 'utf8');
+  const h = harness();
+  const result = await deploy(options(h));
+  expect(result).toMatchObject({
+    exitCode: 2,
+    output: {
+      status: 'error',
+      error: {
+        code: 'migrations_pending',
+        stage: 'deploy',
+        retryable: false,
+        message: expect.stringContaining('pb cloudflare migrate'),
+      },
+    },
+  });
+  expect(h.calls).toHaveLength(0);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it('plans pending expand migrations and deployment on dry run without mutations or state changes', async () => {
+  const j = (await store.read())!;
+  j.migrations.ledger = [];
+  await store.write(j);
+  const before = await readFile(store.path, 'utf8');
+  const filesBefore = await readdir(store.directory);
   const h = harness();
   expect(await deploy(options(h, { dryRun: true }))).toMatchObject({
     exitCode: 0,
@@ -488,13 +486,18 @@ it('plans pending expand migrations on dry run without provider calls or state c
       status: 'planned',
       error: null,
       pending_migrations: ['core:0001_init'],
-      plan: expect.arrayContaining([
+      worker_url: 'https://broker.example.test',
+      plan: [
         { stage: 'migrate', action: 'apply', name: 'core:0001_init', kind: 'expand' },
-      ]),
+        { stage: 'deploy', action: 'upload_activate' },
+      ],
+      checks: expect.arrayContaining([{ name: 'provider_semantics', status: 'injected' }]),
     },
   });
-  expect(h.calls).toHaveLength(0);
+  expect(h.calls.length).toBeGreaterThan(0);
+  expect(mutations(h)).toEqual([]);
   expect(await readFile(store.path, 'utf8')).toBe(before);
+  expect(await readdir(store.directory)).toEqual(filesBefore);
 });
 
 it.each(['pending', 'drift', 'dry-run drift', 'dry-run pending'])(

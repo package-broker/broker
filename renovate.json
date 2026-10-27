@@ -3,6 +3,7 @@
   "extends": ["config:best-practices", ":semanticCommitTypeAll(chore)", "group:monorepos"],
   "timezone": "Europe/Warsaw",
   "schedule": ["before 6am on monday"],
+  "minimumReleaseAge": "3 days",
   "prConcurrentLimit": 8,
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
@@ -10,7 +11,20 @@
     "schedule": ["at any time"],
     "minimumReleaseAge": null
   },
-  "lockFileMaintenance": { "enabled": true, "automerge": true },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true
+  },
+  "postUpdateOptions": ["pnpmDedupe"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": ["npm install --global pnpm@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "pnpm",
+      "datasourceTemplate": "npm"
+    }
+  ],
   "packageRules": [
     {
       "matchManagers": ["github-actions"],
@@ -28,13 +42,23 @@
       "matchUpdateTypes": ["patch", "minor"],
       "automerge": true
     },
-    { "matchDepTypes": ["dependencies"], "matchUpdateTypes": ["patch"], "automerge": true },
+    {
+      "matchDepTypes": ["dependencies"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    },
     {
       "matchPackageNames": ["wrangler", "@cloudflare/**", "workerd", "miniflare"],
       "groupName": "cloudflare toolchain"
     },
-    { "matchPackageNames": ["vitest", "@vitest/**"], "groupName": "vitest" },
-    { "matchPackageNames": ["@playwright/test", "playwright"], "groupName": "playwright" },
+    {
+      "matchPackageNames": ["vitest", "@vitest/**"],
+      "groupName": "vitest"
+    },
+    {
+      "matchPackageNames": ["@playwright/test", "playwright"],
+      "groupName": "playwright"
+    },
     {
       "matchPackageNames": ["react", "react-dom", "@types/react", "@types/react-dom"],
       "groupName": "react"
@@ -44,6 +68,9 @@
       "matchPackageNames": ["node"],
       "allowedVersions": "/^(24|26)\\./"
     },
-    { "matchUpdateTypes": ["major"], "dependencyDashboardApproval": true }
+    {
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
   ]
 }

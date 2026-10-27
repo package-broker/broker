@@ -136,7 +136,7 @@ function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object')
     return `{${Object.entries(value)
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
       .join(',')}}`;
   return JSON.stringify(value);
@@ -1712,6 +1712,10 @@ export async function deploy(
       if (new Set(values).size > 1) return conflict('providers');
       providersText = values[0] ?? null;
     }
+    const identityHash =
+      artifact.identity === null && providersText === null
+        ? null
+        : digest(canonical({ descriptor: artifact.identity, providers: providersText }));
     const plainBindings = bindings(journal, artifact.ports, url);
     if (providersText !== null)
       plainBindings.push({ type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersText });
@@ -1849,6 +1853,18 @@ export async function deploy(
       return succeed();
     }
     if (
+      rollout < 100 &&
+      !resuming &&
+      (identityHash !== (verified?.identity_sha256 ?? null) ||
+        (identityHash !== null &&
+          priorAttempt &&
+          priorAttempt !== verified &&
+          (!verified || !equal(current.versions, distribution(verified)))))
+    )
+      return invalid(
+        'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+      );
+    if (
       resuming &&
       (priorAttempt.phase !== 'preparing_upload' || priorAttempt.script_creation !== undefined) &&
       updates.some((b) => b.name !== 'PB_MASTER_KEY' && b.name !== 'PB_MASTER_KEY_PREVIOUS')
@@ -1907,14 +1923,17 @@ export async function deploy(
       return succeed();
     }
     let a: DeploymentAttempt;
-    if (resuming) a = priorAttempt;
-    else {
+    if (resuming) {
+      a = priorAttempt;
+      a.identity_sha256 = identityHash;
+    } else {
       a = {
         operation_id: randomUUID(),
         artifact_sha256: artifact.artifactHash,
         assets_sha256: artifact.assetsHash,
         settings_sha256: settingsHash,
         providers_sha256: providersText === null ? null : digest(providersText),
+        identity_sha256: identityHash,
         ...(providersText === null ? {} : { providers_text: providersText }),
         secret_names: allNames,
         build_info: artifact.info,

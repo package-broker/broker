@@ -166,6 +166,7 @@ export interface DeploymentAttempt {
   assets_sha256: string | null;
   settings_sha256: string;
   providers_sha256?: string | null;
+  identity_sha256?: string | null;
   providers_text?: string;
   secret_names: string[];
   build_info: BuildInfo;
@@ -434,6 +435,7 @@ function deploymentValid(raw: unknown): boolean {
         'assets_sha256',
         'settings_sha256',
         ...(Object.hasOwn(v, 'providers_sha256') ? ['providers_sha256'] : []),
+        ...(Object.hasOwn(v, 'identity_sha256') ? ['identity_sha256'] : []),
         ...(Object.hasOwn(v, 'providers_text') ? ['providers_text'] : []),
         'secret_names',
         'build_info',
@@ -470,6 +472,7 @@ function deploymentValid(raw: unknown): boolean {
       hash(v.artifact_sha256) &&
       (v.assets_sha256 === null || hash(v.assets_sha256)) &&
       hash(v.settings_sha256) &&
+      (v.identity_sha256 === undefined || v.identity_sha256 === null || hash(v.identity_sha256)) &&
       (v.providers_sha256 === undefined ||
         v.providers_sha256 === null ||
         hash(v.providers_sha256)) &&

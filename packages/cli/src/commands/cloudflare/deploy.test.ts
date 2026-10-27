@@ -4587,8 +4587,20 @@ it('preserves active providers when script settings show a different version', a
 it.each(['equal', 'different', 'absent'])(
   'handles providers in a managed split deployment: %s',
   async (mode) => {
+    const full = providerHarness();
+    liveProviders(full, providersValue);
+    const verified = await verifiedIdentityDeploy(full);
+    verified.deployment!.attempt.version_id = OLD;
+    verified.deployment!.attempt.previous_version_id = null;
+    verified.deployment!.attempt.previous_deployment_id = null;
+    verified.deployment!.attempt.previous_distribution = [];
+    await store.write(verified);
     const h = providerHarness();
-    liveProviders(h, providersValue);
+    h.versions.set(OLD, { ...full.versions.get(CANDIDATE)!, id: OLD });
+    h.endpoints = full.endpoints;
+    h.schedules = full.schedules;
+    h.consumer = full.consumer;
+    h.domain = full.domain;
     expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
     const journal = (await store.read())!;
     journal.deployment!.attempt.phase = 'verified';
@@ -5096,4 +5108,233 @@ it.each([
   expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
   expect(providerUploads(h)).toHaveLength(0);
   expect(mutations(h)).toHaveLength(before);
+});
+
+async function verifiedIdentityDeploy(h: ReturnType<typeof harness>) {
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  await store.write(journal);
+  return journal;
+}
+
+it.each(['unchanged', 'providers', 'compiled', 'flag', 'removed'] as const)(
+  'checks partial rollout identity configuration: %s',
+  async (change) => {
+    const descriptor = { runtimeProviders: true, compiled: [] as (typeof compiledIdentity)[] };
+    await writeIdentity(descriptor);
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    const journal = await verifiedIdentityDeploy(h);
+    const expected = digest(
+      JSON.stringify({
+        descriptor: { compiled: [], runtimeProviders: true },
+        providers: providersValue,
+      }),
+    );
+    expect(journal.deployment!.attempt.identity_sha256).toBe(expected);
+    if (change === 'compiled') await writeIdentity({ ...descriptor, compiled: [compiledIdentity] });
+    if (change === 'flag') await writeIdentity({ ...descriptor, runtimeProviders: false });
+    if (change === 'removed') {
+      const file = join(out, 'generated/manifest.json');
+      const manifest = JSON.parse(await readFile(file, 'utf8'));
+      delete manifest.identity;
+      await writeFile(file, JSON.stringify(manifest));
+    }
+    const before = await readFile(store.path, 'utf8');
+    const uploads = providerUploads(h).length;
+    const result = await deploy(
+      options(h, {
+        rollout: 25,
+        ...(change === 'providers' ? { providers: { kind: 'set', value: '[]', ids: [] } } : {}),
+      }),
+    );
+    if (change === 'unchanged') {
+      expect(result.exitCode).toBe(0);
+      expect(providerUploads(h)).toHaveLength(uploads + 1);
+      const deployment = (await store.read())!.deployment!;
+      expect(deployment.attempt.identity_sha256).toBe(expected);
+      expect(deployment.last_verified!.identity_sha256).toBe(expected);
+      expect(JSON.stringify(deployment.history)).not.toContain(expected);
+      expect(JSON.stringify(deployment.history)).not.toContain('identity_sha256');
+    } else {
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message:
+          'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+      });
+      expect(providerUploads(h)).toHaveLength(uploads);
+      expect(await readFile(store.path, 'utf8')).toBe(before);
+    }
+  },
+);
+
+it.each(['null', 'descriptor', 'providers'] as const)(
+  'loads a legacy receipt and checks a partial rollout with new %s identity',
+  async (mode) => {
+    const h = providerHarness();
+    const journal = await verifiedIdentityDeploy(h);
+    delete journal.deployment!.attempt.identity_sha256;
+    await store.write(journal);
+    expect((await store.read())!.deployment!.attempt).not.toHaveProperty('identity_sha256');
+    if (mode === 'descriptor') await writeIdentity({ runtimeProviders: true, compiled: [] });
+    if (mode === 'providers') {
+      liveProviders(h, providersValue);
+      h.versions.get(CANDIDATE)!.resources = h.versions.get(OLD)!.resources;
+    }
+    // Exercise the saved receipt path as well as the verified current attempt path.
+    journal.deployment!.last_verified = structuredClone(journal.deployment!.attempt);
+    journal.deployment!.attempt.phase = 'active';
+    await store.write(journal);
+    const before = await readFile(store.path, 'utf8');
+    const result = await deploy(options(h, { rollout: 25 }));
+    expect(result.exitCode).toBe(mode === 'null' ? 0 : 2);
+    expect(providerUploads(h)).toHaveLength(mode === 'null' ? 2 : 1);
+    if (mode === 'null')
+      expect((await store.read())!.deployment!.attempt.identity_sha256).toBeNull();
+    else {
+      expect(result.output.error?.code).toBe('invalid_input');
+      expect(await readFile(store.path, 'utf8')).toBe(before);
+    }
+  },
+);
+
+it('allows full rollout identity changes and retains the previous verified identity hash', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  const journal = await verifiedIdentityDeploy(h);
+  const previous = journal.deployment!.attempt.identity_sha256;
+  await writeIdentity({ runtimeProviders: false, compiled: [compiledIdentity] });
+  expect((await deploy(options(h, { rollout: 100, providers: { kind: 'remove' } }))).exitCode).toBe(
+    0,
+  );
+  const deployment = (await store.read())!.deployment!;
+  expect(providerUploads(h)).toHaveLength(2);
+  expect(deployment.attempt.identity_sha256).not.toBe(previous);
+  expect(deployment.last_verified!.identity_sha256).toBe(previous);
+});
+
+it.each([null, 'a'.repeat(64), '', 'A'.repeat(64), 'a'.repeat(63), 1, {}])(
+  'validates optional identity hashes on attempts and verified receipts: %j',
+  async (value) => {
+    const h = harness();
+    const journal = await verifiedIdentityDeploy(h);
+    journal.deployment!.last_verified = structuredClone(journal.deployment!.attempt);
+    for (const field of ['attempt', 'last_verified'] as const) {
+      const changed = structuredClone(journal);
+      Object.assign(changed.deployment![field]!, { identity_sha256: value });
+      await writeFile(store.path, JSON.stringify(changed));
+      if (value === null || value === 'a'.repeat(64))
+        expect((await store.read())!.deployment![field]!.identity_sha256).toBe(value);
+      else await expect(store.read()).rejects.toMatchObject({ code: 'invalid_inventory' });
+    }
+  },
+);
+
+it('returns unchanged for an already verified split with a legacy identity receipt', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  await verifiedIdentityDeploy(h);
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  delete journal.deployment!.attempt.identity_sha256;
+  await store.write(journal);
+  h.settingsVersion = NEWEST;
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy(options(h, { rollout: 25 }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+  expect(providerUploads(h)).toHaveLength(2);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it.each(['modern', 'legacy'] as const)(
+  'resumes an in-flight partial rollout with a %s identity attempt',
+  async (mode) => {
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    await verifiedIdentityDeploy(h);
+    h.uploadLost = true;
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).not.toBe(0);
+    const journal = (await store.read())!;
+    expect(journal.deployment!.attempt.phase).toBe('upload_pending');
+    const expected = journal.deployment!.attempt.identity_sha256;
+    delete journal.deployment!.last_verified!.identity_sha256;
+    if (mode === 'legacy') delete journal.deployment!.attempt.identity_sha256;
+    await store.write(journal);
+    h.uploadLost = false;
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+    expect(providerUploads(h)).toHaveLength(2);
+    expect((await store.read())!.deployment!.attempt.identity_sha256).toBe(expected);
+  },
+);
+
+it.each(['active', 'rollback_pending'] as const)(
+  'refuses a partial rollout against an older verified policy while the latest attempt is %s',
+  async (phase) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = providerHarness();
+    liveProviders(h, '[]');
+    await verifiedIdentityDeploy(h);
+    liveProviders(h, providersValue);
+    h.versions.get(CANDIDATE)!.resources = h.versions.get(OLD)!.resources;
+    expect((await deploy(options(h))).exitCode).toBe(0);
+    const journal = (await store.read())!;
+    journal.deployment!.attempt.phase = phase;
+    await store.write(journal);
+    const before = await readFile(store.path, 'utf8');
+    const result = await deploy(
+      options(h, { rollout: 25, providers: { kind: 'set', value: '[]', ids: [] } }),
+    );
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message:
+        'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+    });
+    expect(providerUploads(h)).toHaveLength(2);
+    expect(await readFile(store.path, 'utf8')).toBe(before);
+  },
+);
+
+it('refuses changed identity on partial dry-run without upload or journal writes', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  await verifiedIdentityDeploy(h);
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy(
+    options(h, { dryRun: true, rollout: 25, providers: { kind: 'remove' } }),
+  );
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message:
+      'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+  });
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it('copies the identity hash into last_verified through the real smoke path', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = lifecycleHarness();
+  const o = options(h, { secret: ['PB_MASTER_KEY'] });
+  expect((await deploy(o)).exitCode).toBe(0);
+  const expected = (await store.read())!.deployment!.attempt.identity_sha256;
+  expect(expected).toMatch(/^[a-f0-9]{64}$/);
+  const checked = await smoke({
+    workerName: 'broker',
+    projectRoot: project,
+    env: o.env,
+    fetch: h.fetch,
+    now: h.now,
+    sleep: h.sleep,
+  });
+  expect(checked.exitCode).toBe(0);
+  const deployment = (await store.read())!.deployment!;
+  expect(deployment.attempt.phase).toBe('verified');
+  expect(deployment.attempt.identity_sha256).toBe(expected);
+  expect(deployment.last_verified!.identity_sha256).toBe(expected);
 });

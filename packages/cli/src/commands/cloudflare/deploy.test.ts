@@ -6,7 +6,7 @@ import { envelopeResponse } from '@package-broker/core/kernel/errors';
 import { smoke } from './smoke.js';
 import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
-import { CloudflareApi, object } from './api.js';
+import { CloudflareApi, CloudflareError, object } from './api.js';
 import {
   deploy,
   tracesMetadata,
@@ -1607,8 +1607,14 @@ it('the production contract builds the candidate version URL for a gradual rollo
     { version_id: OLD, percentage: 75 },
     { version_id: CANDIDATE, percentage: 25 },
   ]);
+  const probe = vi.fn(async () => true);
+  await withCandidatePreview(api(h), store, (await store.read())!, cloudflareDeployContract, probe);
+  expect(probe).toHaveBeenCalledWith(
+    `https://${CANDIDATE.slice(0, 8)}-${script}.${h.subdomain}.workers.dev`,
+  );
 });
 it.each([
+  `https://${CANDIDATE.slice(0, 8)}-${script}.other.workers.dev`,
   `https://${CANDIDATE}-${script}.account.workers.dev`,
   `https://${CANDIDATE.slice(0, 8)}-another-worker.account.workers.dev`,
 ])('refuses a contract preview with a different exact hostname: %s', async (url) => {
@@ -1842,11 +1848,10 @@ it('first install records no prior and requires 100 percent', async () => {
   expect(r.output.previous_version_id).toBeNull();
   expect(r.output.version_id).toBe(CANDIDATE);
 });
-it('requires verified provider facilities and refuses unknown inheritance or gradual preview before writes', async () => {
+it('requires verified provider facilities and refuses unknown inheritance or asset hashing before writes', async () => {
   for (const contract of [
     { ...fixtureContract, secretInheritance: false },
     { versionsCreateScript: true, secretInheritance: true },
-    { versionsCreateScript: true, secretInheritance: true, assetHash: sha },
   ]) {
     const h = harness();
     const r = await deploy(
@@ -3935,4 +3940,67 @@ it.each([
   const original = structuredClone(traces);
   expect(tracesMetadata(traces)).toEqual(expected);
   expect(traces).toEqual(original);
+});
+
+it('resolves a first-install custom domain through the production contract', async () => {
+  const { h, o } = firstInstall();
+  o.domain = 'example.com';
+  const send = h.fetch;
+  o.fetch = vi.fn(async (input, init) =>
+    new URL(String(input)).pathname === '/client/v4/zones'
+      ? new Response(JSON.stringify(providerFixtures.zonesApex))
+      : send(input, init),
+  );
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(h.calls).toContainEqual(
+    expect.objectContaining({
+      path: '/workers/domains',
+      method: 'PUT',
+      body: expect.objectContaining({ zone_id: '1'.repeat(32), hostname: 'example.com' }),
+    }),
+  );
+  expect(
+    vi.mocked(o.fetch).mock.calls.some(([url]) => String(url).includes('/zones?name=example.com&')),
+  ).toBe(true);
+});
+it.each(['domain', 'publicUrl'] as const)(
+  'requires account registration before gradual rollout writes with %s',
+  async (option) => {
+    const h = harness();
+    h.subdomain = null;
+    const o = options(h, { rollout: 25 });
+    if (option === 'publicUrl') {
+      delete o.domain;
+      o.publicUrl = 'https://broker.example.test';
+    }
+    expect((await deploy(o)).output.error?.code).toBe('workers_dev_subdomain_missing');
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each(['domain_zone_not_found', 'domain_zone_ambiguous'] as const)(
+  'preserves resolver error %s before writes',
+  async (code) => {
+    const { h, o } = firstInstall();
+    o.domain = 'example.com';
+    o.contract = {
+      ...cloudflareDeployContract,
+      domainZone: async () => {
+        throw new CloudflareError(code, 1, false, 'deploy');
+      },
+    };
+    expect((await deploy(o)).output.error).toMatchObject({ code, stage: 'deploy' });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+it('treats a malformed contract zone id as provider failure before writes', async () => {
+  const { h, o } = firstInstall();
+  o.domain = 'example.com';
+  o.contract = { ...cloudflareDeployContract, domainZone: async () => 'invalid' };
+  expect((await deploy(o)).output.error).toMatchObject({
+    code: 'provider_failure',
+    stage: 'deploy',
+  });
+  expect(mutations(h)).toEqual([]);
 });

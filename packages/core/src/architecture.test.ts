@@ -282,6 +282,13 @@ function findViolations(
       return report(`${pkg} must not import the core runtime subpath`);
     }
     const dependency = classify(specifier);
+    if (
+      pkg === 'cli' &&
+      dependency === '@package-broker/plugin-sso-oidc' &&
+      specifier !== '@package-broker/plugin-sso-oidc/definitions'
+    ) {
+      return report('cli may import only @package-broker/plugin-sso-oidc/definitions');
+    }
     if (dependency === `${WORKSPACE_PREFIX}${pkg}`) return;
     if (
       pkg.startsWith('plugin-') &&
@@ -343,6 +350,24 @@ function format(violations: Violation[]): string[] {
 }
 
 describe('classifier', () => {
+  it.each(['packages/cli/src/a.ts', 'packages/cli/src/a.test.ts'])(
+    'limits SSO plugin imports to the definitions subpath in %s',
+    (file) => {
+      expect(findViolations(file, "import '@package-broker/plugin-sso-oidc/definitions';")).toEqual(
+        [],
+      );
+      for (const specifier of [
+        '@package-broker/plugin-sso-oidc',
+        '@package-broker/plugin-sso-oidc/runtime',
+        '@package-broker/plugin-sso-oidc/definitions/extra',
+      ]) {
+        expect(format(findViolations(file, `import '${specifier}';`))).toEqual([
+          `${file}:1: ${specifier} (cli may import only @package-broker/plugin-sso-oidc/definitions)`,
+        ]);
+      }
+    },
+  );
+
   it('flags a dynamic import that crosses a package boundary by relative path', () => {
     const text = "const m = await import('../../runtime-node/src/x.js');";
     expect(format(findViolations('packages/db-sqlite/src/a.ts', text))).toEqual([

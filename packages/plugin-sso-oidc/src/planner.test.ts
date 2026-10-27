@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ProviderConfig } from './definitions.js';
+import type { ProviderConfig } from './provider-checks.js';
 import { planProviders } from './planner.js';
 import { parseRuntimeProviders } from './runtime.js';
 

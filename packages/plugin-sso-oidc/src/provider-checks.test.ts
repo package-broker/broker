@@ -12,7 +12,7 @@ import {
   checkProviderDefinitions,
   REJECTION_CODES,
   type ProviderConfig,
-} from './definitions.js';
+} from './provider-checks.js';
 import ssoOidc from './index.js';
 import { createOidcProvider } from './oidc.js';
 

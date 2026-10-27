@@ -1,6 +1,6 @@
 import { isReservedProviderId, isValidProviderId } from '@package-broker/core/plugin';
-import { canonicalAnchor, checkProviderDefinitions, isContainer } from './definitions.js';
-import type { ProviderConfig, Rejection, RejectionCode } from './definitions.js';
+import { canonicalAnchor, checkProviderDefinitions, isContainer } from './provider-checks.js';
+import type { ProviderConfig, Rejection, RejectionCode } from './provider-checks.js';
 
 export const RUNTIME_PROVIDERS_VARIABLE = 'PB_IDP_PROVIDERS';
 export const MAX_RUNTIME_DOCUMENT_BYTES = 5120;

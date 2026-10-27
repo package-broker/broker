@@ -7,7 +7,7 @@ import {
   type CloudflareAccessConfig,
   createCloudflareAccessProvider,
 } from './cloudflare-access.js';
-import { checkEntries, isContainer } from './definitions.js';
+import { checkEntries, isContainer } from './provider-checks.js';
 import { type OidcConfig, createOidcProvider } from './oidc.js';
 import { planProviders } from './planner.js';
 import {

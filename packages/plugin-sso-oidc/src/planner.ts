@@ -1,4 +1,4 @@
-import { canonicalAnchor, type ProviderConfig } from './definitions.js';
+import { canonicalAnchor, type ProviderConfig } from './provider-checks.js';
 import { providerPresentation } from './presentation.js';
 import { MAX_RUNTIME_PROVIDERS, type RuntimeProviders } from './runtime.js';
 

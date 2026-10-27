@@ -37,6 +37,7 @@ import {
   type Inventory,
 } from './inventory.js';
 import { provision } from './provision.js';
+import { readProvidersOption } from './providers-file.js';
 import { setup, setupBuildEnvironment, type SetupOptions, type SetupOperations } from './setup.js';
 
 const providerFixtures = JSON.parse(
@@ -296,6 +297,45 @@ it('orders typed operations, durably delivers a T159 key and prints only a crede
   expect(publicText).toContain('setup/start');
   expect(publicText).toContain('setup/finish');
   expect(publicText).toContain('delete the local key file');
+});
+
+it.each(['file.json', 'none', undefined])(
+  'forwards parsed --providers %s only to deploy',
+  async (flag) => {
+    const file = join(project, 'file.json');
+    await writeFile(file, '[ ]');
+    options.providers = await readProvidersOption(
+      flag === 'file.json' ? file : flag,
+      undefined,
+      'setup',
+    );
+    const expected =
+      flag === 'file.json'
+        ? { kind: 'set', value: '[]', ids: [] }
+        : { kind: flag === 'none' ? 'remove' : 'absent' };
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(ops.deploy).toHaveBeenCalledWith(expect.objectContaining({ providers: expected }));
+    for (const operation of [ops.provision, ops.migrate, ops.smoke]) {
+      expect(operation).toHaveBeenCalled();
+      for (const [received] of vi.mocked(operation).mock.calls)
+        expect(received).not.toHaveProperty('providers');
+    }
+  },
+);
+
+it('keeps omitted providers absent and forwards a future workersPaid option only to deploy', async () => {
+  const paidOptions: SetupOptions & { workersPaid?: boolean } = { ...options, workersPaid: true };
+  expect((await setup(paidOptions, ops)).exitCode).toBe(0);
+  const received = vi.mocked(ops.deploy).mock.calls[0]![0];
+  expect(received).not.toHaveProperty('providers');
+  expect(received).toHaveProperty('workersPaid', true);
+  for (const operation of [ops.provision, ops.migrate, ops.smoke]) {
+    expect(operation).toHaveBeenCalled();
+    for (const [received] of vi.mocked(operation).mock.calls) {
+      expect(received).not.toHaveProperty('providers');
+      expect(received).not.toHaveProperty('workersPaid');
+    }
+  }
 });
 
 it.each(['none', 'different', 'exact'])(

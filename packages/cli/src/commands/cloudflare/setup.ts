@@ -568,8 +568,10 @@ export async function setup(
       if (JSON.stringify(await store.read()) !== JSON.stringify(journal))
         throw new CloudflareError('plan_changed', 8, false, 'validate');
     }
+    const { providers, workersPaid, ...sharedOptions }: SetupOptions & { workersPaid?: boolean } =
+      o;
     const common = {
-      ...o,
+      ...sharedOptions,
       workerName: values.workerName!,
       prebuilt: false,
       project,
@@ -804,6 +806,8 @@ export async function setup(
     const deployOptions: DeployOptions = {
       contract: cloudflareDeployContract,
       ...deployCommon,
+      ...(providers === undefined ? {} : { providers }),
+      ...(workersPaid === undefined ? {} : { workersPaid }),
       env: deployEnv,
       secret: selectedSecrets
         .filter((s) => s !== 'PB_MASTER_KEY' && !retainedNames.has(s))

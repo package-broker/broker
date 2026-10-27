@@ -37,7 +37,7 @@ import {
   digestFiles,
   runtimeProviderSettings,
   startMockIssuer,
-} from '../../../scripts/mock-oidc-issuer.mjs';
+} from './mock-oidc-issuer.mjs';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEADLINE_MS = 60_000;

@@ -15,7 +15,7 @@ import {
   runtimeProviderSettings,
   secretName,
   startMockIssuer,
-} from './mock-oidc-issuer.mjs';
+} from '../packages/runtime-cloudflare/scripts/mock-oidc-issuer.mjs';
 import {
   INSTALL_NOT_RUN,
   NODE_SSO_STAGES,

@@ -13,7 +13,7 @@ import {
   digestFiles,
   runtimeProviderSettings,
   startMockIssuer,
-} from './mock-oidc-issuer.mjs';
+} from '../packages/runtime-cloudflare/scripts/mock-oidc-issuer.mjs';
 import { listFiles, payloadFiles } from './stage-prebuilt.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));

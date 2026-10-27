@@ -30,6 +30,14 @@ import {
 } from './traceparent-smoke.mjs';
 
 import { checkUiBundle } from './ui-bundle-regression.mjs';
+import {
+  assertDiscovered,
+  assertProviderListing,
+  assertStartRedirect,
+  digestFiles,
+  runtimeProviderSettings,
+  startMockIssuer,
+} from '../../../scripts/mock-oidc-issuer.mjs';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEADLINE_MS = 60_000;
@@ -276,7 +284,7 @@ async function readAssetsDescriptor(script) {
   return { ...descriptor, directory: resolve(outDir, descriptor.directory) };
 }
 
-async function createMiniflare(script, entry = basename(script)) {
+async function createMiniflare(script, entry = basename(script), extraBindings = {}) {
   const assets = await readAssetsDescriptor(script);
   return trackMiniflare(
     new Miniflare(
@@ -315,10 +323,79 @@ async function createMiniflare(script, entry = basename(script)) {
           PB_MASTER_KEY: MASTER_KEY,
           PB_PUBLIC_URL: PUBLIC_ORIGIN,
           DEPLOYMENT_ID: 'smoke',
+          ...extraBindings,
         },
       }),
     ),
   );
+}
+
+const RUNTIME_SSO_STAGES = [
+  { id: 'mock', path: '/tenant-a', absent: [] },
+  { id: 'mock2', path: '/tenant-b', absent: ['mock'] },
+];
+
+async function startSso(id, limitMs) {
+  return mf.dispatchFetch(`http://broker.test/_pb/auth/sso/${id}/start`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/json', origin: PUBLIC_ORIGIN },
+    body: JSON.stringify({ purpose: 'login' }),
+    signal: AbortSignal.timeout(limitMs),
+  });
+}
+
+async function checkRuntimeSsoProviders(limitMs) {
+  const directory = dirname(workerScript);
+  const names = (await bundleFiles(directory)).map((path) => path.slice(directory.length + 1));
+  const before = await digestFiles(directory, names);
+  console.log(`smoke:cloudflare runtime SSO Worker bundle sha256 before=${before.combined}`);
+  for (const [name, digest] of Object.entries(before.files))
+    if (name.endsWith('.js'))
+      console.log(`smoke:cloudflare runtime SSO Worker   ${name} ${digest}`);
+  const issuer = await startMockIssuer();
+  try {
+    for (const { id, path, absent } of RUNTIME_SSO_STAGES) {
+      step = `runtime SSO providers (${id})`;
+      await disposeMiniflare();
+      mf = await createMiniflare(
+        workerScript,
+        basename(workerScript),
+        runtimeProviderSettings(id, issuer.issuer(path)),
+      );
+      const executor = createD1Executor(await mf.getD1Database('DB'));
+      await migrate(executor, await readMigrations(), { holder: 'smoke' });
+      await createOrganizationBootstrap(executor).bootstrap({
+        id: ulid(),
+        slug: 'smoke',
+        name: 'Smoke',
+        now: new Date().toISOString(),
+      });
+      const listed = await dispatch('/_pb/auth/providers', limitMs);
+      await expectStatus('GET /_pb/auth/providers', listed, 200);
+      const ids = assertProviderListing(await listed.json(), { present: [id], absent });
+      const started = await startSso(id, limitMs);
+      assertStartRedirect(
+        { status: started.status, location: started.headers.get('location') },
+        {
+          authorizationEndpoint: issuer.authorizationEndpoint(path),
+          callbackUrl: `${PUBLIC_ORIGIN}/_pb/auth/sso/${id}/callback`,
+        },
+      );
+      assertDiscovered(issuer.requests, path);
+      for (const gone of absent)
+        await expectStatus(`SSO start for removed ${gone}`, await startSso(gone, limitMs), 404);
+      console.log(
+        `smoke:cloudflare runtime SSO Worker PB_IDP_PROVIDERS=${id}: providers [${ids.join(', ')}], start 303 to <mock>${path}/authorize${absent.map((gone) => `, ${gone} start 404`).join('')}`,
+      );
+    }
+  } finally {
+    await disposeMiniflare();
+    await issuer.close();
+  }
+  const after = await digestFiles(directory, names);
+  console.log(`smoke:cloudflare runtime SSO Worker bundle sha256 after=${after.combined}`);
+  assert.deepEqual(after, before, 'the Worker bundle changed between provider sets');
 }
 
 async function run() {
@@ -819,6 +896,7 @@ async function run() {
     );
 
     if (PREBUILT) {
+      await checkRuntimeSsoProviders(limitMs);
       for (const leg of ['package-route', 'traceparent', 'held-batch'])
         console.log(`NOT RUN (source-only fixture): Worker ${leg}`);
     } else {

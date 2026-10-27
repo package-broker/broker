@@ -1,9 +1,19 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import {
+  assertDiscovered,
+  assertProviderListing,
+  assertStartRedirect,
+  digestFiles,
+  runtimeProviderSettings,
+  startMockIssuer,
+} from './mock-oidc-issuer.mjs';
 import { listFiles, payloadFiles } from './stage-prebuilt.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -93,6 +103,155 @@ export async function copyMetafile(root, target, outDir) {
   }
 }
 
+export const NODE_SSO_STAGES = Object.freeze([
+  Object.freeze({ id: 'mock', path: '/tenant-a', absent: Object.freeze([]) }),
+  Object.freeze({ id: 'mock2', path: '/tenant-b', absent: Object.freeze(['mock']) }),
+]);
+
+export function bundleFileNames(directory) {
+  return listFiles(directory).filter((name) => !name.startsWith('assets/'));
+}
+
+const SMOKE_MASTER_KEY = `pbmk_v1_${randomBytes(32).toString('base64url')}`;
+
+export function serverEnv(base, { port, dataDir, settings }) {
+  const env = { ...base };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith('PB_') || name === 'NODE_PATH') delete env[name];
+  }
+  return {
+    ...env,
+    PORT: String(port),
+    PB_SQLITE_PATH: join(dataDir, 'db.sqlite'),
+    PB_ORG_SLUG: 'smoke',
+    PB_ORG_NAME: 'Smoke',
+    PB_MASTER_KEY: SMOKE_MASTER_KEY,
+    PB_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    PB_BLOB_ROOT: join(dataDir, 'blobs'),
+    DEPLOYMENT_ID: 'smoke',
+    ...settings,
+  };
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+async function startServer(nodeDir, env) {
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: nodeDir,
+    env,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const base = env.PB_PUBLIC_URL;
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    if (child.exitCode !== null) throw new Error(`server exited early: ${stderr.slice(-2000)}`);
+    const response = await fetch(`${base}/health/ready`, {
+      signal: AbortSignal.timeout(2_000),
+    }).catch(() => null);
+    if (response?.status === 200) break;
+    if (Date.now() > deadline) {
+      child.kill('SIGKILL');
+      throw new Error('server was not ready within 15000ms');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return {
+    base,
+    stop: async () => {
+      if (child.exitCode === null) child.kill('SIGTERM');
+      const timer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      const code = await exited;
+      clearTimeout(timer);
+      return code;
+    },
+  };
+}
+
+export async function checkSsoStage(base, issuer, { id, path, absent }, request = fetch) {
+  const listed = await request(`${base}/_pb/auth/providers`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (listed.status !== 200) throw new Error(`GET /_pb/auth/providers answered ${listed.status}`);
+  const ids = assertProviderListing(await listed.json(), { present: [id], absent });
+  const started = await request(`${base}/_pb/auth/sso/${id}/start`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/json', origin: base },
+    body: JSON.stringify({ purpose: 'login' }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  assertStartRedirect(
+    { status: started.status, location: started.headers.get('location') },
+    {
+      authorizationEndpoint: issuer.authorizationEndpoint(path),
+      callbackUrl: `${base}/_pb/auth/sso/${id}/callback`,
+    },
+  );
+  assertDiscovered(issuer.requests, path);
+  for (const gone of absent) {
+    const refused = await request(`${base}/_pb/auth/sso/${gone}/start`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'content-type': 'application/json', origin: base },
+      body: JSON.stringify({ purpose: 'login' }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (refused.status !== 404)
+      throw new Error(`SSO start for removed provider ${gone} answered ${refused.status}`);
+  }
+  return ids;
+}
+
+export async function runNodeRuntimeSso({ nodeDir, dataDir, log = console.log }) {
+  await mkdir(dataDir, { recursive: true });
+  const names = bundleFileNames(nodeDir);
+  const before = await digestFiles(nodeDir, names);
+  log(`smoke:prebuilt runtime SSO Node bundle sha256 before=${before.combined}`);
+  for (const [name, digest] of Object.entries(before.files))
+    if (name.endsWith('.js')) log(`smoke:prebuilt runtime SSO Node   ${name} ${digest}`);
+  const issuer = await startMockIssuer();
+  try {
+    for (const stage of NODE_SSO_STAGES) {
+      const port = await freePort();
+      const settings = runtimeProviderSettings(stage.id, issuer.issuer(stage.path));
+      const server = await startServer(
+        nodeDir,
+        serverEnv(process.env, { port, dataDir, settings }),
+      );
+      const ids = await checkSsoStage(server.base, issuer, stage).catch(async (error) => {
+        await server.stop();
+        throw error;
+      });
+      const code = await server.stop();
+      if (code !== 0) throw new Error(`server exited with ${code} after the ${stage.id} stage`);
+      log(
+        `smoke:prebuilt runtime SSO Node PB_IDP_PROVIDERS=${stage.id}: providers [${ids.join(', ')}], start 303 to ${issuer.authorizationEndpoint(stage.path).replace(issuer.origin, '<mock>')}${stage.absent.map((gone) => `, ${gone} start 404`).join('')}`,
+      );
+    }
+  } finally {
+    await issuer.close();
+  }
+  const after = await digestFiles(nodeDir, bundleFileNames(nodeDir));
+  log(`smoke:prebuilt runtime SSO Node bundle sha256 after=${after.combined}`);
+  if (JSON.stringify(after) !== JSON.stringify(before))
+    throw new Error('Installed Node bundle changed between provider sets');
+  return { before, after };
+}
+
 export async function runPrebuiltSmoke({ root = ROOT, run = checked, materialize } = {}) {
   const expected = await loadExpectedRecord(join(root, 'packages/cli/dist/prebuilt-expected.json'));
   await mkdir(join(root, '.pb'), { recursive: true });
@@ -174,6 +333,17 @@ export async function runPrebuiltSmoke({ root = ROOT, run = checked, materialize
       },
       'smoke:prebuilt Node leg',
     );
+    console.log('smoke:prebuilt Node runtime SSO stage');
+    run(
+      process.execPath,
+      [join(root, 'scripts/prebuilt-smoke.mjs'), '--node-runtime-sso'],
+      {
+        cwd: root,
+        stdio: 'inherit',
+        env: { ...smokeEnv, SMOKE_NODE_DIR: nodeDir, SMOKE_SSO_DATA: join(temporary, 'sso-data') },
+      },
+      'smoke:prebuilt Node runtime SSO stage',
+    );
     console.log('smoke:prebuilt Worker leg');
     run(
       process.execPath,
@@ -190,14 +360,26 @@ export async function runPrebuiltSmoke({ root = ROOT, run = checked, materialize
       'smoke:prebuilt Worker leg',
     );
     console.log(
-      'smoke:prebuilt ok (installed Node: server.js in place with hoisted dependencies, readiness, OpenAPI, auth, UI, blobs, audit jobs, shutdown; materialized installed Worker: readiness/liveness, OpenAPI, auth, UI, D1 foreign keys, blobs, audit jobs/queue; installed bundles: vitest scan with payload-matched local metafiles; repository helpers: cache adapter checks)',
+      'smoke:prebuilt ok (installed Node: server.js in place with hoisted dependencies, readiness, OpenAPI, auth, UI, blobs, audit jobs, shutdown, runtime SSO providers across a restart with unchanged bundle bytes; materialized installed Worker: readiness/liveness, OpenAPI, auth, UI, D1 foreign keys, blobs, audit jobs/queue, runtime SSO providers across two versions of the same bundle; installed bundles: vitest scan with payload-matched local metafiles; repository helpers: cache adapter checks)',
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href &&
+  process.argv.includes('--node-runtime-sso')
+) {
+  runNodeRuntimeSso({
+    nodeDir: process.env.SMOKE_NODE_DIR,
+    dataDir: process.env.SMOKE_SSO_DATA,
+  }).catch((error) => {
+    console.error(`smoke:prebuilt runtime SSO ${error.message}`);
+    process.exitCode = 1;
+  });
+} else if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runPrebuiltSmoke().catch((error) => {
     console.error(
       error.message === INSTALL_NOT_RUN ? INSTALL_NOT_RUN : `smoke:prebuilt ${error.message}`,

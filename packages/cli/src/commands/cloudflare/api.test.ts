@@ -26,6 +26,24 @@ function harness(send: (url: string, init?: RequestInit) => Promise<Response> | 
     fetch,
   };
 }
+it('lists root-scoped zones without an account filter, with retries and pagination', async () => {
+  let calls = 0;
+  const h = harness((url, init) => {
+    const parsed = new URL(url);
+    expect(parsed.pathname).toBe('/client/v4/zones');
+    expect(parsed.searchParams.get('name')).toBe('example.com');
+    expect(parsed.searchParams.get('per_page')).toBe('50');
+    expect(parsed.searchParams.has('account.id')).toBe(false);
+    expect(init?.method).toBe('GET');
+    expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${apiToken}`);
+    if (++calls === 1) return new Response('', { status: 429, headers: { 'retry-after': '3' } });
+    const page = Number(parsed.searchParams.get('page'));
+    return json([{ id: page }], { page, count: 1, total_pages: 2, total_count: 2 });
+  });
+  expect(await h.api.listZones('example.com')).toEqual([{ id: 1 }, { id: 2 }]);
+  expect(h.fetch).toHaveBeenCalledTimes(3);
+  expect(h.sleep).toHaveBeenCalledWith(3000);
+});
 it('pages the full numeric and cursor listings and refuses ambiguous completion', async () => {
   const h = harness((url) =>
     json([url.includes('page=2') ? { id: 2 } : { id: 1 }], { total_pages: 2 }),

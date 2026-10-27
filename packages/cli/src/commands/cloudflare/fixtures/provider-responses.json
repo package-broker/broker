@@ -150,5 +150,235 @@
       }
     ],
     "result_info": null
+  },
+  "zonesEmpty": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 0,
+      "total_count": 0,
+      "total_pages": 1
+    }
+  },
+  "zonesApex": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "11111111111111111111111111111111",
+        "name": "example.com",
+        "status": "active",
+        "account": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 1,
+      "total_count": 1,
+      "total_pages": 1
+    }
+  },
+  "zonesOtherAccount": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "33333333333333333333333333333333",
+        "name": "packages.example.com",
+        "status": "active",
+        "account": {
+          "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 1,
+      "total_count": 1,
+      "total_pages": 1
+    }
+  },
+  "zonesPending": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "11111111111111111111111111111111",
+        "name": "packages.example.com",
+        "status": "pending",
+        "account": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 1,
+      "total_count": 1,
+      "total_pages": 1
+    }
+  },
+  "zonesAmbiguous": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "11111111111111111111111111111111",
+        "name": "example.com",
+        "status": "active",
+        "account": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      {
+        "id": "22222222222222222222222222222222",
+        "name": "example.com",
+        "status": "active",
+        "account": {
+          "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 2,
+      "total_count": 2,
+      "total_pages": 1
+    }
+  },
+  "zonesMalformed": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {},
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 0,
+      "total_count": 0,
+      "total_pages": 1
+    }
+  },
+  "zonesInconsistent": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "11111111111111111111111111111111",
+        "name": "example.com",
+        "status": "active",
+        "account": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 1,
+      "total_count": 2,
+      "total_pages": 1
+    }
+  },
+  "zonesApexWithForeignPending": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "11111111111111111111111111111111",
+        "name": "example.com",
+        "status": "active",
+        "account": {
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      {
+        "id": "44444444444444444444444444444444",
+        "name": "example.com",
+        "status": "pending",
+        "account": {
+          "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 2,
+      "total_count": 2,
+      "total_pages": 1
+    }
+  },
+  "zonesForeignPendingSubzone": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "44444444444444444444444444444444",
+        "name": "pkg.example.com",
+        "status": "pending",
+        "account": {
+          "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 50,
+      "count": 1,
+      "total_count": 1,
+      "total_pages": 1
+    }
+  },
+  "dnsNsEmpty": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [],
+    "result_info": {
+      "page": 1,
+      "per_page": 100,
+      "count": 0,
+      "total_count": 0,
+      "total_pages": 1
+    }
+  },
+  "dnsNsDelegated": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "55555555555555555555555555555555",
+        "type": "NS",
+        "name": "pkg.example.com",
+        "content": "ns.example.net",
+        "ttl": 3600
+      }
+    ],
+    "result_info": {
+      "page": 1,
+      "per_page": 100,
+      "count": 1,
+      "total_count": 1,
+      "total_pages": 1
+    }
   }
 }

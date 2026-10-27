@@ -29,6 +29,7 @@ import {
   wasNotSent,
   type CommandResult,
 } from './api.js';
+import { resolveZone } from './zone.js';
 import {
   InventoryStore,
   InventoryTransaction,
@@ -257,7 +258,7 @@ export async function validateDeploymentArtifact(out: string) {
 export interface DeployProviderContract {
   versionsCreateScript: boolean;
   createScript?: (api: CloudflareApi, script: string, form: FormData) => Promise<void>;
-  domainZone?: (api: CloudflareApi, hostname: string) => Promise<string>;
+  domainZone: (api: CloudflareApi, hostname: string) => Promise<string>;
   secretInheritance: boolean;
   assetHash?: (bytes: Buffer, name: string) => string;
   preview?: (
@@ -269,6 +270,9 @@ export interface DeployProviderContract {
 export const unverifiedDeployContract: DeployProviderContract = {
   versionsCreateScript: false,
   secretInheritance: false,
+  domainZone: async () => {
+    throw new CloudflareError('domain_zone_not_supported', 1, false, 'deploy');
+  },
 };
 /** Cloudflare's direct-upload example hashes base64 bytes plus the extension without its dot. */
 export function cloudflareAssetHash(bytes: Buffer, name: string): string {
@@ -280,6 +284,7 @@ export function cloudflareAssetHash(bytes: Buffer, name: string): string {
 export const cloudflareDeployContract: DeployProviderContract = {
   versionsCreateScript: false,
   secretInheritance: true,
+  domainZone: resolveZone,
   assetHash: cloudflareAssetHash,
   createScript: async (api, script, form) => {
     const result = object((await api.request(`/workers/scripts/${script}`, 'PUT', form)).result);

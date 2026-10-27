@@ -166,6 +166,18 @@ export function expiredRun(journal: Inventory, repositoryId: string, now: number
   );
 }
 
+function errorCodes(text: string): number[] {
+  try {
+    const parsed = object(JSON.parse(text));
+    if (parsed.success !== false || parsed.result !== null || !Array.isArray(parsed.errors))
+      return [];
+    const codes = parsed.errors.map((entry) => object(entry).code);
+    return codes.every((code) => Number.isInteger(code)) ? (codes as number[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 class CleanupApi {
   private readonly now: () => number;
   private readonly deadline: number;
@@ -182,8 +194,10 @@ class CleanupApi {
     body?: unknown,
     r2 = false,
     notFoundCodes = false,
+    deniedCodes = false,
   ): Promise<{
     gone: boolean;
+    denied?: boolean;
     result: unknown;
     result_info?: Record<string, unknown>;
     codes?: number[];
@@ -241,18 +255,15 @@ class CleanupApi {
         };
         if (response.status === 404) {
           if (!notFoundCodes) return { gone: true, result: null };
-          const text = await read(response);
-          try {
-            const parsed = object(JSON.parse(text));
-            if (parsed.success !== false || parsed.result !== null || !Array.isArray(parsed.errors))
-              throw new Error();
-            const codes = parsed.errors.map((entry) => object(entry).code);
-            if (!codes.every((code) => Number.isInteger(code))) throw new Error();
-            return { gone: true, result: null, codes: codes as number[] };
-          } catch {
-            return { gone: true, result: null, codes: [] };
-          }
+          return { gone: true, result: null, codes: errorCodes(await read(response)) };
         }
+        if (response.status === 403 && deniedCodes)
+          return {
+            gone: false,
+            denied: true,
+            result: null,
+            codes: errorCodes(await read(response)),
+          };
         if (!response.ok)
           throw new CloudflareError(
             [401, 403].includes(response.status) ? 'permission_denied' : 'provider_failure',
@@ -303,22 +314,46 @@ class CleanupApi {
     }
     throw new CloudflareError('provider_failure');
   }
-  async list(path: string, field?: string, r2 = false): Promise<Record<string, unknown>[]> {
+  async list(
+    path: string,
+    field?: string,
+    r2 = false,
+    deniedMeansEmpty = false,
+  ): Promise<Record<string, unknown>[]> {
     const conflict = (): never => {
       throw new CloudflareError('ownership_conflict', 8);
     };
-    return paginatedList(
-      path,
-      async (page) => {
-        const response = await this.request(page, 'GET', undefined, r2);
-        // A missing child collection is not evidence of an empty live parent.
-        if (response.gone) return conflict();
-        return response;
-      },
-      field,
-      conflict,
-      conflict,
-    );
+    const empty = new Error();
+    let first = true;
+    try {
+      return await paginatedList(
+        path,
+        async (page) => {
+          const response = await this.request(
+            page,
+            'GET',
+            undefined,
+            r2,
+            false,
+            deniedMeansEmpty && first,
+          );
+          first = false;
+          if (response.denied) {
+            if (response.codes?.length === 1 && response.codes[0] === 10003) throw empty;
+            throw new CloudflareError('permission_denied', 1, false, 'teardown', 403);
+          }
+          // A missing child collection is not evidence of an empty live parent.
+          if (response.gone) return conflict();
+          return response;
+        },
+        field,
+        conflict,
+        conflict,
+      );
+    } catch (error) {
+      if (error === empty) return [];
+      throw error;
+    }
   }
 
   async snapshot(path: string): Promise<Record<string, unknown>[]> {
@@ -856,7 +891,13 @@ async function preflight(
     try {
       for (const jurisdiction of ['default', 'eu', 'fedramp']) {
         api.jurisdiction = jurisdiction;
-        const buckets = await api.list(`${base}/r2/buckets`, 'buckets', true);
+        const buckets = await api.list(
+          `${base}/r2/buckets`,
+          'buckets',
+          true,
+          // Accounts without FedRAMP answer 403/10003 to a FedRAMP-scoped bucket listing.
+          jurisdiction === 'fedramp' && (j.identity.jurisdiction as string) !== 'fedramp',
+        );
         const names = new Set(buckets.map((bucket) => liveId(bucket.name)));
         if (jurisdiction === j.identity.jurisdiction)
           for (const name of selectedBuckets) names.add(name);

@@ -452,5 +452,16 @@
       }
     ],
     "result": null
+  },
+  "r2JurisdictionAccessDenied": {
+    "success": false,
+    "errors": [
+      {
+        "code": 10003,
+        "message": "Access Denied"
+      }
+    ],
+    "messages": [],
+    "result": null
   }
 }

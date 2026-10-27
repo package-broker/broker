@@ -2191,6 +2191,74 @@ it('fails as a provider failure when a notification 404 body exceeds 1 MiB', asy
   expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
 });
 
+const accessDenied = (body: unknown = providerFixtures.r2JurisdictionAccessDenied) =>
+  new Response(JSON.stringify(body), {
+    status: 403,
+    headers: { 'content-type': 'application/json' },
+  });
+
+function denyBucketListing(jurisdiction: string, body?: unknown) {
+  const denied: string[] = [];
+  interceptRead(async (url, fallback, init) => {
+    if (
+      url.pathname === `/client/v4/accounts/${ACCOUNT}/r2/buckets` &&
+      new Headers(init?.headers).get('cf-r2-jurisdiction') === jurisdiction
+    ) {
+      denied.push(url.pathname + url.search);
+      return accessDenied(body);
+    }
+    if (url.pathname.endsWith('/lifecycle')) return response({ rules: [ABORT_RULE] });
+    return fallback;
+  });
+  return denied;
+}
+
+async function expectPermissionDenied() {
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(1);
+  expect(result.output.error?.code).toBe('permission_denied');
+  expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+}
+
+it('treats a FedRAMP bucket listing answered 403/10003 as no FedRAMP buckets and deletes', async () => {
+  const name = await provisionedBucket();
+  const denied = denyBucketListing('fedramp');
+  expect((await teardown(options)).exitCode).toBe(0);
+  expect(denied).toEqual([`/client/v4/accounts/${ACCOUNT}/r2/buckets?page=1&per_page=100`]);
+  expect(trace.some((e) => e.method === 'DELETE' && e.path.endsWith(`/r2/buckets/${name}`))).toBe(
+    true,
+  );
+});
+
+it('refuses an EU bucket listing answered 403/10003 before mutation', async () => {
+  await provisionedBucket();
+  denyBucketListing('eu');
+  await expectPermissionDenied();
+});
+
+it.each([
+  ['other_code', { ...providerFixtures.r2JurisdictionAccessDenied, errors: [{ code: 10000 }] }],
+  ['success_true', { ...providerFixtures.r2JurisdictionAccessDenied, success: true }],
+] as const)(
+  'refuses a FedRAMP bucket listing answered 403 with %s before mutation',
+  async (_kind, body) => {
+    await provisionedBucket();
+    denyBucketListing('fedramp', body);
+    await expectPermissionDenied();
+  },
+);
+
+it('refuses an inventory whose identity jurisdiction is FedRAMP before any API call', async () => {
+  await provisionedBucket();
+  (journal.identity as { jurisdiction: string }).jurisdiction = 'fedramp';
+  await save();
+  denyBucketListing('fedramp');
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error?.code).toBe('invalid_input');
+  expect(trace).toEqual([]);
+});
+
 it('keeps a 404/11015 from a non-notification bucket configuration fail-closed', async () => {
   const name = await provisionedBucket();
   interceptRead(async (url, fallback) =>

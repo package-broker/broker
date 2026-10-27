@@ -2751,6 +2751,12 @@ describe('UX4 add package', () => {
     ],
     [
       404,
+      'package_not_found',
+      'packageAlert',
+      'Not found upstream. Check the package name or use another source.',
+    ],
+    [
+      404,
       'not_found',
       'packageAlert',
       'The package or attached source could not be found. Check the name and refresh sources.',

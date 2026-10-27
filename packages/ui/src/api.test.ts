@@ -207,6 +207,12 @@ describe('error mapping', () => {
     [412, 'precondition_failed'],
     [413, 'payload_too_large'],
     [428, 'precondition_required'],
+    [400, 'unsupported_package'],
+    [400, 'unsupported_source_kind'],
+    [404, 'package_not_found'],
+    [409, 'source_paused'],
+    [502, 'upstream_refused'],
+    [502, 'bad_gateway'],
   ] as const)('maps %i to %s from the envelope', async (status, code) => {
     const { client } = setup(() => envelope(status, code));
     const result = await client.request('get', SOURCES, { params: { project: 'p' } });

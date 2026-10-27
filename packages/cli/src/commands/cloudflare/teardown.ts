@@ -366,15 +366,15 @@ class CleanupApi {
   async configuration(
     path: string,
     field: string,
-    notifications = false,
+    emptyCode?: number,
   ): Promise<Record<string, unknown>[]> {
-    const response = await this.request(path, 'GET', undefined, true, notifications);
-    // Cloudflare answers 404/11015 for an existing bucket that has no notification rules.
+    const response = await this.request(path, 'GET', undefined, true, emptyCode !== undefined);
+    // Cloudflare answers 404 with a dedicated code for an existing bucket without this configuration.
     if (
-      notifications &&
+      emptyCode !== undefined &&
       response.gone &&
       response.codes?.length === 1 &&
-      response.codes[0] === 11015
+      response.codes[0] === emptyCode
     )
       return [];
     if (response.gone) throw new CloudflareError('ownership_conflict', 8);
@@ -905,7 +905,7 @@ async function preflight(
           const notifications = await api.configuration(
             `${base}/event_notifications/r2/${name}/configuration`,
             'queues',
-            true,
+            11015,
           );
           for (const notification of notifications) {
             liveId(notification.queueId, /^[a-f0-9]{32}$/);
@@ -1014,7 +1014,11 @@ async function preflight(
       ['lifecycle', 'rules'],
       ['lock', 'rules'],
     ] as const) {
-      const rules = await api.configuration(`${entry.path}/${suffix}`, field);
+      const rules = await api.configuration(
+        `${entry.path}/${suffix}`,
+        field,
+        suffix === 'cors' ? 10059 : undefined,
+      );
       const baseline = suffix === 'lifecycle' ? (j.resources.r2?.lifecycle_baseline ?? []) : [];
       if (
         rules.some(

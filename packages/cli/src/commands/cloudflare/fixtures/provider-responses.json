@@ -443,6 +443,17 @@
     ],
     "result": null
   },
+  "r2CorsNotConfigured": {
+    "success": false,
+    "errors": [
+      {
+        "code": 10059,
+        "message": "The CORS configuration does not exist."
+      }
+    ],
+    "messages": [],
+    "result": null
+  },
   "r2BucketNotFound": {
     "success": false,
     "errors": [

@@ -2269,6 +2269,53 @@ it('keeps a 404/11015 from a non-notification bucket configuration fail-closed',
   await expectOwnershipConflict();
 });
 
+const corsPath = (bucket: string) => `/r2/buckets/${bucket}/cors`;
+
+it('treats the recorded 404/10059 CORS read as no CORS rules and deletes the bucket', async () => {
+  const name = await provisionedBucket();
+  let corsReads = 0;
+  interceptRead(async (url, fallback) => {
+    if (url.pathname.endsWith(corsPath(name))) {
+      corsReads++;
+      return notFound(JSON.stringify(providerFixtures.r2CorsNotConfigured));
+    }
+    return fallback;
+  });
+  expect((await teardown(options)).exitCode).toBe(0);
+  expect(corsReads).toBeGreaterThan(0);
+  expect(trace.some((e) => e.method === 'DELETE' && e.path.endsWith(`/r2/buckets/${name}`))).toBe(
+    true,
+  );
+});
+
+it.each(['bucket_not_found', 'other_code', 'two_codes', 'unparsable'] as const)(
+  'refuses a 404 CORS read that is not a lone 10059 (%s) before mutation',
+  async (kind) => {
+    const name = await provisionedBucket();
+    const real = providerFixtures.r2CorsNotConfigured as Record<string, unknown>;
+    const bodies = {
+      bucket_not_found: bucketNotFoundBody(name),
+      other_code: JSON.stringify({ ...real, errors: [{ code: 10000 }] }),
+      two_codes: JSON.stringify({ ...real, errors: [{ code: 10059 }, { code: 10000 }] }),
+      unparsable: '<html>not found</html>',
+    };
+    interceptRead(async (url, fallback) =>
+      url.pathname.endsWith(corsPath(name)) ? notFound(bodies[kind]) : fallback,
+    );
+    await expectOwnershipConflict();
+  },
+);
+
+it('still refuses a 200 CORS read that carries a foreign rule', async () => {
+  const name = await provisionedBucket();
+  interceptRead(async (url, fallback) =>
+    url.pathname.endsWith(corsPath(name))
+      ? response({ rules: [{ allowed: { methods: ['GET'], origins: ['*'] } }] })
+      : fallback,
+  );
+  await expectOwnershipConflict();
+});
+
 it('treats the documented empty storageClassTransitions as part of the abort-only default rule', async () => {
   const name = await provisionedBucket();
   interceptRead(async (url, fallback) =>

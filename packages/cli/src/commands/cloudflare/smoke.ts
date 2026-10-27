@@ -150,7 +150,7 @@ async function endpointPolicy(
   if (a && (a.intended_settings.domain || a.intended_settings.routes.length) && p.enabled)
     return failed();
   if (!a) {
-    const domains = await api.list('/workers/domains');
+    const domains = await api.snapshot('/workers/domains');
     const custom =
       !new URL(canonical).hostname.endsWith('.workers.dev') ||
       domains.some((d) => d.service === base.slice('/workers/scripts/'.length));
@@ -194,24 +194,10 @@ async function verifyRestoredSettings(api: CloudflareApi, base: string, j: Inven
     [...a.prior_settings.routes, ...a.intended_settings.routes].map((r) => r.zone_id),
   );
   for (const zone of zones) {
-    let complete = false;
-    for (let page = 1; page <= 10_000; page++) {
-      const response = await api.requestZone(zone, `/workers/routes?page=${page}&per_page=100`);
-      if (!Array.isArray(response.result)) return failed();
-      for (const raw of response.result) {
-        const r = object(raw);
-        if (r.script === j.identity.script_name)
-          routes.push(routeKey({ zone_id: zone, pattern: r.pattern, script: r.script }));
-      }
-      const pages = response.result_info?.total_pages;
-      if (pages === page || (pages === 0 && response.result.length === 0)) {
-        complete = true;
-        break;
-      }
-      if (typeof pages !== 'number' || !Number.isSafeInteger(pages) || pages < page)
-        return failed();
+    for (const r of await api.snapshotZone(zone, '/workers/routes')) {
+      if (r.script === j.identity.script_name)
+        routes.push(routeKey({ zone_id: zone, pattern: r.pattern, script: r.script }));
     }
-    if (!complete) return failed();
   }
   const allowed = new Set(expected.routes.map(routeKey));
   if (
@@ -219,7 +205,7 @@ async function verifyRestoredSettings(api: CloudflareApi, base: string, j: Inven
     a.prior_settings.routes.some((r) => !routes.includes(routeKey(r)))
   )
     return failed();
-  const domains = (await api.list('/workers/domains')).filter(
+  const domains = (await api.snapshot('/workers/domains')).filter(
     (d) => d.service === j.identity.script_name || d.hostname === expected.domain?.hostname,
   );
   if (domains.length !== (expected.domain ? 1 : 0)) return failed();

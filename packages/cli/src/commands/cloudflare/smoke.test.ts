@@ -1379,3 +1379,81 @@ it('refuses a restored-consumer snapshot that advertises more pages', async () =
   expect(result.exitCode).toBe(10);
   expect(consumerReads).toBe(1);
 });
+
+it('verifies restoration with recorded unpaginated route and domain snapshots', async () => {
+  const fixtures = JSON.parse(
+    await readFile(
+      new globalThis.URL('./fixtures/provider-responses.json', import.meta.url),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  await change((a) => {
+    a.phase = 'rolled_back';
+    a.rollback = 'succeeded';
+    a.smoke = 'failed';
+    a.prior_settings.endpoints.enabled = false;
+    a.intended_settings.endpoints.enabled = false;
+    a.intended_settings.routes = [
+      {
+        id: 'route-id',
+        zone_id: 'b'.repeat(32),
+        pattern: 'broker.example.test/*',
+        script: identity.script_name,
+      },
+    ];
+  });
+  const h = harness();
+  h.live = [{ version_id: OLD, percentage: 100 }];
+  h.endpoints.enabled = false;
+  const inner = h.fetch;
+  const snapshots: string[] = [];
+  const transport: typeof fetch = async (input, init) => {
+    const url = new globalThis.URL(String(input));
+    const fixture = url.pathname.endsWith('/workers/routes')
+      ? 'zoneRoutesForeign'
+      : url.pathname.endsWith('/workers/domains')
+        ? 'domainsEmpty'
+        : null;
+    if (!fixture) return inner(input, init);
+    expect(url.search).toBe('');
+    snapshots.push(fixture);
+    return json(fixtures[fixture]);
+  };
+  const result = await smoke(options(h, { fetch: transport }));
+  expect(result.exitCode).toBe(9);
+  expect(result.output.rollback.status).toBe('succeeded');
+  expect(snapshots).toEqual(['zoneRoutesForeign', 'domainsEmpty']);
+  expect(mutations(h)).toHaveLength(0);
+});
+
+it('smokes without an attempt using recorded unpaginated collection responses', async () => {
+  const fixtures = JSON.parse(
+    await readFile(
+      new globalThis.URL('./fixtures/provider-responses.json', import.meta.url),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  const j = (await store.read())!;
+  j.deployment = null;
+  await store.write(j);
+  const h = harness();
+  const inner = h.fetch;
+  const snapshots: string[] = [];
+  const transport: typeof fetch = async (input, init) => {
+    const url = new globalThis.URL(String(input));
+    const fixture = url.pathname.endsWith('/workers/routes')
+      ? 'zoneRoutesEmpty'
+      : url.pathname.endsWith('/workers/domains')
+        ? 'domainsEmpty'
+        : null;
+    if (!fixture) return inner(input, init);
+    expect(url.search).toBe('');
+    snapshots.push(fixture);
+    return json(fixtures[fixture]);
+  };
+  const result = await smoke(options(h, { fetch: transport }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.previous_version_id).toBeNull();
+  expect(snapshots).toEqual(['domainsEmpty', 'domainsEmpty']);
+  expect(mutations(h)).toHaveLength(0);
+});

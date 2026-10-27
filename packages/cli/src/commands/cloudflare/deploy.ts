@@ -750,19 +750,11 @@ async function readSettings(
     domain: foundDomain,
   };
 }
-async function zoneRoutes(api: CloudflareApi, zone: string): Promise<Record<string, unknown>[]> {
-  // Zone APIs must never be sent beneath the accounts prefix.
-  const all: Record<string, unknown>[] = [];
-  for (let page = 1; page <= 10000; page++) {
-    const r = await api.requestZone(zone, `/workers/routes?page=${page}&per_page=100`);
-    if (!Array.isArray(r.result)) return conflict('routes');
-    all.push(...r.result.map(object));
-    if (r.result_info?.total_pages === page || r.result_info?.total_count === all.length)
-      return all;
-    if (typeof r.result_info?.total_pages !== 'number' || r.result_info.total_pages < page)
-      return conflict('routes');
-  }
-  return conflict('routes');
+export async function zoneRoutes(
+  api: CloudflareApi,
+  zone: string,
+): Promise<Record<string, unknown>[]> {
+  return api.snapshotZone(zone, '/workers/routes');
 }
 function bindings(j: Inventory, ports: PlatformPortConfig | null, url: string) {
   const b: Record<string, unknown>[] = [

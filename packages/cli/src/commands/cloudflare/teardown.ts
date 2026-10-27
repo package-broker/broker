@@ -21,8 +21,17 @@ import {
   lifecycleRule,
   validateInventory,
   type Inventory,
+  type LifecycleRule,
   type ResourceKey,
 } from './inventory.js';
+
+// R2 attaches this rule to every new bucket.
+const PROVIDER_DEFAULT_LIFECYCLE_RULE = {
+  id: 'Default Multipart Abort Rule',
+  enabled: true,
+  conditions: { prefix: '' },
+  abortMultipartUploadsTransition: { condition: { type: 'Age', maxAge: 604800 } },
+} satisfies LifecycleRule;
 
 export interface TeardownOptions {
   inventory: string;
@@ -200,6 +209,7 @@ class CleanupApi {
     denied?: boolean;
     result: unknown;
     result_info?: Record<string, unknown>;
+    resultInfoAbsent?: boolean;
     codes?: number[];
   }> {
     if (
@@ -280,6 +290,7 @@ class CleanupApi {
             gone: false,
             result: parsed.result,
             ...(parsed.result_info == null ? {} : { result_info: object(parsed.result_info) }),
+            ...(Object.hasOwn(parsed, 'result_info') ? {} : { resultInfoAbsent: true }),
           };
         } catch {
           throw new CloudflareError(
@@ -401,7 +412,13 @@ class CleanupApi {
         throw new CloudflareError('capability_unknown');
       }
       const info = response.result_info;
-      if (!Array.isArray(response.result) || typeof info?.is_truncated !== 'boolean')
+      // An empty bucket answers without result_info; only an empty listing is complete without it.
+      if (
+        !Array.isArray(response.result) ||
+        (info === undefined
+          ? !response.resultInfoAbsent || response.result.length > 0
+          : typeof info.is_truncated !== 'boolean')
+      )
         throw new CloudflareError('provider_failure');
       const keys = response.result.map((raw) => {
         const key = object(raw).key;
@@ -428,7 +445,7 @@ class CleanupApi {
           throw new CloudflareError('outcome_unknown', 6);
         this.drained += keys.length;
       }
-      if (!info.is_truncated) return true;
+      if (info === undefined || !info.is_truncated) return true;
       if (typeof info.cursor !== 'string' || !info.cursor || seen.has(info.cursor))
         throw new CloudflareError('provider_failure');
       seen.add(info.cursor);
@@ -1007,6 +1024,11 @@ async function preflight(
         throw new CloudflareError('ownership_conflict', 8);
     }
   }
+  const r2 = j.resources.r2;
+  const implicitBaseline =
+    r2?.lifecycle_baseline === undefined &&
+    !!r2?.evidence &&
+    ['created', 'pending_create'].includes(r2.evidence.source);
   for (const entry of livePrimary.filter((entry) => entry.bucket)) {
     for (const [suffix, field] of [
       ['domains/custom', 'domains'],
@@ -1019,18 +1041,21 @@ async function preflight(
         field,
         suffix === 'cors' ? 10059 : undefined,
       );
-      const baseline = suffix === 'lifecycle' ? (j.resources.r2?.lifecycle_baseline ?? []) : [];
-      if (
-        rules.some(
-          (rule) =>
-            !baseline.some(
-              (expected) =>
-                JSON.stringify(sorted(lifecycleRule(rule) ? abortOnlyRule(rule) : rule)) ===
-                JSON.stringify(sorted(expected)),
-            ),
-        )
-      )
+      const lifecycle = suffix === 'lifecycle';
+      const remaining = (
+        lifecycle
+          ? (r2?.lifecycle_baseline ?? (implicitBaseline ? [PROVIDER_DEFAULT_LIFECYCLE_RULE] : []))
+          : []
+      ).map((expected) => JSON.stringify(sorted(expected)));
+      if (lifecycle && implicitBaseline && rules.length !== 1)
         throw new CloudflareError('ownership_conflict', 8);
+      for (const rule of rules) {
+        const index = remaining.indexOf(
+          JSON.stringify(sorted(lifecycleRule(rule) ? abortOnlyRule(rule) : rule)),
+        );
+        if (index < 0) throw new CloudflareError('ownership_conflict', 8);
+        remaining.splice(index, 1);
+      }
     }
     for (const suffix of ['domains/managed', 'sippy']) {
       const config = await api.request(`${entry.path}/${suffix}`, 'GET', undefined, true);

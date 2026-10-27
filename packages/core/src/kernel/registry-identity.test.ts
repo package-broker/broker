@@ -28,6 +28,15 @@ function problemsOf(plugins: readonly PluginDefinition[]): readonly string[] {
 }
 
 describe('identity providers in collectRegistrations', () => {
+  it('allows an unbound SSO plugin alongside another identity plugin', () => {
+    const result = collectRegistrations([
+      plugin('sso-oidc', { capabilities: ['sso'] }),
+      plugin('other-identity', { binds: ['identity'], identityProviders: () => [] }),
+    ]);
+    expect(result.bindings.get('identity')).toBe('other-identity');
+    expect(result.identityFactory?.({} as never)).toEqual([]);
+  });
+
   it('registers a plugin that binds identity and supplies a factory', () => {
     const result = collectRegistrations([
       plugin('sso', { binds: ['identity'], identityProviders: () => [] }),

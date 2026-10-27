@@ -15,6 +15,8 @@ import {
 import {
   InventoryStore,
   abortOnlyRule,
+  digest,
+  hashedBindingNames,
   installIdentity,
   lifecycleRule,
   validateInventory,
@@ -577,7 +579,17 @@ function recordedBinding(
         (j.resources.analytics?.state === 'bound' &&
           j.resources.analytics.evidence?.source === 'worker_binding')),
     );
-  if (binding.type === 'plain_text')
+  if (binding.type === 'plain_text') {
+    const text = binding.text;
+    if (typeof binding.name === 'string' && hashedBindingNames.has(binding.name))
+      return (
+        typeof text === 'string' &&
+        Boolean(
+          j.deployment?.history?.hashed_bindings?.some(
+            (b) => b.name === binding.name && b.sha256.includes(digest(text)),
+          ),
+        )
+      );
     return (
       (binding.name === 'DEPLOYMENT_ID' && binding.text === j.identity.deployment_id) ||
       (binding.name === 'PB_PUBLIC_URL' && attempts.some((a) => binding.text === a.worker_url)) ||
@@ -590,6 +602,7 @@ function recordedBinding(
         ),
       )
     );
+  }
   if (binding.type === 'assets')
     return binding.name === 'ASSETS' && attempts.some((a) => a.assets_sha256 !== null);
   if (binding.type === 'secret_text')

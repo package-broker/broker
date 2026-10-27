@@ -5,26 +5,25 @@ import {
 } from '@package-broker/core/plugin';
 import {
   type CloudflareAccessConfig,
-  cloudflareAccessProblems,
   createCloudflareAccessProvider,
 } from './cloudflare-access.js';
-import { MAX_LIST_LENGTH } from './config.js';
-import { type OidcConfig, createOidcProvider, oidcProblems } from './oidc.js';
+import { checkEntries, isContainer } from './definitions.js';
+import { type OidcConfig, createOidcProvider } from './oidc.js';
+import { planProviders } from './planner.js';
+import {
+  MAX_RUNTIME_PROVIDERS as MAX_PROVIDERS,
+  parseRuntimeProviders,
+  RUNTIME_PROVIDERS_VARIABLE,
+  type RuntimeProviders,
+} from './runtime.js';
 
 export type { CloudflareAccessConfig } from './cloudflare-access.js';
 export type { OidcConfig } from './oidc.js';
 
 export interface SsoOidcOptions {
   readonly providers?: readonly (CloudflareAccessConfig | OidcConfig)[];
+  readonly runtimeProviders?: boolean;
 }
-
-type ProviderConfig = CloudflareAccessConfig | OidcConfig;
-type Fields = Record<PropertyKey, unknown>;
-
-const MAX_PROVIDERS = 64;
-const UNREADABLE = 'configuration must be a readable object';
-const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
-const LIST_KEYS: readonly string[] = ['scopes', 'trustedAudiences', 'trustedEndpointOrigins'];
 
 function definition(
   extra: Pick<PluginDefinition, 'binds' | 'identityProviders'>,
@@ -41,121 +40,30 @@ function definition(
   );
 }
 
-function isContainer(value: unknown): value is object {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function copyFields(raw: object): Fields {
-  const copy: Fields = Object.create(null) as Fields;
-  for (const key of Reflect.ownKeys(raw)) {
-    const descriptor = Object.getOwnPropertyDescriptor(raw, key);
-    if (
-      typeof key !== 'string' ||
-      descriptor === undefined ||
-      !descriptor.enumerable ||
-      !('value' in descriptor)
-    ) {
-      throw new TypeError(UNREADABLE);
-    }
-    Object.defineProperty(copy, key, {
-      value: descriptor.value as unknown,
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
-  }
-  return copy;
-}
-
-function frozenList(value: unknown): unknown {
-  if (!Array.isArray(value)) {
-    return value;
-  }
-  const list = value as unknown[];
-  if (list.length > MAX_LIST_LENGTH) {
-    throw new TypeError(UNREADABLE);
-  }
-  const keys = Reflect.ownKeys(list);
-  if (keys.length !== list.length + 1) {
-    throw new TypeError(UNREADABLE);
-  }
-  for (let index = 0; index < list.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(list, index);
-    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
-      throw new TypeError(UNREADABLE);
-    }
-  }
-  return Object.freeze(Array.from(list));
-}
-
-function snapshotConfig(raw: unknown): unknown {
-  if (!isContainer(raw)) {
-    return raw;
-  }
-  const copy = copyFields(raw);
-  for (const key of LIST_KEYS) {
-    if (Object.hasOwn(copy, key)) {
-      copy[key] = frozenList(copy[key]);
-    }
-  }
-  if (isContainer(copy['policy'])) {
-    const policy = copyFields(copy['policy']);
-    for (const key of ['verifiedDomains', 'emailAuthoritativeDomains']) {
-      if (Object.hasOwn(policy, key)) {
-        policy[key] = frozenList(policy[key]);
-      }
-    }
-    copy['policy'] = Object.freeze(policy);
-  }
-  return Object.freeze(copy);
-}
-
-function problemsOf(config: unknown): string[] {
-  if (!isContainer(config)) {
-    return ['configuration must be an object'];
-  }
-  switch ((config as { kind?: unknown }).kind) {
-    case 'cloudflare-access':
-      return cloudflareAccessProblems(config);
-    case 'oidc':
-      return oidcProblems(config);
-    default:
-      return ['kind must be "cloudflare-access" or "oidc"'];
-  }
-}
-
-function canonicalAnchor(anchor: string): string {
-  if (!anchor.startsWith('oidc:')) {
-    return anchor.toLowerCase();
-  }
-  try {
-    const url = new URL(anchor.slice('oidc:'.length));
-    const path = url.pathname
-      .replace(/%([0-9a-fA-F]{2})/g, (escape, hex: string) => {
-        const char = String.fromCharCode(Number.parseInt(hex, 16));
-        return UNRESERVED_CHARACTER.test(char) ? char : escape.toUpperCase();
-      })
-      .replace(/\/+$/, '');
-    const host = url.hostname.replace(/\.$/, '');
-    return `oidc:${url.protocol}//${host}${url.port === '' ? '' : `:${url.port}`}${path}`;
-  } catch {
-    return anchor;
-  }
-}
-
-function anchorOf(config: ProviderConfig): string {
-  return config.kind === 'oidc'
-    ? `oidc:${config.issuer}`
-    : `access:${config.teamDomain}/${config.audience}`;
-}
-
 function fail(problems: readonly string[]): never {
   throw new TypeError(`invalid sso-oidc configuration: ${problems.join('; ')}`);
+}
+
+function warn(fields: Readonly<Record<string, unknown>>): void {
+  try {
+    console.warn(JSON.stringify({ event: 'sso.runtime_providers', ...fields }));
+  } catch {
+    // Diagnostics must not prevent provider construction.
+  }
 }
 
 export default function ssoOidc(options: SsoOidcOptions = {}): PluginDefinition {
   if (!isContainer(options)) {
     return fail(['options must be an object']);
+  }
+  let runtimeProviders: unknown;
+  try {
+    runtimeProviders = options.runtimeProviders;
+  } catch {
+    return fail(['runtimeProviders must be readable']);
+  }
+  if (runtimeProviders !== undefined && typeof runtimeProviders !== 'boolean') {
+    return fail(['runtimeProviders must be a boolean']);
   }
   let configured: unknown;
   let length = 0;
@@ -174,60 +82,51 @@ export default function ssoOidc(options: SsoOidcOptions = {}): PluginDefinition 
   if (configured !== undefined && !Array.isArray(configured)) {
     return fail(['providers must be an array']);
   }
-  if (configured === undefined || length === 0) {
+  if (length === 0 && runtimeProviders !== true) {
     return definition({});
   }
   if (length > MAX_PROVIDERS) {
     return fail([`providers must hold at most ${MAX_PROVIDERS} entries`]);
   }
 
-  const problems: string[] = [];
-  const snapshots: ProviderConfig[] = [];
-  const idIndex = new Map<string, number>();
-  const anchorIndex = new Map<string, number>();
-  for (let index = 0; index < length; index += 1) {
-    const label = `providers[${index}]`;
-    let config: unknown;
-    let own: string[];
-    try {
-      config = snapshotConfig((configured as unknown[])[index]);
-      own = problemsOf(config);
-    } catch {
-      problems.push(`${label}: ${UNREADABLE}`);
-      continue;
-    }
-    problems.push(...own.map((problem) => `${label}: ${problem}`));
-    const id = isContainer(config) ? (config as { id?: unknown }).id : undefined;
-    if (typeof id === 'string') {
-      const first = idIndex.get(id);
-      if (first === undefined) {
-        idIndex.set(id, index);
-      } else {
-        problems.push(`${label}: id duplicates providers[${first}]`);
-      }
-    }
-    if (own.length === 0) {
-      const key = canonicalAnchor(anchorOf(config as ProviderConfig));
-      const first = anchorIndex.get(key);
-      if (first === undefined) {
-        anchorIndex.set(key, index);
-      } else {
-        problems.push(`${label}: trust anchor duplicates providers[${first}]`);
-      }
-      snapshots.push(config as ProviderConfig);
-    }
-  }
-  if (problems.length > 0) {
-    return fail(problems);
+  const { accepted, rejected } = checkEntries(length, (index) => (configured as unknown[])[index]);
+  if (rejected.length > 0) {
+    return fail(rejected.flatMap((entry) => entry.problems));
   }
 
   return definition({
     binds: Object.freeze(['identity'] as const),
-    identityProviders: (ctx): readonly IdentityProvider[] =>
-      snapshots.map((config) =>
-        config.kind === 'oidc'
-          ? createOidcProvider(config, ctx)
-          : createCloudflareAccessProvider(config, ctx),
-      ),
+    identityProviders: (ctx): readonly IdentityProvider[] => {
+      let effective = accepted;
+      if (runtimeProviders === true) {
+        let runtime: RuntimeProviders;
+        try {
+          runtime = parseRuntimeProviders(ctx.env(RUNTIME_PROVIDERS_VARIABLE));
+        } catch {
+          runtime = { ...parseRuntimeProviders(undefined), documentProblem: 'unreadable' };
+        }
+        const plan = planProviders(accepted, runtime);
+        effective = plan.effective;
+        if (runtime.documentProblem !== null) warn({ documentProblem: runtime.documentProblem });
+        for (const { index, id, codes } of runtime.rejected) warn({ index, id, codes });
+        for (const key of ['overridden', 'suppressed', 'displaced', 'overflow'] as const) {
+          for (const id of plan[key]) warn({ [key]: id });
+        }
+      }
+      const providers: IdentityProvider[] = [];
+      for (const config of effective) {
+        try {
+          providers.push(
+            config.kind === 'oidc'
+              ? createOidcProvider(config, ctx)
+              : createCloudflareAccessProvider(config, ctx),
+          );
+        } catch (error) {
+          if (accepted.includes(config)) throw error;
+          warn({ id: config.id, code: 'construction_failed' });
+        }
+      }
+      return providers;
+    },
   });
 }

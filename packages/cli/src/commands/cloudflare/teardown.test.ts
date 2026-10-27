@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,8 +8,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vite
 import { run } from '../../cli.js';
 import {
   emptyInventory,
+  deploymentHistoryLimits,
   installIdentity,
   InventoryStore,
+  recordDeploymentHistory,
+  validateInventory,
   type Inventory,
   type ManagedSettings,
 } from './inventory.js';
@@ -2576,4 +2579,207 @@ it.each([
     return pageResponse(records, info);
   });
   await expectOwnershipConflict();
+});
+
+const providerHash = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+it.each(['x'.repeat(5000), 'é'.repeat(2500)])(
+  'records and validates a 5000-byte provider definition without plain text',
+  async (text) => {
+    await saveAttachments();
+    expect(Buffer.byteLength(text, 'utf8')).toBe(5000);
+    recordDeploymentHistory(journal.deployment!, {
+      plainBinding: { name: 'PB_IDP_PROVIDERS', text },
+    });
+    expect(journal.deployment!.history).toEqual({
+      version_ids: ['version-1'],
+      plain_bindings: [{ name: 'PB_PUBLIC_URL', texts: ['https://example.test'] }],
+      hashed_bindings: [{ name: 'PB_IDP_PROVIDERS', sha256: [providerHash(text)] }],
+    });
+    expect(validateInventory(journal, journal.identity)).toBe(journal);
+    const store = await InventoryStore.create({
+      project,
+      inventory,
+      outDir: '.pb/cloudflare',
+      identity: journal.identity,
+    });
+    await store.write(journal);
+    expect(await store.read()).toEqual(journal);
+  },
+);
+
+it('keeps provider hashes by recency independently of a full plain-value budget', async () => {
+  await saveAttachments();
+  journal.deployment!.history = {
+    version_ids: ['version-1'],
+    plain_bindings: [
+      { name: 'PB_PUBLIC_URL', texts: ['https://example.test'] },
+      {
+        name: 'OTHER',
+        texts: Array.from({ length: deploymentHistoryLimits.plainValues - 1 }, (_, i) => String(i)),
+      },
+    ],
+  };
+  const plain = structuredClone(journal.deployment!.history.plain_bindings);
+  const values = Array.from({ length: 70 }, (_, i) => `provider-${i}`);
+  for (const text of values) {
+    expect(() =>
+      recordDeploymentHistory(journal.deployment!, {
+        plainBinding: { name: 'PB_IDP_PROVIDERS', text },
+      }),
+    ).not.toThrow();
+    expect(validateInventory(journal, journal.identity)).toBe(journal);
+  }
+  expect(journal.deployment!.history!.hashed_bindings).toEqual([
+    {
+      name: 'PB_IDP_PROVIDERS',
+      sha256: values.slice(-deploymentHistoryLimits.hashedValues).map(providerHash),
+    },
+  ]);
+  expect(journal.deployment!.history!.plain_bindings).toEqual(plain);
+  recordDeploymentHistory(journal.deployment!, {
+    plainBinding: {
+      name: 'PB_IDP_PROVIDERS',
+      text: values.at(-deploymentHistoryLimits.hashedValues)!,
+    },
+  });
+  expect(journal.deployment!.history!.hashed_bindings).toEqual([
+    {
+      name: 'PB_IDP_PROVIDERS',
+      sha256: [
+        ...values.slice(1 - deploymentHistoryLimits.hashedValues),
+        values.at(-deploymentHistoryLimits.hashedValues)!,
+      ].map(providerHash),
+    },
+  ]);
+  const before = JSON.stringify(journal);
+  expect(() =>
+    recordDeploymentHistory(journal.deployment!, {
+      plainBinding: { name: 'OTHER', text: 'new-value' },
+    }),
+  ).toThrow('Deployment history capacity reached');
+  expect(JSON.stringify(journal)).toBe(before);
+});
+
+it('loads and round-trips a legacy deployment history byte-identically without adding hashes', async () => {
+  await saveAttachments();
+  journal.deployment!.history = {
+    version_ids: ['version-1'],
+    plain_bindings: [{ name: 'OTEL_ENDPOINT', texts: ['https://otel.example.test'] }],
+  };
+  const store = await InventoryStore.create({
+    project,
+    inventory,
+    outDir: '.pb/cloudflare',
+    identity: journal.identity,
+  });
+  const bytes = `${JSON.stringify(journal, null, 2)}\n`;
+  await writeFile(inventory, bytes);
+  const loaded = (await store.read())!;
+  expect(await readFile(inventory, 'utf8')).toBe(bytes);
+  expect(loaded.deployment!.history).not.toHaveProperty('hashed_bindings');
+  await store.write(loaded);
+  expect(await readFile(inventory, 'utf8')).toBe(bytes);
+});
+
+it.each([
+  ['unknown name', [{ name: 'OTHER', sha256: ['a'.repeat(64)] }]],
+  ['bad hex', [{ name: 'PB_IDP_PROVIDERS', sha256: ['g'.repeat(64)] }]],
+  ['uppercase hex', [{ name: 'PB_IDP_PROVIDERS', sha256: ['A'.repeat(64)] }]],
+  ['short hash', [{ name: 'PB_IDP_PROVIDERS', sha256: ['a'.repeat(63)] }]],
+  ['duplicate hash', [{ name: 'PB_IDP_PROVIDERS', sha256: ['a'.repeat(64), 'a'.repeat(64)] }]],
+  [
+    'duplicate name',
+    Array.from({ length: 2 }, () => ({ name: 'PB_IDP_PROVIDERS', sha256: ['a'.repeat(64)] })),
+  ],
+  [
+    '65 hashes',
+    [
+      {
+        name: 'PB_IDP_PROVIDERS',
+        sha256: Array.from({ length: deploymentHistoryLimits.hashedValues + 1 }, (_, i) =>
+          providerHash(String(i)),
+        ),
+      },
+    ],
+  ],
+  ['extra entry key', [{ name: 'PB_IDP_PROVIDERS', sha256: ['a'.repeat(64)], extra: true }]],
+  ['missing hashes', [{ name: 'PB_IDP_PROVIDERS' }]],
+  ['empty hashes', [{ name: 'PB_IDP_PROVIDERS', sha256: [] }]],
+  ['non-array hashes', [{ name: 'PB_IDP_PROVIDERS', sha256: 'a'.repeat(64) }]],
+  ['null entry', [null]],
+  ['empty bindings', []],
+  ['non-array bindings', {}],
+  ['null bindings', null],
+  ['undefined bindings', undefined],
+])('rejects malformed hashed binding history: %s', async (_label, hashed_bindings) => {
+  await saveAttachments();
+  journal.deployment!.history = { version_ids: [], plain_bindings: [] };
+  Object.assign(journal.deployment!.history, { hashed_bindings });
+  expect(() => validateInventory(journal, journal.identity)).toThrow(
+    'Inventory identity or journal is invalid',
+  );
+});
+
+it.each(['recorded', 'unrecorded', 'missing', 'wrong_type'] as const)(
+  'checks live provider binding ownership with %s hash evidence',
+  async (kind) => {
+    await saveAttachments();
+    const text = 'é'.repeat(2500);
+    journal.deployment!.history = {
+      version_ids: ['version-1'],
+      plain_bindings: [],
+      ...(kind === 'missing'
+        ? {}
+        : {
+            hashed_bindings: [{ name: 'PB_IDP_PROVIDERS', sha256: [providerHash(text)] }],
+          }),
+    };
+    await save();
+    interceptRead(async (url, fallback) =>
+      url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}/settings`)
+        ? response(
+            ownedWorkerSettings([
+              {
+                type: 'plain_text',
+                name: 'PB_IDP_PROVIDERS',
+                text: kind === 'unrecorded' ? `${text}!` : kind === 'wrong_type' ? 42 : text,
+              },
+            ]),
+          )
+        : fallback,
+    );
+    if (kind === 'recorded') expect((await teardown(options)).exitCode).toBe(0);
+    else await expectOwnershipConflict();
+  },
+);
+
+it('retains a reused oldest provider hash when the next value evicts the second-oldest', async () => {
+  await saveAttachments();
+  const values = Array.from(
+    { length: deploymentHistoryLimits.hashedValues },
+    (_, i) => `provider-${i}`,
+  );
+  for (const text of [...values, values[0]!, 'new-provider'])
+    recordDeploymentHistory(journal.deployment!, {
+      plainBinding: { name: 'PB_IDP_PROVIDERS', text },
+    });
+  expect(journal.deployment!.history!.hashed_bindings).toEqual([
+    {
+      name: 'PB_IDP_PROVIDERS',
+      sha256: [...values.slice(2), values[0]!, 'new-provider'].map(providerHash),
+    },
+  ]);
+  expect(validateInventory(journal, journal.identity)).toBe(journal);
+});
+
+it('rejects provider-definition text stored in plain binding history', async () => {
+  await saveAttachments();
+  journal.deployment!.history = {
+    version_ids: [],
+    plain_bindings: [{ name: 'PB_IDP_PROVIDERS', texts: ['legacy'] }],
+  };
+  expect(() => validateInventory(journal, journal.identity)).toThrow(
+    'Inventory identity or journal is invalid',
+  );
 });

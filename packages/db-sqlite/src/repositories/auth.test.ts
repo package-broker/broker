@@ -279,6 +279,7 @@ describe('createAuthRepositories', () => {
     const repositories = createAuthRepositories(executor);
 
     expect(Object.keys(repositories).sort()).toEqual([
+      'bindings',
       'credentials',
       'localReader',
       'localSetup',

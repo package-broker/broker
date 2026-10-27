@@ -23,7 +23,7 @@ import type {
 } from '../db/local-login.js';
 import type { OrgContext } from '../db/port.js';
 import type { SessionRepository } from '../db/sessions.js';
-import type { LoginWriter, UserRepository } from '../db/users.js';
+import type { LoginWriter, ProviderBindingReader, UserRepository } from '../db/users.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import type { HookErrorHandler } from '../kernel/access.js';
@@ -39,6 +39,7 @@ import type { CredentialStore } from '../secrets/credential-store.js';
 import type { Keyring } from '../secrets/keyring.js';
 
 export interface AuthRepositories {
+  readonly bindings: ProviderBindingReader;
   readonly sessions: SessionRepository;
   readonly users: UserRepository;
   readonly login: LoginWriter;
@@ -282,6 +283,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   };
 
   const sso = createSsoRoutes({
+    bindings: repositories.bindings,
     providers,
     sessions,
     reauthSessions: repositories.sessions,

@@ -33,6 +33,7 @@ const kernelErrors = [
   [503, 'unavailable', 'Try again later'],
   [503, 'unavailable', 'Authorization is temporarily unavailable'],
   [503, 'not_ready', 'Not ready'],
+  [503, 'provider_binding_unavailable', 'Provider binding unavailable'],
   [404, 'not_found', 'Route not found'],
   [404, 'not_found', 'Unknown provider'],
   [400, 'bad_request', 'Bad request'],
@@ -158,6 +159,7 @@ async function harness(mode: FailureMode, extra: readonly RouteDefinition[] = []
   };
   const registration = collectRegistrations([plugin]);
   const repositories: AuthRepositories = {
+    bindings: { anchor: () => Promise.resolve(null) },
     sessions: repository(read),
     users: repository(read),
     login: repository(read),

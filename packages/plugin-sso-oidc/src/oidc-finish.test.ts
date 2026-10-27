@@ -375,6 +375,110 @@ describe('finish success', () => {
   });
 });
 
+describe('definition-bound login state', () => {
+  it.each([
+    ['issuer', { issuer: 'https://other.example.com/dex' }],
+    ['clientId', { clientId: 'other-client' }],
+    ['scopes', { scopes: ['openid', 'email'] }],
+    ['trustedAudiences', { trustedAudiences: ['other-client'] }],
+    ['trustedEndpointOrigins', { trustedEndpointOrigins: ['https://other.example.com'] }],
+  ] satisfies readonly [string, Partial<OidcConfig>][])(
+    'refuses a changed %s before query parsing or any fetch',
+    async (_name, changed) => {
+      const s = scenario();
+      const stored = await begin(provider(s));
+      s.requests.length = 0;
+      const request = new Request(CALLBACK);
+      Object.defineProperty(request, 'url', {
+        get: () => {
+          throw new Error('query must not be read');
+        },
+      });
+      expect(await finish(provider(s, changed), request, stored)).toEqual({
+        ok: false,
+        reason: 'state_mismatch',
+      });
+      expect(tokenRequests(s)).toHaveLength(0);
+      expect(s.requests).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['unchanged', {}, {}],
+    ['displayName', {}, { displayName: 'New display name' }],
+    ['policy', {}, { policy: { ...POLICY, autoJoin: true } }],
+    ['scope order', { scopes: ['profile', 'email'] }, { scopes: ['email', 'profile'] }],
+    ['default scopes', {}, { scopes: ['openid', 'email', 'profile', 'groups'] }],
+    [
+      'trust list order and duplicates',
+      {
+        trustedAudiences: ['a', 'b', 'a'],
+        trustedEndpointOrigins: ['https://a.example.com', 'https://b.example.com'],
+      },
+      {
+        trustedAudiences: ['b', 'a'],
+        trustedEndpointOrigins: ['https://b.example.com', 'https://a.example.com'],
+      },
+    ],
+  ] satisfies readonly [string, Partial<OidcConfig>, Partial<OidcConfig>][])(
+    'accepts %s across provider instances and exchanges once',
+    async (_name, before, after) => {
+      const s = scenario();
+      const stored = await begin(provider(s, before));
+      const current = await begin(provider(s, after));
+      expect(current.digest).toBe(stored.digest);
+      s.token = async () =>
+        json({ id_token: await sign(claims(stored.nonce as string), signer.privateKey) });
+      s.requests.length = 0;
+      const result = await finish(
+        provider(s, after),
+        callback({ code: 'code', state: stored.state as string }),
+        stored,
+      );
+      expect(result.ok).toBe(true);
+      expect(tokenRequests(s)).toHaveLength(1);
+    },
+  );
+
+  it('uses the fixed-order versioned SHA-256 canonical definition', async () => {
+    const stored = await begin(provider(scenario()));
+    const canonical = JSON.stringify([
+      ISSUER,
+      CLIENT_ID,
+      ['email', 'groups', 'openid', 'profile'],
+      [],
+      [],
+    ]);
+    const hash = await crypto.subtle.digest('SHA-256', encoder.encode(canonical));
+    expect(stored.digest).toBe(`v1:${base64urlEncode(new Uint8Array(hash))}`);
+    expect(stored.digest).toMatch(/^v1:[A-Za-z0-9_-]{43}$/);
+  });
+
+  it.each(['missing', 'non-string', 'v2'])(
+    'refuses a %s digest before query parsing or any fetch',
+    async (kind) => {
+      const s = scenario();
+      const stored = { ...(await begin(provider(s))) } as Record<string, unknown>;
+      if (kind === 'missing') delete stored['digest'];
+      else if (kind === 'non-string') stored['digest'] = 42;
+      else stored['digest'] = (stored['digest'] as string).replace('v1:', 'v2:');
+      s.requests.length = 0;
+      const request = new Request(CALLBACK);
+      Object.defineProperty(request, 'url', {
+        get: () => {
+          throw new Error('query must not be read');
+        },
+      });
+      expect(await finish(provider(s), request, stored as LoginStateData)).toEqual({
+        ok: false,
+        reason: 'state_mismatch',
+      });
+      expect(tokenRequests(s)).toHaveLength(0);
+      expect(s.requests).toHaveLength(0);
+    },
+  );
+});
+
 describe('finish callback checks', () => {
   it('refuses a state mismatch without contacting the issuer', async () => {
     const s = scenario();

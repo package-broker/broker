@@ -39,6 +39,11 @@ export interface LoginLookup {
   readonly invited: boolean;
 }
 
+export interface ProviderBindingReader {
+  /** Null only when no binding exists; failed reads reject. */
+  anchor(ctx: OrgContext, provider: string): Promise<string | null>;
+}
+
 export interface UserRepository {
   /**
    * One statement. `email` is matched exactly against the stored, already lower-cased e-mail.

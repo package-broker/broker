@@ -607,6 +607,7 @@ describe('single sign-on under the UI policy', () => {
       finish: () => Promise.resolve({ ok: false, reason: 'invalid_token' }),
     };
     const sso = createSsoRoutes({
+      bindings: { anchor: () => Promise.resolve(null) },
       providers: new Map([['dex', provider]]),
       sessions: createSessionService({
         sessions: {} as never,

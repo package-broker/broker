@@ -4,7 +4,7 @@ import ssoOidc from '@package-broker/plugin-sso-oidc';
 
 export default defineConfig({
   platform: 'cloudflare',
-  plugins: [ssoOidc(), github()],
+  plugins: [ssoOidc({ runtimeProviders: true }), github()],
   assets: [defineAssets({ kind: 'ui', provider: '@package-broker/ui-assets' })],
   platformPorts: {
     cloudflare: {

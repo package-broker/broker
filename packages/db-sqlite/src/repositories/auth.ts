@@ -6,6 +6,7 @@ import { createLocalLoginReader } from './local-login.js';
 import { createLocalLoginSetupWriter } from './local-login-setup.js';
 import { createLocalLoginSuccessWriter } from './local-login-success.js';
 import { createLoginWriter } from './login.js';
+import { readProviderBinding } from './provider-binding.js';
 import { createSessionRepository } from './session.js';
 import { createUserRepository } from './user.js';
 
@@ -14,6 +15,10 @@ export function createAuthRepositories(
   options: AccessLossOptions = {},
 ): AuthRepositories {
   return {
+    bindings: {
+      anchor: async (ctx, provider) =>
+        (await readProviderBinding(executor, ctx, provider))?.anchor ?? null,
+    },
     sessions: createSessionRepository(executor),
     users: createUserRepository(executor),
     login: createLoginWriter(executor, options),

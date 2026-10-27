@@ -95,6 +95,7 @@ function activeSession(id: string, csrfHash: string, expiresAt: string): ActiveS
 }
 
 interface Options {
+  readonly bindings?: SsoRouteDeps['bindings'];
   readonly clientIp?: (request: Request) => string | null;
   readonly providers?: readonly IdentityProvider[];
   readonly localLoginAvailable?: boolean;
@@ -211,6 +212,9 @@ async function build(options: Options = {}) {
   );
   const findActiveById = vi.fn(repository.findActiveById);
   const deps: SsoRouteDeps = {
+    bindings: options.bindings ?? {
+      anchor: (_org, id) => Promise.resolve(providers.get(id)?.trustAnchor ?? null),
+    },
     clientIp: options.clientIp ?? (() => null),
     reauthSessions: { findActiveById },
     providers,
@@ -383,6 +387,298 @@ describe('route table', () => {
     await app.kernel.fetch(startRequest('dex', undefined, { 'sec-fetch-site': 'cross-site' }));
 
     expect(refusals(app).map((entry) => entry['provider'])).toEqual([null, 'dex']);
+  });
+});
+
+describe('SSO checks before the anchor read', () => {
+  it('keeps origin, provider, body and reauth checks ahead of a failing reader', async () => {
+    const provider = makeProvider('dex');
+    const start = vi.fn(provider.start);
+    const finish = vi.fn(provider.finish);
+    const anchor = vi.fn<SsoRouteDeps['bindings']['anchor']>(() =>
+      Promise.reject(new TypeError(PROVIDER_ERROR_TEXT)),
+    );
+    const app = await build({
+      providers: [
+        { ...provider, start, finish },
+        makeProvider('unsupported', { supportsReauth: false, start, finish }),
+      ],
+      bindings: { anchor },
+    });
+    const session = await app.seed();
+    const requests: readonly [Request, number][] = [
+      [startRequest('dex', undefined, { origin: 'https://evil.test' }), 403],
+      [startRequest('missing'), 404],
+      [startRequest('Evil%0Aid'), 404],
+      [startRequest('local'), 404],
+      [startRequest('dex', '{'), 400],
+      [startRequest('dex', { purpose: 'reauth' }), 401],
+      [startRequest('dex', { purpose: 'reauth' }, { cookie: session.cookie }), 403],
+      [
+        startRequest(
+          'unsupported',
+          { purpose: 'reauth' },
+          { cookie: session.cookie, 'x-csrf-token': session.csrf },
+        ),
+        400,
+      ],
+      [callback('missing', null), 404],
+      [callback('dex', null), 401],
+    ];
+    for (const [request, status] of requests) {
+      expect((await app.kernel.fetch(request)).status).toBe(status);
+    }
+    app.findActiveById.mockResolvedValueOnce(null);
+    const inactiveStart = await app.kernel.fetch(
+      startRequest(
+        'dex',
+        { purpose: 'reauth' },
+        {
+          cookie: session.cookie,
+          'x-csrf-token': session.csrf,
+        },
+      ),
+    );
+    expect(inactiveStart.status).toBe(401);
+    const sealed = await sealLoginState(app.cipher, {
+      provider: 'dex',
+      purpose: 'reauth',
+      returnTo: '/',
+      issuedAt: NOW,
+      sessionId: session.id,
+      data: {},
+    });
+    const noSession = await app.kernel.fetch(callback('dex', pairOf(sealed)));
+    expect(noSession.status).toBe(401);
+    expect(cookieValue(noSession, LOGIN_COOKIE)).toBe('');
+    app.findActiveById.mockResolvedValueOnce(null);
+    const response = await app.kernel.fetch(
+      callback('dex', `${pairOf(sealed)}; ${session.cookie}`),
+    );
+    expect(response.status).toBe(401);
+    expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
+    expect(refusals(app)).toContainEqual(expect.objectContaining({ reason: 'session_inactive' }));
+    expect(anchor).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  it('refuses an anonymous login with a different anchor before contacting the provider', async () => {
+    const provider = makeProvider('dex');
+    const storedAnchor = 'oidc:https://old.example.test';
+    const start = vi.fn(provider.start);
+    const finish = vi.fn(provider.finish);
+    const anchor = vi.fn<SsoRouteDeps['bindings']['anchor']>(() => Promise.resolve(storedAnchor));
+    const app = await build({ providers: [{ ...provider, start, finish }], bindings: { anchor } });
+
+    const response = await app.kernel.fetch(startRequest('dex'));
+
+    expect(response.status).toBe(401);
+    expect(genericRefusal(await bodyOf(response))).toEqual({
+      code: 'login_failed',
+      message: 'Login failed',
+    });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.getSetCookie()).toEqual([]);
+    expect(anchor).toHaveBeenCalledExactlyOnceWith(ORG, 'dex');
+    expect(start).not.toHaveBeenCalled();
+    expect(finish).not.toHaveBeenCalled();
+    expect(refusals(app)).toEqual([expect.objectContaining({ reason: 'provider_rebound' })]);
+    for (const value of [storedAnchor, provider.trustAnchor]) {
+      expect(JSON.stringify(app.logs)).not.toContain(value);
+      expect(JSON.stringify([...response.headers])).not.toContain(value);
+    }
+  });
+});
+
+describe.each(['login', 'reauth'] as const)('SSO anchor gate (%s)', (purpose) => {
+  it.each(['unbound', 'equal', 'different', 'rejects'] as const)(
+    'checks a %s binding before start',
+    async (binding) => {
+      const provider = makeProvider('dex');
+      const start = vi.fn(provider.start);
+      const finish = vi.fn(provider.finish);
+      const anchor = vi.fn<SsoRouteDeps['bindings']['anchor']>(() =>
+        binding === 'rejects'
+          ? Promise.reject(new TypeError(PROVIDER_ERROR_TEXT))
+          : Promise.resolve(
+              binding === 'unbound'
+                ? null
+                : binding === 'equal'
+                  ? provider.trustAnchor
+                  : `${provider.trustAnchor}/`,
+            ),
+      );
+      const app = await build({
+        providers: [{ ...provider, start, finish }],
+        bindings: { anchor },
+      });
+      const session = await app.seed();
+      const response = await app.kernel.fetch(
+        startRequest(
+          'dex',
+          { purpose },
+          {
+            cookie: session.cookie,
+            'x-csrf-token': session.csrf,
+          },
+        ),
+      );
+
+      expect(anchor).toHaveBeenCalledExactlyOnceWith(ORG, 'dex');
+      expect(finish).not.toHaveBeenCalled();
+      if (binding === 'equal' || (binding === 'unbound' && purpose === 'login')) {
+        expect(response.status).toBe(303);
+        expect(start).toHaveBeenCalledTimes(1);
+        expect(cookieValue(response, LOGIN_COOKIE)).toBeTruthy();
+      } else {
+        expect(start).not.toHaveBeenCalled();
+        expect(response.headers.getSetCookie()).toEqual([]);
+        expect(response.status).toBe(binding === 'rejects' ? 503 : 401);
+        expect(await bodyOf(response)).toEqual({
+          error: {
+            ...(binding === 'rejects'
+              ? { code: 'provider_binding_unavailable', message: 'Provider binding unavailable' }
+              : { code: 'login_failed', message: 'Login failed' }),
+            requestId: response.headers.get('x-request-id'),
+          },
+        });
+        expect(refusals(app)).toEqual([
+          expect.objectContaining({
+            level: 'warn',
+            provider: 'dex',
+            reason:
+              binding === 'rejects'
+                ? 'provider_binding_unavailable'
+                : purpose === 'reauth'
+                  ? 'anchor_mismatch'
+                  : 'provider_rebound',
+            ...(binding === 'rejects' ? { error: 'TypeError' } : {}),
+          }),
+        ]);
+        expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        for (const value of [provider.trustAnchor, `${provider.trustAnchor}/`]) {
+          expect(JSON.stringify(app.logs)).not.toContain(value);
+          expect(JSON.stringify([...response.headers])).not.toContain(value);
+        }
+      }
+    },
+  );
+
+  it.each(['unbound', 'equal', 'different', 'rejects'] as const)(
+    'checks a %s binding again before callback exchange',
+    async (binding) => {
+      const provider = makeProvider('dex');
+      const start = vi.fn(provider.start);
+      const finish = vi.fn(provider.finish);
+      const anchor = vi.fn<SsoRouteDeps['bindings']['anchor']>(() =>
+        Promise.resolve(provider.trustAnchor),
+      );
+      const app = await build({
+        providers: [{ ...provider, start, finish }],
+        bindings: { anchor },
+      });
+      const session = await app.seed();
+      const login = await loginCookieOf(
+        app,
+        'dex',
+        { purpose },
+        {
+          cookie: session.cookie,
+          'x-csrf-token': session.csrf,
+        },
+      );
+      expect(start).toHaveBeenCalledTimes(1);
+      anchor.mockClear();
+      if (binding === 'rejects') {
+        anchor.mockRejectedValueOnce(new TypeError(PROVIDER_ERROR_TEXT));
+      } else {
+        anchor.mockResolvedValueOnce(
+          binding === 'unbound'
+            ? null
+            : binding === 'equal'
+              ? provider.trustAnchor
+              : `${provider.trustAnchor}/`,
+        );
+      }
+      const response = await app.kernel.fetch(callback('dex', `${login}; ${session.cookie}`));
+
+      expect(anchor).toHaveBeenCalledExactlyOnceWith(ORG, 'dex');
+      expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
+      expect(response.headers.getSetCookie()).toContainEqual(
+        expect.stringMatching(new RegExp(`^${LOGIN_COOKIE}=;.*Max-Age=0`)),
+      );
+      if (binding === 'equal' || (binding === 'unbound' && purpose === 'login')) {
+        expect(response.status).toBe(303);
+        expect(finish).toHaveBeenCalledTimes(1);
+        expect(purpose === 'login' ? app.login : app.reauth).toHaveBeenCalledTimes(1);
+      } else {
+        expect(finish).not.toHaveBeenCalled();
+        expect(app.login).not.toHaveBeenCalled();
+        expect(app.reauth).not.toHaveBeenCalled();
+        expect(response.status).toBe(binding === 'rejects' ? 503 : 401);
+        expect(await bodyOf(response)).toEqual({
+          error: {
+            ...(binding === 'rejects'
+              ? { code: 'provider_binding_unavailable', message: 'Provider binding unavailable' }
+              : { code: 'login_failed', message: 'Login failed' }),
+            requestId: response.headers.get('x-request-id'),
+          },
+        });
+        expect(refusals(app)).toEqual([
+          expect.objectContaining({
+            level: 'warn',
+            provider: 'dex',
+            reason:
+              binding === 'rejects'
+                ? 'provider_binding_unavailable'
+                : purpose === 'reauth'
+                  ? 'anchor_mismatch'
+                  : 'provider_rebound',
+            ...(binding === 'rejects' ? { error: 'TypeError' } : {}),
+          }),
+        ]);
+        expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        for (const value of [provider.trustAnchor, `${provider.trustAnchor}/`]) {
+          expect(JSON.stringify(app.logs)).not.toContain(value);
+          expect(JSON.stringify([...response.headers])).not.toContain(value);
+        }
+      }
+    },
+  );
+
+  it('ignores a binding for another provider', async () => {
+    const provider = makeProvider('dex');
+    const start = vi.fn(provider.start);
+    const finish = vi.fn(provider.finish);
+    const anchor = vi.fn<SsoRouteDeps['bindings']['anchor']>((_org, id) =>
+      Promise.resolve(id === 'other' ? 'oidc:https://changed.test' : provider.trustAnchor),
+    );
+    const app = await build({
+      providers: [{ ...provider, start, finish }, makeProvider('other')],
+      bindings: { anchor },
+    });
+    const session = await app.seed();
+    const login = await loginCookieOf(
+      app,
+      'dex',
+      { purpose },
+      {
+        cookie: session.cookie,
+        'x-csrf-token': session.csrf,
+      },
+    );
+    const response = await app.kernel.fetch(callback('dex', `${login}; ${session.cookie}`));
+
+    expect(response.status).toBe(303);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(anchor.mock.calls).toEqual([
+      [ORG, 'dex'],
+      [ORG, 'dex'],
+    ]);
   });
 });
 

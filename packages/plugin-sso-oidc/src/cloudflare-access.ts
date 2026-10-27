@@ -13,6 +13,7 @@ import { checkPolicy } from './config.js';
 import { fetchBounded } from './http.js';
 import { createJwksCache } from './jwks.js';
 import { JwtError, type JwtFailure, type VerifiedClaims, verifyJwt } from './jwt.js';
+import { providerPresentation } from './presentation.js';
 
 export interface CloudflareAccessConfig {
   readonly id: string;
@@ -26,7 +27,6 @@ export interface CloudflareAccessConfig {
 }
 
 const ASSERTION_HEADER = 'Cf-Access-Jwt-Assertion';
-const DEFAULT_DISPLAY_NAME = 'Cloudflare Access';
 const AUDIENCE_PATTERN = /^[0-9a-f]{64}$/;
 const TEAM_DOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/;
 const GROUPS_UNSUPPORTED = 'groups are not supported until spike T172';
@@ -264,8 +264,13 @@ export function createCloudflareAccessProvider(
   return {
     id,
     kind: 'cloudflare-access',
-    displayName: config.displayName ?? DEFAULT_DISPLAY_NAME,
-    trustAnchor: `access:${teamDomain}/${audience}`,
+    ...providerPresentation({
+      id,
+      kind: 'cloudflare-access',
+      teamDomain,
+      audience,
+      displayName: config.displayName,
+    }),
     policy,
     supportsReauth: false,
     start: (input) =>

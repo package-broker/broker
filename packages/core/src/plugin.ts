@@ -23,6 +23,7 @@ export {
 } from './auth/primitives.js';
 export { packageKey } from './catalogue/names.js';
 export { normalizeEmail, domainPolicyProblems } from './identity/policy.js';
+export { providerFieldProblems } from './identity/provider-fields.js';
 export {
   isReservedProviderId,
   isValidProviderId,

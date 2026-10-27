@@ -498,7 +498,7 @@ it('15. exits 6 with a fixed line when the migrate response body is lost', async
   await writeBuiltInit(outDir, await realInit());
   expect(await migrate(unreadableBody())).toBe(6);
   expect(console.error).toHaveBeenCalledWith(
-    'outcome unknown: the change may have been applied; re-run pb cloudflare migrate to read the recorded state; if the re-run reports the lock held by the holder printed above, it expires 10 minutes after this run started; wait and run migrate again',
+    'outcome unknown: the change may have been applied; re-run pb cloudflare migrate to read the recorded state; if the re-run reports the lock held by the holder printed above, it expires 10 minutes after the last applied migration; wait and run migrate again',
   );
 });
 

@@ -380,7 +380,7 @@ export async function migrateCloudflare(
     report(error, secrets);
     if (outcomeUnknown(error)) {
       emit(
-        `outcome unknown: the change may have been applied; re-run pb cloudflare migrate to read the recorded state; if the re-run reports the lock held by the holder printed above, it expires ${LOCK_TTL_SECONDS / 60} minutes after this run started; wait and run migrate again`,
+        `outcome unknown: the change may have been applied; re-run pb cloudflare migrate to read the recorded state; if the re-run reports the lock held by the holder printed above, it expires ${LOCK_TTL_SECONDS / 60} minutes after the last applied migration; wait and run migrate again`,
       );
       return finish(6);
     }

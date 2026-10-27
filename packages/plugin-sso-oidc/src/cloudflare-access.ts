@@ -29,7 +29,8 @@ export interface CloudflareAccessConfig {
 const ASSERTION_HEADER = 'Cf-Access-Jwt-Assertion';
 const AUDIENCE_PATTERN = /^[0-9a-f]{64}$/;
 const TEAM_DOMAIN_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/;
-const GROUPS_UNSUPPORTED = 'groups are not supported until spike T172';
+const GROUPS_UNSUPPORTED =
+  'groups must be none or get-identity, and policy rules cannot match on groups';
 const MAX_IDENTITY_BYTES = 64 * 1024;
 const IDENTITY_TIMEOUT_MS = 5_000;
 const ALLOWED_KEYS: ReadonlySet<string> = new Set([

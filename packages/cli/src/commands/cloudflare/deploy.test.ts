@@ -4180,3 +4180,112 @@ it('pins route drift during reconciliation after failed configuration', async ()
   expect(routeChecks(result.output)).toEqual(conflictChecks('routes', 'routes:drift'));
   expect(routeMutations(h)).toHaveLength(count);
 });
+
+const compiledIdentity = { id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' };
+const accessIdentity = {
+  id: 'access',
+  kind: 'cloudflare-access',
+  anchor: `access:team.example.com/${'a'.repeat(64)}`,
+};
+async function writeIdentity(identity: unknown) {
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.identity = identity;
+  await writeFile(file, JSON.stringify(manifest));
+}
+it.each([true, false])(
+  'reads a valid identity descriptor (runtimeProviders: %s)',
+  async (runtimeProviders) => {
+    const identity = { runtimeProviders, compiled: [compiledIdentity, accessIdentity] };
+    await writeIdentity(identity);
+    const parsed = (await validateDeploymentArtifact(out)).identity;
+    expect(parsed).toEqual(identity);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed?.compiled)).toBe(true);
+    expect(parsed?.compiled.every(Object.isFrozen)).toBe(true);
+  },
+);
+it('reads an absent identity descriptor as legacy null', async () => {
+  expect((await validateDeploymentArtifact(out)).identity).toBeNull();
+});
+it('accepts the identity descriptor at the 64-provider boundary', async () => {
+  const identity = {
+    runtimeProviders: true,
+    compiled: Array.from({ length: 64 }, (_, i) => ({
+      id: `p${i}`,
+      kind: 'oidc',
+      anchor: `oidc:https://idp${i}.example.com`,
+    })),
+  };
+  await writeIdentity(identity);
+  expect((await validateDeploymentArtifact(out)).identity).toEqual(identity);
+});
+it.each([
+  ['null', null],
+  ['array', []],
+  ['string', 'identity'],
+  ['extra key', { runtimeProviders: true, compiled: [], extra: true }],
+  ['missing flag', { compiled: [] }],
+  ['wrong flag type', { runtimeProviders: 'true', compiled: [] }],
+  ['missing compiled', { runtimeProviders: true }],
+  ['wrong compiled type', { runtimeProviders: true, compiled: {} }],
+  [
+    '65 entries',
+    {
+      runtimeProviders: true,
+      compiled: Array.from({ length: 65 }, (_, i) => ({
+        id: `p${i}`,
+        kind: 'oidc',
+        anchor: `oidc:https://idp${i}.example.com`,
+      })),
+    },
+  ],
+  ...[
+    ['null entry', null],
+    ['array entry', []],
+    ['entry extra key', { ...compiledIdentity, extra: true }],
+    ['missing id', { kind: 'oidc', anchor: compiledIdentity.anchor }],
+    ['wrong id type', { ...compiledIdentity, id: 1 }],
+    ['invalid id', { ...compiledIdentity, id: 'BAD_ID' }],
+    ['reserved id', { ...compiledIdentity, id: 'local' }],
+    ['bad kind', { ...compiledIdentity, kind: 'saml' }],
+    ['wrong kind type', { ...compiledIdentity, kind: null }],
+    ['wrong anchor type', { ...compiledIdentity, anchor: 1 }],
+    ['bad anchor', { ...compiledIdentity, anchor: 'oidc:https://user:pass@idp.example.com' }],
+    ['mismatched oidc anchor', { ...compiledIdentity, anchor: accessIdentity.anchor }],
+    ['mismatched access anchor', { ...accessIdentity, anchor: compiledIdentity.anchor }],
+  ].map(([name, entry]): [unknown, unknown] => [
+    name,
+    { runtimeProviders: true, compiled: [entry] },
+  ]),
+  [
+    'duplicate id',
+    {
+      runtimeProviders: true,
+      compiled: [
+        compiledIdentity,
+        {
+          ...compiledIdentity,
+          anchor: 'oidc:https://other.example.com',
+        },
+      ],
+    },
+  ],
+  [
+    'duplicate canonical anchor',
+    {
+      runtimeProviders: true,
+      compiled: [
+        compiledIdentity,
+        {
+          ...compiledIdentity,
+          id: 'other',
+          anchor: 'oidc:https://IDP.example.com:443/',
+        },
+      ],
+    },
+  ],
+])('rejects malformed identity metadata: %s', async (_name, identity) => {
+  await writeIdentity(identity);
+  await expect(validateDeploymentArtifact(out)).rejects.toMatchObject({ code: 'invalid_input' });
+});

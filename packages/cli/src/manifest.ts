@@ -1,4 +1,4 @@
-import type { Platform, PluginDefinition } from '@package-broker/core/plugin';
+import type { IdentityDescriptor, Platform, PluginDefinition } from '@package-broker/core/plugin';
 import { SUPPORTED_PLUGIN_API } from '@package-broker/core/plugin';
 import {
   KernelConfigError,
@@ -152,6 +152,7 @@ export interface ManifestMigration {
 }
 
 export interface Manifest {
+  identity?: IdentityDescriptor;
   platformPorts?: PlatformPortConfig | null;
   schemaVersion: 1;
   platform: Platform;
@@ -172,6 +173,20 @@ export function renderManifestJson(
 ): Manifest {
   return {
     schemaVersion: 1,
+    ...(extra.registration?.identityDescriptor
+      ? {
+          identity: {
+            runtimeProviders: extra.registration.identityDescriptor.runtimeProviders,
+            compiled: extra.registration.identityDescriptor.compiled.map(
+              ({ id, kind, anchor }) => ({
+                id,
+                kind,
+                anchor,
+              }),
+            ),
+          },
+        }
+      : {}),
     platform,
     plugins: plugins.map((plugin) => ({
       id: plugin.id,

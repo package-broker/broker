@@ -457,7 +457,7 @@ function fields(value: unknown, keys: readonly string[]): Record<string, unknown
   return Object.fromEntries(keys.map((key) => [key, (value as Record<string, unknown>)[key]]));
 }
 
-function snapshotIdentityDescriptor(value: unknown): IdentityDescriptor | null {
+export function snapshotIdentityDescriptor(value: unknown): IdentityDescriptor | null {
   const { runtimeProviders, compiled } = fields(value, ['runtimeProviders', 'compiled']) ?? {};
   if (typeof runtimeProviders !== 'boolean' || !Array.isArray(compiled)) return null;
   const length = readLength(compiled as unknown[]);

@@ -9,6 +9,7 @@ import {
   type PlatformPortConfig,
 } from '@package-broker/core/platform/port-config';
 import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
+import { snapshotIdentityDescriptor } from '@package-broker/core/kernel/registry';
 import {
   assertPrebuiltConfiguration,
   materializePrebuilt,
@@ -181,6 +182,9 @@ export async function validateDeploymentArtifact(out: string) {
     if (module.length === 0) return invalid();
     const info = safeBuildInfo(JSON.parse((await read('build-info.json')).toString('utf8')));
     const manifest = object(JSON.parse((await read('generated/manifest.json')).toString('utf8')));
+    const hasIdentity = Object.hasOwn(manifest, 'identity');
+    const identity = hasIdentity ? snapshotIdentityDescriptor(manifest.identity) : null;
+    if (hasIdentity && identity === null) return invalid();
     if (
       manifest.schemaVersion !== 1 ||
       manifest.platform !== 'cloudflare' ||
@@ -258,7 +262,16 @@ export async function validateDeploymentArtifact(out: string) {
         ports,
       }),
     );
-    return { module, info, ports, assets, assetsHash: exactAssetsHash, artifactHash, migrations };
+    return {
+      module,
+      info,
+      ports,
+      assets,
+      assetsHash: exactAssetsHash,
+      artifactHash,
+      migrations,
+      identity,
+    };
   } catch {
     return invalid();
   }

@@ -141,3 +141,30 @@ it('serializes declared and absent route boundaries explicitly', () => {
     ),
   ).toEqual(['organization', null]);
 });
+
+it('copies identity metadata from the registration snapshot without rereading the plugin', () => {
+  const descriptor = {
+    runtimeProviders: true,
+    compiled: [{ id: 'corp', kind: 'oidc' as const, anchor: 'oidc:https://idp.example.com' }],
+  };
+  const identityPlugin = definePlugin({
+    id: 'identity-fixture',
+    package: '@example/identity',
+    apiVersion: 3,
+    platforms: ['node'],
+    binds: ['identity'],
+    identityProviders: () => [],
+    identityDescriptor: descriptor,
+  });
+  const registration = collectRegistrations([identityPlugin]);
+  descriptor.runtimeProviders = false;
+  descriptor.compiled[0]!.anchor = 'oidc:https://other.example.com';
+  const manifest = renderManifestJson([identityPlugin], new Map(), 'node', { registration });
+  expect(manifest.identity).toEqual({
+    runtimeProviders: true,
+    compiled: [{ id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' }],
+  });
+  expect(manifest.identity).not.toBe(registration.identityDescriptor);
+  expect(manifest.identity?.compiled[0]).not.toBe(registration.identityDescriptor?.compiled[0]);
+  expect(renderManifestJson([identityPlugin], new Map(), 'node')).not.toHaveProperty('identity');
+});

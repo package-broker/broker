@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import {
   mkdir,
   mkdtemp,
@@ -363,6 +364,57 @@ describe('build with platformPorts', () => {
   async function readManifest(outDir: string): Promise<Record<string, unknown>> {
     return JSON.parse(await readFile(path.join(outDir, 'generated', 'manifest.json'), 'utf8'));
   }
+
+  it('writes the registered SSO identity descriptor into the built manifest', async () => {
+    const configPath = path.join(project, 'broker.config.ts');
+    await writeFile(
+      configPath,
+      `
+      import ssoOidc from '@package-broker/plugin-sso-oidc';
+      export default { platform: 'cloudflare', plugins: [ssoOidc({
+        runtimeProviders: true,
+        providers: [{ id: 'corp', kind: 'oidc', issuer: 'https://idp.example.com',
+          clientId: 'broker-client', policy: { verifiedDomains: ['example.com'], autoJoin: false } }],
+      })] };
+    `,
+    );
+    const result = await build({ configPath, target: 'cloudflare', cwd: project, runtimeEntry });
+    expect((await readManifest(result.outDir)).identity).toEqual({
+      runtimeProviders: true,
+      compiled: [{ id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' }],
+    });
+  });
+
+  it('omits identity from a build without SSO', async () => {
+    const configPath = await writeConfig('cloudflare', { cloudflare: CLOUDFLARE_PORTS });
+    const result = await build({ configPath, target: 'cloudflare', cwd: project, runtimeEntry });
+    expect(await readManifest(result.outDir)).not.toHaveProperty('identity');
+  });
+
+  it.skipIf(
+    process.env.CI === undefined &&
+      !existsSync(new URL('../../ui/dist/assets/manifest.json', import.meta.url)),
+  )(
+    'builds the release config offline with the runtime-only identity descriptor',
+    async () => {
+      if (!existsSync(new URL('../../ui/dist/assets/manifest.json', import.meta.url))) {
+        throw new Error('Release-config build test requires UI assets; run pnpm build first.');
+      }
+      const configPath = fileURLToPath(new URL('../../../broker.config.ts', import.meta.url));
+      const result = await build({
+        configPath,
+        target: 'cloudflare',
+        cwd: await realpath(project),
+        outDir: path.join(await realpath(project), 'release'),
+        runtimeEntry: await realpath(runtimeEntry),
+      });
+      expect((await readManifest(result.outDir)).identity).toEqual({
+        runtimeProviders: true,
+        compiled: [],
+      });
+    },
+    60_000,
+  );
 
   it.each(['node', 'cloudflare'] as const)(
     'bundles the expected migration metadata for %s readiness',

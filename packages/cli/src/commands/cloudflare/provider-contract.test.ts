@@ -788,3 +788,11 @@ it('reports a non-array through the deploy zoneRoutes path as provider failure',
     code: 'provider_failure',
   });
 });
+it('records the R2 CORS not-configured response as a single 10059 error with a null result', () => {
+  expect(fixtures.r2CorsNotConfigured).toEqual({
+    success: false,
+    errors: [{ code: 10059, message: 'The CORS configuration does not exist.' }],
+    messages: [],
+    result: null,
+  });
+});

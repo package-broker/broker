@@ -2329,25 +2329,209 @@ it('treats the documented empty storageClassTransitions as part of the abort-onl
   );
 });
 
-it.each(['changed', 'unrelated', 'no_baseline'] as const)(
+it.each(['changed', 'unrelated'] as const)(
   'refuses a %s R2 lifecycle rule before any mutation',
   async (kind) => {
-    const name = await provisionedBucket(kind === 'no_baseline' ? null : [ABORT_RULE]);
+    const name = await provisionedBucket([ABORT_RULE]);
     const rule =
       kind === 'changed'
         ? {
             ...ABORT_RULE,
             abortMultipartUploadsTransition: { condition: { type: 'Age', maxAge: 60 } },
           }
-        : kind === 'unrelated'
-          ? { id: 'expire', enabled: true, conditions: { prefix: '' }, deleteObjectsTransition: {} }
-          : ABORT_RULE;
+        : { id: 'expire', enabled: true, conditions: { prefix: '' }, deleteObjectsTransition: {} };
     interceptRead(async (url, fallback) =>
       url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`)
         ? response({ rules: [rule] })
         : fallback,
     );
     await expectOwnershipConflict();
+  },
+);
+
+const LIVE_DEFAULT_RULE = providerFixtures.r2LifecycleDefault.result.rules[0];
+const liveBody = (fixture: unknown) => Response.json(fixture);
+const bucketDeleted = (name: string) =>
+  trace.some((e) => e.method === 'DELETE' && e.path.endsWith(`/r2/buckets/${name}`));
+function liveLifecycle(name: string, rules: unknown[]) {
+  interceptRead(async (url, fallback) =>
+    url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`) ? response({ rules }) : fallback,
+  );
+}
+
+it.each([
+  ['recorded baseline', [ABORT_RULE]],
+  ['no recorded baseline', null],
+] as const)(
+  'deletes a created bucket whose live default rule has empty conditions (%s)',
+  async (_kind, baseline) => {
+    const name = await provisionedBucket(baseline === null ? null : [...baseline]);
+    liveLifecycle(name, [LIVE_DEFAULT_RULE]);
+    expect((await teardown(options)).exitCode).toBe(0);
+    expect(bucketDeleted(name)).toBe(true);
+  },
+);
+
+it.each([
+  [
+    'different max age',
+    [
+      {
+        ...LIVE_DEFAULT_RULE,
+        abortMultipartUploadsTransition: { condition: { type: 'Age', maxAge: 60 } },
+      },
+    ],
+  ],
+  ['different id', [{ ...LIVE_DEFAULT_RULE, id: 'Custom Abort Rule' }]],
+  ['disabled', [{ ...LIVE_DEFAULT_RULE, enabled: false }]],
+  ['non-empty prefix', [{ ...LIVE_DEFAULT_RULE, conditions: { prefix: 'tmp/' } }]],
+  ['extra condition', [{ ...LIVE_DEFAULT_RULE, conditions: { prefix: '', suffix: '' } }]],
+  [
+    'extra field',
+    [{ ...LIVE_DEFAULT_RULE, deleteObjectsTransition: { condition: { type: 'Age', maxAge: 60 } } }],
+  ],
+  ['extra rule', [LIVE_DEFAULT_RULE, { ...LIVE_DEFAULT_RULE, id: 'second' }]],
+  [
+    'extra expiry rule',
+    [
+      LIVE_DEFAULT_RULE,
+      { id: 'expire', enabled: true, conditions: {}, deleteObjectsTransition: {} },
+    ],
+  ],
+] as const)(
+  'refuses a created bucket without a recorded baseline whose lifecycle has a %s',
+  async (_kind, rules) => {
+    const name = await provisionedBucket(null);
+    liveLifecycle(name, [...rules]);
+    await expectOwnershipConflict();
+  },
+);
+
+it.each([
+  ['the live default rule', LIVE_DEFAULT_RULE],
+  ['the normalized default rule', ABORT_RULE],
+])('refuses an adopted bucket without a baseline carrying %s', async (_kind, rule) => {
+  const name = await provisionedBucket(null);
+  journal.resources.r2!.evidence = {
+    source: 'adopted',
+    operation_id: null,
+    verified_at: journal.updated_at,
+  };
+  journal.operations = journal.operations.filter((op) => op.id !== 'create-r2');
+  await save();
+  liveLifecycle(name, [rule]);
+  await expectOwnershipConflict();
+});
+
+it('drains an objects listing recorded without result_info as an empty bucket', async () => {
+  const name = await provisionedBucket();
+  let listings = 0;
+  interceptRead(async (url, fallback) => {
+    if (url.pathname.endsWith(`/r2/buckets/${name}/objects`)) {
+      listings++;
+      return liveBody(providerFixtures.r2ObjectsEmpty);
+    }
+    return fallback;
+  });
+  expect((await teardown(options)).exitCode).toBe(0);
+  expect(listings).toBeGreaterThan(0);
+  expect(bucketDeleted(name)).toBe(true);
+});
+
+it.each([
+  [
+    'one object without result_info',
+    { ...providerFixtures.r2ObjectsEmpty, result: [{ key: 'a' }] },
+  ],
+  [
+    'a full page without result_info',
+    {
+      ...providerFixtures.r2ObjectsEmpty,
+      result: Array.from({ length: 100 }, (_, i) => ({ key: `object-${i}` })),
+    },
+  ],
+  [
+    'an empty listing with result_info null',
+    { ...providerFixtures.r2ObjectsEmpty, result_info: null },
+  ],
+] as const)('refuses %s as a provider failure before mutation', async (_kind, body) => {
+  const name = await provisionedBucket();
+  interceptRead(async (url, fallback) =>
+    url.pathname.endsWith(`/r2/buckets/${name}/objects`) ? liveBody(body) : fallback,
+  );
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(1);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+});
+
+it.each([
+  ['an empty recorded baseline', [], LIVE_DEFAULT_RULE],
+  ['a recorded non-default rule', [{ ...ABORT_RULE, id: 'Custom Abort Rule' }], LIVE_DEFAULT_RULE],
+  ['a recorded default rule matched twice', [ABORT_RULE], [LIVE_DEFAULT_RULE, ABORT_RULE]],
+] as const)('refuses the live default rule against %s', async (_kind, baseline, live) => {
+  const name = await provisionedBucket([...baseline]);
+  liveLifecycle(name, Array.isArray(live) ? [...live] : [live]);
+  await expectOwnershipConflict();
+});
+
+it.each([
+  ['two live-shape copies', [LIVE_DEFAULT_RULE, LIVE_DEFAULT_RULE]],
+  ['a live-shape and a normalized copy', [LIVE_DEFAULT_RULE, ABORT_RULE]],
+  ['no rule', []],
+] as const)('refuses %s under the implicit default baseline', async (_kind, rules) => {
+  const name = await provisionedBucket(null);
+  liveLifecycle(name, [...rules]);
+  await expectOwnershipConflict();
+});
+
+it.each([
+  ['created evidence and an empty-prefix rule', 0, 'created', ABORT_RULE],
+  ['pending_create evidence and the live rule', 0, 'pending_create', LIVE_DEFAULT_RULE],
+  ['worker_binding evidence and the live rule', 8, 'worker_binding', LIVE_DEFAULT_RULE],
+] as const)('without a baseline, %s exits %i', async (_kind, exitCode, source, rule) => {
+  const name = await provisionedBucket(null);
+  journal.resources.r2!.evidence!.source = source;
+  if (source === 'worker_binding') journal.resources.r2!.evidence!.operation_id = null;
+  await save();
+  liveLifecycle(name, [rule]);
+  if (exitCode === 8) await expectOwnershipConflict();
+  else {
+    expect((await teardown(options)).exitCode).toBe(0);
+    expect(bucketDeleted(name)).toBe(true);
+  }
+});
+
+it.each([
+  ['recorded baseline', [ABORT_RULE]],
+  ['no recorded baseline', null],
+] as const)(
+  'reaches the delete phase when every R2 read returns the recorded live body (%s)',
+  async (_kind, baseline) => {
+    const name = await provisionedBucket(baseline === null ? null : [...baseline]);
+    const served = new Set<string>();
+    interceptRead(async (url, fallback) => {
+      const bucketPath = `/r2/buckets/${name}`;
+      const live: [string, () => Response][] = [
+        [`${bucketPath}/lifecycle`, () => liveBody(providerFixtures.r2LifecycleDefault)],
+        [`${bucketPath}/objects`, () => liveBody(providerFixtures.r2ObjectsEmpty)],
+        [`${bucketPath}/lock`, () => liveBody(providerFixtures.r2LockEmpty)],
+        [`${bucketPath}/domains/managed`, () => liveBody(providerFixtures.r2ManagedDomainDisabled)],
+        [`${bucketPath}/sippy`, () => liveBody(providerFixtures.r2SippyDisabled)],
+        [`${bucketPath}/domains/custom`, () => response({ domains: [] })],
+        [corsPath(name), () => notFound(JSON.stringify(providerFixtures.r2CorsNotConfigured))],
+        [notificationPath(name), () => notFound(noNotificationsBody(name))],
+      ];
+      for (const [suffix, body] of live)
+        if (url.pathname.endsWith(suffix)) {
+          served.add(suffix);
+          return body();
+        }
+      return fallback;
+    });
+    expect((await teardown(options)).exitCode).toBe(0);
+    expect(served.size).toBe(8);
+    expect(bucketDeleted(name)).toBe(true);
   },
 );
 

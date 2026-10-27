@@ -1483,6 +1483,94 @@ it.each([false, true])('chains provision into teardown with lifecycle drift=%s',
   }
 });
 
+const liveFixtures = JSON.parse(
+  await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+) as Record<string, Record<string, unknown>>;
+const LIVE_DEFAULT_RULE = (liveFixtures.r2LifecycleDefault!.result as { rules: unknown[] })
+  .rules[0] as Record<string, unknown>;
+
+it('records the recorded live default rule with empty conditions as the normalized baseline', async () => {
+  const h = harness();
+  h.hook = (path) =>
+    path.endsWith('/lifecycle')
+      ? new Response(JSON.stringify(liveFixtures.r2LifecycleDefault))
+      : undefined;
+  const result = await provision(options(h));
+  expect(result.exitCode).toBe(0);
+  expect((await journal()).resources.r2?.lifecycle_baseline).toEqual([DEFAULT_ABORT_RULE]);
+  expect(result.output.checks).not.toContainEqual({
+    name: 'lifecycle_baseline',
+    status: 'unrecorded',
+  });
+});
+
+it.each([
+  ['extra_condition', { prefix: '', suffix: '' }],
+  ['other_condition', { suffix: '' }],
+  ['numeric_prefix', { prefix: 0 }],
+  ['null_conditions', null],
+  ['array_conditions', []],
+] as const)(
+  'still reports an unrecorded baseline for live conditions %s',
+  async (_kind, conditions) => {
+    const h = harness();
+    h.hook = (path) =>
+      path.endsWith('/lifecycle')
+        ? ok({ rules: [{ ...LIVE_DEFAULT_RULE, conditions }] })
+        : undefined;
+    const result = await provision(options(h));
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({
+      name: 'lifecycle_baseline',
+      status: 'unrecorded',
+    });
+    expect((await journal()).resources.r2?.lifecycle_baseline).toBeUndefined();
+  },
+);
+
+it('chains provision into teardown when every lifecycle read returns the live default shape', async () => {
+  const h = harness();
+  const live = () => new Response(JSON.stringify(liveFixtures.r2LifecycleDefault));
+  h.hook = (path) => (path.endsWith('/lifecycle') ? live() : undefined);
+  expect((await provision(options(h))).exitCode).toBe(0);
+  expect((await journal()).resources.r2!.lifecycle_baseline).toEqual([DEFAULT_ABORT_RULE]);
+  const provider = h.fetch;
+  const deleted: string[] = [];
+  h.fetch = vi.fn(async (input, init) => {
+    const path = new URL(String(input)).pathname.split(ACCOUNT)[1]!;
+    if (init?.method === 'DELETE') {
+      deleted.push(path);
+      const id = path.split('/').at(-1);
+      for (const kind of ['d1', 'r2', 'queue'])
+        h.resources[kind] = h.resources[kind]!.filter(
+          (r) => (r.uuid ?? r.queue_id ?? r.name) !== id,
+        );
+      return ok(null);
+    }
+    if (path === '/workers/scripts') return ok([]);
+    if (path === '/queues') return ok(h.resources.queue, { total_pages: 1 });
+    if (path.endsWith('/consumers')) return ok([]);
+    if (path.endsWith('/configuration')) return ok({ queues: [] });
+    if (path.endsWith('/objects')) return new Response(JSON.stringify(liveFixtures.r2ObjectsEmpty));
+    if (path.endsWith('/domains/custom')) return ok({ domains: [] });
+    if (/\/(?:cors|lock)$/.test(path)) return ok({ rules: [] });
+    if (/\/(?:domains\/managed|sippy)$/.test(path)) return ok({ enabled: false });
+    return provider(input, init);
+  });
+  const result = await teardown({
+    project,
+    inventory: statePath(),
+    env,
+    fetch: h.fetch,
+    now: h.now,
+    sleep: h.sleep,
+    inventoryId: identity.owner_digest,
+    iUnderstandThisDeletes: true,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(deleted).toHaveLength(4);
+});
+
 it.each([true, false, null])(
   'preserves dirty provenance in provision output (%s)',
   async (dirty) => {

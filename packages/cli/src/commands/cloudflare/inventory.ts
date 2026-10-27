@@ -41,15 +41,18 @@ export interface LifecycleRule {
   conditions: { prefix: string };
   abortMultipartUploadsTransition: { condition: { type: 'Age'; maxAge: number } };
 }
-export function abortOnlyRule(rule: LifecycleRule): LifecycleRule {
+export interface LiveLifecycleRule extends Omit<LifecycleRule, 'conditions'> {
+  conditions: { prefix?: string };
+}
+export function abortOnlyRule(rule: LiveLifecycleRule): LifecycleRule {
   return {
     id: rule.id,
     enabled: rule.enabled,
-    conditions: rule.conditions,
+    conditions: { prefix: rule.conditions.prefix ?? '' },
     abortMultipartUploadsTransition: rule.abortMultipartUploadsTransition,
   };
 }
-export function lifecycleRule(raw: unknown): raw is LifecycleRule {
+export function lifecycleRule(raw: unknown): raw is LiveLifecycleRule {
   const record = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === 'object' && !Array.isArray(v);
   const only = (v: Record<string, unknown>, keys: string[]) =>
@@ -73,7 +76,13 @@ export function lifecycleRule(raw: unknown): raw is LifecycleRule {
   )
     return false;
   const { conditions, abortMultipartUploadsTransition: abort } = raw;
-  if (!record(conditions) || !only(conditions, ['prefix']) || typeof conditions.prefix !== 'string')
+  if (
+    !record(conditions) ||
+    !(
+      only(conditions, []) ||
+      (only(conditions, ['prefix']) && typeof conditions.prefix === 'string')
+    )
+  )
     return false;
   if (!record(abort) || !only(abort, ['condition']) || !record(abort.condition)) return false;
   const c = abort.condition;
@@ -902,7 +911,9 @@ export function validateInventory(raw: unknown, expected: InstallIdentity): Inve
       (key !== 'r2' ||
         !Array.isArray(r.lifecycle_baseline) ||
         r.lifecycle_baseline.length > 16 ||
-        !r.lifecycle_baseline.every(lifecycleRule) ||
+        !r.lifecycle_baseline.every(
+          (rule) => lifecycleRule(rule) && typeof rule.conditions.prefix === 'string',
+        ) ||
         r.evidence === null ||
         !['created', 'pending_create'].includes(r.evidence.source))
     )

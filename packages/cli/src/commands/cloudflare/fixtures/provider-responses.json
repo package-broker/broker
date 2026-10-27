@@ -492,5 +492,57 @@
         "script": "other-worker"
       }
     ]
+  },
+  "r2LifecycleDefault": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "rules": [
+        {
+          "id": "Default Multipart Abort Rule",
+          "enabled": true,
+          "conditions": {},
+          "abortMultipartUploadsTransition": {
+            "condition": {
+              "type": "Age",
+              "maxAge": 604800
+            }
+          }
+        }
+      ]
+    }
+  },
+  "r2ObjectsEmpty": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": []
+  },
+  "r2LockEmpty": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "rules": []
+    }
+  },
+  "r2ManagedDomainDisabled": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "enabled": false,
+      "bucketId": "00000000000000000000000000000000",
+      "domain": "pub-00000000000000000000000000000000.r2.dev"
+    }
+  },
+  "r2SippyDisabled": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+      "enabled": false
+    }
   }
 }

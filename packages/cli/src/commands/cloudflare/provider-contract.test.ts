@@ -3,7 +3,13 @@ import { expect, it, vi } from 'vitest';
 import ts from 'typescript';
 import { CloudflareApi } from './api.js';
 import { cloudflareDeployContract, unverifiedDeployContract, zoneRoutes } from './deploy.js';
-import { installIdentity, type Operation, type ResourceKind } from './inventory.js';
+import {
+  abortOnlyRule,
+  installIdentity,
+  lifecycleRule,
+  type Operation,
+  type ResourceKind,
+} from './inventory.js';
 import { cloudflareProviderContract, type RemoteResource } from './provision.js';
 
 // Sanitized owner response (queuesEmpty) and recorded documented response shapes; see T969 report.
@@ -795,4 +801,34 @@ it('records the R2 CORS not-configured response as a single 10059 error with a n
     messages: [],
     result: null,
   });
+});
+it('records the live R2 default lifecycle rule with empty conditions and normalizes it', () => {
+  const rules = (fixtures.r2LifecycleDefault!.result as { rules: unknown[] }).rules;
+  expect(rules).toEqual([
+    {
+      id: 'Default Multipart Abort Rule',
+      enabled: true,
+      conditions: {},
+      abortMultipartUploadsTransition: { condition: { type: 'Age', maxAge: 604800 } },
+    },
+  ]);
+  expect(rules.every(lifecycleRule)).toBe(true);
+  expect(abortOnlyRule(rules[0] as Parameters<typeof abortOnlyRule>[0]).conditions).toEqual({
+    prefix: '',
+  });
+});
+it('records the empty R2 objects listing without result_info', () => {
+  expect(fixtures.r2ObjectsEmpty).toEqual({ success: true, errors: [], messages: [], result: [] });
+  expect(Object.hasOwn(fixtures.r2ObjectsEmpty!, 'result_info')).toBe(false);
+});
+it('records disabled R2 lock, managed domain and Sippy reads', () => {
+  expect(fixtures.r2LockEmpty!.result).toEqual({ rules: [] });
+  expect(fixtures.r2ManagedDomainDisabled!.result).toEqual({
+    enabled: false,
+    bucketId: expect.any(String),
+    domain: expect.stringMatching(/^pub-[0-9a-f]+\.r2\.dev$/),
+  });
+  expect(fixtures.r2SippyDisabled!.result).toEqual({ enabled: false });
+  for (const name of ['r2LockEmpty', 'r2ManagedDomainDisabled', 'r2SippyDisabled'])
+    expect(fixtures[name]).toMatchObject({ success: true, errors: [], messages: [] });
 });

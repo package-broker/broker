@@ -6,9 +6,11 @@ import { hostname } from 'node:os';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   InventoryStore,
+  abortOnlyRule,
   emptyInventory,
   installIdentity,
   inventoryTransportPolicy,
+  lifecycleRule,
   validateInventory,
 } from './inventory.js';
 
@@ -218,4 +220,50 @@ it('refuses JSON-only ignore rules that expose atomic temporary inventory files'
   const store = await stores();
   await store.write(emptyInventory(identity, Date.now()));
   expect(await store.read()).not.toBeNull();
+});
+
+const DEFAULT_RULE = {
+  id: 'Default Multipart Abort Rule',
+  enabled: true,
+  conditions: { prefix: '' },
+  abortMultipartUploadsTransition: { condition: { type: 'Age' as const, maxAge: 604800 } },
+};
+
+it('accepts the live empty conditions and normalizes them to an empty prefix', () => {
+  const live = { ...DEFAULT_RULE, conditions: {} };
+  expect(lifecycleRule(live)).toBe(true);
+  expect(abortOnlyRule(live)).toEqual(DEFAULT_RULE);
+  expect(abortOnlyRule(DEFAULT_RULE)).toEqual(DEFAULT_RULE);
+  for (const conditions of [{ prefix: '', suffix: '' }, { suffix: '' }, { prefix: 1 }, null, []])
+    expect(lifecycleRule({ ...DEFAULT_RULE, conditions })).toBe(false);
+});
+
+it('accepts only normalized lifecycle baselines in a stored inventory', () => {
+  const withBaseline = (rule: unknown) => {
+    const inventory = emptyInventory(identity, Date.parse('2026-10-27T12:00:00Z'));
+    inventory.operations.push({
+      id: 'create-r2',
+      kind: 'r2',
+      name: `${identity.script_name}-blobs`,
+      spec_sha256: 'e'.repeat(64),
+      absence_observed_at: inventory.updated_at,
+      started_at: inventory.updated_at,
+      state: 'confirmed',
+      resolved_id: `${identity.script_name}-blobs`,
+    });
+    inventory.resources.r2 = {
+      name: `${identity.script_name}-blobs`,
+      id: `${identity.script_name}-blobs`,
+      jurisdiction: 'eu',
+      state: 'complete',
+      evidence: { source: 'created', operation_id: 'create-r2', verified_at: inventory.updated_at },
+      lifecycle_baseline: [rule as never],
+    };
+    return inventory;
+  };
+  const normalized = withBaseline(DEFAULT_RULE);
+  expect(validateInventory(normalized, identity)).toBe(normalized);
+  expect(() =>
+    validateInventory(withBaseline({ ...DEFAULT_RULE, conditions: {} }), identity),
+  ).toThrow(expect.objectContaining({ code: 'invalid_inventory' }));
 });

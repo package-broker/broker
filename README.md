@@ -4,7 +4,7 @@ Package Broker is a self-hosted, open-source (AGPL-3.0-only) private Composer an
 
 Visit [package.broker](https://package.broker), follow the [Cloudflare quickstart](https://package.broker/docs/getting-started/quickstart-cloudflare) or [Docker quickstart](https://package.broker/docs/getting-started/quickstart-docker), or read the [comparisons](https://package.broker/compare). The container image is not published yet.
 
-> Pre-release. The 2.0 line is under active development towards its first release candidate: no tagged release exists yet, the API and the plugin contract still change, and contributions are welcome under the Developer Certificate of Origin, see [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute. Security reports are welcome at any time, see [SECURITY.md](SECURITY.md).
+> Pre-release. The 2.0 line is published as release candidates under the npm `rc` tag (`npm i @package-broker/cli@rc`); the API and the plugin contract can still change, and contributions are welcome under the Developer Certificate of Origin, see [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute. Security reports are welcome at any time, see [SECURITY.md](SECURITY.md).
 
 ## Prerequisites
 

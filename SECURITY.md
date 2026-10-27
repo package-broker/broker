@@ -8,7 +8,7 @@ Include the affected package and version or commit, the runtime (Cloudflare Work
 
 ## Supported versions
 
-Package Broker 2.0 has no tagged release yet. Reports against the 2.0 `main` branch are accepted. Package Broker 1.x is end of life and receives no security fixes.
+Package Broker 2.0 is in release candidates. Reports against the latest `rc` release and the 2.0 `main` branch are accepted. Package Broker 1.x is end of life and receives no security fixes.
 
 ## Scope
 

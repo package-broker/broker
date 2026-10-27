@@ -32,6 +32,7 @@ import {
   SourceForm,
   SOURCE_TYPE_LABELS,
   sourceFieldErrors,
+  scopeNamePatterns,
   type CreateSource,
   type SourceChanges,
   type VcsProvider,
@@ -165,6 +166,17 @@ interface SourcesState {
   canEnableProjectSource: boolean;
   enableDenied: string[];
   enableConflicts: string[];
+}
+
+export function suggestedScopePatterns(
+  source: Source | undefined,
+  registered: readonly string[],
+): string[] {
+  const config = source?.config as { scopes?: string[] } | undefined;
+  if (source?.type !== 'npm_registry' || !Array.isArray(config?.scopes)) return [];
+  return scopeNamePatterns(config.scopes.join('\n')).filter(
+    (pattern) => !registered.includes(pattern),
+  );
 }
 
 export function displayUrl(value: string | null): string | null {
@@ -477,6 +489,10 @@ export function createSourcesModel(
     async saveSource(body: CreateSource | SourceChanges) {
       if (state.busy || state.editor === null) return;
       const editor = state.editor;
+      if (editor !== 'create' && Object.keys(body).length === 0) {
+        set({ editor: null, fieldErrors: {}, formError: null });
+        return;
+      }
       set({ busy: true, error: null, formError: null, fieldErrors: {} });
       try {
         const result =
@@ -1218,6 +1234,14 @@ export function SourcesView({ model }: { model: SourcesModel }) {
   const [filters, setFilters] = useState<SourceFilters>({ q: '', type: '', scope: '' });
   const filtered = !!(filters.q || filters.type || filters.scope);
   const created = state.items.find((item) => item.id === state.createdSource);
+  const scopePatterns = useMemo(() => {
+    const names = state.names;
+    if (names === null) return [];
+    return suggestedScopePatterns(
+      state.items.find((source) => source.id === names.source),
+      names.items.map((item) => item.pattern),
+    );
+  }, [state.items, state.names]);
   const membershipKnown = !state.loading && !state.listError && state.next === null;
   const credentialForPackagist =
     state.items.find((source) => source.id === state.credentialSource)?.type === 'packagist_proxy';
@@ -1675,7 +1699,19 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                 }}
               >
                 <Label htmlFor="registered-pattern">Registered pattern</Label>
-                <Input id="registered-pattern" name="pattern" maxLength={50} required />
+                <Input
+                  key={`${state.names.source}:${state.names.items.map((item) => item.pattern).join(',')}`}
+                  id="registered-pattern"
+                  name="pattern"
+                  maxLength={50}
+                  required
+                  defaultValue={scopePatterns[0] ?? ''}
+                />
+                {scopePatterns.map((pattern) => (
+                  <p key={pattern} className="text-sm">
+                    Register {pattern} before enabling this source.
+                  </p>
+                ))}
                 <Button type="submit" className="w-fit" disabled={state.busy}>
                   Add name
                 </Button>

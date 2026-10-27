@@ -52,6 +52,11 @@ const fields = [
   'lastPolledAt',
   'nextPollAt',
   'hasCredential',
+  'config',
+  'configComplete',
+  'userAgent',
+  'retentionDaysOverride',
+  'defaultVisibleToNewProjects',
 ].sort();
 
 async function fixture(
@@ -584,6 +589,9 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
         url: `https://user:${SENTINEL}@packages.example.com/?token=${SENTINEL}`,
         credentialId: SENTINEL,
         configJson: SENTINEL,
+        userAgent: 'Broker/2.0',
+        retentionDaysOverride: 730,
+        defaultVisibleToNewProjects: true,
         lastError: SENTINEL,
         status: 'active',
         removalPolicy: 'flag',

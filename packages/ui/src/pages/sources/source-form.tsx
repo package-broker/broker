@@ -123,7 +123,8 @@ const HELP: Record<string, string> = {
     'One hostname per line. Archive downloads may come from these hosts; the source credential is also sent to them.',
   'config/selection/packages':
     'Packages matching either list are selected. Empty lists select no packages.',
-  'config/scopes': 'One scope per line, including @. Only these scopes use this registry.',
+  'config/scopes':
+    'One scope per line, including @. Only these scopes use this registry. Register @scope/* for each scope before enabling the source.',
   'config/packageName': 'Leave blank to use the name in composer.json.',
   'config/refs/branches': 'One branch name per line. Leave blank to import no branches.',
   'config/installationId':
@@ -157,6 +158,8 @@ export function validateSourceForm(
   data: FormData,
   type: CreateSource['type'],
   editing: boolean,
+  original: Source | null = null,
+  baseline: FormData | null = original ? sourceFormData(original) : null,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
   const value = (name: string) => String(data.get(name) ?? '').trim();
@@ -167,15 +170,28 @@ export function validateSourceForm(
   };
   if (!editing && !value('name')) errors.name = FIELD_MESSAGES['name']!;
   if (
-    (!editing || data.has('replaceNetwork')) &&
     (type === 'composer_repository' || type === 'npm_registry') &&
+    (!editing || value('url') !== String(baseline?.get('url') ?? '')) &&
     !value('url')
   )
     errors.url = FIELD_MESSAGES['url']!;
   whole('pollIntervalSeconds', 1);
-  if ((!editing || data.has('replaceDefaults')) && value('retentionDaysOverride'))
-    whole('retentionDaysOverride', 0);
-  if (!editing || data.has('replaceConfig')) {
+  if (value('retentionDaysOverride')) whole('retentionDaysOverride', 0);
+  const configChanged =
+    !baseline ||
+    Object.keys(FIELD_LABELS).some(
+      (name) =>
+        (name.startsWith('config/') || (type === 'vcs' && name === 'githubAuthentication')) &&
+        String(data.get(name) ?? '') !== String(baseline.get(name) ?? ''),
+    );
+  if (
+    configReplacementAllowed(original, data) &&
+    (configChanged || data.has('replaceConfig')) &&
+    (data.has('config/provider') ||
+      data.has('config/scopes') ||
+      data.has('config/selection/packages') ||
+      !editing)
+  ) {
     if (
       type === 'composer_repository' &&
       !value('config/selection/packages') &&
@@ -203,12 +219,12 @@ function integer(value: string, minimum: number) {
   return number;
 }
 
-export function sourceSubmission(
+function sourceChanges(
   data: FormData,
-  ecosystem: CreateSource['ecosystem'],
   type: CreateSource['type'],
   editing: boolean,
-): CreateSource | SourceChanges {
+  includeConfig = true,
+): SourceChanges {
   const value = (name: string) => String(data.get(name) ?? '');
   const checked = (name: string) => data.has(name);
   const list = (name: string) =>
@@ -220,18 +236,22 @@ export function sourceSubmission(
     pollIntervalSeconds: integer(value('pollIntervalSeconds'), 1),
     removalPolicy: value('removalPolicy') as Source['removalPolicy'],
   };
-  if (!editing || checked('replaceDefaults')) {
-    changes.defaultVisibleToNewProjects = checked('defaultVisibleToNewProjects');
-    changes.retentionDaysOverride =
-      value('retentionDaysOverride').trim() === ''
-        ? null
-        : integer(value('retentionDaysOverride'), 0);
-  }
-  if (!editing || checked('replaceNetwork')) {
-    changes.userAgent = value('userAgent') || null;
-    if (type !== 'vcs') changes.url = value('url') || null;
-  }
-  if (!editing || checked('replaceConfig')) {
+  changes.defaultVisibleToNewProjects = checked('defaultVisibleToNewProjects');
+  changes.retentionDaysOverride =
+    value('retentionDaysOverride').trim() === ''
+      ? null
+      : integer(value('retentionDaysOverride'), 0);
+  changes.userAgent = value('userAgent') || null;
+  if (type !== 'vcs') changes.url = value('url') || null;
+  if (
+    includeConfig &&
+    (!editing ||
+      data.has('config/provider') ||
+      data.has('config/scopes') ||
+      data.has('config/selection/packages') ||
+      type === 'packagist_proxy' ||
+      type === 'npmjs_proxy')
+  ) {
     switch (type) {
       case 'vcs':
         changes.config = {
@@ -266,7 +286,85 @@ export function sourceSubmission(
         break;
     }
   }
-  return editing ? changes : { name: value('name'), ecosystem, type, ...changes };
+  return changes;
+}
+
+function configReplacementAllowed(source: Source | null, data: FormData): boolean {
+  return (
+    source === null ||
+    (source.config !== undefined && source.configComplete !== false) ||
+    data.has('replaceConfig')
+  );
+}
+
+export function sourceSubmission(
+  data: FormData,
+  ecosystem: CreateSource['ecosystem'],
+  type: CreateSource['type'],
+  original: Source | null,
+  initialData: FormData | null = original ? sourceFormData(original) : null,
+): CreateSource | SourceChanges {
+  const changes = sourceChanges(
+    data,
+    type,
+    original !== null,
+    configReplacementAllowed(original, data),
+  );
+  if (!original) return { name: String(data.get('name') ?? ''), ecosystem, type, ...changes };
+  const baseline = sourceChanges(
+    initialData ?? sourceFormData(original),
+    type,
+    true,
+    original.config !== undefined && original.configComplete !== false,
+  );
+  return Object.fromEntries(
+    Object.entries(changes).filter(
+      ([key, value]) =>
+        JSON.stringify(value) !== JSON.stringify(baseline[key as keyof SourceChanges]),
+    ),
+  ) as SourceChanges;
+}
+
+function sourceConfigValue(source: Source | null, path: string): unknown {
+  let value: unknown = source?.config;
+  for (const key of path.split('/')) {
+    if (typeof value !== 'object' || value === null) return undefined;
+    value = (value as Record<string, unknown>)[key];
+  }
+  return value;
+}
+
+export function sourceFormData(source: Source): FormData {
+  const data = new FormData();
+  for (const name of Object.keys(FIELD_LABELS)) {
+    const value = name.startsWith('config/')
+      ? sourceConfigValue(source, name.slice(7))
+      : source[name as keyof Source];
+    if (typeof value === 'boolean') {
+      if (value) data.set(name, 'on');
+    } else if (Array.isArray(value)) data.set(name, value.join('\n'));
+    else if (value != null) data.set(name, String(value));
+  }
+  if (source.type === 'packagist_proxy' || source.type === 'npmjs_proxy')
+    data.set('url', DEFAULT_URL[source.type]);
+  data.set('pollIntervalSeconds', String(source.pollIntervalSeconds));
+  data.set('removalPolicy', source.removalPolicy);
+  data.set(
+    'githubAuthentication',
+    source.githubAuthentication ?? (sourceConfigValue(source, 'installationId') ? 'app' : 'token'),
+  );
+  return data;
+}
+
+export function scopeNamePatterns(scopes: string): string[] {
+  return [
+    ...new Set(
+      scopes
+        .split(/\r?\n/)
+        .map((scope) => scope.trim())
+        .filter((scope) => /^@[a-z0-9][a-z0-9._~-]*$/.test(scope)),
+    ),
+  ].map((scope) => `${scope}/*`);
 }
 
 export function focusSourceError(form: HTMLFormElement | null, errors: Record<string, string>) {
@@ -303,25 +401,29 @@ export function SourceForm({
   const [type, setType] = useState<CreateSource['type']>(source?.type ?? 'packagist_proxy');
   const providerOptions = vcsProviderOptions(vcsProviders);
   const firstProvider = providerOptions[0]?.[0] ?? 'github';
-  const [provider, setProvider] = useState<VcsProvider>(firstProvider);
-  const providerOffered = providerOptions.some(([value]) => value === provider);
-  const vcsUnserved = type === 'vcs' && providerOptions.length === 0;
-  useEffect(() => {
-    if (!providerOffered && providerOptions.length > 0) setProvider(firstProvider);
-  }, [providerOffered, providerOptions.length, firstProvider]);
-  const [githubAuthentication, setGithubAuthentication] = useState(
-    source?.githubAuthentication ?? 'app',
+  const [provider, setProvider] = useState<VcsProvider>(
+    (sourceConfigValue(source, 'provider') as VcsProvider | undefined) ?? firstProvider,
   );
+  const providerOffered = providerOptions.some(([value]) => value === provider);
+  const vcsUnserved = type === 'vcs' && (providerOptions.length === 0 || !providerOffered);
+  useEffect(() => {
+    if (!source && !providerOffered && providerOptions.length > 0) setProvider(firstProvider);
+  }, [source, providerOffered, providerOptions.length, firstProvider]);
+  const [githubAuthentication, setGithubAuthentication] = useState(
+    source?.githubAuthentication ??
+      (source ? (sourceConfigValue(source, 'installationId') ? 'app' : 'token') : 'app'),
+  );
+  const [scopes, setScopes] = useState('');
+  const initialData = source ? sourceFormData(source) : null;
+  const incompleteConfig =
+    source !== null && (source.configComplete === false || source.config === undefined);
   const [replaceConfig, setReplaceConfig] = useState(false);
-  const [replaceNetwork, setReplaceNetwork] = useState(false);
-  const [replaceDefaults, setReplaceDefaults] = useState(false);
   const [localErrors, setLocalErrors] = useState<Record<string, string>>({});
   const formRef = useRef<HTMLFormElement>(null);
   const errors = { ...serverErrors, ...localErrors };
   const editing = source !== null;
   const proxy = type === 'packagist_proxy' || type === 'npmjs_proxy';
-  const configEnabled = !editing || replaceConfig;
-  const networkEnabled = !editing || replaceNetwork;
+  const configEnabled = !vcsUnserved && (!incompleteConfig || replaceConfig);
 
   useEffect(() => {
     focusSourceError(formRef.current, serverErrors);
@@ -375,7 +477,11 @@ export function SourceForm({
       id: `source-${name}`,
       name,
       required: options.required,
-      defaultValue: options.value,
+      defaultValue: options.value ?? initialData?.get(name)?.toString(),
+      onChange:
+        name === 'config/scopes'
+          ? (event: { currentTarget: { value: string } }) => setScopes(event.currentTarget.value)
+          : undefined,
       placeholder: options.placeholder ?? PLACEHOLDERS[name],
       'aria-invalid': !!errors[name],
       'aria-describedby': describedBy(name),
@@ -416,7 +522,7 @@ export function SourceForm({
             type="checkbox"
             id={`source-${name}`}
             name={name}
-            defaultChecked={defaultChecked}
+            defaultChecked={source ? initialData?.has(name) : defaultChecked}
             onChange={onChange ? (event) => onChange(event.currentTarget.checked) : undefined}
             aria-invalid={!!errors[name]}
             aria-describedby={describedBy(name)}
@@ -503,13 +609,13 @@ export function SourceForm({
             event.preventDefault();
             if (busy) return;
             const data = new FormData(event.currentTarget);
-            const next = validateSourceForm(data, type, editing);
+            const next = validateSourceForm(data, type, editing, source, initialData);
             setLocalErrors(next);
             if (Object.keys(next).length) {
               focusSourceError(formRef.current, next);
               return;
             }
-            onSubmit(sourceSubmission(data, ecosystem, type, editing));
+            onSubmit(sourceSubmission(data, ecosystem, type, source, initialData));
           }}
           onInvalidCapture={(event) => {
             const control = event.target as HTMLInputElement;
@@ -557,6 +663,7 @@ export function SourceForm({
                       const next = value as CreateSource['ecosystem'];
                       setEcosystem(next);
                       setType(SOURCE_TYPES[next][0]);
+                      setScopes('');
                       setLocalErrors({});
                     },
                     true,
@@ -572,6 +679,7 @@ export function SourceForm({
                       ),
                     (value) => {
                       setType(value as CreateSource['type']);
+                      setScopes('');
                       setProvider(firstProvider);
                       setGithubAuthentication('app');
                       setLocalErrors({});
@@ -581,10 +689,6 @@ export function SourceForm({
                 </>
               ) : (
                 <>
-                  <p className="text-sm text-neutral-600">
-                    Some saved settings cannot be displayed. Leave a replacement option unchecked to
-                    keep those settings.
-                  </p>
                   {vcsUnserved ? (
                     <p className="text-sm">
                       {`Source type: ${SOURCE_TYPE_LABELS[type]}. This broker cannot change its repository settings.`}
@@ -592,25 +696,22 @@ export function SourceForm({
                   ) : null}
                 </>
               )}
-              {editing && !proxy && type !== 'vcs'
-                ? check('replaceNetwork', 'Replace URL and User-Agent', setReplaceNetwork)
-                : null}
               {proxy ? (
                 <p className="break-words text-sm">
                   Upstream URL: {DEFAULT_URL[type as keyof typeof DEFAULT_URL]}
                 </p>
               ) : null}
-              {proxy && networkEnabled ? (
+              {proxy ? (
                 <input
                   type="hidden"
                   name="url"
                   value={DEFAULT_URL[type as keyof typeof DEFAULT_URL]}
                 />
               ) : null}
-              {networkEnabled && !proxy && type !== 'vcs' ? (
+              {!proxy && type !== 'vcs' ? (
                 <div key={`network:${type}`}>
                   {input('url', {
-                    required: true,
+                    required: !editing || source.url !== null,
                     value: source?.url ?? '',
                     label: type === 'npm_registry' ? 'Registry URL' : 'Repository URL',
                     placeholder:
@@ -620,9 +721,15 @@ export function SourceForm({
                   })}
                 </div>
               ) : null}
-              {editing && !proxy && !vcsUnserved
-                ? check('replaceConfig', 'Replace type-specific configuration', setReplaceConfig)
-                : null}
+              {incompleteConfig && !vcsUnserved ? (
+                <div className="grid gap-1">
+                  <p className="text-sm text-neutral-600">
+                    Some saved settings cannot be displayed. Replace the configuration only if you
+                    intend to overwrite all saved type-specific settings.
+                  </p>
+                  {check('replaceConfig', 'Replace type-specific configuration', setReplaceConfig)}
+                </div>
+              ) : null}
               {configEnabled ? (
                 <div className="grid gap-4" key={`primary:${type}`}>
                   {type === 'vcs' ? (
@@ -724,7 +831,24 @@ export function SourceForm({
                       {input('config/selection/patterns', { multiline: true })}
                     </>
                   ) : null}
-                  {type === 'npm_registry' ? input('config/scopes', { multiline: true }) : null}
+                  {type === 'npm_registry' ? (
+                    <>
+                      {input('config/scopes', { multiline: true })}
+                      {!editing
+                        ? field(
+                            'registeredPatterns',
+                            <textarea
+                              id="source-registeredPatterns"
+                              name="registeredPatterns"
+                              rows={3}
+                              readOnly
+                              value={scopeNamePatterns(scopes).join('\n')}
+                            />,
+                            'Names to register after adding this source',
+                          )
+                        : null}
+                    </>
+                  ) : null}
                 </div>
               ) : null}
               {!editing ? (
@@ -748,13 +872,6 @@ export function SourceForm({
                   <p className="text-sm text-neutral-600">
                     Optional sync, visibility, retention, and connection settings.
                   </p>
-                  {editing && proxy
-                    ? check(
-                        'replaceConfig',
-                        'Replace type-specific configuration',
-                        setReplaceConfig,
-                      )
-                    : null}
                   {configEnabled ? (
                     <div className="grid gap-4" key={`advanced:${type}`}>
                       {type === 'composer_repository' || type === 'npm_registry'
@@ -779,7 +896,7 @@ export function SourceForm({
                   {type === 'packagist_proxy' && editing ? (
                     <p className="text-sm text-neutral-600">
                       To enable Use GitHub token, save a bearer credential with your GitHub token,
-                      then replace its configuration.
+                      then select Use GitHub token and save the source.
                     </p>
                   ) : null}
                   {input('pollIntervalSeconds', {
@@ -801,29 +918,9 @@ export function SourceForm({
                       <option value="exclude">Exclude from package resolution</option>
                     </Select>,
                   )}
-                  {editing
-                    ? check(
-                        'replaceDefaults',
-                        'Replace visibility and retention override',
-                        setReplaceDefaults,
-                      )
-                    : null}
-                  {!editing || replaceDefaults ? (
-                    <>
-                      {check('defaultVisibleToNewProjects')}
-                      {input('retentionDaysOverride', { number: true, minimum: 0 })}
-                    </>
-                  ) : null}
-                  {editing && (proxy || type === 'vcs')
-                    ? check(
-                        'replaceNetwork',
-                        type === 'vcs'
-                          ? 'Replace User-Agent setting'
-                          : 'Replace upstream URL and User-Agent',
-                        setReplaceNetwork,
-                      )
-                    : null}
-                  {networkEnabled ? input('userAgent') : null}
+                  {check('defaultVisibleToNewProjects')}
+                  {input('retentionDaysOverride', { number: true, minimum: 0 })}
+                  {input('userAgent')}
                 </div>
               </details>
             </fieldset>

@@ -15,6 +15,7 @@ import {
   filterSources,
   sourceCredentialKind,
   sourceCredentialKinds,
+  suggestedScopePatterns,
   SourceActions,
   CredentialFields,
   SourcesView,
@@ -1189,6 +1190,19 @@ describe('source creation and configuration editing', () => {
     url: 'https://composer.example.test',
     config: { selection: { packages: ['vendor/package'] } },
   };
+
+  it.each([null, 'acme'])(
+    'closes unchanged edits without requesting a patch in scope %s',
+    async (project) => {
+      const fetch = vi.fn();
+      const { model } = setup(fetch, project);
+      model.openEditor(source);
+      await model.saveSource({});
+      expect(fetch).not.toHaveBeenCalled();
+      expect(model.snapshot().editor).toBeNull();
+      expect(model.snapshot().busy).toBe(false);
+    },
+  );
 
   it.each([null, 'acme'])(
     'creates in scope %s, reloads and opens the new credential editor',
@@ -2902,5 +2916,34 @@ describe('UX4 resource failures and compact controls', () => {
     expect(html()).toContain('<option value="Organization">Organization</option>');
     expect(html()).toContain('<option value="Project">Project</option>');
     expect(html()).not.toContain('<option value="organization">organization</option>');
+  });
+});
+
+describe('npm scope registration suggestions', () => {
+  it('prefills each unregistered scope and advances after registration', async () => {
+    const registry: Source = { ...source, config: { scopes: ['@one', '@two'], distHosts: [] } };
+    expect(suggestedScopePatterns(registry, [])).toEqual(['@one/*', '@two/*']);
+    expect(suggestedScopePatterns(registry, ['@one/*'])).toEqual(['@two/*']);
+    expect(suggestedScopePatterns(registry, ['@one/*', '@two/*'])).toEqual([]);
+    expect(suggestedScopePatterns(undefined, [])).toEqual([]);
+    expect(suggestedScopePatterns({ ...source, type: 'npmjs_proxy', config: {} }, [])).toEqual([]);
+    const { model, html, fetch } = setup();
+    fetch.mockResolvedValueOnce(json({ items: [registry], next: null, vcsProviders: [] }));
+    await model.load();
+    fetch.mockResolvedValueOnce(json({ items: [], next: null }));
+    await model.names(SOURCE);
+    expect(html()).toMatch(
+      /<input[^>]*id="registered-pattern"[^>]*name="pattern"[^>]*value="@one\/\*"/,
+    );
+    expect(html().replace(/<!--.*?-->/g, '')).toContain(
+      'Register @two/* before enabling this source.',
+    );
+    fetch.mockResolvedValueOnce(
+      json({ items: [{ id: 'name-one', sourceId: SOURCE, pattern: '@one/*' }], next: null }),
+    );
+    await model.names(SOURCE);
+    expect(html()).toMatch(
+      /<input[^>]*id="registered-pattern"[^>]*name="pattern"[^>]*value="@two\/\*"/,
+    );
   });
 });

@@ -8,6 +8,8 @@ import { DialogContent } from '../../components/ui/dialog.js';
 import {
   SourceForm,
   sourceSubmission,
+  sourceFormData,
+  scopeNamePatterns,
   sourceFieldErrors,
   validateSourceForm,
   focusSourceError,
@@ -26,6 +28,47 @@ function data(fields: Record<string, string> = {}) {
   return result;
 }
 
+function savedSource(type: Source['type'], config: NonNullable<Source['config']>): Source {
+  return {
+    id: 'saved',
+    name: 'Saved source',
+    projectId: null,
+    ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
+    type,
+    url: 'https://registry.example.com',
+    config,
+    userAgent: 'Broker/2.0',
+    retentionDaysOverride: 730,
+    defaultVisibleToNewProjects: true,
+    pollIntervalSeconds: 600,
+    removalPolicy: 'exclude',
+    hasCredential: true,
+    status: 'paused',
+    lastError: null,
+    lastPolledAt: null,
+    lastSuccessAt: null,
+    nextPollAt: null,
+    lastRemovalRefusal: null,
+    removalAcceptanceArmed: false,
+    projectName: null,
+    attachedProjectCount: 0,
+  };
+}
+
+function renderForm(source: Source) {
+  return renderToString(
+    createElement(SourceForm, {
+      source,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      vcsProviders: ['github', 'git', 'ssh'],
+    }),
+  );
+}
+
 describe('source form request bodies', () => {
   it('builds composer selection lists without inventing nested URL fields', () => {
     expect(
@@ -42,7 +85,7 @@ describe('source form request bodies', () => {
         }),
         'composer',
         'composer_repository',
-        false,
+        null,
       ),
     ).toEqual({
       name: 'Upstream',
@@ -81,7 +124,7 @@ describe('source form request bodies', () => {
         }),
         'composer',
         'vcs',
-        false,
+        null,
       );
       expect(result).not.toHaveProperty('url');
       expect(result).toEqual({
@@ -122,7 +165,7 @@ describe('source form request bodies', () => {
       }),
       'composer',
       'vcs',
-      false,
+      null,
     );
     expect(result.config).toEqual({
       provider: 'github',
@@ -137,7 +180,7 @@ describe('source form request bodies', () => {
         data({ 'config/provider': 'github', githubAuthentication: 'app' }),
         'composer',
         'vcs',
-        false,
+        null,
       ),
     ).toThrow('Enter valid whole numbers');
   });
@@ -152,7 +195,7 @@ describe('source form request bodies', () => {
       }),
       'npm',
       'npm_registry',
-      false,
+      null,
     );
     expect(result.config).toEqual({ scopes: ['@one', '@two'], distHosts: ['dist.example.test'] });
   });
@@ -166,7 +209,7 @@ describe('source form request bodies', () => {
         data({ 'config/githubToken': 'on', 'config/scopes': '@stale' }),
         ecosystem,
         type,
-        false,
+        null,
       ).config,
     ).toEqual(config);
   });
@@ -176,7 +219,7 @@ describe('source form request bodies', () => {
       data({ url: 'https://repo.packagist.org', 'config/githubToken': 'on' }),
       'composer',
       'packagist_proxy',
-      false,
+      null,
     );
     const options = {
       runtime: 'node' as const,
@@ -193,98 +236,41 @@ describe('source form request bodies', () => {
     expect(validate(body.config, true).ok).toBe(true);
   });
 
-  it('enables Packagist token mode on explicit config replacement', () => {
-    const body = sourceSubmission(
-      data({ replaceConfig: 'on', 'config/githubToken': 'on' }),
-      'composer',
-      'packagist_proxy',
-      true,
-    );
-    expect(body.config).toEqual({ githubToken: true });
-  });
-
-  it('preserves Packagist config unless replaced and supports disabling token mode', () => {
-    expect(sourceSubmission(data(), 'composer', 'packagist_proxy', true)).not.toHaveProperty(
-      'config',
-    );
-    expect(
-      sourceSubmission(data({ replaceConfig: 'on' }), 'composer', 'packagist_proxy', true).config,
-    ).toEqual({ githubToken: false });
-  });
-
-  it('offers Packagist config replacement and explains the setup sequence', () => {
-    const source: Source = {
-      id: 'packagist',
-      name: 'Packagist',
-      projectId: null,
-      ecosystem: 'composer',
-      type: 'packagist_proxy',
-      url: 'https://repo.packagist.org',
-      status: 'active',
-      removalPolicy: 'flag',
-      pollIntervalSeconds: 300,
-      hasCredential: false,
-      lastError: null,
-      lastPolledAt: null,
-      nextPollAt: null,
-      lastSuccessAt: null,
-      lastRemovalRefusal: null,
-      removalAcceptanceArmed: false,
-      attachedProjectCount: 0,
-      projectName: null,
-    };
-    const html = renderToString(
-      createElement(SourceForm, {
-        source,
-        busy: false,
-        errors: {},
-        alert: null,
-        onSubmit: vi.fn(),
-        onClose: vi.fn(),
-      }),
-    );
-    expect(html).toContain('name="replaceConfig"');
-    expect(html).not.toContain('setup is unavailable');
+  it('prefills Packagist token mode and explains the credential setup sequence', () => {
+    const source = savedSource('packagist_proxy', { githubToken: true });
+    const html = renderForm(source);
+    expect(html).not.toContain('replaceConfig');
+    expect(html).not.toContain('replaceDefaults');
+    expect(html).not.toContain('replaceNetwork');
+    expect(html).toMatch(/name="config\/githubToken"[^>]*checked=""/);
     expect(html).toContain('save a bearer credential with your GitHub token');
-  });
-
-  it('keeps unread config, network settings and defaults out of ordinary edits', () => {
-    expect(
-      sourceSubmission(
-        data({ url: 'https://display-only.example.test' }),
-        'composer',
-        'composer_repository',
-        true,
-      ),
-    ).toEqual({ pollIntervalSeconds: 300, removalPolicy: 'flag' });
-  });
-
-  it('allows explicit config replacement, false visibility and resetting retention to inheritance', () => {
-    expect(
-      sourceSubmission(
-        data({
-          replaceConfig: 'on',
-          replaceDefaults: 'on',
-          replaceNetwork: 'on',
-          url: 'https://new.example.test',
-        }),
-        'composer',
-        'composer_repository',
-        true,
-      ),
-    ).toEqual({
-      pollIntervalSeconds: 300,
-      removalPolicy: 'flag',
-      defaultVisibleToNewProjects: false,
-      retentionDaysOverride: null,
-      url: 'https://new.example.test',
-      userAgent: null,
-      config: {
-        selection: { packages: [], patterns: [], expandPatterns: false },
-        distHosts: [],
-        mirrorsFallback: false,
-      },
+    expect(sourceSubmission(sourceFormData(source), 'composer', source.type, source)).toEqual({});
+    const changed = sourceFormData(source);
+    changed.delete('config/githubToken');
+    expect(sourceSubmission(changed, 'composer', source.type, source)).toEqual({
+      config: { githubToken: false },
     });
+  });
+
+  it('sends changed visibility, inherited retention and network fields alone', () => {
+    const source = savedSource('composer_repository', {
+      selection: { packages: ['vendor/package'], patterns: [], expandPatterns: false },
+      distHosts: [],
+      mirrorsFallback: false,
+    });
+    for (const [field, value, expected] of [
+      ['userAgent', 'Changed/3.0', { userAgent: 'Changed/3.0' }],
+      ['url', 'https://new.example.com', { url: 'https://new.example.com' }],
+      ['retentionDaysOverride', '', { retentionDaysOverride: null }],
+      ['defaultVisibleToNewProjects', null, { defaultVisibleToNewProjects: false }],
+      ['pollIntervalSeconds', '60', { pollIntervalSeconds: 60 }],
+      ['removalPolicy', 'flag', { removalPolicy: 'flag' }],
+    ] as const) {
+      const changed = sourceFormData(source);
+      if (value === null) changed.delete(field);
+      else changed.set(field, value);
+      expect(sourceSubmission(changed, 'composer', source.type, source)).toEqual(expected);
+    }
   });
 
   it.each(['0', '-1', '1.5', '9007199254740992', '', 'not a number'])(
@@ -295,7 +281,7 @@ describe('source form request bodies', () => {
           data({ pollIntervalSeconds: value }),
           'composer',
           'composer_repository',
-          false,
+          null,
         ),
       ).toThrow('Enter valid whole numbers');
     },
@@ -346,7 +332,7 @@ describe('source form UX', () => {
   it('creates a working Packagist proxy with only a name typed', () => {
     const fields = data({ url: 'https://repo.packagist.org' });
     expect(validateSourceForm(fields, 'packagist_proxy', false)).toEqual({});
-    expect(sourceSubmission(fields, 'composer', 'packagist_proxy', false)).toEqual({
+    expect(sourceSubmission(fields, 'composer', 'packagist_proxy', null)).toEqual({
       name: 'Upstream',
       ecosystem: 'composer',
       type: 'packagist_proxy',
@@ -362,7 +348,7 @@ describe('source form UX', () => {
 
   it('keeps the npmjs payload and default URL unchanged', () => {
     expect(
-      sourceSubmission(data({ url: 'https://registry.npmjs.org' }), 'npm', 'npmjs_proxy', false),
+      sourceSubmission(data({ url: 'https://registry.npmjs.org' }), 'npm', 'npmjs_proxy', null),
     ).toEqual({
       name: 'Upstream',
       ecosystem: 'npm',
@@ -415,7 +401,7 @@ describe('source form UX', () => {
     expect(validateSourceForm(fields, 'npm_registry', false)).toHaveProperty('config/scopes');
     fields.set('config/scopes', '@acme');
     expect(validateSourceForm(fields, 'npm_registry', false)).toEqual({});
-    expect(sourceSubmission(fields, 'npm', 'npm_registry', false)).toEqual({
+    expect(sourceSubmission(fields, 'npm', 'npm_registry', null)).toEqual({
       name: 'Upstream',
       ecosystem: 'npm',
       type: 'npm_registry',
@@ -448,19 +434,24 @@ describe('source form UX', () => {
     },
   );
 
-  it('validates advanced numeric fields without requiring unselected replacement groups', () => {
-    const fields = data({ pollIntervalSeconds: '0', retentionDaysOverride: '-1' });
-    expect(validateSourceForm(fields, 'npmjs_proxy', false)).toEqual({
+  it('validates prefilled edit fields without replacement checkboxes', () => {
+    const source = savedSource('composer_repository', {
+      selection: { packages: ['acme/payments'], patterns: [], expandPatterns: false },
+    });
+    const fields = sourceFormData(source);
+    fields.set('pollIntervalSeconds', '0');
+    fields.set('retentionDaysOverride', '-1');
+    expect(validateSourceForm(fields, source.type, true)).toEqual({
       pollIntervalSeconds: 'Enter a whole number of seconds greater than 0.',
       retentionDaysOverride:
         'Enter a whole number of days that does not shorten organization retention.',
     });
     fields.set('pollIntervalSeconds', '90');
-    expect(validateSourceForm(fields, 'composer_repository', true)).toEqual({});
-    fields.set('replaceConfig', 'on');
-    expect(validateSourceForm(fields, 'composer_repository', true)).toHaveProperty(
-      'config/selection/packages',
-    );
+    fields.set('retentionDaysOverride', '730');
+    fields.set('config/selection/packages', '');
+    expect(validateSourceForm(fields, source.type, true)).toEqual({
+      'config/selection/packages': 'Add at least one package name or pattern',
+    });
   });
 
   it('orders primary choices first and keeps advanced controls collapsed and the footer outside the scroll area', () => {
@@ -577,6 +568,8 @@ describe('editing a Git repository source the broker no longer serves', () => {
           name: 'Repository',
           ecosystem: 'composer',
           type: 'vcs',
+          config: { provider: 'github', repository: 'owner/repo', installationId: 42 },
+          configComplete: true,
           pollIntervalSeconds: 300,
           removalPolicy: 'flag',
         } as Source,
@@ -595,9 +588,227 @@ describe('editing a Git repository source the broker no longer serves', () => {
     expect(html).not.toContain('Replace type-specific configuration');
   });
 
-  it('offers the configuration replacement when a provider is served', () => {
+  it('shows repository settings without a replacement checkbox when a provider is served', () => {
     const html = editing(['github']);
     expect(html).not.toContain('Source type: Git repository');
-    expect(html).toContain('Replace type-specific configuration');
+    expect(html).not.toContain('Replace type-specific configuration');
+    expect(html).toContain('name="config/repository"');
   });
 });
+
+describe('prefilled source editing', () => {
+  it.each([
+    [
+      'composer_repository',
+      {
+        selection: {
+          packages: ['vendor/one', 'vendor/two'],
+          patterns: ['vendor/*'],
+          expandPatterns: true,
+        },
+        distHosts: ['dist.example.com'],
+        mirrorsFallback: true,
+      },
+    ],
+    ['npm_registry', { scopes: ['@one', '@two'], distHosts: ['dist.example.com'] }],
+    [
+      'vcs',
+      {
+        provider: 'github',
+        repository: 'owner/repo',
+        installationId: 42,
+        packageName: 'vendor/package',
+        refs: { branches: ['main', 'release'], tags: false },
+      },
+    ],
+    [
+      'vcs',
+      {
+        provider: 'git',
+        repository: 'https://git.example.com/repo',
+        refs: { branches: [], tags: true },
+      },
+    ],
+    [
+      'vcs',
+      {
+        provider: 'ssh',
+        repository: 'git@git.example.com:repo',
+        refs: { branches: [], tags: true },
+      },
+    ],
+    ['packagist_proxy', { githubToken: false }],
+    ['npmjs_proxy', {}],
+  ] as const)('prefills all %s fields and omits every unchanged field: %j', (type, config) => {
+    const source = savedSource(type, config as NonNullable<Source['config']>);
+    const html = renderForm(source);
+    const fields = sourceFormData(source);
+    expect(html).toContain('value="Broker/2.0"');
+    expect(html).toContain('value="730"');
+    expect(html).toContain('value="600"');
+    expect(html).toMatch(/name="defaultVisibleToNewProjects"[^>]*checked=""/);
+    const assertConfig = (value: unknown, path = 'config') => {
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        const name = `${path}/${key}`;
+        if (Array.isArray(item)) {
+          expect(html).toContain(`name="${name}"`);
+          if (item.length) expect(html).toContain(item.join('\n'));
+          expect(fields.get(name)).toBe(item.join('\n'));
+        } else if (typeof item === 'object' && item !== null) assertConfig(item, name);
+        else if (typeof item === 'boolean') {
+          expect(html).toMatch(new RegExp(`name="${name}"[^>]*${item ? 'checked=""' : '(?=>)'}`));
+          if (!item) expect(html).not.toMatch(new RegExp(`name="${name}"[^>]*checked`));
+        } else if (key === 'provider')
+          expect(html).toContain(`<option value="${item}" selected="">`);
+        else expect(html).toContain(`value="${item}"`);
+      }
+    };
+    assertConfig(config);
+    expect(validateSourceForm(fields, type, true)).toEqual({});
+    expect(sourceSubmission(fields, source.ecosystem, type, source)).toEqual({});
+  });
+
+  it('sends config alone when a config field changes, preserving the other config fields', () => {
+    const source = savedSource('npm_registry', {
+      scopes: ['@one'],
+      distHosts: ['dist.example.com'],
+    });
+    const fields = sourceFormData(source);
+    fields.set('config/scopes', '@one\n@two');
+    expect(sourceSubmission(fields, 'npm', source.type, source)).toEqual({
+      config: { scopes: ['@one', '@two'], distHosts: ['dist.example.com'] },
+    });
+  });
+
+  it('keeps an unavailable saved VCS provider and its configuration untouched on unrelated edits', () => {
+    const source = savedSource('vcs', {
+      provider: 'git',
+      repository: 'https://git.example.com/repo',
+      refs: { branches: [], tags: true },
+    });
+    const html = renderToString(
+      createElement(SourceForm, {
+        source,
+        busy: false,
+        errors: {},
+        alert: null,
+        onSubmit: vi.fn(),
+        onClose: vi.fn(),
+        vcsProviders: ['github'],
+      }),
+    );
+    expect(html).toContain('Source type: Git repository');
+    expect(html).not.toContain('name="config/provider"');
+    const fields = sourceFormData(source);
+    fields.delete('config/provider');
+    fields.delete('config/repository');
+    fields.set('userAgent', 'Changed/3.0');
+    expect(sourceSubmission(fields, 'composer', source.type, source)).toEqual({
+      userAgent: 'Changed/3.0',
+    });
+  });
+
+  it('generates a name pattern for each configured npm scope', () => {
+    expect(scopeNamePatterns('@one\r\n@two\n@one\n\ninvalid')).toEqual(['@one/*', '@two/*']);
+    expect(scopeNamePatterns('')).toEqual([]);
+  });
+});
+
+it.each([
+  ['packagist_proxy', 'composer', 'https://repo.packagist.org'],
+  ['npmjs_proxy', 'npm', 'https://registry.npmjs.org'],
+] as const)(
+  'does not resend the fixed %s URL when the DTO has a trailing slash',
+  (type, ecosystem, url) => {
+    const source = { ...savedSource(type, {}), url: `${url}/` };
+    const fields = sourceFormData(source);
+    const hidden = renderForm(source).match(/type="hidden" name="url" value="([^"]+)"/);
+    expect(hidden?.[1]).toBe(url);
+    fields.set('url', hidden![1]!);
+    expect(sourceSubmission(fields, ecosystem, type, source)).toEqual({});
+    fields.set('userAgent', 'Changed/3.0');
+    expect(sourceSubmission(fields, ecosystem, type, source)).toEqual({ userAgent: 'Changed/3.0' });
+  },
+);
+
+it('allows unrelated edits to a saved empty Composer selection while validating changes to that selection', () => {
+  const source = savedSource('composer_repository', {
+    selection: { packages: [], patterns: [], expandPatterns: false },
+    distHosts: [],
+    mirrorsFallback: false,
+  });
+  const fields = sourceFormData(source);
+  fields.set('userAgent', 'Changed/3.0');
+  expect(validateSourceForm(fields, source.type, true, source)).toEqual({});
+  expect(sourceSubmission(fields, 'composer', source.type, source)).toEqual({
+    userAgent: 'Changed/3.0',
+  });
+  fields.set('config/selection/packages', ' ');
+  expect(validateSourceForm(fields, source.type, true, source)).toEqual({
+    'config/selection/packages': 'Add at least one package name or pattern',
+  });
+});
+
+it('requires explicit replacement for incomplete configuration and preserves it on unrelated edits', () => {
+  const source = { ...savedSource('npm_registry', { scopes: ['@one'] }), configComplete: false };
+  const html = renderForm(source);
+  expect(html).toContain('Some saved settings cannot be displayed');
+  expect(html).toContain('Replace type-specific configuration');
+  expect(html).not.toContain('name="config/scopes"');
+  const fields = sourceFormData(source);
+  fields.set('config/scopes', '@two');
+  fields.set('userAgent', 'Changed/3.0');
+  expect(validateSourceForm(fields, source.type, true, source)).toEqual({});
+  expect(sourceSubmission(fields, 'npm', source.type, source)).toEqual({
+    userAgent: 'Changed/3.0',
+  });
+  fields.set('replaceConfig', 'on');
+  expect(sourceSubmission(fields, 'npm', source.type, source)).toEqual({
+    userAgent: 'Changed/3.0',
+    config: { scopes: ['@two'], distHosts: [] },
+  });
+  fields.set('config/scopes', '');
+  expect(validateSourceForm(fields, source.type, true, source)).toHaveProperty('config/scopes');
+});
+
+it('can explicitly replace an incomplete config even when its displayed values are unchanged', () => {
+  const source = {
+    ...savedSource('packagist_proxy', { githubToken: false }),
+    configComplete: false,
+  };
+  const fields = sourceFormData(source);
+  fields.set('replaceConfig', 'on');
+  expect(sourceSubmission(fields, 'composer', source.type, source)).toEqual({
+    config: { githubToken: false },
+  });
+});
+
+it.each(['composer_repository', 'npm_registry'] as const)(
+  'allows unrelated edits with a redacted %s URL',
+  (type) => {
+    const source = {
+      ...savedSource(
+        type,
+        type === 'npm_registry'
+          ? { scopes: ['@one'] }
+          : { selection: { packages: ['vendor/package'] } },
+      ),
+      url: null,
+    };
+    const fields = sourceFormData(source);
+    fields.set('userAgent', 'Changed/3.0');
+    expect(renderForm(source)).not.toContain('URL (required)');
+    expect(validateSourceForm(fields, type, true, source)).toEqual({});
+    expect(sourceSubmission(fields, source.ecosystem, type, source)).toEqual({
+      userAgent: 'Changed/3.0',
+    });
+    fields.set('url', 'https://new.example.com');
+    expect(sourceSubmission(fields, source.ecosystem, type, source)).toEqual({
+      userAgent: 'Changed/3.0',
+      url: 'https://new.example.com',
+    });
+    const displayed = { ...source, url: 'https://registry.example.com' };
+    fields.set('url', '');
+    expect(validateSourceForm(fields, type, true, displayed)).toHaveProperty('url');
+  },
+);

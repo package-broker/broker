@@ -5920,6 +5920,37 @@ export interface operations {
               | {
                   /** @constant */
                   attached: true;
+                  config?:
+                    | {
+                        installationId?: number;
+                        packageName?: string;
+                        /** @enum {string} */
+                        provider?: 'github' | 'git' | 'ssh';
+                        refs?: {
+                          branches?: string[];
+                          tags?: boolean;
+                        };
+                        repository?: string;
+                      }
+                    | {
+                        distHosts?: string[];
+                        mirrorsFallback?: boolean;
+                        selection?: {
+                          expandPatterns?: boolean;
+                          packages?: string[];
+                          patterns?: string[];
+                        };
+                      }
+                    | {
+                        distHosts?: string[];
+                        scopes?: string[];
+                      }
+                    | {
+                        githubToken?: boolean;
+                      }
+                    | Record<string, never>;
+                  configComplete?: boolean;
+                  defaultVisibleToNewProjects?: boolean;
                   /** @enum {string} */
                   ecosystem: 'composer' | 'npm';
                   /** @enum {string} */
@@ -5943,6 +5974,7 @@ export interface operations {
                   removalAcceptanceArmed: boolean;
                   /** @enum {string} */
                   removalPolicy: 'flag' | 'exclude';
+                  retentionDaysOverride?: number | null;
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
                   sync?: {
@@ -5983,10 +6015,42 @@ export interface operations {
                     | 'npmjs_proxy'
                     | 'hosted';
                   url: string | null;
+                  userAgent?: string | null;
                 }
               | {
                   /** @constant */
                   attached: false;
+                  config?:
+                    | {
+                        installationId?: number;
+                        packageName?: string;
+                        /** @enum {string} */
+                        provider?: 'github' | 'git' | 'ssh';
+                        refs?: {
+                          branches?: string[];
+                          tags?: boolean;
+                        };
+                        repository?: string;
+                      }
+                    | {
+                        distHosts?: string[];
+                        mirrorsFallback?: boolean;
+                        selection?: {
+                          expandPatterns?: boolean;
+                          packages?: string[];
+                          patterns?: string[];
+                        };
+                      }
+                    | {
+                        distHosts?: string[];
+                        scopes?: string[];
+                      }
+                    | {
+                        githubToken?: boolean;
+                      }
+                    | Record<string, never>;
+                  configComplete?: boolean;
+                  defaultVisibleToNewProjects?: boolean;
                   /** @enum {string} */
                   ecosystem: 'composer' | 'npm';
                   /** @enum {string} */
@@ -6009,6 +6073,7 @@ export interface operations {
                   removalAcceptanceArmed: boolean;
                   /** @enum {string} */
                   removalPolicy: 'flag' | 'exclude';
+                  retentionDaysOverride?: number | null;
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
                   sync?: {
@@ -6049,6 +6114,7 @@ export interface operations {
                     | 'npmjs_proxy'
                     | 'hosted';
                   url: string | null;
+                  userAgent?: string | null;
                 }
             )[];
             next: string | null;
@@ -8535,6 +8601,37 @@ export interface operations {
           'application/json': {
             items: {
               attachedProjectCount: number;
+              config?:
+                | {
+                    installationId?: number;
+                    packageName?: string;
+                    /** @enum {string} */
+                    provider?: 'github' | 'git' | 'ssh';
+                    refs?: {
+                      branches?: string[];
+                      tags?: boolean;
+                    };
+                    repository?: string;
+                  }
+                | {
+                    distHosts?: string[];
+                    mirrorsFallback?: boolean;
+                    selection?: {
+                      expandPatterns?: boolean;
+                      packages?: string[];
+                      patterns?: string[];
+                    };
+                  }
+                | {
+                    distHosts?: string[];
+                    scopes?: string[];
+                  }
+                | {
+                    githubToken?: boolean;
+                  }
+                | Record<string, never>;
+              configComplete?: boolean;
+              defaultVisibleToNewProjects?: boolean;
               /** @enum {string} */
               ecosystem: 'composer' | 'npm';
               /** @enum {string} */
@@ -8558,6 +8655,7 @@ export interface operations {
               removalAcceptanceArmed: boolean;
               /** @enum {string} */
               removalPolicy: 'flag' | 'exclude';
+              retentionDaysOverride?: number | null;
               /** @enum {string} */
               status: 'active' | 'degraded' | 'failing' | 'paused';
               sync?: {
@@ -8598,6 +8696,7 @@ export interface operations {
                 | 'npmjs_proxy'
                 | 'hosted';
               url: string | null;
+              userAgent?: string | null;
             }[];
             next: string | null;
             vcsProviders: ('github' | 'git' | 'ssh')[];

@@ -40,6 +40,7 @@ const config = z.union([
   z.strictObject({ githubToken: z.boolean().optional() }),
   z.strictObject({}),
 ]);
+const readableConfig = z.union([config.options[0].partial(), ...config.options.slice(1)]);
 const changes = {
   url: z.string().max(2048).nullable().optional(),
   config: config.optional(),
@@ -69,6 +70,11 @@ const source = z.strictObject({
   ecosystem,
   type,
   url: z.string().nullable(),
+  config: readableConfig.optional(),
+  configComplete: z.boolean().optional(),
+  userAgent: z.string().nullable().optional(),
+  retentionDaysOverride: z.number().int().nonnegative().nullable().optional(),
+  defaultVisibleToNewProjects: z.boolean().optional(),
   status: z.enum(['active', 'degraded', 'failing', 'paused']),
   removalPolicy,
   pollIntervalSeconds: z.number().int(),

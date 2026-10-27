@@ -23,7 +23,7 @@ const components = {
     `,
   githubForm: `
       import { SourceForm } from './pages/sources/source-form';
-      const source = { id: 'github', name: 'GitHub', ecosystem: 'composer', type: 'vcs', githubAuthentication: globalThis.authentication, pollIntervalSeconds: 300, removalPolicy: 'flag' };
+      const source = { id: 'github', name: 'GitHub', ecosystem: 'composer', type: 'vcs', config: { provider: 'github', repository: 'owner/repo', ...(globalThis.authentication === 'app' ? { installationId: 42 } : {}) }, configComplete: true, githubAuthentication: globalThis.authentication, pollIntervalSeconds: 300, removalPolicy: 'flag' };
       globalThis.submissions = [];
       createRoot(document.getElementById('root')).render(<SourceForm source={globalThis.creating ? null : source} busy={false} errors={{}} alert={null} onSubmit={(body) => globalThis.submissions.push(body)} onClose={() => {}} vcsProviders={globalThis.vcsProviders} />);
     `,
@@ -38,7 +38,7 @@ const components = {
     `,
   sources: `
       import { SourcesView, createSourcesModel } from './pages/sources';
-      const source = { projectId: null, ecosystem: 'npm', type: 'npm_registry', url: 'https://registry.example', status: 'active', removalPolicy: 'flag', pollIntervalSeconds: 300, hasCredential: false, lastSuccessAt: null };
+      const source = { config: { scopes: ['@fixture'], distHosts: [] }, configComplete: true, projectId: null, ecosystem: 'npm', type: 'npm_registry', url: 'https://registry.example', status: 'active', removalPolicy: 'flag', pollIntervalSeconds: 300, hasCredential: false, lastSuccessAt: null };
       const alpha = { ...source, id: 'alpha', name: 'Alpha', pollIntervalSeconds: 600, attached: true, precedence: 0 };
       const beta = { ...source, id: 'beta', name: 'Beta', attached: true, precedence: 1 };
       let state = { ...createSourcesModel({ client: {}, requireReauth: () => {} }, null).snapshot(), items: [alpha, beta], order: ['alpha', 'beta'], settingsVersion: 0, loading: false, busy: false, listError: false, next: null, credentialSource: null, names: null, preview: null, savedCredential: null, error: null, etag: '"r1"' };
@@ -51,7 +51,7 @@ const components = {
         subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
         openEditor: (source) => publish({ editor: source ?? 'create' }),
         closeEditor: () => publish({ editor: null }),
-        saveSource: (body) => { globalThis.edits.push([state.editor.id, body.pollIntervalSeconds, body.removalPolicy]); publish({ editor: null }); },
+        saveSource: (body) => { const saved = { ...state.editor, ...body }; globalThis.edits.push([saved.id, saved.pollIntervalSeconds, saved.removalPolicy]); publish({ editor: null }); },
       };
       globalThis.reorder = () => { state = { ...state, items: [beta, alpha], order: ['beta', 'alpha'] }; for (const listener of listeners) listener(); };
       createRoot(document.getElementById('root')).render(<SourcesView model={model} />);
@@ -255,7 +255,9 @@ it.for(['app', 'token'])(
     if (!fixture) context.skip('Chromium cannot start in this environment');
     const { page, browserExpect } = fixture!;
     await fixture!.mount(bundles.githubForm!, { authentication: mode });
-    await page.getByLabel('Replace type-specific configuration', { exact: true }).check();
+    await page
+      .getByLabel('GitHub repository (required)', { exact: true })
+      .waitFor({ state: 'visible' });
     await browserExpect(page.locator('select[name="githubAuthentication"]')).toHaveCount(0);
     await browserExpect(page.locator('input[name="githubAuthentication"]')).toHaveValue(mode);
     await browserExpect(page.locator('input[name="githubAuthenticationDisplay"]')).toHaveValue(

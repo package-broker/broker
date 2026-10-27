@@ -610,7 +610,6 @@ test.describe('Node management UI', () => {
     const edit = activeDialog(page, 'Edit source');
     await edit.getByText('Advanced settings', { exact: true }).click();
     await edit.getByLabel('Sync interval (seconds)', { exact: true }).fill('600');
-    await edit.getByLabel('Replace type-specific configuration', { exact: true }).check();
     await edit.getByLabel('Package names (one per line)', { exact: true }).fill('browser/updated');
     const updated = page.waitForResponse(
       (r) =>
@@ -891,6 +890,86 @@ test.describe('Node management UI', () => {
     await expect(row.getByText('rate_limited', { exact: true })).toHaveCount(0);
     await assertLayout(page);
     await page.unrouteAll({ behavior: 'wait' });
+  });
+
+  test('prefills source edits, saves only changes and suggests every npm scope name', async ({
+    page,
+    admin,
+  }) => {
+    await confirmIdentity(page, admin);
+    await go(page, 'sources');
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const create = activeDialog(page, 'Add source');
+    await create.getByRole('radio', { name: 'npm', exact: true }).check();
+    await create.getByRole('radio', { name: /^Private npm registry/ }).check();
+    await create.getByLabel('Source name (required)', { exact: true }).fill('Readable npm source');
+    await create
+      .getByLabel('Registry URL (required)', { exact: true })
+      .fill('https://npm.example.test');
+    await create.getByLabel('Package scopes (one per line)', { exact: true }).fill('@one\n@two');
+    await expect(
+      create.getByLabel('Names to register after adding this source', { exact: true }),
+    ).toHaveValue('@one/*\n@two/*');
+    await create.getByText('Advanced settings', { exact: true }).click();
+    await create.getByLabel('User-Agent override', { exact: true }).fill('Broker/2.0');
+    await create.getByLabel('Visible to new projects', { exact: true }).check();
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/sources',
+    );
+    await create.getByRole('button', { name: 'Add source', exact: true }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    const { id } = (await response.json()) as { id: string };
+    await activeDialog(page, 'Set credential')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
+    const row = page.getByRole('row').filter({ hasText: 'Readable npm source' });
+    await row.getByRole('button', { name: 'Edit Readable npm source', exact: true }).click();
+    const edit = activeDialog(page, 'Edit source');
+    await expect(edit.getByLabel('Registry URL (required)', { exact: true })).toHaveValue(
+      'https://npm.example.test/',
+    );
+    await expect(edit.getByLabel('Package scopes (one per line)', { exact: true })).toHaveValue(
+      '@one\n@two',
+    );
+    await expect(
+      edit.getByText('Replace type-specific configuration', { exact: true }),
+    ).toHaveCount(0);
+    await edit.getByText('Advanced settings', { exact: true }).click();
+    await expect(edit.getByLabel('User-Agent override', { exact: true })).toHaveValue('Broker/2.0');
+    await expect(edit.getByLabel('Visible to new projects', { exact: true })).toBeChecked();
+    const unchangedRequests: string[] = [];
+    const recordUnchanged = (request: import('@playwright/test').Request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname === `/_pb/sources/${id}`)
+        unchangedRequests.push(request.postData() ?? '');
+    };
+    page.on('request', recordUnchanged);
+    await edit.getByRole('button', { name: 'Save source', exact: true }).click();
+    await expect(edit).toHaveCount(0);
+    page.off('request', recordUnchanged);
+    expect(unchangedRequests).toEqual([]);
+    await row.getByRole('button', { name: 'Edit Readable npm source', exact: true }).click();
+    await edit.getByText('Advanced settings', { exact: true }).click();
+    await edit.getByLabel('User-Agent override', { exact: true }).fill('Broker/3.0');
+    const changed = page.waitForResponse(
+      (r) => r.request().method() === 'PATCH' && new URL(r.url()).pathname === `/_pb/sources/${id}`,
+    );
+    await edit.getByRole('button', { name: 'Save source', exact: true }).click();
+    const changedResponse = await changed;
+    expect(changedResponse.status()).toBe(204);
+    expect(changedResponse.request().postDataJSON()).toEqual({ userAgent: 'Broker/3.0' });
+    await expect(edit).toHaveCount(0);
+    await row.getByText('More', { exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Registered names / }).click();
+    const names = activeDialog(page, 'Registered names');
+    await expect(names.getByLabel('Registered pattern', { exact: true })).toHaveValue('@one/*');
+    const registered = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' && new URL(r.url()).pathname === `/_pb/sources/${id}/names`,
+    );
+    await names.getByRole('button', { name: 'Add name', exact: true }).click();
+    expect((await registered).status()).toBe(201);
+    await expect(names.getByLabel('Registered pattern', { exact: true })).toHaveValue('@two/*');
   });
 
   test('offers only the repository providers the Node runtime serves', async ({ page, admin }) => {

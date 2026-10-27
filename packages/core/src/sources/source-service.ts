@@ -101,6 +101,11 @@ export type SourceDto = Pick<
   | 'lastPolledAt'
   | 'nextPollAt'
 > & {
+  readonly config?: Readonly<Record<string, unknown>>;
+  readonly configComplete?: boolean;
+  readonly userAgent?: string | null;
+  readonly retentionDaysOverride?: number | null;
+  readonly defaultVisibleToNewProjects?: boolean;
   readonly hasCredential: boolean;
   readonly githubAuthentication?: 'app' | 'token';
   readonly lastRemovalRefusal: RemovalRefusal | null;
@@ -214,13 +219,13 @@ function safeSourceError(code: string | null): string | null {
   return code !== null && (SOURCE_ERROR_CODES as readonly string[]).includes(code) ? code : null;
 }
 
-function sourceDto(source: SourceRecord): SourceDto {
+function safeSourceUrl(value: string | null): string | null {
   let url: string | null = null;
-  if (source.url !== null) {
+  if (value !== null) {
     try {
-      const parsed = new URL(source.url);
+      const parsed = new URL(value);
       if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
-        const redacted = redactValue(source.url, 2048, 'url');
+        const redacted = redactValue(value, 2048, 'url');
         if (redacted.ok) {
           // Scan decoded path material too; keep the sanitized URL's original escaping.
           const decoded = decodeURIComponent(redacted.value);
@@ -232,13 +237,129 @@ function sourceDto(source: SourceRecord): SourceDto {
       // Invalid stored URLs have no public representation.
     }
   }
+  return url;
+}
+
+type PublicConfigField =
+  | 'string'
+  | 'provider'
+  | 'boolean'
+  | 'number'
+  | 'strings'
+  | {
+      readonly [key: string]: PublicConfigField;
+    };
+const PUBLIC_CONFIG_FIELDS: Record<
+  SourceRecord['type'],
+  Readonly<Record<string, PublicConfigField>>
+> = {
+  vcs: {
+    provider: 'provider',
+    repository: 'string',
+    installationId: 'number',
+    packageName: 'string',
+    refs: { tags: 'boolean', branches: 'strings' },
+  },
+  composer_repository: {
+    selection: { packages: 'strings', patterns: 'strings', expandPatterns: 'boolean' },
+    distHosts: 'strings',
+    mirrorsFallback: 'boolean',
+  },
+  npm_registry: { scopes: 'strings', distHosts: 'strings' },
+  packagist_proxy: { githubToken: 'boolean' },
+  npmjs_proxy: {},
+  hosted: {},
+};
+
+function safeConfigText(value: string, repository = false): string | undefined {
+  if (/^https?:\/\//i.test(value)) return safeSourceUrl(value) ?? undefined;
+  // SSH clone addresses carry a login name, but never a password or URL parameters.
+  const ssh = repository ? /^(?:ssh:\/\/)?([a-z0-9._-]+)@([^/?#]+)([/:][^?#]+)$/.exec(value) : null;
+  const scanned = ssh ? `${ssh[1]}/${ssh[2]}${ssh[3]}` : value;
+  try {
+    const checked = redactValue(scanned, 2048, 'text');
+    const decoded = decodeURIComponent(scanned);
+    const decodedCheck = redactValue(decoded, 2048, 'text');
+    return checked.ok &&
+      checked.value === scanned &&
+      decodedCheck.ok &&
+      decodedCheck.value === decoded
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function publicConfigObject(
+  value: unknown,
+  fields: Readonly<Record<string, PublicConfigField>>,
+): { config: Record<string, unknown>; configComplete: boolean } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return { config: {}, configComplete: false };
+  const object = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  let configComplete = true;
+  for (const [key, field] of Object.entries(fields)) {
+    const item = object[key];
+    if (typeof field === 'object') {
+      if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+        const nested = publicConfigObject(item, field);
+        result[key] = nested.config;
+        configComplete &&= nested.configComplete;
+      }
+    } else if (field === 'string' && typeof item === 'string') {
+      const safe = safeConfigText(item, key === 'repository');
+      if (safe !== undefined) result[key] = safe;
+      if (safe !== item) configComplete = false;
+    } else if (field === 'strings' && Array.isArray(item) && item.length <= 64) {
+      if (
+        item.every((entry: unknown) => typeof entry === 'string' && safeConfigText(entry) === entry)
+      )
+        result[key] = item;
+    } else if (field === 'provider' && (item === 'github' || item === 'git' || item === 'ssh')) {
+      result[key] = item;
+    } else if (field === 'boolean' && typeof item === 'boolean') {
+      result[key] = item;
+    } else if (
+      field === 'number' &&
+      typeof item === 'number' &&
+      Number.isSafeInteger(item) &&
+      item > 0
+    ) {
+      result[key] = item;
+    }
+  }
+  return {
+    config: result,
+    configComplete: configComplete && Object.keys(object).length === Object.keys(result).length,
+  };
+}
+
+function publicSourceConfig(source: SourceRecord) {
+  try {
+    return publicConfigObject(JSON.parse(source.configJson), PUBLIC_CONFIG_FIELDS[source.type]);
+  } catch {
+    return { config: {}, configComplete: false };
+  }
+}
+
+function sourceDto(source: SourceRecord, editable: boolean): SourceDto {
   return {
     id: source.id,
     projectId: source.projectId,
     name: source.name,
     ecosystem: source.ecosystem,
     type: source.type,
-    url,
+    url: safeSourceUrl(source.url),
+    ...(editable
+      ? {
+          ...publicSourceConfig(source),
+          userAgent: source.userAgent == null ? null : (safeConfigText(source.userAgent) ?? null),
+          retentionDaysOverride: source.retentionDaysOverride,
+          defaultVisibleToNewProjects: source.defaultVisibleToNewProjects,
+        }
+      : {}),
     status: source.status,
     removalPolicy: source.removalPolicy,
     pollIntervalSeconds: source.pollIntervalSeconds,
@@ -711,7 +832,9 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     async getVisible(ctx, who, input) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       const source = await deps.sources.getVisible(ctx, input);
-      return source === null ? fail('not_found') : success(sourceDto(source));
+      return source === null
+        ? fail('not_found')
+        : success(sourceDto(source, permitted(ctx, who, source.projectId)));
     },
     async list(ctx, who, input) {
       const projectId = input.projectId ?? null;
@@ -770,7 +893,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
             })
           : null;
       const items = page.map((source) => ({
-        ...sourceDto(source),
+        ...sourceDto(source, permitted(ctx, who, source.projectId)),
         ...(projectId === null ? { projectName: source.projectName ?? null } : {}),
         ...(counts === null ? {} : { attachedProjectCount: counts.get(source.id) ?? 0 }),
       }));

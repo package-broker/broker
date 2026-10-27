@@ -37,6 +37,7 @@ import {
   type Inventory,
 } from './inventory.js';
 import { provision } from './provision.js';
+import { readProvidersOption } from './providers-file.js';
 import { setup, setupBuildEnvironment, type SetupOptions, type SetupOperations } from './setup.js';
 
 const providerFixtures = JSON.parse(
@@ -188,7 +189,9 @@ beforeEach(async () => {
     }),
     validateArtifact: vi.fn(async () => {
       calls.push('artifact');
-      return {} as Awaited<ReturnType<SetupOperations['validateArtifact']>>;
+      return { identity: { runtimeProviders: true, compiled: [] } } as unknown as Awaited<
+        ReturnType<SetupOperations['validateArtifact']>
+      >;
     }),
     provision: vi.fn(async (o) => {
       calls.push(o.dryRun ? 'plan' : 'provision');
@@ -296,6 +299,45 @@ it('orders typed operations, durably delivers a T159 key and prints only a crede
   expect(publicText).toContain('setup/start');
   expect(publicText).toContain('setup/finish');
   expect(publicText).toContain('delete the local key file');
+});
+
+it.each(['file.json', 'none', undefined])(
+  'forwards parsed --providers %s only to deploy',
+  async (flag) => {
+    const file = join(project, 'file.json');
+    await writeFile(file, '[ ]');
+    options.providers = await readProvidersOption(
+      flag === 'file.json' ? file : flag,
+      undefined,
+      'setup',
+    );
+    const expected =
+      flag === 'file.json'
+        ? { kind: 'set', value: '[]', ids: [] }
+        : { kind: flag === 'none' ? 'remove' : 'absent' };
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(ops.deploy).toHaveBeenCalledWith(expect.objectContaining({ providers: expected }));
+    for (const operation of [ops.provision, ops.migrate, ops.smoke]) {
+      expect(operation).toHaveBeenCalled();
+      for (const [received] of vi.mocked(operation).mock.calls)
+        expect(received).not.toHaveProperty('providers');
+    }
+  },
+);
+
+it('keeps omitted providers absent and forwards a future workersPaid option only to deploy', async () => {
+  const paidOptions: SetupOptions & { workersPaid?: boolean } = { ...options, workersPaid: true };
+  expect((await setup(paidOptions, ops)).exitCode).toBe(0);
+  const received = vi.mocked(ops.deploy).mock.calls[0]![0];
+  expect(received).not.toHaveProperty('providers');
+  expect(received).toHaveProperty('workersPaid', true);
+  for (const operation of [ops.provision, ops.migrate, ops.smoke]) {
+    expect(operation).toHaveBeenCalled();
+    for (const [received] of vi.mocked(operation).mock.calls) {
+      expect(received).not.toHaveProperty('providers');
+      expect(received).not.toHaveProperty('workersPaid');
+    }
+  }
 });
 
 it.each(['none', 'different', 'exact'])(
@@ -2111,3 +2153,50 @@ it.each(['domain', 'publicUrl'] as const)(
 
 it('sets up routes in an empty zone then deploys the same flags without route mutations', () =>
   exerciseDeploymentCheckpoint('first_install_routes'));
+
+it.each([
+  [null, 'Cannot set providers on a legacy artifact without identity metadata'],
+  [
+    { runtimeProviders: false, compiled: [] },
+    'Cannot set providers: artifact runtimeProviders is false',
+  ],
+])('refuses --providers <file> before any write for artifact identity %j', async (id, message) => {
+  vi.mocked(ops.validateArtifact).mockResolvedValue({ identity: id } as unknown as Awaited<
+    ReturnType<SetupOperations['validateArtifact']>
+  >);
+  const file = join(project, 'file.json');
+  await writeFile(file, '[ ]');
+  options.providers = await readProvidersOption(file, undefined, 'setup');
+  options.reveal = vi.fn();
+  const outcome = await setup(options, ops);
+  expect(outcome).toMatchObject({
+    exitCode: 2,
+    output: { status: 'error', error: { code: 'invalid_input', message } },
+  });
+  for (const operation of [
+    ops.provision,
+    ops.migrate,
+    ops.organization,
+    ops.deploy,
+    ops.smoke,
+    ops.admin,
+  ])
+    expect(operation).not.toHaveBeenCalled();
+  for (const [, init] of vi.mocked(options.fetch!).mock.calls)
+    expect(init?.method ?? 'GET').toBe('GET');
+  expect(options.reveal).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+  await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it.each(['none', undefined])(
+  'does not check artifact identity for --providers %s',
+  async (flag) => {
+    vi.mocked(ops.validateArtifact).mockResolvedValue({ identity: null } as unknown as Awaited<
+      ReturnType<SetupOperations['validateArtifact']>
+    >);
+    options.providers = await readProvidersOption(flag, undefined, 'setup');
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(ops.deploy).toHaveBeenCalledTimes(1);
+  },
+);

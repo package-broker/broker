@@ -378,3 +378,53 @@ describe('runtime identity factory through the kernel', () => {
     ).toThrow('invalid sso-oidc configuration: runtimeProviders must be readable');
   });
 });
+
+describe('static identity descriptor', () => {
+  it.each([undefined, false, true])(
+    'describes compiled snapshots with runtimeProviders=%s',
+    (flag) => {
+      const source = { ...oidc, displayName: 'Company', scopes: ['openid', 'email'] };
+      const plugin = ssoOidc({
+        providers: [source, access],
+        ...(flag === undefined ? {} : { runtimeProviders: flag }),
+      });
+      Object.assign(source, { issuer: 'https://changed.example.com' });
+      expect(plugin.identityDescriptor).toEqual({
+        runtimeProviders: flag === true,
+        compiled: [
+          { id: oidc.id, kind: 'oidc', anchor: `oidc:${oidc.issuer}` },
+          {
+            id: access.id,
+            kind: 'cloudflare-access',
+            anchor: `access:${access.teamDomain}/${access.audience}`,
+          },
+        ],
+      });
+      expect(Reflect.ownKeys(plugin.identityDescriptor!)).toEqual(['runtimeProviders', 'compiled']);
+      expect(Object.isFrozen(plugin.identityDescriptor)).toBe(true);
+      expect(Object.isFrozen(plugin.identityDescriptor!.compiled)).toBe(true);
+      const providers = build([plugin], () => undefined);
+      for (const entry of plugin.identityDescriptor!.compiled) {
+        expect(entry.anchor).toBe(providers.get(entry.id)?.trustAnchor);
+        expect(Reflect.ownKeys(entry)).toEqual(['id', 'kind', 'anchor']);
+        expect(Object.isFrozen(entry)).toBe(true);
+      }
+      expect(() => collectRegistrations([plugin])).not.toThrow();
+    },
+  );
+
+  it('describes runtime-only composition without reading the environment', () => {
+    const plugin = ssoOidc({ runtimeProviders: true });
+    expect(plugin.identityDescriptor).toEqual({ runtimeProviders: true, compiled: [] });
+    expect(Object.isFrozen(plugin.identityDescriptor)).toBe(true);
+    expect(Object.isFrozen(plugin.identityDescriptor!.compiled)).toBe(true);
+    expect(() => collectRegistrations([plugin])).not.toThrow();
+  });
+
+  it.each([{}, { runtimeProviders: false }, { providers: [] }])(
+    'omits the descriptor when unbound: %j',
+    (options) => {
+      expect(ssoOidc(options)).not.toHaveProperty('identityDescriptor');
+    },
+  );
+});

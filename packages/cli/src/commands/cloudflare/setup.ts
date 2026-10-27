@@ -30,6 +30,7 @@ import {
 } from './api.js';
 import {
   active,
+  assertProvidersAccepted,
   cloudflareDeployContract,
   deploy,
   deploymentDomain,
@@ -44,11 +45,13 @@ import {
   type Inventory,
 } from './inventory.js';
 import { provision, type ProvisionOptions } from './provision.js';
+import type { ProvidersOption } from './providers-file.js';
 import { smoke, type SmokeOptions } from './smoke.js';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
 export interface SetupOptions extends Omit<ProvisionOptions, 'contract' | 'transaction'> {
+  providers?: ProvidersOption;
   orgSlug?: string;
   orgName?: string;
   adminEmail?: string;
@@ -536,6 +539,7 @@ export async function setup(
     } else await operations.build(configPath, outDir, buildEnv);
     validateSmokeToken(o);
     const artifact = await operations.validateArtifact(outDir);
+    assertProvidersAccepted(o.providers, artifact.identity);
     output.build_info = artifact.info ?? null;
     output.artifact_sha256 = artifact.artifactHash ?? null;
     const generatedNames = [
@@ -566,8 +570,10 @@ export async function setup(
       if (JSON.stringify(await store.read()) !== JSON.stringify(journal))
         throw new CloudflareError('plan_changed', 8, false, 'validate');
     }
+    const { providers, workersPaid, ...sharedOptions }: SetupOptions & { workersPaid?: boolean } =
+      o;
     const common = {
-      ...o,
+      ...sharedOptions,
       workerName: values.workerName!,
       prebuilt: false,
       project,
@@ -802,6 +808,8 @@ export async function setup(
     const deployOptions: DeployOptions = {
       contract: cloudflareDeployContract,
       ...deployCommon,
+      ...(providers === undefined ? {} : { providers }),
+      ...(workersPaid === undefined ? {} : { workersPaid }),
       env: deployEnv,
       secret: selectedSecrets
         .filter((s) => s !== 'PB_MASTER_KEY' && !retainedNames.has(s))

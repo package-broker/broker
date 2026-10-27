@@ -86,3 +86,23 @@ it('setup --project keeps the build project at cwd and passes only the smoke slu
   );
   expect(setup.mock.calls[0]![0]).not.toHaveProperty('project');
 });
+
+vi.mock('./commands/cloudflare/deploy.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./commands/cloudflare/deploy.js')>()),
+  runCloudflareDeploy: vi.fn(async () => 0),
+}));
+
+it('passes --workers-paid to cloudflare deploy options', async () => {
+  const { runCloudflareDeploy } = await import('./commands/cloudflare/deploy.js');
+  const deploy = vi.mocked(runCloudflareDeploy);
+  deploy.mockClear();
+  expect(await run(['cloudflare', 'deploy', '--worker-name', 'broker', '--workers-paid'])).toBe(0);
+  expect(deploy).toHaveBeenCalledWith(expect.objectContaining({ workersPaid: true }));
+});
+
+it('passes --workers-paid to cloudflare setup options', async () => {
+  const setup = vi.mocked(runCloudflareSetup);
+  setup.mockClear();
+  expect(await run(['cloudflare', 'setup', '--worker-name', 'broker', '--workers-paid'])).toBe(0);
+  expect(setup).toHaveBeenCalledWith(expect.objectContaining({ workersPaid: true }));
+});

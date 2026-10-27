@@ -7,9 +7,10 @@ import {
   type CloudflareAccessConfig,
   createCloudflareAccessProvider,
 } from './cloudflare-access.js';
-import { checkEntries, isContainer } from './definitions.js';
+import { checkEntries, isContainer } from './provider-checks.js';
 import { type OidcConfig, createOidcProvider } from './oidc.js';
 import { planProviders } from './planner.js';
+import { providerPresentation } from './presentation.js';
 import {
   MAX_RUNTIME_PROVIDERS as MAX_PROVIDERS,
   parseRuntimeProviders,
@@ -26,7 +27,7 @@ export interface SsoOidcOptions {
 }
 
 function definition(
-  extra: Pick<PluginDefinition, 'binds' | 'identityProviders'>,
+  extra: Pick<PluginDefinition, 'binds' | 'identityProviders' | 'identityDescriptor'>,
 ): PluginDefinition {
   return Object.freeze(
     definePlugin({
@@ -96,6 +97,18 @@ export default function ssoOidc(options: SsoOidcOptions = {}): PluginDefinition 
 
   return definition({
     binds: Object.freeze(['identity'] as const),
+    identityDescriptor: Object.freeze({
+      runtimeProviders: runtimeProviders === true,
+      compiled: Object.freeze(
+        accepted.map((c) =>
+          Object.freeze({
+            id: c.id,
+            kind: c.kind,
+            anchor: providerPresentation(c).trustAnchor,
+          }),
+        ),
+      ),
+    }),
     identityProviders: (ctx): readonly IdentityProvider[] => {
       let effective = accepted;
       if (runtimeProviders === true) {

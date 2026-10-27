@@ -8,7 +8,24 @@ import {
   validatePlatformPorts,
   type PlatformPortConfig,
 } from '@package-broker/core/platform/port-config';
-import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
+import {
+  PLUGIN_BINDABLE_PORTS,
+  providerSecretName,
+  type IdentityDescriptor,
+} from '@package-broker/core/plugin';
+import {
+  parseRuntimeProviders,
+  planProviders,
+  type ProviderPlan,
+  type RuntimeProviders,
+} from '@package-broker/plugin-sso-oidc/definitions';
+import { snapshotIdentityDescriptor } from '@package-broker/core/kernel/registry';
+import { orgContext } from '@package-broker/core/db/port';
+import { isValidTrustAnchor } from '@package-broker/core/identity/port';
+import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { readProviderBinding } from '@package-broker/db-sqlite/repositories/provider-binding';
+import { DbError } from '@package-broker/core/db/errors';
+import { createD1HttpExecutor, isLostResponse } from '../../cloudflare/d1-http-executor.js';
 import {
   assertPrebuiltConfiguration,
   materializePrebuilt,
@@ -16,6 +33,7 @@ import {
   removePrebuilt,
 } from '../../prebuilt.js';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
+import { validateProvidersDocument, type ProvidersOption } from './providers-file.js';
 import { normalizeQueueConsumer } from './queue-consumer.js';
 import { assertMigrationsApplied } from './migrations-check.js';
 import { d1BindingId, workerSettingsDifferences } from './worker-settings.js';
@@ -27,6 +45,7 @@ import {
   failCommand,
   object,
   wasNotSent,
+  type CommandEnvelope,
   type CommandResult,
 } from './api.js';
 import { resolveZone } from './zone.js';
@@ -76,8 +95,11 @@ const uuid = (v: unknown): v is string =>
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(v);
 const safeId = (v: unknown): v is string =>
   typeof v === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(v);
-const invalid = (): never => {
-  throw new CloudflareError('invalid_input', 2, false, 'deploy');
+const inputMessages = new WeakMap<CloudflareError, string>();
+const invalid = (message?: string): never => {
+  const error = new CloudflareError('invalid_input', 2, false, 'deploy');
+  if (message) inputMessages.set(error, message);
+  throw error;
 };
 const conflict = (field: string, ...fields: string[]): never => {
   throw new CloudflareError('configuration_conflict', 8, false, 'deploy', null, null, null, null, [
@@ -88,11 +110,177 @@ const conflict = (field: string, ...fields: string[]): never => {
 const unknown = (): never => {
   throw new CloudflareError('outcome_unknown', 6, false, 'deploy');
 };
+export function assertProvidersAccepted(
+  option: ProvidersOption | undefined,
+  identity: ReturnType<typeof snapshotIdentityDescriptor>,
+): void {
+  if (option?.kind !== 'set' || identity?.runtimeProviders) return;
+  const message = identity
+    ? 'Cannot set providers: artifact runtimeProviders is false'
+    : 'Cannot set providers on a legacy artifact without identity metadata';
+  try {
+    invalid(message);
+  } catch (error) {
+    throw Object.assign(error as CloudflareError, { message });
+  }
+}
+function desiredProviders(
+  option: ProvidersOption | undefined,
+  identity: ReturnType<typeof snapshotIdentityDescriptor>,
+  live: Record<string, unknown> | null,
+): string | null {
+  if (option?.kind === 'set') {
+    assertProvidersAccepted(option, identity);
+    return option.value;
+  }
+  if (option?.kind === 'remove') return null;
+  const found = ((live?.bindings ?? []) as unknown[])
+    .map(object)
+    .filter((b) => b.name === 'PB_IDP_PROVIDERS');
+  if (!found.length) return null;
+  try {
+    const binding = found[0]!;
+    if (found.length !== 1 || binding.type !== 'plain_text' || typeof binding.text !== 'string')
+      throw new Error();
+    validateProvidersDocument(binding.text, 'deploy', true);
+    return binding.text;
+  } catch {
+    return invalid(
+      'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
+    );
+  }
+}
+type PlannedCompiled = { readonly id: string } & (
+  | { readonly kind: 'oidc'; readonly issuer: string }
+  | { readonly kind: 'cloudflare-access'; readonly teamDomain: string; readonly audience: string }
+);
+function planned({ id, kind, anchor }: IdentityDescriptor['compiled'][number]): PlannedCompiled {
+  const value = anchor.slice(anchor.indexOf(':') + 1);
+  const slash = value.indexOf('/');
+  return kind === 'oidc'
+    ? { id, kind, issuer: value }
+    : { id, kind, teamDomain: value.slice(0, slash), audience: value.slice(slash + 1) };
+}
+function identityDigest(descriptor: IdentityDescriptor | null, providers: string | null) {
+  return descriptor === null && providers === null
+    ? null
+    : digest(canonical({ descriptor, providers }));
+}
+function providerPlan(descriptor: IdentityDescriptor, providersText: string | null) {
+  let runtime: RuntimeProviders = parseRuntimeProviders(undefined);
+  if (descriptor.runtimeProviders)
+    try {
+      runtime = parseRuntimeProviders(providersText ?? undefined);
+    } catch {
+      runtime = { ...runtime, documentProblem: 'unreadable' };
+    }
+  const plan = (
+    planProviders as (c: readonly PlannedCompiled[], r: RuntimeProviders) => ProviderPlan
+  )(descriptor.compiled.map(planned), runtime);
+  return { runtime, plan };
+}
+type EffectiveAnchor = { readonly id: string; readonly anchor: string };
+function effectiveAnchors(
+  descriptor: IdentityDescriptor | null,
+  providersText: string | null,
+): EffectiveAnchor[] {
+  if (descriptor === null) return [];
+  return providerPlan(descriptor, providersText).plan.effective.map((entry) => ({
+    id: entry.id,
+    anchor:
+      entry.kind === 'oidc'
+        ? `oidc:${entry.issuer}`
+        : `access:${entry.teamDomain}/${entry.audience}`,
+  }));
+}
+const MISSING_SCHEMA = /\bno such table: (?:main\.)?organization\b/;
+async function anchorPreflight(
+  connection: { accountId: string; apiToken: string; fetch?: typeof fetch },
+  databaseId: string | null | undefined,
+  anchors: readonly EffectiveAnchor[],
+  missingSchemaSkips: boolean,
+): Promise<'checked' | 'skipped'> {
+  let changed: string | undefined;
+  try {
+    if (typeof databaseId !== 'string' || databaseId === '') throw new TypeError('no database');
+    const executor = createD1HttpExecutor({ ...connection, databaseId });
+    let organization;
+    try {
+      organization = await createOrganizationBootstrap(executor).findSingleton();
+    } catch (error) {
+      if (missingSchemaSkips && missingSchema(error)) return 'skipped';
+      throw error;
+    }
+    if (organization === null) return 'checked';
+    const ctx = orgContext(organization.id);
+    for (const { id, anchor } of anchors) {
+      const binding = await readProviderBinding(executor, ctx, id);
+      if (binding === null) continue;
+      if (typeof binding.anchor !== 'string' || !isValidTrustAnchor(binding.anchor))
+        throw new TypeError('malformed provider binding');
+      if (binding.anchor !== anchor) {
+        changed = id;
+        break;
+      }
+    }
+  } catch {
+    throw new CloudflareError('provider_failure', 1, false, 'deploy');
+  }
+  if (changed === undefined) return 'checked';
+  const message = `Provider ${changed} is bound to a different trust anchor; run pb admin rebind-provider before deploying this definition`;
+  const error = new CloudflareError('provider_anchor_changed', 2, false, 'deploy');
+  inputMessages.set(error, message);
+  throw Object.assign(error, { message });
+}
+function missingSchema(error: unknown): boolean {
+  return (
+    error instanceof DbError &&
+    error.kind === 'unknown' &&
+    !isLostResponse(error) &&
+    MISSING_SCHEMA.test(error.message)
+  );
+}
+export function dryRunIdentity(
+  descriptor: IdentityDescriptor | null,
+  providersText: string | null,
+  identityHash: string | null,
+  skippedChecks: string[] = [],
+) {
+  if (descriptor === null) return null;
+  const { runtime, plan } = providerPlan(descriptor, providersText);
+  return {
+    providers: plan.effective.map((entry) => ({
+      id: entry.id,
+      type: entry.kind,
+      source: runtime.accepted.includes(entry) ? 'runtime' : 'compiled',
+    })),
+    overrides: [...plan.overridden],
+    displaced: [
+      ...plan.displaced.map(({ compiled: id, by }) => ({ id, reason: 'displaced', by })),
+      ...plan.suppressed.map((id) => ({ id, reason: 'suppressed', by: null })),
+      ...plan.overflow.map((id) => ({ id, reason: 'overflow', by: null })),
+    ],
+    runtime_providers_applied: descriptor.runtimeProviders,
+    runtime_document_problem: runtime.documentProblem,
+    providers_sha256: providersText === null ? null : digest(providersText),
+    identity_sha256: identityHash,
+    skipped_checks: skippedChecks,
+  };
+}
+function frozenProviders(attempt: DeploymentAttempt): string | null {
+  const value = attempt.providers_text ?? null;
+  if ((value === null ? null : digest(value)) !== (attempt.providers_sha256 ?? null))
+    return conflict('providers');
+  const parsed = parseRuntimeProviders(value ?? undefined);
+  if (parsed.documentProblem !== null || parsed.rejected.length)
+    return invalid('Frozen PB_IDP_PROVIDERS is not valid');
+  return value;
+}
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object')
     return `{${Object.entries(value)
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
       .join(',')}}`;
   return JSON.stringify(value);
@@ -181,6 +369,9 @@ export async function validateDeploymentArtifact(out: string) {
     if (module.length === 0) return invalid();
     const info = safeBuildInfo(JSON.parse((await read('build-info.json')).toString('utf8')));
     const manifest = object(JSON.parse((await read('generated/manifest.json')).toString('utf8')));
+    const hasIdentity = Object.hasOwn(manifest, 'identity');
+    const identity = hasIdentity ? snapshotIdentityDescriptor(manifest.identity) : null;
+    if (hasIdentity && identity === null) return invalid();
     if (
       manifest.schemaVersion !== 1 ||
       manifest.platform !== 'cloudflare' ||
@@ -258,7 +449,16 @@ export async function validateDeploymentArtifact(out: string) {
         ports,
       }),
     );
-    return { module, info, ports, assets, assetsHash: exactAssetsHash, artifactHash, migrations };
+    return {
+      module,
+      info,
+      ports,
+      assets,
+      assetsHash: exactAssetsHash,
+      artifactHash,
+      migrations,
+      identity,
+    };
   } catch {
     return invalid();
   }
@@ -361,6 +561,7 @@ export const cloudflareDeployContract: DeployProviderContract = {
 };
 
 export interface DeployOptions {
+  providers?: ProvidersOption;
   workerName: string;
   prebuilt?: boolean;
   configPath?: string;
@@ -377,6 +578,7 @@ export interface DeployOptions {
   routes?: string;
   secret?: readonly string[];
   secrets?: string;
+  workersPaid?: boolean;
   allowContract?: readonly string[];
   dryRun?: boolean;
   json?: boolean;
@@ -450,7 +652,10 @@ function secretNames(o: DeployOptions): string[] {
   const names = [...(o.secret ?? []), ...(o.secrets === undefined ? [] : o.secrets.split('\n'))];
   if (
     new Set(names).size !== names.length ||
-    names.some((n) => !/^[A-Z][A-Z0-9_]{0,127}$/.test(n) || n === 'PB_TOKEN_PEPPER')
+    names.some(
+      (n) =>
+        !/^[A-Z][A-Z0-9_]{0,127}$/.test(n) || ['PB_TOKEN_PEPPER', 'PB_IDP_PROVIDERS'].includes(n),
+    )
   )
     return invalid();
   return names.sort();
@@ -1304,7 +1509,8 @@ export async function deploy(
   operations: { materializePrebuilt?: typeof materializePrebuilt } = {},
 ): Promise<CommandResult> {
   let prebuiltOut: string | undefined;
-  const output = commandEnvelope('deploy', o.dryRun);
+  const output: CommandEnvelope & { identity?: ReturnType<typeof dryRunIdentity> } =
+    commandEnvelope('deploy', o.dryRun);
   const result: CommandResult = { exitCode: 1, output };
   const succeed = () => {
     result.exitCode = 0;
@@ -1362,12 +1568,14 @@ export async function deploy(
     )
       return invalid();
     const artifact = await validateDeploymentArtifact(out);
+    if (o.providers?.kind === 'set') desiredProviders(o.providers, artifact.identity, null);
     const endpointEnv = artifact.ports?.observability.endpointEnv;
     const headersEnv = artifact.ports?.observability.headersEnv;
     const generatedNames = [
       'DB',
       'DEPLOYMENT_ID',
       'PB_PUBLIC_URL',
+      'PB_IDP_PROVIDERS',
       'ASSETS',
       ...(artifact.ports
         ? [
@@ -1486,6 +1694,18 @@ export async function deploy(
     if (journal.deployment && journal.deployment.attempt.preview !== 'disabled') {
       if (o.dryRun) {
         output.plan.push({ stage: 'deploy', action: 'reconcile_preview_cleanup' });
+        const known =
+          o.providers?.kind === 'set'
+            ? o.providers.value
+            : o.providers?.kind === 'remove'
+              ? null
+              : undefined;
+        output.identity = dryRunIdentity(
+          artifact.identity,
+          known ?? null,
+          known === undefined ? null : identityDigest(artifact.identity, known),
+          known === undefined ? ['live_providers'] : [],
+        );
         output.status = 'planned';
         return succeed();
       }
@@ -1533,8 +1753,9 @@ export async function deploy(
     )
       return conflict('deployment');
     if (!current.versions.length && rollout !== 100) return invalid();
+    let prior: Record<string, unknown> | undefined;
     if (current.versions.length === 1) {
-      const prior = object(
+      prior = object(
         (await api.request(`${base}/versions/${current.versions[0]!.version_id}`)).result,
       );
       if (prior.id !== current.versions[0]!.version_id) return conflict('version_id');
@@ -1587,7 +1808,73 @@ export async function deploy(
       return invalid();
     if (installedNames.length && !contract.secretInheritance)
       throw new CloudflareError('capability_unknown');
+    const priorAttempt = journal.deployment?.attempt;
+    const resuming =
+      priorAttempt &&
+      [
+        'preparing_upload',
+        'upload_pending',
+        'uploaded',
+        'configuring',
+        'activation_pending',
+      ].includes(priorAttempt.phase);
+    if (resuming) {
+      if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
+        return conflict('artifact_sha256');
+      if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
+    } else if (current.versions.length > 1 && recordedVerified?.requested_rollout !== rollout)
+      return conflict('deployment');
+    const removeSecret = () =>
+      invalid('Remove the secret first: wrangler secret delete PB_IDP_PROVIDERS');
+    if (installedNames.includes('PB_IDP_PROVIDERS')) return removeSecret();
+    const sources: Record<string, unknown>[] = [];
+    for (const version of current.versions) {
+      const result =
+        prior ?? object((await api.request(`${base}/versions/${version.version_id}`)).result);
+      if (result.id !== version.version_id) return conflict('version_id');
+      const resources = object(result.resources ?? {});
+      if (!Array.isArray(resources.bindings)) return conflict('providers');
+      if (
+        resources.bindings
+          .map(object)
+          .some((b) => b.name === 'PB_IDP_PROVIDERS' && b.type === 'secret_text')
+      )
+        return removeSecret();
+      sources.push(resources);
+    }
+    const frozen = resuming ? frozenProviders(priorAttempt) : null;
+    let providersText = frozen;
+    if (o.providers?.kind === 'set' || o.providers?.kind === 'remove') {
+      providersText = desiredProviders(o.providers, artifact.identity, null);
+      if (resuming) {
+        if (
+          providersText !== frozen &&
+          !(
+            o.providers.kind === 'set' &&
+            frozen !== null &&
+            validateProvidersDocument(frozen).value === providersText
+          )
+        )
+          return conflict('settings_sha256');
+        providersText = frozen;
+      }
+    } else if (!resuming) {
+      if (
+        sources.some((r) =>
+          (r.bindings as unknown[]).map(object).some((b) => b.name === 'PB_IDP_PROVIDERS'),
+        )
+      )
+        checkManaged();
+      const values = sources.map((r) => desiredProviders(o.providers, artifact.identity, r));
+      if (new Set(values).size > 1) return conflict('providers');
+      providersText = values[0] ?? null;
+    }
+    const identityHash = identityDigest(artifact.identity, providersText);
+    const anchors = effectiveAnchors(artifact.identity, providersText);
+    if (o.dryRun) output.identity = dryRunIdentity(artifact.identity, providersText, identityHash);
     const plainBindings = bindings(journal, artifact.ports, url);
+    if (providersText !== null)
+      plainBindings.push({ type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersText });
     if (endpointEnv) {
       if (selectedSecrets.includes(endpointEnv) || installedNames.includes(endpointEnv))
         return invalid();
@@ -1596,6 +1883,29 @@ export async function deploy(
     const collisionNames = new Set(plainBindings.map((b) => b.name));
     if ([...selectedSecrets, ...installedNames].some((n) => collisionNames.has(n)))
       return invalid();
+    const pending = journal.deployment?.attempt;
+    const pendingNames =
+      pending &&
+      ['upload_pending', 'uploaded', 'configuring', 'activation_pending'].includes(pending.phase)
+        ? pending.secret_names
+        : [];
+    const missingSecrets = [
+      ...new Set(
+        parseRuntimeProviders(providersText ?? undefined)
+          .accepted.filter((p) => p.kind === 'oidc')
+          .map((p) => providerSecretName(p.id, 'CLIENT_SECRET')),
+      ),
+    ].filter(
+      (name) =>
+        !installedNames.includes(name) &&
+        !pendingNames.includes(name) &&
+        !(selectedSecrets.includes(name) && o.env[name]),
+    );
+    if (missingSecrets.length)
+      return invalid(
+        `Missing provider secrets: ${missingSecrets.join(', ')}; deliver with --secret <ENV_NAME> or --secrets <ENV_NAMES>`,
+      );
+    output.checks.push({ name: 'provider_secrets', status: 'verified' });
     const updates: Record<string, unknown>[] = [];
     for (const name of selectedSecrets) {
       if (
@@ -1609,15 +1919,19 @@ export async function deploy(
       if (text) updates.push({ type: 'secret_text', name, text });
       else if (!installedNames.includes(name)) return invalid();
     }
-    const pending = journal.deployment?.attempt;
-    const pendingNames =
-      pending &&
-      ['upload_pending', 'uploaded', 'configuring', 'activation_pending'].includes(pending.phase)
-        ? pending.secret_names
-        : [];
     const allNames = [
       ...new Set([...installedNames, ...pendingNames, ...updates.map((b) => String(b.name))]),
     ].sort();
+    const variableCount = new Set([
+      ...plainBindings.filter((b) => b.type === 'plain_text').map((b) => String(b.name)),
+      ...allNames,
+    ]).size;
+    const variableLimit = o.workersPaid ? 128 : 64;
+    if (variableCount > variableLimit)
+      return invalid(
+        `Worker environment variable count ${variableCount} exceeds limit ${variableLimit}`,
+      );
+    output.checks.push({ name: 'variable_budget', status: 'verified' });
     if (!allNames.includes('PB_MASTER_KEY')) return invalid();
     if (headersEnv && !allNames.includes(headersEnv)) return invalid();
     let domain = live.domain;
@@ -1662,7 +1976,6 @@ export async function deploy(
       }),
     );
     const priorJournal = journal.deployment;
-    const priorAttempt = priorJournal?.attempt;
     const verified =
       priorAttempt?.phase === 'verified' && priorAttempt.smoke === 'passed'
         ? priorAttempt
@@ -1678,6 +1991,16 @@ export async function deploy(
       livePlain !== undefined &&
       plainBindings.every((b) => livePlain.some((x) => equal(x, b))) &&
       livePlain.length === plainBindings.length;
+    if (
+      anchors.length &&
+      (await anchorPreflight(
+        { ...auth, ...(o.fetch ? { fetch: o.fetch } : {}) },
+        journal.resources.d1?.id,
+        anchors,
+        o.dryRun === true,
+      )) === 'skipped'
+    )
+      output.identity?.skipped_checks.push('anchor_preflight');
     if (
       verified &&
       plainMatch &&
@@ -1695,15 +2018,18 @@ export async function deploy(
       output.status = o.dryRun ? 'planned' : 'ok';
       return succeed();
     }
-    const resuming =
-      priorAttempt &&
-      [
-        'preparing_upload',
-        'upload_pending',
-        'uploaded',
-        'configuring',
-        'activation_pending',
-      ].includes(priorAttempt.phase);
+    if (
+      rollout < 100 &&
+      !resuming &&
+      (identityHash !== (verified?.identity_sha256 ?? null) ||
+        (identityHash !== null &&
+          priorAttempt &&
+          priorAttempt !== verified &&
+          (!verified || !equal(current.versions, distribution(verified)))))
+    )
+      return invalid(
+        'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+      );
     if (
       resuming &&
       (priorAttempt.phase !== 'preparing_upload' || priorAttempt.script_creation !== undefined) &&
@@ -1711,14 +2037,13 @@ export async function deploy(
     )
       return conflict('bindings:secret_text');
     if (resuming) {
-      if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
-        return conflict('artifact_sha256');
       if (priorAttempt.settings_sha256 !== settingsHash) return conflict('settings_sha256');
-      if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
     }
-    if (!resuming) {
-      if (current.versions.length > 1) return conflict('deployment');
-      let managed = priorAttempt?.intended_settings ?? verified?.intended_settings;
+    if (!resuming && current.versions.length > 1) return conflict('deployment');
+    checkManaged();
+    function checkManaged() {
+      if (resuming) return;
+      let managed = priorAttempt?.intended_settings ?? recordedVerified?.intended_settings;
       if (priorAttempt?.phase === 'failed' || priorAttempt?.phase === 'rolled_back')
         managed =
           restoredSnapshot(
@@ -1729,7 +2054,7 @@ export async function deploy(
           ) ?? conflict('managed_settings');
       if (
         live.routes.some(
-          (r) => !intended.routes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
+          (r) => !requestedRoutes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
         )
       )
         return conflict('routes', 'routes:unmanaged_own');
@@ -1764,13 +2089,18 @@ export async function deploy(
       return succeed();
     }
     let a: DeploymentAttempt;
-    if (resuming) a = priorAttempt;
-    else {
+    if (resuming) {
+      a = priorAttempt;
+      a.identity_sha256 = identityHash;
+    } else {
       a = {
         operation_id: randomUUID(),
         artifact_sha256: artifact.artifactHash,
         assets_sha256: artifact.assetsHash,
         settings_sha256: settingsHash,
+        providers_sha256: providersText === null ? null : digest(providersText),
+        identity_sha256: identityHash,
+        ...(providersText === null ? {} : { providers_text: providersText }),
         secret_names: allNames,
         build_info: artifact.info,
         version_id: null,
@@ -1909,6 +2239,12 @@ export async function deploy(
     }
     if (!a.version_id) return unknown();
     await version(api, base, a.version_id, a, allNames, plainBindings);
+    if (providersText !== null) {
+      recordDeploymentHistory(journal.deployment!, {
+        plainBinding: { name: 'PB_IDP_PROVIDERS', text: providersText },
+      });
+      await save(store, journal, now);
+    }
     if (rollout < 100) {
       const preview = await contract.preview(api, identity.script_name, a.version_id);
       if (preview.version_id !== a.version_id || !preview.bindings_verified)
@@ -2123,16 +2459,22 @@ export async function deploy(
           : failure instanceof CloudflareError && failure.stage === 'prebuilt'
             ? failure
             : failure instanceof CloudflareError
-              ? new CloudflareError(
-                  failure.code,
-                  failure.exitCode,
-                  failure.retryable,
-                  'deploy',
-                  failure.status,
-                  failure.check,
-                  failure.providerCode,
-                  failure.source,
-                  failure.fields,
+              ? Object.assign(
+                  new CloudflareError(
+                    failure.code,
+                    failure.exitCode,
+                    failure.retryable,
+                    'deploy',
+                    failure.status,
+                    failure.check,
+                    failure.providerCode,
+                    failure.source,
+                    failure.fields,
+                  ),
+                  {
+                    message:
+                      inputMessages.get(failure) ?? new CloudflareError(failure.code).message,
+                  },
                 )
               : new CloudflareError('provider_failure', 1, false, 'deploy'),
       ),

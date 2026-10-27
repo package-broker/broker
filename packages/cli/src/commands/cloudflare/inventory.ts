@@ -165,6 +165,9 @@ export interface DeploymentAttempt {
   artifact_sha256: string;
   assets_sha256: string | null;
   settings_sha256: string;
+  providers_sha256?: string | null;
+  identity_sha256?: string | null;
+  providers_text?: string;
   secret_names: string[];
   build_info: BuildInfo;
   version_id: string | null;
@@ -431,6 +434,9 @@ function deploymentValid(raw: unknown): boolean {
         'artifact_sha256',
         'assets_sha256',
         'settings_sha256',
+        ...(Object.hasOwn(v, 'providers_sha256') ? ['providers_sha256'] : []),
+        ...(Object.hasOwn(v, 'identity_sha256') ? ['identity_sha256'] : []),
+        ...(Object.hasOwn(v, 'providers_text') ? ['providers_text'] : []),
         'secret_names',
         'build_info',
         'version_id',
@@ -466,6 +472,14 @@ function deploymentValid(raw: unknown): boolean {
       hash(v.artifact_sha256) &&
       (v.assets_sha256 === null || hash(v.assets_sha256)) &&
       hash(v.settings_sha256) &&
+      (v.identity_sha256 === undefined || v.identity_sha256 === null || hash(v.identity_sha256)) &&
+      (v.providers_sha256 === undefined ||
+        v.providers_sha256 === null ||
+        hash(v.providers_sha256)) &&
+      (v.providers_text === undefined ||
+        (typeof v.providers_text === 'string' &&
+          Buffer.byteLength(v.providers_text, 'utf8') <= 5120 &&
+          !['verified', 'failed', 'rolled_back'].includes(String(v.phase)))) &&
       Array.isArray(v.secret_names) &&
       v.secret_names.every(
         (n) =>
@@ -1022,6 +1036,9 @@ export class InventoryStore {
     await chmod(this.directory, 0o700);
   }
   async write(data: Inventory): Promise<void> {
+    for (const attempt of [data.deployment?.attempt, data.deployment?.last_verified])
+      if (attempt && ['verified', 'failed', 'rolled_back'].includes(attempt.phase))
+        delete attempt.providers_text;
     validateInventory(data, this.identity);
     await this.prepare();
     await noLinks(this.project, this.path);

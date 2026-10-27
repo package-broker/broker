@@ -334,6 +334,9 @@ importers:
       '@package-broker/db-sqlite':
         specifier: workspace:*
         version: link:../db-sqlite
+      '@package-broker/plugin-sso-oidc':
+        specifier: workspace:*
+        version: link:../plugin-sso-oidc
       '@package-broker/runtime-cloudflare':
         specifier: workspace:*
         version: link:../runtime-cloudflare

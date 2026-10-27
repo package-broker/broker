@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { envelopeResponse } from '@package-broker/core/kernel/errors';
 import { smoke } from './smoke.js';
+import { readProvidersOption } from './providers-file.js';
 import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
 import { CloudflareApi, CloudflareError, object } from './api.js';
@@ -218,6 +219,7 @@ function harness() {
       [NEWEST, { id: NEWEST, annotations: {}, resources: { bindings: [] } }],
     ]),
     calls: [] as { path: string; method: string; body: unknown; auth: string | null }[],
+    settingsVersion: null as string | null,
     uploadLost: false,
     uploadAbsent: false,
     activationLost: false,
@@ -248,6 +250,13 @@ function harness() {
           : init?.body
             ? JSON.parse(String(init.body))
             : undefined;
+    if (
+      path === `/d1/database/${DB}/query` &&
+      body.batch === undefined &&
+      typeof body.sql === 'string' &&
+      /^\s*select\b[^;]*;?\s*$/i.test(body.sql)
+    )
+      return ok([{ success: true, results: [], meta: { changes: 0 } }]);
     h.calls.push({ path, method, body, auth: new Headers(init?.headers).get('authorization') });
     if (method === 'DELETE') throw new Error('forbidden deletion');
     if (path === '/workers/scripts')
@@ -316,7 +325,7 @@ function harness() {
       return ok(h.active);
     }
     if (path === base + '/settings') {
-      const current = h.versions.get(h.active.versions[0]?.version_id ?? '');
+      const current = h.versions.get(h.settingsVersion ?? h.active.versions[0]?.version_id ?? '');
       const currentBindings = (current?.resources as { bindings: unknown[] } | undefined)?.bindings;
       return ok({
         tags: [
@@ -810,7 +819,6 @@ it.each(['valid', 'consumer-drift', 'deployment-drift'] as const)(
     const failed = (await store.read())!;
     const a = failed.deployment!.attempt;
     expect(a.phase).toBe('failed');
-    // The old reader could not verify any setting once this consumer existed.
     for (const change of a.changes) if (change.kind !== 'endpoints') change.restoration = 'unknown';
     h.configFail = false;
     if (evidence === 'consumer-drift') h.consumer!.max_retries += 1;
@@ -4179,4 +4187,1563 @@ it('pins route drift during reconciliation after failed configuration', async ()
   expect(result.output.error?.code).toBe('configuration_conflict');
   expect(routeChecks(result.output)).toEqual(conflictChecks('routes', 'routes:drift'));
   expect(routeMutations(h)).toHaveLength(count);
+});
+
+const compiledIdentity = { id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' };
+const accessIdentity = {
+  id: 'access',
+  kind: 'cloudflare-access',
+  anchor: `access:team.example.com/${'a'.repeat(64)}`,
+};
+async function writeIdentity(identity: unknown) {
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.identity = identity;
+  await writeFile(file, JSON.stringify(manifest));
+}
+it.each([true, false])(
+  'reads a valid identity descriptor (runtimeProviders: %s)',
+  async (runtimeProviders) => {
+    const identity = { runtimeProviders, compiled: [compiledIdentity, accessIdentity] };
+    await writeIdentity(identity);
+    const parsed = (await validateDeploymentArtifact(out)).identity;
+    expect(parsed).toEqual(identity);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed?.compiled)).toBe(true);
+    expect(parsed?.compiled.every(Object.isFrozen)).toBe(true);
+  },
+);
+it('reads an absent identity descriptor as legacy null', async () => {
+  expect((await validateDeploymentArtifact(out)).identity).toBeNull();
+});
+it('accepts the identity descriptor at the 64-provider boundary', async () => {
+  const identity = {
+    runtimeProviders: true,
+    compiled: Array.from({ length: 64 }, (_, i) => ({
+      id: `p${i}`,
+      kind: 'oidc',
+      anchor: `oidc:https://idp${i}.example.com`,
+    })),
+  };
+  await writeIdentity(identity);
+  expect((await validateDeploymentArtifact(out)).identity).toEqual(identity);
+});
+it.each([
+  ['null', null],
+  ['array', []],
+  ['string', 'identity'],
+  ['extra key', { runtimeProviders: true, compiled: [], extra: true }],
+  ['missing flag', { compiled: [] }],
+  ['wrong flag type', { runtimeProviders: 'true', compiled: [] }],
+  ['missing compiled', { runtimeProviders: true }],
+  ['wrong compiled type', { runtimeProviders: true, compiled: {} }],
+  [
+    '65 entries',
+    {
+      runtimeProviders: true,
+      compiled: Array.from({ length: 65 }, (_, i) => ({
+        id: `p${i}`,
+        kind: 'oidc',
+        anchor: `oidc:https://idp${i}.example.com`,
+      })),
+    },
+  ],
+  ...[
+    ['null entry', null],
+    ['array entry', []],
+    ['entry extra key', { ...compiledIdentity, extra: true }],
+    ['missing id', { kind: 'oidc', anchor: compiledIdentity.anchor }],
+    ['wrong id type', { ...compiledIdentity, id: 1 }],
+    ['invalid id', { ...compiledIdentity, id: 'BAD_ID' }],
+    ['reserved id', { ...compiledIdentity, id: 'local' }],
+    ['bad kind', { ...compiledIdentity, kind: 'saml' }],
+    ['wrong kind type', { ...compiledIdentity, kind: null }],
+    ['wrong anchor type', { ...compiledIdentity, anchor: 1 }],
+    ['bad anchor', { ...compiledIdentity, anchor: 'oidc:https://user:pass@idp.example.com' }],
+    ['mismatched oidc anchor', { ...compiledIdentity, anchor: accessIdentity.anchor }],
+    ['mismatched access anchor', { ...accessIdentity, anchor: compiledIdentity.anchor }],
+  ].map(([name, entry]): [unknown, unknown] => [
+    name,
+    { runtimeProviders: true, compiled: [entry] },
+  ]),
+  [
+    'duplicate id',
+    {
+      runtimeProviders: true,
+      compiled: [
+        compiledIdentity,
+        {
+          ...compiledIdentity,
+          anchor: 'oidc:https://other.example.com',
+        },
+      ],
+    },
+  ],
+  [
+    'duplicate canonical anchor',
+    {
+      runtimeProviders: true,
+      compiled: [
+        compiledIdentity,
+        {
+          ...compiledIdentity,
+          id: 'other',
+          anchor: 'oidc:https://IDP.example.com:443/',
+        },
+      ],
+    },
+  ],
+])('rejects malformed identity metadata: %s', async (_name, identity) => {
+  await writeIdentity(identity);
+  await expect(validateDeploymentArtifact(out)).rejects.toMatchObject({ code: 'invalid_input' });
+});
+
+const providersSentinel = 'PROVIDERS_DISPLAY_SENTINEL';
+const providersValue = JSON.stringify([
+  {
+    id: 'test',
+    kind: 'oidc',
+    displayName: providersSentinel,
+    issuer: 'https://idp.example.test',
+    clientId: 'broker',
+    policy: { verifiedDomains: ['example.test'], autoJoin: false },
+  },
+]);
+function liveProviders(h: ReturnType<typeof harness>, text: unknown, type = 'plain_text') {
+  h.versions.get(OLD)!.resources = {
+    bindings: [
+      { type: 'd1', name: 'DB', id: DB },
+      { type, name: 'PB_IDP_PROVIDERS', text },
+    ],
+  };
+}
+const providerUploads = (h: ReturnType<typeof harness>) =>
+  h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST');
+const uploadedProviders = (h: ReturnType<typeof harness>) =>
+  (h.metadata!.bindings as Record<string, unknown>[]).filter((b) => b.name === 'PB_IDP_PROVIDERS');
+
+function providerHarness() {
+  const h = harness();
+  h.installed.push('PB_IDP_TEST_CLIENT_SECRET');
+  return h;
+}
+
+it('sets compact providers, journals only their hash, and changes versions only when needed', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = providerHarness();
+  const o = options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } });
+  const success = await deploy(o);
+  expect(success.exitCode).toBe(0);
+  expect(JSON.stringify(success.output)).not.toContain(providersSentinel);
+  expect(uploadedProviders(h)).toEqual([
+    { type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersValue },
+  ]);
+  expect((await store.read())!.deployment!.history!.hashed_bindings).toEqual([
+    { name: 'PB_IDP_PROVIDERS', sha256: [digest(providersValue)] },
+  ]);
+  expect((await store.read())!.deployment!.attempt.providers_text).toBe(providersValue);
+  expect(JSON.stringify((await store.read())!.deployment!.history)).not.toContain(
+    providersSentinel,
+  );
+  expect((await store.read())!.deployment!.history!.plain_bindings).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ name: 'PB_IDP_PROVIDERS' })]),
+  );
+  const verified = (await store.read())!;
+  verified.deployment!.attempt.phase = 'verified';
+  verified.deployment!.attempt.smoke = 'passed';
+  await store.write(verified);
+  expect((await deploy(o)).exitCode).toBe(0);
+  expect(providerUploads(h)).toHaveLength(1);
+  o.providers = { kind: 'set', value: '[]', ids: [] };
+  expect((await deploy(o)).exitCode).toBe(0);
+  expect(providerUploads(h)).toHaveLength(2);
+  expect(uploadedProviders(h)[0]!.text).toBe('[]');
+});
+
+it.each(['remove', 'absent'] as const)(
+  'uploads no providers for %s with nothing live',
+  async (kind) => {
+    const h = harness();
+    expect((await deploy(options(h, { providers: { kind } }))).exitCode).toBe(0);
+    expect(uploadedProviders(h)).toEqual([]);
+    expect((await store.read())!.deployment!.history!.hashed_bindings).toBeUndefined();
+  },
+);
+
+it('removes live providers through the exact uploaded binding set', async () => {
+  const h = harness();
+  liveProviders(h, providersValue);
+  expect((await deploy(options(h, { providers: { kind: 'remove' } }))).exitCode).toBe(0);
+  expect(uploadedProviders(h)).toEqual([]);
+  const candidate = h.versions.get(CANDIDATE)!.resources as { bindings: { name: string }[] };
+  expect(candidate.bindings.some((b) => b.name === 'PB_IDP_PROVIDERS')).toBe(false);
+  expect((await store.read())!.deployment!.history!.hashed_bindings).toBeUndefined();
+});
+
+it('preserves valid live providers byte for byte on a legacy artifact', async () => {
+  const h = providerHarness();
+  const value = ` \n${providersValue}\n `;
+  liveProviders(h, value);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(uploadedProviders(h)[0]!.text).toBe(value);
+  expect((await store.read())!.deployment!.history!.hashed_bindings).toEqual([
+    { name: 'PB_IDP_PROVIDERS', sha256: [digest(value)] },
+  ]);
+});
+
+it.each<[string, unknown]>([
+  ['secret_text', undefined],
+  ['plain_text', 3],
+  ['plain_text', '{' + providersSentinel],
+  ['plain_text', JSON.stringify([{ displayName: providersSentinel }])],
+  ['json', providersValue],
+])('refuses invalid live providers (%s) without leaking values', async (type, value) => {
+  const h = harness();
+  liveProviders(h, value, type);
+  const result = await deploy(options(h));
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message:
+      type === 'secret_text'
+        ? 'Remove the secret first: wrangler secret delete PB_IDP_PROVIDERS'
+        : 'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
+  });
+  expect(providerUploads(h)).toHaveLength(0);
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+});
+
+it.each(['legacy', 'disabled'])('refuses set providers for a %s artifact', async (mode) => {
+  if (mode === 'disabled') await writeIdentity({ runtimeProviders: false, compiled: [] });
+  const h = harness();
+  const result = await deploy(
+    options(h, {
+      providers: { kind: 'set', value: providersValue, ids: ['test'] },
+    }),
+  );
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: expect.stringContaining(mode === 'legacy' ? 'legacy' : 'runtimeProviders'),
+  });
+  expect(JSON.stringify(result)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(0);
+});
+
+it('resumes a lost upload with frozen providers after live providers become invalid', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  h.uploadLost = true;
+  const first = await deploy(options(h));
+  expect(first.exitCode).not.toBe(0);
+  expect(JSON.stringify(first)).not.toContain(providersSentinel);
+  expect((await store.read())!.deployment!.attempt.phase).toBe('upload_pending');
+  liveProviders(h, 'invalid changed live value');
+  const second = await deploy(options(h));
+  expect(second.exitCode).toBe(0);
+  expect(JSON.stringify(second)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(uploadedProviders(h)[0]!.text).toBe(providersValue);
+});
+
+async function pendingProviders(h: ReturnType<typeof harness>, value = providersValue) {
+  liveProviders(h, value);
+  const send = h.fetch;
+  h.fetch = vi.fn(async (input, init) =>
+    String(input).endsWith('/assets-upload-session')
+      ? new Response('', { status: 403 })
+      : send(input, init),
+  );
+  expect((await deploy(options(h))).exitCode).not.toBe(0);
+  h.fetch = send;
+  const attempt = (await store.read())!.deployment!.attempt;
+  expect(attempt.phase).toBe('preparing_upload');
+  expect(attempt.providers_text).toBe(value);
+  return attempt;
+}
+
+it.each(['changed', 'remove', 'same', 'absent'])(
+  'checks explicit providers on resume before upload: %s',
+  async (mode) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = providerHarness();
+    await pendingProviders(h);
+    expect(providerUploads(h)).toHaveLength(0);
+    liveProviders(h, 'changed invalid live value');
+    const providers: DeployOptions['providers'] =
+      mode === 'remove'
+        ? { kind: 'remove' }
+        : mode === 'absent'
+          ? { kind: 'absent' }
+          : { kind: 'set', value: mode === 'same' ? providersValue : '[]', ids: [] };
+    const result = await deploy(options(h, { providers }));
+    if (mode === 'changed' || mode === 'remove') {
+      expect(result.output.error?.code).toBe('configuration_conflict');
+      expect(result.output.checks).toContainEqual({
+        name: 'settings_sha256',
+        status: 'configuration_conflict',
+      });
+      expect(providerUploads(h)).toHaveLength(0);
+    } else {
+      expect(result.exitCode).toBe(0);
+      expect(providerUploads(h)).toHaveLength(1);
+      expect(uploadedProviders(h)[0]!.text).toBe(providersValue);
+      expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+    }
+  },
+);
+
+it.each(['missing', 'mismatch'])(
+  'refuses an unusable frozen provider attempt field: %s',
+  async (mode) => {
+    const h = providerHarness();
+    await pendingProviders(h);
+    const journal = (await store.read())!;
+    if (mode === 'missing') delete journal.deployment!.attempt.providers_text;
+    else journal.deployment!.attempt.providers_text = '[]';
+    await store.write(journal);
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: 'providers',
+      status: 'configuration_conflict',
+    });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it.each(['verified', 'failed', 'rolled_back'] as const)(
+  'removes frozen provider text atomically when inventory reaches %s',
+  async (phase) => {
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    expect((await deploy(options(h))).exitCode).toBe(0);
+    const journal = (await store.read())!;
+    const attempt = journal.deployment!.attempt;
+    expect(attempt.providers_text).toBe(providersValue);
+    attempt.phase = phase;
+    if (phase === 'verified') attempt.smoke = 'passed';
+    await store.write(journal);
+    const stored = (await store.read())!.deployment!;
+    expect(stored.attempt).not.toHaveProperty('providers_text');
+    expect(stored.attempt.providers_sha256).toBe(digest(providersValue));
+    expect(JSON.stringify(stored.history)).not.toContain(providersSentinel);
+    expect(await readFile(store.path, 'utf8')).not.toContain(providersSentinel);
+  },
+);
+
+it('rejects oversized UTF-8 provider text in inventory reads and writes', async () => {
+  const h = providerHarness();
+  await pendingProviders(h);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.providers_text = 'é'.repeat(2561);
+  await expect(store.write(journal)).rejects.toMatchObject({ code: 'invalid_inventory' });
+  await writeFile(store.path, JSON.stringify(journal));
+  await expect(store.read()).rejects.toMatchObject({ code: 'invalid_inventory' });
+});
+
+it.each(['set', 'remove', 'absent'] as const)(
+  'refuses an installed provider secret for %s',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    h.installed.push('PB_IDP_PROVIDERS');
+    const result = await deploy(
+      options(h, {
+        providers: kind === 'set' ? { kind, value: providersValue, ids: ['test'] } : { kind },
+      }),
+    );
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: expect.stringContaining('wrangler secret delete PB_IDP_PROVIDERS'),
+    });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it.each(['set', 'remove', 'absent'] as const)(
+  'refuses selecting the provider secret for %s',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    for (const selection of [{ secret: ['PB_IDP_PROVIDERS'] }, { secrets: 'PB_IDP_PROVIDERS' }]) {
+      const h = harness();
+      const result = await deploy(
+        options(h, {
+          ...selection,
+          providers: kind === 'set' ? { kind, value: providersValue, ids: ['test'] } : { kind },
+        }),
+      );
+      expect(result.output.error?.code).toBe('invalid_input');
+      expect(mutations(h)).toHaveLength(0);
+    }
+  },
+);
+
+it('preserves active providers when script settings show a different version', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  h.settingsVersion = NEWEST;
+  h.versions.get(NEWEST)!.resources = {
+    bindings: [
+      { type: 'd1', name: 'DB', id: DB },
+      { type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: '[]' },
+    ],
+  };
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(uploadedProviders(h)[0]!.text).toBe(providersValue);
+});
+
+it.each(['equal', 'different', 'absent'])(
+  'handles providers in a managed split deployment: %s',
+  async (mode) => {
+    const full = providerHarness();
+    liveProviders(full, providersValue);
+    const verified = await verifiedIdentityDeploy(full);
+    verified.deployment!.attempt.version_id = OLD;
+    verified.deployment!.attempt.previous_version_id = null;
+    verified.deployment!.attempt.previous_deployment_id = null;
+    verified.deployment!.attempt.previous_distribution = [];
+    await store.write(verified);
+    const h = providerHarness();
+    h.versions.set(OLD, { ...full.versions.get(CANDIDATE)!, id: OLD });
+    h.endpoints = full.endpoints;
+    h.schedules = full.schedules;
+    h.consumer = full.consumer;
+    h.domain = full.domain;
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+    const journal = (await store.read())!;
+    journal.deployment!.attempt.phase = 'verified';
+    journal.deployment!.attempt.smoke = 'passed';
+    await store.write(journal);
+    h.settingsVersion = CANDIDATE;
+    if (mode === 'different') liveProviders(h, '[]');
+    if (mode === 'absent') h.versions.get(OLD)!.resources = { bindings: [] };
+    const result = await deploy(options(h, { rollout: 25 }));
+    if (mode === 'equal') {
+      expect(result.exitCode).toBe(0);
+      expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+    } else expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(providerUploads(h)).toHaveLength(1);
+  },
+);
+
+it.each(['absent', 'remove'] as const)(
+  'allows %s on a runtimeProviders false artifact',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: false, compiled: [] });
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    expect((await deploy(options(h, { providers: { kind } }))).exitCode).toBe(0);
+    expect(uploadedProviders(h)).toHaveLength(kind === 'absent' ? 1 : 0);
+  },
+);
+
+it.each(['duplicate', 'duplicate-member', 'invalid-dry-run'])(
+  'refuses invalid preserved providers: %s',
+  async (mode) => {
+    const h = harness();
+    liveProviders(
+      h,
+      mode === 'duplicate-member'
+        ? '[{"id":"a","id":"b"}]'
+        : mode === 'invalid-dry-run'
+          ? '{'
+          : providersValue,
+    );
+    if (mode === 'duplicate') {
+      const resources = h.versions.get(OLD)!.resources as { bindings: unknown[] };
+      resources.bindings.push({
+        type: 'plain_text',
+        name: 'PB_IDP_PROVIDERS',
+        text: providersValue,
+      });
+    }
+    const result = await deploy(options(h, { dryRun: mode === 'invalid-dry-run' }));
+    expect(result.output.error?.code).toBe('invalid_input');
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it('absent preserves providers on a verified receipt without another upload', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  await store.write(journal);
+  const result = await deploy(options(h, { providers: { kind: 'absent' } }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+it.each(['deployment', 'managed_settings'])(
+  'reports %s conflict before invalid live providers',
+  async (field) => {
+    const h = harness();
+    liveProviders(h, '{');
+    if (field === 'deployment')
+      h.active.versions = [
+        { version_id: OLD, percentage: 50 },
+        { version_id: NEWEST, percentage: 50 },
+      ];
+    else h.schedules = ['* * * * *'];
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({ name: field, status: 'configuration_conflict' });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it('refuses preserved provider documents padded beyond the runtime byte bound', async () => {
+  const h = harness();
+  liveProviders(h, `${providersValue}${' '.repeat(5121)}`);
+  const result = await deploy(options(h));
+  expect(result.output.error?.code).toBe('invalid_input');
+  expect(providerUploads(h)).toHaveLength(0);
+});
+
+it('resumes with an explicit compact set equal to the frozen non-compact value', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = providerHarness();
+  const value = JSON.stringify(JSON.parse(providersValue), null, 2);
+  await pendingProviders(h, value);
+  liveProviders(h, 'changed live value');
+  const result = await deploy(
+    options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(uploadedProviders(h)[0]!.text).toBe(value);
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+});
+
+it.each(['set', 'remove', 'absent'] as const)(
+  'refuses an active-version provider secret for %s',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    liveProviders(h, undefined, 'secret_text');
+    h.settingsVersion = NEWEST;
+    const result = await deploy(
+      options(h, {
+        providers: kind === 'set' ? { kind, value: providersValue, ids: ['test'] } : { kind },
+      }),
+    );
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: expect.stringContaining('wrangler secret delete PB_IDP_PROVIDERS'),
+    });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it.each([undefined, {}, { bindings: null }, { bindings: {} }])(
+  'reports providers conflict for non-array version bindings: %j',
+  async (resources) => {
+    const h = harness();
+    h.settingsVersion = NEWEST;
+    h.versions.get(OLD)!.resources = resources;
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: 'providers',
+      status: 'configuration_conflict',
+    });
+  },
+);
+
+it('fetches the single active version only once while preserving providers', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(
+    h.calls.filter((c) => c.path === `${base}/versions/${OLD}` && c.method === 'GET'),
+  ).toHaveLength(1);
+});
+
+it.each(['artifact', 'rollout'])(
+  'checks resumed %s before active provider bindings',
+  async (field) => {
+    const h = providerHarness();
+    await pendingProviders(h);
+    h.settingsVersion = NEWEST;
+    h.versions.get(OLD)!.resources = { bindings: {} };
+    if (field === 'artifact') await writeFile(join(out, 'worker.js'), 'export default {};');
+    const result = await deploy(options(h, field === 'rollout' ? { rollout: 25 } : {}));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: field === 'artifact' ? 'artifact_sha256' : 'requested_rollout',
+      status: 'configuration_conflict',
+    });
+  },
+);
+
+it('keeps no-op ordering before managed reconciliation without providers involvement', async () => {
+  const h = harness();
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  journal.deployment!.attempt.intended_settings.schedules = [];
+  await store.write(journal);
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+it('replaces in-flight provider text without copying it into history', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = providerHarness();
+  expect(
+    (await deploy(options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } })))
+      .exitCode,
+  ).toBe(0);
+  expect(
+    (await deploy(options(h, { providers: { kind: 'set', value: '[]', ids: [] } }))).exitCode,
+  ).toBe(0);
+  const journal = (await store.read())!.deployment!;
+  expect(journal.attempt.providers_text).toBe('[]');
+  expect(journal.history!.hashed_bindings).toContainEqual({
+    name: 'PB_IDP_PROVIDERS',
+    sha256: [digest(providersValue), digest('[]')],
+  });
+  expect(await readFile(store.path, 'utf8')).not.toContain(providersSentinel);
+});
+
+const corpProviders = JSON.stringify([{ ...JSON.parse(providersValue)[0], id: 'corp' }]);
+it.each(['installed', 'secret', 'secrets'] as const)(
+  'accepts an OIDC client secret %s with the deploy',
+  async (delivery) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    const name = 'PB_IDP_CORP_CLIENT_SECRET';
+    if (delivery === 'installed') h.installed.push(name);
+    const o = options(h, {
+      providers: { kind: 'set', value: corpProviders, ids: ['corp'] },
+      ...(delivery === 'secret' ? { secret: [name] } : {}),
+      ...(delivery === 'secrets' ? { secrets: name } : {}),
+    });
+    o.env = { ...o.env, [name]: 'CORP_SECRET_SENTINEL' };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+    expect(providerUploads(h)).toHaveLength(1);
+    expect(JSON.stringify(result.output)).not.toContain('CORP_SECRET_SENTINEL');
+  },
+);
+it.each([
+  ['set', false, 'unselected'],
+  ['preserved', false, 'unselected'],
+  ['set', true, 'empty'],
+  ['preserved', true, 'empty'],
+] as const)(
+  'refuses missing OIDC secrets for %s (dry-run %s, %s env)',
+  async (mode, dryRun, env) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    if (mode === 'preserved') liveProviders(h, corpProviders);
+    const o = options(h, {
+      dryRun,
+      ...(mode === 'set'
+        ? { providers: { kind: 'set', value: corpProviders, ids: ['corp'] } }
+        : {}),
+      ...(env === 'empty' ? { secret: ['PB_IDP_CORP_CLIENT_SECRET'] } : {}),
+    });
+    o.env = { ...o.env, PB_IDP_CORP_CLIENT_SECRET: env === 'empty' ? '' : 'UNSELECTED_SECRET' };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(2);
+    expect(result.output.error).toMatchObject({ code: 'invalid_input' });
+    expect(result.output.error!.message).toContain('PB_IDP_CORP_CLIENT_SECRET');
+    expect(result.output.error!.message).toContain('--secret');
+    expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+    expect(JSON.stringify(result.output)).not.toContain('idp.example.test');
+    expect(JSON.stringify(result.output)).not.toContain('UNSELECTED_SECRET');
+    expect(mutations(h)).toEqual([]);
+  },
+);
+it('reports every missing OIDC secret name without provider values', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  const result = await deploy(
+    options(h, {
+      providers: {
+        kind: 'set',
+        value: JSON.stringify([
+          ...JSON.parse(corpProviders),
+          { ...JSON.parse(providersValue)[0], issuer: 'https://other.example.test' },
+        ]),
+        ids: ['corp', 'test'],
+      },
+    }),
+  );
+  expect(result.output.error).toMatchObject({ code: 'invalid_input' });
+  expect(result.output.error!.message).toContain(
+    'PB_IDP_CORP_CLIENT_SECRET, PB_IDP_TEST_CLIENT_SECRET',
+  );
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+  expect(mutations(h)).toEqual([]);
+});
+it.each([false, true])('accepts Access without a client secret (dry-run %s)', async (dryRun) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  const value = JSON.stringify([
+    {
+      id: 'corp',
+      kind: 'cloudflare-access',
+      teamDomain: 'corp.cloudflareaccess.com',
+      audience: 'a'.repeat(64),
+      trustEmailVerification: true,
+      policy: { verifiedDomains: ['example.test'], autoJoin: false },
+    },
+  ]);
+  const result = await deploy(
+    options(h, { dryRun, providers: { kind: 'set', value, ids: ['corp'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+  expect(providerUploads(h)).toHaveLength(dryRun ? 0 : 1);
+});
+it('checks and reports installed secrets for preserved OIDC during dry-run', async () => {
+  const h = harness();
+  liveProviders(h, corpProviders);
+  h.installed.push('PB_IDP_CORP_CLIENT_SECRET');
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+  expect(mutations(h)).toEqual([]);
+});
+it.each([
+  [64, false, 0],
+  [65, false, 2],
+  [65, true, 0],
+  [128, true, 0],
+  [129, true, 2],
+] as const)(
+  'checks %i variable names with workersPaid=%s',
+  async (count, workersPaid, exitCode) => {
+    const h = harness();
+    h.installed.push(...Array.from({ length: count - 4 }, (_, i) => `ORPHAN_${i}`));
+    const result = await deploy(options(h, { workersPaid }));
+    expect(result.exitCode).toBe(exitCode);
+    if (exitCode) {
+      expect(result.output.error).toMatchObject({ code: 'invalid_input' });
+      expect(result.output.error!.message).toContain(`${count}`);
+      expect(result.output.error!.message).toContain(`${workersPaid ? 128 : 64}`);
+      expect(mutations(h)).toEqual([]);
+    } else {
+      expect(result.output.checks).toContainEqual({
+        name: 'variable_budget',
+        status: 'verified',
+      });
+      expect(providerUploads(h)).toHaveLength(1);
+      expect(h.metadata!.bindings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'd1' }),
+          expect.objectContaining({ type: 'r2_bucket' }),
+          expect.objectContaining({ type: 'queue' }),
+          expect.objectContaining({ type: 'analytics_engine' }),
+        ]),
+      );
+      expect(h.metadata).toHaveProperty('assets');
+    }
+  },
+);
+it.each([64, 65])(
+  'counts providers, telemetry and delivered secret union at %i during dry-run',
+  async (count) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const file = join(out, 'generated/manifest.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.platformPorts.observability.endpointEnv = 'OTEL_ENDPOINT';
+    await writeFile(file, JSON.stringify(manifest));
+    const h = harness();
+    h.installed.push(
+      'PB_IDP_CORP_CLIENT_SECRET',
+      ...Array.from({ length: count - 8 }, (_, i) => `ORPHAN_${i}`),
+    );
+    const o = options(h, {
+      dryRun: true,
+      providers: { kind: 'set', value: corpProviders, ids: ['corp'] },
+      secret: ['PB_IDP_CORP_CLIENT_SECRET', 'NEW_SECRET'],
+    });
+    o.env = {
+      ...o.env,
+      PB_IDP_CORP_CLIENT_SECRET: 'ROTATED_SENTINEL',
+      NEW_SECRET: 'NEW_SENTINEL',
+      OTEL_ENDPOINT: 'https://telemetry.example.test',
+    };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(count === 64 ? 0 : 2);
+    if (count === 64)
+      expect(result.output.checks).toContainEqual({
+        name: 'variable_budget',
+        status: 'verified',
+      });
+    else
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message: 'Worker environment variable count 65 exceeds limit 64',
+      });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+it('counts orphaned installed provider secrets after providers are removed', async () => {
+  const h = harness();
+  liveProviders(h, corpProviders);
+  h.installed.push(
+    'PB_IDP_CORP_CLIENT_SECRET',
+    ...Array.from({ length: 60 }, (_, i) => `ORPHAN_${i}`),
+  );
+  const result = await deploy(options(h, { providers: { kind: 'remove' } }));
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Worker environment variable count 65 exceeds limit 64',
+  });
+  expect(mutations(h)).toEqual([]);
+});
+
+it('includes pending secret names in the variable budget before reconciling a lost upload', async () => {
+  const h = harness();
+  h.uploadLost = true;
+  const o = options(h, { secret: ['PENDING_SECRET'] });
+  o.env = { ...o.env, PENDING_SECRET: 'PENDING_SENTINEL' };
+  expect((await deploy(o)).exitCode).toBe(6);
+  const uploads = providerUploads(h).length;
+  h.installed.push(...Array.from({ length: 60 }, (_, i) => `ORPHAN_${i}`));
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Worker environment variable count 65 exceeds limit 64',
+  });
+  expect(providerUploads(h)).toHaveLength(uploads);
+  expect(JSON.stringify(result.output)).not.toContain('PENDING_SENTINEL');
+});
+
+it.each(['invalid-live', 'disabled-artifact', 'resume-conflict'] as const)(
+  'keeps l1 sentinel redaction and no-upload guards effective with complete OIDC fixtures: %s',
+  async (mode) => {
+    const h = providerHarness();
+    let o = options(h);
+    if (mode === 'invalid-live') liveProviders(h, '{' + providersSentinel);
+    else if (mode === 'disabled-artifact') {
+      await writeIdentity({ runtimeProviders: false, compiled: [] });
+      o = options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } });
+    } else {
+      await writeIdentity({ runtimeProviders: true, compiled: [] });
+      await pendingProviders(h);
+      o = options(h, { providers: { kind: 'set', value: '[]', ids: [] } });
+    }
+    const result = await deploy(o);
+    expect(h.installed).toContain('PB_IDP_TEST_CLIENT_SECRET');
+    if (mode === 'invalid-live')
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message: 'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
+      });
+    else if (mode === 'disabled-artifact')
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message: 'Cannot set providers: artifact runtimeProviders is false',
+      });
+    else {
+      expect(result.output.error).toMatchObject({ code: 'configuration_conflict' });
+      expect(result.output.checks).toContainEqual({
+        name: 'settings_sha256',
+        status: 'configuration_conflict',
+      });
+    }
+    expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it('resumes a lost provider upload using the pending client secret without selecting it again', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const file = join(project, 'corp.json');
+  await writeFile(file, corpProviders);
+  const h = harness();
+  h.uploadLost = true;
+  const firstOptions = options(h, {
+    providers: await readProvidersOption(file),
+    secret: ['PB_IDP_CORP_CLIENT_SECRET'],
+  });
+  firstOptions.env = { ...firstOptions.env, PB_IDP_CORP_CLIENT_SECRET: 'CORP_PENDING_SENTINEL' };
+  const first = await deploy(firstOptions);
+  expect(first.exitCode).toBe(6);
+  expect((await store.read())!.deployment!.attempt).toMatchObject({
+    phase: 'upload_pending',
+    secret_names: expect.arrayContaining(['PB_IDP_CORP_CLIENT_SECRET']),
+  });
+  expect(h.installed).not.toContain('PB_IDP_CORP_CLIENT_SECRET');
+  const resumed = await deploy(options(h));
+  expect(resumed.exitCode).toBe(0);
+  expect(resumed.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(uploadedProviders(h)[0]!.text).toBe(corpProviders);
+  expect(JSON.stringify(resumed.output)).not.toContain('CORP_PENDING_SENTINEL');
+  expect(JSON.stringify(resumed.output)).not.toContain(providersSentinel);
+});
+
+it.each([
+  ['syntax', '{' + providersSentinel],
+  ['not-array', JSON.stringify({ displayName: providersSentinel })],
+  ['over-cap', JSON.stringify(Array.from({ length: 65 }, () => ({})))],
+  [
+    'rejected-entry',
+    JSON.stringify([
+      ...JSON.parse(providersValue),
+      { ...JSON.parse(corpProviders)[0], issuer: providersSentinel },
+    ]),
+  ],
+])('refuses invalid frozen providers before upload: %s', async (_mode, text) => {
+  const h = providerHarness();
+  await pendingProviders(h);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.providers_text = text;
+  journal.deployment!.attempt.providers_sha256 = digest(text);
+  await store.write(journal);
+  const before = mutations(h).length;
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Frozen PB_IDP_PROVIDERS is not valid',
+  });
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(0);
+  expect(mutations(h)).toHaveLength(before);
+});
+
+async function verifiedIdentityDeploy(h: ReturnType<typeof harness>) {
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  await store.write(journal);
+  return journal;
+}
+
+it.each(['unchanged', 'providers', 'compiled', 'flag', 'removed'] as const)(
+  'checks partial rollout identity configuration: %s',
+  async (change) => {
+    const descriptor = { runtimeProviders: true, compiled: [] as (typeof compiledIdentity)[] };
+    await writeIdentity(descriptor);
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    const journal = await verifiedIdentityDeploy(h);
+    const expected = digest(
+      JSON.stringify({
+        descriptor: { compiled: [], runtimeProviders: true },
+        providers: providersValue,
+      }),
+    );
+    expect(journal.deployment!.attempt.identity_sha256).toBe(expected);
+    if (change === 'compiled') await writeIdentity({ ...descriptor, compiled: [compiledIdentity] });
+    if (change === 'flag') await writeIdentity({ ...descriptor, runtimeProviders: false });
+    if (change === 'removed') {
+      const file = join(out, 'generated/manifest.json');
+      const manifest = JSON.parse(await readFile(file, 'utf8'));
+      delete manifest.identity;
+      await writeFile(file, JSON.stringify(manifest));
+    }
+    const before = await readFile(store.path, 'utf8');
+    const uploads = providerUploads(h).length;
+    const result = await deploy(
+      options(h, {
+        rollout: 25,
+        ...(change === 'providers' ? { providers: { kind: 'set', value: '[]', ids: [] } } : {}),
+      }),
+    );
+    if (change === 'unchanged') {
+      expect(result.exitCode).toBe(0);
+      expect(providerUploads(h)).toHaveLength(uploads + 1);
+      const deployment = (await store.read())!.deployment!;
+      expect(deployment.attempt.identity_sha256).toBe(expected);
+      expect(deployment.last_verified!.identity_sha256).toBe(expected);
+      expect(JSON.stringify(deployment.history)).not.toContain(expected);
+      expect(JSON.stringify(deployment.history)).not.toContain('identity_sha256');
+    } else {
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message:
+          'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+      });
+      expect(providerUploads(h)).toHaveLength(uploads);
+      expect(await readFile(store.path, 'utf8')).toBe(before);
+    }
+  },
+);
+
+it.each(['null', 'descriptor', 'providers'] as const)(
+  'loads a legacy receipt and checks a partial rollout with new %s identity',
+  async (mode) => {
+    const h = providerHarness();
+    const journal = await verifiedIdentityDeploy(h);
+    delete journal.deployment!.attempt.identity_sha256;
+    await store.write(journal);
+    expect((await store.read())!.deployment!.attempt).not.toHaveProperty('identity_sha256');
+    if (mode === 'descriptor') await writeIdentity({ runtimeProviders: true, compiled: [] });
+    if (mode === 'providers') {
+      liveProviders(h, providersValue);
+      h.versions.get(CANDIDATE)!.resources = h.versions.get(OLD)!.resources;
+    }
+    // Exercise the saved receipt path as well as the verified current attempt path.
+    journal.deployment!.last_verified = structuredClone(journal.deployment!.attempt);
+    journal.deployment!.attempt.phase = 'active';
+    await store.write(journal);
+    const before = await readFile(store.path, 'utf8');
+    const result = await deploy(options(h, { rollout: 25 }));
+    expect(result.exitCode).toBe(mode === 'null' ? 0 : 2);
+    expect(providerUploads(h)).toHaveLength(mode === 'null' ? 2 : 1);
+    if (mode === 'null')
+      expect((await store.read())!.deployment!.attempt.identity_sha256).toBeNull();
+    else {
+      expect(result.output.error?.code).toBe('invalid_input');
+      expect(await readFile(store.path, 'utf8')).toBe(before);
+    }
+  },
+);
+
+it('allows full rollout identity changes and retains the previous verified identity hash', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  const journal = await verifiedIdentityDeploy(h);
+  const previous = journal.deployment!.attempt.identity_sha256;
+  await writeIdentity({ runtimeProviders: false, compiled: [compiledIdentity] });
+  expect((await deploy(options(h, { rollout: 100, providers: { kind: 'remove' } }))).exitCode).toBe(
+    0,
+  );
+  const deployment = (await store.read())!.deployment!;
+  expect(providerUploads(h)).toHaveLength(2);
+  expect(deployment.attempt.identity_sha256).not.toBe(previous);
+  expect(deployment.last_verified!.identity_sha256).toBe(previous);
+});
+
+it.each([null, 'a'.repeat(64), '', 'A'.repeat(64), 'a'.repeat(63), 1, {}])(
+  'validates optional identity hashes on attempts and verified receipts: %j',
+  async (value) => {
+    const h = harness();
+    const journal = await verifiedIdentityDeploy(h);
+    journal.deployment!.last_verified = structuredClone(journal.deployment!.attempt);
+    for (const field of ['attempt', 'last_verified'] as const) {
+      const changed = structuredClone(journal);
+      Object.assign(changed.deployment![field]!, { identity_sha256: value });
+      await writeFile(store.path, JSON.stringify(changed));
+      if (value === null || value === 'a'.repeat(64))
+        expect((await store.read())!.deployment![field]!.identity_sha256).toBe(value);
+      else await expect(store.read()).rejects.toMatchObject({ code: 'invalid_inventory' });
+    }
+  },
+);
+
+it('returns unchanged for an already verified split with a legacy identity receipt', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  await verifiedIdentityDeploy(h);
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  delete journal.deployment!.attempt.identity_sha256;
+  await store.write(journal);
+  h.settingsVersion = NEWEST;
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy(options(h, { rollout: 25 }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+  expect(providerUploads(h)).toHaveLength(2);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it.each(['modern', 'legacy'] as const)(
+  'resumes an in-flight partial rollout with a %s identity attempt',
+  async (mode) => {
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    await verifiedIdentityDeploy(h);
+    h.uploadLost = true;
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).not.toBe(0);
+    const journal = (await store.read())!;
+    expect(journal.deployment!.attempt.phase).toBe('upload_pending');
+    const expected = journal.deployment!.attempt.identity_sha256;
+    delete journal.deployment!.last_verified!.identity_sha256;
+    if (mode === 'legacy') delete journal.deployment!.attempt.identity_sha256;
+    await store.write(journal);
+    h.uploadLost = false;
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+    expect(providerUploads(h)).toHaveLength(2);
+    expect((await store.read())!.deployment!.attempt.identity_sha256).toBe(expected);
+  },
+);
+
+it.each(['active', 'rollback_pending'] as const)(
+  'refuses a partial rollout against an older verified policy while the latest attempt is %s',
+  async (phase) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = providerHarness();
+    liveProviders(h, '[]');
+    await verifiedIdentityDeploy(h);
+    liveProviders(h, providersValue);
+    h.versions.get(CANDIDATE)!.resources = h.versions.get(OLD)!.resources;
+    expect((await deploy(options(h))).exitCode).toBe(0);
+    const journal = (await store.read())!;
+    journal.deployment!.attempt.phase = phase;
+    await store.write(journal);
+    const before = await readFile(store.path, 'utf8');
+    const result = await deploy(
+      options(h, { rollout: 25, providers: { kind: 'set', value: '[]', ids: [] } }),
+    );
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message:
+        'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+    });
+    expect(providerUploads(h)).toHaveLength(2);
+    expect(await readFile(store.path, 'utf8')).toBe(before);
+  },
+);
+
+it('refuses changed identity on partial dry-run without upload or journal writes', async () => {
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  await verifiedIdentityDeploy(h);
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy(
+    options(h, { dryRun: true, rollout: 25, providers: { kind: 'remove' } }),
+  );
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message:
+      'partial rollout is not allowed when SSO provider configuration changes; deploy with --rollout 100 first',
+  });
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it('copies the identity hash into last_verified through the real smoke path', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = lifecycleHarness();
+  const o = options(h, { secret: ['PB_MASTER_KEY'] });
+  expect((await deploy(o)).exitCode).toBe(0);
+  const expected = (await store.read())!.deployment!.attempt.identity_sha256;
+  expect(expected).toMatch(/^[a-f0-9]{64}$/);
+  const checked = await smoke({
+    workerName: 'broker',
+    projectRoot: project,
+    env: o.env,
+    fetch: h.fetch,
+    now: h.now,
+    sleep: h.sleep,
+  });
+  expect(checked.exitCode).toBe(0);
+  const deployment = (await store.read())!.deployment!;
+  expect(deployment.attempt.phase).toBe('verified');
+  expect(deployment.attempt.identity_sha256).toBe(expected);
+  expect(deployment.last_verified!.identity_sha256).toBe(expected);
+});
+
+const identityOf = (result: Awaited<ReturnType<typeof deploy>>) =>
+  (result.output as Record<string, unknown>).identity;
+const hexDigest = expect.stringMatching(/^[a-f0-9]{64}$/);
+const identityLeaks = [
+  'IDP_SENTINEL',
+  providersSentinel,
+  'idp.example.com',
+  'idp.example.test',
+  'old.example.test',
+  'team.example.com',
+  'a'.repeat(64),
+  'oidc:',
+  'access:',
+];
+function expectNoIdentityLeak(result: Awaited<ReturnType<typeof deploy>>) {
+  const serialized = JSON.stringify(result.output);
+  for (const value of identityLeaks) expect(serialized).not.toContain(value);
+}
+it('dry-run lists compiled providers without overrides or values', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+  const h = harness();
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [
+      { id: 'corp', type: 'oidc', source: 'compiled' },
+      { id: 'access', type: 'cloudflare-access', source: 'compiled' },
+    ],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: null,
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+  expect(mutations(h)).toEqual([]);
+});
+it('dry-run reports a runtime entry that overrides a compiled id', async () => {
+  await writeIdentity({
+    runtimeProviders: true,
+    compiled: [{ id: 'test', kind: 'oidc', anchor: 'oidc:https://old.example.test' }],
+  });
+  const h = providerHarness();
+  const result = await deploy(
+    options(h, {
+      dryRun: true,
+      secret: ['PB_IDP_TEST_CLIENT_SECRET'],
+      providers: { kind: 'set', value: providersValue, ids: ['test'] },
+    }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [{ id: 'test', type: 'oidc', source: 'runtime' }],
+    overrides: ['test'],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: digest(providersValue),
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+  expect(mutations(h)).toEqual([]);
+});
+it('dry-run reports a compiled entry displaced by a runtime anchor with its reason', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+  const value = JSON.stringify([
+    { ...JSON.parse(providersValue)[0], issuer: 'https://idp.example.com' },
+  ]);
+  const h = providerHarness();
+  const result = await deploy(
+    options(h, { dryRun: true, providers: { kind: 'set', value, ids: ['test'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [
+      { id: 'access', type: 'cloudflare-access', source: 'compiled' },
+      { id: 'test', type: 'oidc', source: 'runtime' },
+    ],
+    overrides: [],
+    displaced: [{ id: 'corp', reason: 'displaced', by: 'test' }],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: digest(value),
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+});
+it('dry-run with --providers none drops runtime entries and the providers digest', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  const result = await deploy(options(h, { dryRun: true, providers: { kind: 'remove' } }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: null,
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+});
+it('dry-run plans compiled-only when the artifact ignores runtime providers', async () => {
+  await writeIdentity({ runtimeProviders: false, compiled: [compiledIdentity] });
+  const value = JSON.stringify([
+    { ...JSON.parse(providersValue)[0], id: 'corp', issuer: 'https://idp.example.com' },
+  ]);
+  const h = harness();
+  h.installed.push('PB_IDP_CORP_CLIENT_SECRET');
+  liveProviders(h, value);
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: false,
+    runtime_document_problem: null,
+    providers_sha256: digest(value),
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+});
+it.each([
+  ['an explicit value', true],
+  ['the preserved live value', false],
+])('dry-run preview cleanup carries identity for %s', async (_name, explicit) => {
+  const h = harness();
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const j = (await store.read())!;
+  j.deployment!.attempt.preview = 'cleanup_pending';
+  await store.write(j);
+  const before = mutations(h).length;
+  const result = await deploy(
+    options(h, {
+      dryRun: true,
+      ...(explicit
+        ? { providers: { kind: 'set' as const, value: providersValue, ids: ['test'] } }
+        : {}),
+    }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({
+    stage: 'deploy',
+    action: 'reconcile_preview_cleanup',
+  });
+  expect(identityOf(result)).toEqual({
+    providers: explicit
+      ? [
+          { id: 'corp', type: 'oidc', source: 'compiled' },
+          { id: 'test', type: 'oidc', source: 'runtime' },
+        ]
+      : [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: explicit ? digest(providersValue) : null,
+    identity_sha256: explicit ? hexDigest : null,
+    skipped_checks: explicit ? [] : ['live_providers'],
+  });
+  expectNoIdentityLeak(result);
+  expect(mutations(h)).toHaveLength(before);
+});
+it.each([
+  ['{', 'syntax'],
+  ['{}', 'not_array'],
+] as const)(
+  'reports a runtime document problem (%s) and keeps the compiled set',
+  async (value, problem) => {
+    const { dryRunIdentity } = await import('./deploy.js');
+    const identity = dryRunIdentity(
+      { runtimeProviders: true, compiled: [compiledIdentity as never] },
+      value,
+      null,
+    );
+    expect(identity).toMatchObject({
+      providers: [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+      overrides: [],
+      displaced: [],
+      runtime_document_problem: problem,
+    });
+    expect(
+      dryRunIdentity(
+        { runtimeProviders: false, compiled: [compiledIdentity as never] },
+        value,
+        null,
+      ),
+    ).toMatchObject({ runtime_providers_applied: false, runtime_document_problem: null });
+  },
+);
+it('dry-run reports identity null for a legacy artifact', async () => {
+  const result = await deploy(options(harness(), { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output).toHaveProperty('identity', null);
+  expectNoIdentityLeak(result);
+});
+it('a deploy that is not a dry run has no identity key', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = providerHarness();
+  const result = await deploy(
+    options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(Object.hasOwn(result.output, 'identity')).toBe(false);
+});
+
+const ORG = 'org-anchor-preflight';
+type D1Fake = {
+  organization?: unknown[];
+  bindings?: Record<string, unknown[]>;
+  fail?: 'transport' | 'sql' | 'no_table';
+};
+function withD1(h: ReturnType<typeof harness>, fake: D1Fake) {
+  const queried: { sql: string; params: unknown[] }[] = [];
+  const upstream = h.fetch;
+  h.fetch = (async (input: unknown, init?: RequestInit) => {
+    if (!String(input).endsWith(`/accounts/${ACCOUNT}/d1/database/${DB}/query`))
+      return upstream(input as string, init);
+    const { sql, params } = JSON.parse(String(init?.body));
+    queried.push({ sql, params });
+    if (fake.fail === 'transport') throw new Error('connection reset');
+    if (fake.fail === 'sql' || fake.fail === 'no_table')
+      return new Response(
+        JSON.stringify({
+          success: false,
+          errors: [
+            {
+              code: 7500,
+              message:
+                fake.fail === 'sql' ? 'no such table' : 'no such table: organization: SQLITE_ERROR',
+            },
+          ],
+        }),
+        { status: 400 },
+      );
+    const results = sql.includes('"identity_provider_binding"')
+      ? (fake.bindings?.[params.at(-1)] ?? [])
+      : (fake.organization ?? [{ id: ORG, slug: 'acme', name: 'Acme' }]);
+    return new Response(
+      JSON.stringify({ success: true, result: [{ success: true, results, meta: { changes: 0 } }] }),
+    );
+  }) as typeof fetch;
+  return queried;
+}
+const bound = (anchor: unknown) => [{ anchor, created_at: '2026-10-01T00:00:00.000Z' }];
+const queriedProviders = (queried: { sql: string; params: unknown[] }[]) =>
+  queried.filter((q) => q.sql.includes('"identity_provider_binding"')).map((q) => q.params.at(-1));
+
+it('anchor preflight lets a deploy through when the stored anchor is equal', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+  const h = harness();
+  const queried = withD1(h, {
+    bindings: { corp: bound(compiledIdentity.anchor), access: bound(accessIdentity.anchor) },
+  });
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(0);
+  expect(queriedProviders(queried)).toEqual(['corp', 'access']);
+  expect(queried.every((q) => q.params.includes(ORG) || !q.sql.includes('binding'))).toBe(true);
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+it.each([true, false])(
+  'anchor preflight refuses a changed anchor for a bound id (dry run %s)',
+  async (dryRun) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+    const h = harness();
+    withD1(h, { bindings: { corp: bound('oidc:https://stored.example.org') } });
+    const result = await deploy(options(h, { dryRun }));
+    expect(result.exitCode).toBe(2);
+    expect(result.output.error).toMatchObject({
+      code: 'provider_anchor_changed',
+      stage: 'deploy',
+      message: expect.stringContaining('corp'),
+    });
+    expect(result.output.error!.message).toContain('pb admin rebind-provider');
+    const serialized = JSON.stringify(result.output);
+    for (const value of ['stored.example.org', 'idp.example.com', accessIdentity.anchor])
+      expect(serialized).not.toContain(value);
+    expect(providerUploads(h)).toHaveLength(0);
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each<[string, D1Fake]>([
+  ['no organization', { organization: [] }],
+  ['no binding for the id', { bindings: {} }],
+])('anchor preflight passes a fresh install: %s', async (_name, fake) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  const queried = withD1(h, fake);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(queried.length).toBeGreaterThan(0);
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+async function emptyLedger() {
+  const j = (await store.read())!;
+  j.migrations.ledger = [];
+  await store.write(j);
+}
+it('dry-run lists anchor_preflight as skipped when D1 has no organization table', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  await emptyLedger();
+  const h = harness();
+  const queried = withD1(h, { fail: 'no_table' });
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toMatchObject({ skipped_checks: ['anchor_preflight'] });
+  expect(queried).toHaveLength(1);
+  expect(mutations(h)).toEqual([]);
+});
+
+it.each<[string, D1Fake]>([
+  ['a changed anchor', { bindings: { corp: bound('oidc:https://stored.example.org') } }],
+  ['a transport failure', { fail: 'transport' }],
+  ['another SQL error', { fail: 'sql' }],
+])('dry-run with an empty ledger still reads D1 and refuses %s', async (name, fake) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  await emptyLedger();
+  const h = harness();
+  withD1(h, fake);
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.output.error?.code).toBe(
+    name === 'a changed anchor' ? 'provider_anchor_changed' : 'provider_failure',
+  );
+  expect(mutations(h)).toEqual([]);
+});
+
+it('a non-dry-run deploy does not skip on a missing organization table', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  withD1(h, { fail: 'no_table' });
+  const result = await deploy(options(h));
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(providerUploads(h)).toHaveLength(0);
+});
+
+it('anchor preflight refuses an unchanged redeploy after the stored anchor changed', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  const fake: D1Fake = { bindings: { corp: bound(compiledIdentity.anchor) } };
+  withD1(h, fake);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const verified = (await store.read())!;
+  verified.deployment!.attempt.phase = 'verified';
+  verified.deployment!.attempt.smoke = 'passed';
+  await store.write(verified);
+  const unchanged = await deploy(options(h));
+  expect(unchanged.output.plan).toEqual([{ stage: 'deploy', action: 'unchanged' }]);
+  fake.bindings = { corp: bound('oidc:https://stored.example.org') };
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy(options(h));
+  expect(result.output.error?.code).toBe('provider_anchor_changed');
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it.each<[string, D1Fake]>([
+  ['transport failure', { fail: 'transport' }],
+  ['sql error', { fail: 'sql' }],
+  ['non-string anchor', { bindings: { corp: bound(7) } }],
+  ['invalid anchor', { bindings: { corp: bound('not an anchor') } }],
+  ['null row', { bindings: { corp: [null] } }],
+  ['malformed organization row', { organization: [{ slug: 'acme' }] }],
+])('anchor preflight fails closed on %s', async (_name, fake) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  withD1(h, fake);
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(1);
+  expect(result.output.error).toMatchObject({ code: 'provider_failure', stage: 'deploy' });
+  expect(providerUploads(h)).toHaveLength(0);
+  expect(mutations(h)).toEqual([]);
+});
+
+it('anchor preflight does not check a provider removed from the effective set', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const value = JSON.stringify([
+    { ...JSON.parse(providersValue)[0], issuer: 'https://idp.example.com' },
+  ]);
+  const h = providerHarness();
+  const queried = withD1(h, {
+    bindings: {
+      corp: bound('oidc:https://stored.example.org'),
+      test: bound('oidc:https://idp.example.com'),
+    },
+  });
+  const result = await deploy(options(h, { providers: { kind: 'set', value, ids: ['test'] } }));
+  expect(result.exitCode).toBe(0);
+  expect(queriedProviders(queried)).toEqual(['test']);
 });

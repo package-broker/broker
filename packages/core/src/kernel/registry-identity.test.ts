@@ -349,3 +349,283 @@ describe('frozen registration and captured identity factory', () => {
     }
   });
 });
+
+describe('static identity descriptors', () => {
+  const entry = { id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' };
+  const descriptor = { runtimeProviders: false, compiled: [entry] };
+  function withDescriptor(value: unknown): PluginDefinition {
+    return plugin('sso', {
+      binds: ['identity'],
+      identityProviders: () => [],
+      identityDescriptor: value as never,
+    });
+  }
+
+  it('accepts an identity descriptor without invoking the factory', () => {
+    const definition = {
+      ...withDescriptor(descriptor),
+      identityProviders: () => {
+        throw new Error('must not run');
+      },
+    };
+    expect(collectRegistrations([definition]).identityFactory).toBe(definition.identityProviders);
+  });
+
+  it.each([
+    ['wrong flag type', { ...descriptor, runtimeProviders: 'true' }],
+    ['missing flag', { compiled: [] }],
+    [
+      '65 entries',
+      {
+        ...descriptor,
+        compiled: Array.from({ length: 65 }, (_, i) => ({
+          ...entry,
+          id: `p${i}`,
+          anchor: `oidc:https://p${i}.example.com`,
+        })),
+      },
+    ],
+    ['invalid id', { ...descriptor, compiled: [{ ...entry, id: 'Bad_ID' }] }],
+    ['reserved id', { ...descriptor, compiled: [{ ...entry, id: 'local' }] }],
+    ['bad kind', { ...descriptor, compiled: [{ ...entry, kind: 'saml' }] }],
+    [
+      'bad anchor',
+      { ...descriptor, compiled: [{ ...entry, anchor: 'oidc:http://public.example.com' }] },
+    ],
+    [
+      'oidc anchor with access kind',
+      { ...descriptor, compiled: [{ ...entry, kind: 'cloudflare-access' }] },
+    ],
+    [
+      'access anchor with oidc kind',
+      {
+        ...descriptor,
+        compiled: [{ ...entry, anchor: `access:acme.cloudflareaccess.com/${'a'.repeat(64)}` }],
+      },
+    ],
+    [
+      'duplicate id',
+      { ...descriptor, compiled: [entry, { ...entry, anchor: 'oidc:https://other.example.com' }] },
+    ],
+    ['duplicate anchor', { ...descriptor, compiled: [entry, { ...entry, id: 'other' }] }],
+    ['extra descriptor field', { ...descriptor, clientId: 'private' }],
+    ['extra entry field', { ...descriptor, compiled: [{ ...entry, policy: {} }] }],
+    ['null', null],
+    ['array', []],
+    ['non-array compiled', { ...descriptor, compiled: {} }],
+    ['missing compiled', { runtimeProviders: true }],
+    ['null entry', { ...descriptor, compiled: [null] }],
+    ['sparse compiled', { ...descriptor, compiled: Array(1) }],
+    ['non-string id', { ...descriptor, compiled: [{ ...entry, id: 42 }] }],
+    ['non-string anchor', { ...descriptor, compiled: [{ ...entry, anchor: 42 }] }],
+  ])('rejects %s as a KernelConfigError without exposing descriptor values', (_name, value) => {
+    expect(problemsOf([withDescriptor(value)])).toEqual([
+      'plugin "sso" identityDescriptor is malformed',
+    ]);
+  });
+
+  it.each([
+    ['oidc:https://IDP.example.com:443/', 'oidc:https://idp.example.com'],
+    ['oidc:https://idp.example.com./dex/', 'oidc:https://idp.example.com/dex'],
+    ['oidc:https://idp.example.com/%64ex', 'oidc:https://idp.example.com/dex'],
+    ['oidc:https://idp.example.com/a%2fb', 'oidc:https://idp.example.com/a%2Fb'],
+  ])('rejects duplicate canonical anchors %s and %s', (a, b) => {
+    for (const anchor of [a, b]) {
+      expect(() =>
+        collectRegistrations([
+          withDescriptor({
+            ...descriptor,
+            compiled: [{ ...entry, anchor }],
+          }),
+        ]),
+      ).not.toThrow();
+    }
+    expect(
+      problemsOf([
+        withDescriptor({
+          ...descriptor,
+          compiled: [
+            { ...entry, anchor: a },
+            { ...entry, id: 'other', anchor: b },
+          ],
+        }),
+      ]),
+    ).toEqual(['plugin "sso" identityDescriptor is malformed']);
+  });
+
+  it('rejects a descriptor on an unbound plugin', () => {
+    expect(problemsOf([plugin('sso', { identityDescriptor: descriptor as never })])).toEqual([
+      'plugin "sso" identityDescriptor requires an identity binding',
+    ]);
+  });
+
+  it('converts unreadable descriptor fields into a configuration error', () => {
+    const definition = withDescriptor(descriptor);
+    Object.defineProperty(definition, 'identityDescriptor', {
+      get() {
+        throw new Error('private');
+      },
+    });
+    expect(problemsOf([definition])).toEqual(['plugin "sso" identityDescriptor is malformed']);
+  });
+
+  it('accepts descriptors with both kinds, an empty list, and the 64-entry limit', () => {
+    for (const compiled of [
+      [],
+      [
+        entry,
+        {
+          id: 'access',
+          kind: 'cloudflare-access',
+          anchor: `access:acme.cloudflareaccess.com/${'a'.repeat(64)}`,
+        },
+      ],
+      Array.from({ length: 64 }, (_, i) => ({
+        ...entry,
+        id: `p${i}`,
+        anchor: `oidc:https://p${i}.example.com`,
+      })),
+    ]) {
+      expect(() =>
+        collectRegistrations([withDescriptor({ runtimeProviders: true, compiled })]),
+      ).not.toThrow();
+    }
+  });
+
+  it('accepts both bound and unbound plugins without a descriptor', () => {
+    expect(collectRegistrations([plugin('legacy')]).identityDescriptor).toBeNull();
+    expect(
+      collectRegistrations([plugin('legacy', { binds: ['identity'], identityProviders: () => [] })])
+        .identityDescriptor,
+    ).toBeNull();
+  });
+});
+
+describe('identity descriptor snapshot boundary', () => {
+  const entry = { id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' };
+  const descriptor = { runtimeProviders: true, compiled: [entry] };
+  const malformed = ['plugin "sso" identityDescriptor is malformed'];
+  function definition(value: unknown): PluginDefinition {
+    return plugin('sso', {
+      binds: ['identity'],
+      identityProviders: () => [],
+      identityDescriptor: value as never,
+    });
+  }
+
+  it('validates array indices even when an iterator hides malformed entries', () => {
+    const compiled = Object.assign([{ bad: 1 }], { [Symbol.iterator]: function* () {} });
+    expect(problemsOf([definition({ runtimeProviders: true, compiled })])).toEqual(malformed);
+  });
+
+  it('never reads a compiled array iterator', () => {
+    const compiled = [{ ...entry }];
+    Object.defineProperty(compiled, Symbol.iterator, {
+      get() {
+        throw new Error('private');
+      },
+    });
+    expect(
+      collectRegistrations([definition({ ...descriptor, compiled })]).identityDescriptor,
+    ).toEqual(descriptor);
+  });
+
+  it('reads every field and array index once and returns the first values as a frozen plain snapshot', () => {
+    const counts = new Map<string, number>();
+    function changing(target: object, key: string, first: unknown, later: unknown, label = key) {
+      Object.defineProperty(target, key, {
+        enumerable: true,
+        get() {
+          const count = counts.get(label) ?? 0;
+          counts.set(label, count + 1);
+          return count === 0 ? first : later;
+        },
+      });
+    }
+    const rawEntry = {};
+    changing(rawEntry, 'id', entry.id, 'invalid!');
+    changing(rawEntry, 'kind', entry.kind, 'saml');
+    changing(rawEntry, 'anchor', entry.anchor, 'private');
+    const rawArray = Array(1) as unknown[];
+    changing(rawArray, '0', rawEntry, { bad: 1 });
+    const compiled = new Proxy(rawArray, {
+      get(target, key, receiver) {
+        if (key === 'length') {
+          const count = counts.get('length') ?? 0;
+          counts.set('length', count + 1);
+          return count === 0 ? 1 : 65;
+        }
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    const rawDescriptor = {};
+    changing(rawDescriptor, 'runtimeProviders', true, 'wrong');
+    changing(rawDescriptor, 'compiled', compiled, []);
+    const rawPlugin = definition(undefined);
+    changing(rawPlugin, 'identityDescriptor', rawDescriptor, null);
+    const snapshot = collectRegistrations([rawPlugin]).identityDescriptor!;
+    expect([...counts.entries()].sort()).toEqual(
+      ['identityDescriptor', 'runtimeProviders', 'compiled', 'length', '0', 'id', 'kind', 'anchor']
+        .map((key) => [key, 1])
+        .sort(),
+    );
+    expect(snapshot).toEqual(descriptor);
+    expect(snapshot).not.toBe(rawDescriptor);
+    expect(snapshot.compiled).not.toBe(compiled);
+    expect(snapshot.compiled[0]).not.toBe(rawEntry);
+    expect(Reflect.ownKeys(snapshot)).toEqual(['runtimeProviders', 'compiled']);
+    expect(Reflect.ownKeys(snapshot.compiled[0]!)).toEqual(['id', 'kind', 'anchor']);
+    for (const object of [snapshot, snapshot.compiled, snapshot.compiled[0]!]) {
+      expect(Object.isFrozen(object)).toBe(true);
+      for (const key of Object.keys(object)) {
+        expect(Object.getOwnPropertyDescriptor(object, key)).toHaveProperty('value');
+      }
+    }
+    expect(Object.getPrototypeOf(snapshot)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(snapshot.compiled[0]!)).toBe(Object.prototype);
+    expect(JSON.parse(JSON.stringify(snapshot))).toEqual(descriptor);
+  });
+
+  it('isolates the snapshot from later input mutation', () => {
+    const input = { runtimeProviders: true, compiled: [{ ...entry }] };
+    const snapshot = collectRegistrations([definition(input)]).identityDescriptor;
+    input.runtimeProviders = false;
+    input.compiled[0]!.id = 'changed';
+    input.compiled.push({ ...entry, id: 'other' });
+    expect(snapshot).toEqual(descriptor);
+  });
+
+  it.each(['runtimeProviders', 'compiled', 'id', 'kind', 'anchor'])(
+    'rejects inherited required property %s',
+    (key) => {
+      const fields: Record<string, unknown> =
+        key === 'runtimeProviders' || key === 'compiled' ? { ...descriptor } : { ...entry };
+      const inherited = Object.assign(Object.create({ [key]: fields[key] }) as object, fields);
+      Reflect.deleteProperty(inherited, key);
+      const value =
+        key === 'runtimeProviders' || key === 'compiled'
+          ? inherited
+          : { ...descriptor, compiled: [inherited] };
+      expect(problemsOf([definition(value)])).toEqual(malformed);
+    },
+  );
+
+  it.each(['runtimeProviders', 'compiled', 'id', 'kind', 'anchor', '0'])(
+    'reports throwing getter %s as malformed',
+    (key) => {
+      const input = { runtimeProviders: true, compiled: [{ ...entry }] };
+      const target =
+        key === '0'
+          ? input.compiled
+          : key === 'runtimeProviders' || key === 'compiled'
+            ? input
+            : input.compiled[0]!;
+      Object.defineProperty(target, key, {
+        get() {
+          throw new Error('private');
+        },
+      });
+      expect(problemsOf([definition(input)])).toEqual(malformed);
+    },
+  );
+});

@@ -22,7 +22,7 @@ Run one broker for your agency on Cloudflare Workers, then install one private C
   <!-- source: packages/cli/src/commands/cloudflare/api.ts:37 -->
   <!-- source: packages/cli/src/commands/cloudflare/provision.ts:85 -->
   <!-- source: packages/cli/src/commands/cloudflare/provision.ts:120 -->
-  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:585 -->
+  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:871 -->
 
 - An account API token scoped to the account you will use. The required account permissions, derived from the endpoints the CLI calls, are **Workers Scripts Edit**, **D1 Edit**, **Workers R2 Storage Edit**, **Queues Edit** and **Account Analytics Read**. **Billing Read** is optional. This recipe uses the account Workers address and does not need custom-domain or zone permissions.
 
@@ -32,11 +32,11 @@ Run one broker for your agency on Cloudflare Workers, then install one private C
   <!-- source: packages/cli/src/commands/cloudflare/provision.ts:200 -->
   <!-- source: packages/cli/src/commands/cloudflare/provision.ts:1058 -->
   <!-- source: packages/cli/src/commands/cloudflare/provision.ts:1152 -->
-  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:278 -->
-  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:925 -->
-  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1451 -->
-  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1767 -->
-  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1917 -->
+  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:558 -->
+  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1194 -->
+  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1793 -->
+  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2218 -->
+  <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2380 -->
 
 - A private Composer vendor repository containing a package you can install, its credentials, your administrator e-mail address, an authenticator app and a safe place to retain the generated master key.
 
@@ -272,6 +272,92 @@ Team sign-in uses Cloudflare Access or an OpenID Connect provider such as Dex; g
 <!-- source: packages/core/src/identity/port.ts:131 -->
 <!-- source: packages/core/src/identity/providers.test.ts:26 -->
 <!-- source: docs/reference/access-model.md:31 -->
+
+## Add single sign-on
+
+The release build and the prebuilt Cloudflare distribution read OpenID Connect and Cloudflare Access providers from a providers file at deploy time, so adding single sign-on needs no rebuild. This example adds one OpenID Connect provider with the `id` `corp`.
+
+<!-- source: broker.config.ts:7 -->
+<!-- source: packages/plugin-sso-oidc/src/index.ts:117 -->
+
+1. At your identity provider, register a client for the broker with the redirect URI `<broker-origin>/_pb/auth/sso/corp/callback`, where `<broker-origin>` is the `worker_url` from setup, or your `--public-url`. The provider must report the e-mail address as verified. Note the client ID and client secret.
+
+   <!-- source: packages/core/src/auth/routes-sso.ts:299 -->
+   <!-- source: packages/plugin-sso-oidc/src/oidc.ts:649 -->
+
+2. In the broker checkout, create `providers.json`. Replace the issuer, client ID and domain with yours. The file holds no secret; keep it under version control or in your own backup, because the database backup does not contain it.
+
+   ```json
+   [
+     {
+       "id": "corp",
+       "kind": "oidc",
+       "displayName": "Corporate SSO",
+       "issuer": "https://idp.example.test",
+       "clientId": "package-broker",
+       "policy": {
+         "verifiedDomains": ["example.test"],
+         "autoJoin": true,
+         "emailAuthoritativeDomains": ["example.test"]
+       }
+     }
+   ]
+   ```
+
+   `autoJoin: true` creates a user at the first sign-in for any verified e-mail address in `verifiedDomains`. `emailAuthoritativeDomains` lets an existing account with the same e-mail address, such as the administrator created by setup, be linked at its first sign-in through the provider; without it that sign-in is refused. List a domain there only when the provider alone controls the addresses in it. The fields are described in [Authentication and sessions](../reference/authentication.md#single-sign-on).
+
+   <!-- source: packages/core/src/auth/identity-login.ts:230 -->
+   <!-- source: packages/core/src/auth/identity-login.ts:266 -->
+
+3. Load the Cloudflare API token and the client secret at hidden prompts. The client secret goes to `PB_IDP_CORP_CLIENT_SECRET`: `PB_IDP_`, the provider `id` in uppercase with `-` replaced by `_`, then `_CLIENT_SECRET`. `CLOUDFLARE_ACCOUNT_ID` must still identify the same account. Check the deploy with `--dry-run` first:
+
+   ```sh
+   read -rs -p 'Cloudflare API token: ' CLOUDFLARE_API_TOKEN
+   printf '\n'
+   read -rs -p 'Client secret: ' PB_IDP_CORP_CLIENT_SECRET
+   printf '\n'
+   export CLOUDFLARE_API_TOKEN PB_IDP_CORP_CLIENT_SECRET
+   pnpm pb cloudflare deploy --worker-name '<worker-name>' \
+     --providers providers.json --secret PB_IDP_CORP_CLIENT_SECRET --dry-run --json
+   ```
+
+   <!-- source: packages/core/src/identity/secret-name.ts:16 -->
+   <!-- source: packages/cli/src/cli.ts:41 -->
+   <!-- source: packages/cli/src/cli.ts:234 -->
+   <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1918 -->
+
+   The `identity` section of the result lists `corp` under `providers` with `"source": "runtime"`. The section shows no secret, issuer or trust anchor. An invalid entry refuses the command and names its rejection codes; a missing client secret refuses it and names the secret.
+
+   <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:255 -->
+   <!-- source: packages/cli/src/commands/cloudflare/providers-file.ts:71 -->
+   <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1906 -->
+
+4. Run the same command without `--dry-run`, then clear the variables:
+
+   ```sh
+   pnpm pb cloudflare deploy --worker-name '<worker-name>' \
+     --providers providers.json --secret PB_IDP_CORP_CLIENT_SECRET --json
+   unset CLOUDFLARE_API_TOKEN PB_IDP_CORP_CLIENT_SECRET
+   ```
+
+   Deploy uploads the providers file as the plain-text Worker variable `PB_IDP_PROVIDERS` and the client secret as a Worker secret.
+
+   <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1877 -->
+   <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1919 -->
+
+5. Open `<broker-origin>/_pb/ui` in a private browser window and choose **Sign in with Corporate SSO**.
+
+   <!-- source: packages/ui/src/auth.tsx:603 -->
+
+If you ran setup with `--prebuilt`, add `--prebuilt` to both deploy commands. If your account is on Workers Paid and deploy reports that the Worker environment variable count exceeds 64, add `--workers-paid` to raise the limit to 128.
+
+<!-- source: packages/cli/src/commands/cloudflare/setup.ts:502 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1929 -->
+
+To change a provider later, edit the file and deploy it again with `--providers providers.json`; add `--secret` only for a new or changed client secret. A deploy without `--providers` keeps the live providers, and `--providers none` removes them. For limits, partial rollouts, removing a provider, moving it to a new issuer with `pb admin rebind-provider` and recovery, see [Runtime SSO providers](../reference/runtime-sso-providers.md).
+
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:137 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:136 -->
 
 ## What you operate
 

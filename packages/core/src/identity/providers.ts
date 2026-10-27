@@ -48,7 +48,7 @@ function quoted(value: string): string {
   return JSON.stringify(value.slice(0, MAX_QUOTED_LENGTH));
 }
 
-function canonicalAnchor(anchor: string): string {
+export function canonicalAnchor(anchor: string): string {
   if (!anchor.startsWith('oidc:')) {
     return anchor.toLowerCase();
   }

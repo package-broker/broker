@@ -166,6 +166,18 @@ export function expiredRun(journal: Inventory, repositoryId: string, now: number
   );
 }
 
+function errorCodes(text: string): number[] {
+  try {
+    const parsed = object(JSON.parse(text));
+    if (parsed.success !== false || parsed.result !== null || !Array.isArray(parsed.errors))
+      return [];
+    const codes = parsed.errors.map((entry) => object(entry).code);
+    return codes.every((code) => Number.isInteger(code)) ? (codes as number[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 class CleanupApi {
   private readonly now: () => number;
   private readonly deadline: number;
@@ -181,7 +193,15 @@ class CleanupApi {
     method: 'GET' | 'DELETE' | 'PUT' = 'DELETE',
     body?: unknown,
     r2 = false,
-  ): Promise<{ gone: boolean; result: unknown; result_info?: Record<string, unknown> }> {
+    notFoundCodes = false,
+    deniedCodes = false,
+  ): Promise<{
+    gone: boolean;
+    denied?: boolean;
+    result: unknown;
+    result_info?: Record<string, unknown>;
+    codes?: number[];
+  }> {
     if (
       (!/^\/(?:accounts|zones)\/[a-f0-9]{32}\/[a-zA-Z0-9_/?=&%.-]+$/.test(path) &&
         !/^\/zones\?account\.id=[a-f0-9]{32}&(?:page=\d+&per_page=100|cursor=[a-zA-Z0-9_%.-]+)$/.test(
@@ -214,7 +234,36 @@ class CleanupApi {
           }),
           aborted,
         ]);
-        if (response.status === 404) return { gone: true, result: null };
+        const read = async (source: Response): Promise<string> => {
+          const reader = source.body?.getReader();
+          if (!reader) throw new Error();
+          const chunks: Uint8Array[] = [];
+          let bytes = 0;
+          try {
+            for (;;) {
+              const { done, value } = await Promise.race([reader.read(), aborted]);
+              if (done) break;
+              bytes += value.byteLength;
+              if (bytes > 1_048_576) throw new Error();
+              chunks.push(value);
+            }
+          } finally {
+            void reader.cancel().catch(() => undefined);
+            reader.releaseLock();
+          }
+          return Buffer.concat(chunks).toString('utf8');
+        };
+        if (response.status === 404) {
+          if (!notFoundCodes) return { gone: true, result: null };
+          return { gone: true, result: null, codes: errorCodes(await read(response)) };
+        }
+        if (response.status === 403 && deniedCodes)
+          return {
+            gone: false,
+            denied: true,
+            result: null,
+            codes: errorCodes(await read(response)),
+          };
         if (!response.ok)
           throw new CloudflareError(
             [401, 403].includes(response.status) ? 'permission_denied' : 'provider_failure',
@@ -223,24 +272,9 @@ class CleanupApi {
             'teardown',
             response.status,
           );
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error();
-        const chunks: Uint8Array[] = [];
-        let bytes = 0;
+        const text = await read(response);
         try {
-          for (;;) {
-            const { done, value } = await Promise.race([reader.read(), aborted]);
-            if (done) break;
-            bytes += value.byteLength;
-            if (bytes > 1_048_576) throw new Error();
-            chunks.push(value);
-          }
-        } finally {
-          void reader.cancel().catch(() => undefined);
-          reader.releaseLock();
-        }
-        try {
-          const parsed = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+          const parsed = object(JSON.parse(text));
           if (parsed.success !== true || !Object.hasOwn(parsed, 'result')) throw new Error();
           return {
             gone: false,
@@ -280,22 +314,46 @@ class CleanupApi {
     }
     throw new CloudflareError('provider_failure');
   }
-  async list(path: string, field?: string, r2 = false): Promise<Record<string, unknown>[]> {
+  async list(
+    path: string,
+    field?: string,
+    r2 = false,
+    deniedMeansEmpty = false,
+  ): Promise<Record<string, unknown>[]> {
     const conflict = (): never => {
       throw new CloudflareError('ownership_conflict', 8);
     };
-    return paginatedList(
-      path,
-      async (page) => {
-        const response = await this.request(page, 'GET', undefined, r2);
-        // A missing child collection is not evidence of an empty live parent.
-        if (response.gone) return conflict();
-        return response;
-      },
-      field,
-      conflict,
-      conflict,
-    );
+    const empty = new Error();
+    let first = true;
+    try {
+      return await paginatedList(
+        path,
+        async (page) => {
+          const response = await this.request(
+            page,
+            'GET',
+            undefined,
+            r2,
+            false,
+            deniedMeansEmpty && first,
+          );
+          first = false;
+          if (response.denied) {
+            if (response.codes?.length === 1 && response.codes[0] === 10003) throw empty;
+            throw new CloudflareError('permission_denied', 1, false, 'teardown', 403);
+          }
+          // A missing child collection is not evidence of an empty live parent.
+          if (response.gone) return conflict();
+          return response;
+        },
+        field,
+        conflict,
+        conflict,
+      );
+    } catch (error) {
+      if (error === empty) return [];
+      throw error;
+    }
   }
 
   async snapshot(path: string): Promise<Record<string, unknown>[]> {
@@ -305,8 +363,20 @@ class CleanupApi {
     completeSnapshot(response.result_info, response.result.length);
     return response.result.map(object);
   }
-  async configuration(path: string, field: string): Promise<Record<string, unknown>[]> {
-    const response = await this.request(path, 'GET', undefined, true);
+  async configuration(
+    path: string,
+    field: string,
+    notifications = false,
+  ): Promise<Record<string, unknown>[]> {
+    const response = await this.request(path, 'GET', undefined, true, notifications);
+    // Cloudflare answers 404/11015 for an existing bucket that has no notification rules.
+    if (
+      notifications &&
+      response.gone &&
+      response.codes?.length === 1 &&
+      response.codes[0] === 11015
+    )
+      return [];
     if (response.gone) throw new CloudflareError('ownership_conflict', 8);
     const records = object(response.result)[field];
     if (!Array.isArray(records)) throw new CloudflareError('ownership_conflict', 8);
@@ -821,7 +891,13 @@ async function preflight(
     try {
       for (const jurisdiction of ['default', 'eu', 'fedramp']) {
         api.jurisdiction = jurisdiction;
-        const buckets = await api.list(`${base}/r2/buckets`, 'buckets', true);
+        const buckets = await api.list(
+          `${base}/r2/buckets`,
+          'buckets',
+          true,
+          // Accounts without FedRAMP answer 403/10003 to a FedRAMP-scoped bucket listing.
+          jurisdiction === 'fedramp' && (j.identity.jurisdiction as string) !== 'fedramp',
+        );
         const names = new Set(buckets.map((bucket) => liveId(bucket.name)));
         if (jurisdiction === j.identity.jurisdiction)
           for (const name of selectedBuckets) names.add(name);
@@ -829,6 +905,7 @@ async function preflight(
           const notifications = await api.configuration(
             `${base}/event_notifications/r2/${name}/configuration`,
             'queues',
+            true,
           );
           for (const notification of notifications) {
             liveId(notification.queueId, /^[a-f0-9]{32}$/);

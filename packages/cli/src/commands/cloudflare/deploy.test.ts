@@ -1861,6 +1861,20 @@ it('requires verified provider facilities and refuses unknown inheritance or ass
     expect(mutations(h)).toHaveLength(0);
   }
 });
+it.each(['enabled', 'previews_enabled'])(
+  'rejects a non-boolean %s in the provider subdomain response',
+  async (flag) => {
+    const h = harness();
+    const inner = h.fetch;
+    h.fetch = (async (input, init) =>
+      new URL(String(input)).pathname.endsWith(base + '/subdomain')
+        ? ok({ ...h.endpoints, [flag]: 'true' })
+        : inner(input, init)) as typeof fetch;
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('provider_failure');
+    expect(mutations(h)).toHaveLength(0);
+  },
+);
 it('uses only the registered account subdomain and never auto-registers one', async () => {
   const h = harness();
   h.subdomain = null;

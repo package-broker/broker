@@ -919,280 +919,278 @@ it('an identical completed rerun retains selected non-master secrets without res
   expect(deployed).not.toHaveProperty('secrets');
 });
 
-it.each(['completed', 'completed_deleted_files', 'upload_pending', 'first_install_domain'])(
-  'reuses the real deployment version on an identical %s rerun with selected secrets',
-  async (checkpoint) => {
-    const database = openNodeSqliteExecutor();
-    onTestFinished(() => database.close());
-    ops.migrate = vi.fn(migrateCloudflare);
-    const out = join(project, '.pb/cloudflare');
-    const migrationSql = await readFile(
-      new URL('../../../../db-sqlite/migrations/0001_init.sql', import.meta.url),
-      'utf8',
-    );
-    await mkdir(join(out, 'generated'), { recursive: true });
-    await mkdir(join(out, 'migrations/core'), { recursive: true });
-    await writeFile(join(out, 'migrations/core/0001_init.sql'), migrationSql);
-    await writeFile(join(out, 'worker.js'), 'export default { fetch() {} };');
-    await writeFile(
-      join(out, 'generated/manifest.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        platform: 'cloudflare',
-        platformPorts: null,
-        plugins: [],
-        bindings: [],
-        migrations: [
-          {
-            id: 'core:0001_init',
-            name: '0001_init.sql',
-            checksum: digest(migrationSql),
-            phase: 'expand',
-          },
-        ],
-        routes: [],
-      }),
-    );
-    await writeFile(
-      join(out, 'build-info.json'),
-      JSON.stringify({
-        schemaVersion: 1,
-        target: 'cloudflare',
-        core: '2.0.0',
-        plugins: {},
-        lockfileSha256: null,
-        gitSha: null,
-      }),
-    );
-    const files = [
-      {
-        name: 'manifest.json',
-        content: Buffer.from(
-          JSON.stringify({
-            version: 1,
-            entry: 'index.html',
-            files: { 'index.html': { bytes: 0, contentType: 'text/html' } },
-          }),
-        ),
-      },
-      { name: 'index.html', content: Buffer.alloc(0) },
-    ];
-    const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
-    await stageAssets(out, {
-      files,
-      record: {
-        schemaVersion: 1,
-        provider: { specifier: '@package-broker/ui-assets', version: '2.0.0' },
-        digest: `sha256:${digest(JSON.stringify(files.map((f) => [f.name, sha(f.content)])))}`,
-        descriptor: {
-          directory: './assets',
-          binding: 'ASSETS',
-          run_worker_first: true,
-          html_handling: 'none',
-          not_found_handling: 'none',
+async function exerciseDeploymentCheckpoint(checkpoint: string) {
+  const database = openNodeSqliteExecutor();
+  onTestFinished(() => database.close());
+  ops.migrate = vi.fn(migrateCloudflare);
+  const out = join(project, '.pb/cloudflare');
+  const migrationSql = await readFile(
+    new URL('../../../../db-sqlite/migrations/0001_init.sql', import.meta.url),
+    'utf8',
+  );
+  await mkdir(join(out, 'generated'), { recursive: true });
+  await mkdir(join(out, 'migrations/core'), { recursive: true });
+  await writeFile(join(out, 'migrations/core/0001_init.sql'), migrationSql);
+  await writeFile(join(out, 'worker.js'), 'export default { fetch() {} };');
+  await writeFile(
+    join(out, 'generated/manifest.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      platform: 'cloudflare',
+      platformPorts: null,
+      plugins: [],
+      bindings: [],
+      migrations: [
+        {
+          id: 'core:0001_init',
+          name: '0001_init.sql',
+          checksum: digest(migrationSql),
+          phase: 'expand',
         },
+      ],
+      routes: [],
+    }),
+  );
+  await writeFile(
+    join(out, 'build-info.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      target: 'cloudflare',
+      core: '2.0.0',
+      plugins: {},
+      lockfileSha256: null,
+      gitSha: null,
+    }),
+  );
+  const files = [
+    {
+      name: 'manifest.json',
+      content: Buffer.from(
+        JSON.stringify({
+          version: 1,
+          entry: 'index.html',
+          files: { 'index.html': { bytes: 0, contentType: 'text/html' } },
+        }),
+      ),
+    },
+    { name: 'index.html', content: Buffer.alloc(0) },
+  ];
+  const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+  await stageAssets(out, {
+    files,
+    record: {
+      schemaVersion: 1,
+      provider: { specifier: '@package-broker/ui-assets', version: '2.0.0' },
+      digest: `sha256:${digest(JSON.stringify(files.map((f) => [f.name, sha(f.content)])))}`,
+      descriptor: {
+        directory: './assets',
+        binding: 'ASSETS',
+        run_worker_first: true,
+        html_handling: 'none',
+        not_found_handling: 'none',
       },
-    });
-    const base = `/workers/scripts/${identity.script_name}`;
-    const versionId = '22222222-2222-4222-8222-222222222222';
-    const tags = ['pb-install-v1', `pb-owner-${identity.owner_digest}`];
-    const firstInstall = checkpoint === 'first_install_domain';
-    if (firstInstall) options.domain = 'example.com';
-    let created = !firstInstall;
-    let domain: Record<string, unknown> | null = null;
-    let uploads = 0;
-    let active = false;
-    let loseUpload = checkpoint === 'upload_pending';
-    let candidate: Record<string, unknown> | undefined;
-    let candidateBindings: Record<string, unknown>[] = [];
-    let schedules: { cron: string }[] = [];
-    let clock = Date.now();
-    options.now = () => clock;
-    options.sleep = async (ms) => {
-      clock += ms;
-    };
-    const ok = (value: unknown) =>
-      new Response(
-        JSON.stringify({ success: true, result: value, result_info: { total_pages: 1 } }),
-      );
-    options.fetch = vi.fn(async (input, init) => {
-      const path = new URL(String(input)).pathname.replace(`/client/v4/accounts/${ACCOUNT}`, '');
-      const method = init?.method ?? 'GET';
-      if (path === `/d1/database/${DB}/query`) {
-        const body = JSON.parse(String(init?.body)) as {
-          batch?: ScalarStatement[];
-          sql?: string;
-          params?: [];
-        };
-        const results = await database.executor.batch(
-          body.batch ?? [{ sql: body.sql ?? '', params: body.params ?? [] }],
-        );
-        return ok(
-          results.map(({ rows, changes }) => ({
-            success: true,
-            results: rows,
-            meta: { changes },
-          })),
-        );
-      }
-      if (path === '/client/v4/zones')
-        return new Response(
-          JSON.stringify({
-            success: true,
-            result: [
-              {
-                id: '1'.repeat(32),
-                name: 'example.com',
-                status: 'active',
-                account: { id: ACCOUNT },
-              },
-            ],
-            result_info: { page: 1, per_page: 50, count: 1, total_count: 1, total_pages: 1 },
-          }),
-        );
-      if (path === '/workers/scripts')
-        return ok(created ? [{ id: identity.script_name, tags }] : []);
-      if (path === `/d1/database/${DB}`)
-        return ok({ uuid: DB, name: 'broker-production-db', jurisdiction: 'eu' });
-      if (path === `${base}/settings`)
-        return ok({
-          tags,
-          bindings: active ? candidateBindings : [{ type: 'd1', name: 'DB', id: DB }],
-        });
-      if (path === `${base}/secrets`)
-        return ok(
-          ['PB_MASTER_KEY', ...(active ? ['IDP_SECRET'] : [])].map((name) => ({
-            name,
-            type: 'secret_text',
-          })),
-        );
-      if (path === '/workers/subdomain') return ok({ subdomain: 'account' });
-      if (path === '/workers/domains') {
-        if (method === 'PUT') domain = { ...JSON.parse(String(init?.body)), id: 'managed-domain' };
-        return ok(domain ? [domain] : []);
-      }
-      if (path === `${base}/subdomain`)
-        return ok({ enabled: !firstInstall, previews_enabled: false });
-      if (path === `${base}/schedules`) {
-        if (method !== 'GET') schedules = JSON.parse(String(init?.body));
-        return ok({ schedules });
-      }
-      if (path === `${base}/assets-upload-session`) return ok({ jwt: 'ASSETS', buckets: [] });
-      if (
-        (path === `${base}/versions` && method === 'POST') ||
-        (path === base && method === 'PUT')
-      ) {
-        uploads++;
-        const metadata = JSON.parse(String((init!.body as FormData).get('metadata')));
-        candidateBindings = [
-          ...metadata.bindings.map((b: Record<string, unknown>) =>
-            b.type === 'secret_text' ? { type: b.type, name: b.name } : b,
-          ),
-          ...(!firstInstall ? [{ type: 'secret_text', name: 'PB_MASTER_KEY' }] : []),
-        ];
-        candidate = {
-          id: versionId,
-          annotations: metadata.annotations,
-          resources: {
-            bindings: candidateBindings,
-            assets: { config: metadata.assets.config },
-            script_runtime: {
-              compatibility_date: '2026-10-01',
-              compatibility_flags: ['nodejs_compat'],
-            },
-          },
-        };
-        if (loseUpload) {
-          loseUpload = false;
-          throw new Error('upload acknowledgement lost');
-        }
-        if (path === base) {
-          created = true;
-          return ok({ id: identity.script_name });
-        }
-        return ok({ id: versionId });
-      }
-      if (path === `${base}/versions`) return ok({ items: candidate ? [candidate] : [] });
-      if (path === `${base}/versions/${versionId}`) return ok(candidate);
-      if (path === `${base}/deployments`) {
-        if (method !== 'GET') active = true;
-        const deployment = {
-          id: 'active-deployment',
-          versions: [{ version_id: versionId, percentage: 100 }],
-        };
-        return ok(
-          method === 'GET'
-            ? { deployments: active || (firstInstall && created) ? [deployment] : [] }
-            : deployment,
-        );
-      }
-      throw new Error(`Unexpected request ${method} ${path}`);
-    });
-    installed = exists = !firstInstall;
-    delete options.keyFile;
-    options.masterKeyEnv = 'CUSTOM_SOURCE';
-    options.secret = ['IDP_SECRET'];
-    options.env = { ...options.env, IDP_SECRET: 'IDP_SENTINEL' };
-    ops.validateArtifact = validateDeploymentArtifact;
-    ops.deploy = vi.fn((o) => {
-      const deploymentOptions: Parameters<typeof deploy>[0] = {
-        ...o,
-        contract: { ...cloudflareDeployContract, versionsCreateScript: true, assetHash: sha },
+    },
+  });
+  const base = `/workers/scripts/${identity.script_name}`;
+  const versionId = '22222222-2222-4222-8222-222222222222';
+  const tags = ['pb-install-v1', `pb-owner-${identity.owner_digest}`];
+  const firstInstall = checkpoint === 'first_install_domain';
+  if (firstInstall) options.domain = 'example.com';
+  let created = !firstInstall;
+  let domain: Record<string, unknown> | null = null;
+  let uploads = 0;
+  let active = false;
+  let loseUpload = checkpoint === 'upload_pending';
+  let candidate: Record<string, unknown> | undefined;
+  let candidateBindings: Record<string, unknown>[] = [];
+  let schedules: { cron: string }[] = [];
+  let clock = Date.now();
+  options.now = () => clock;
+  options.sleep = async (ms) => {
+    clock += ms;
+  };
+  const ok = (value: unknown) =>
+    new Response(JSON.stringify({ success: true, result: value, result_info: { total_pages: 1 } }));
+  options.fetch = vi.fn(async (input, init) => {
+    const path = new URL(String(input)).pathname.replace(`/client/v4/accounts/${ACCOUNT}`, '');
+    const method = init?.method ?? 'GET';
+    if (path === `/d1/database/${DB}/query`) {
+      const body = JSON.parse(String(init?.body)) as {
+        batch?: ScalarStatement[];
+        sql?: string;
+        params?: [];
       };
-      if (firstInstall) delete deploymentOptions.contract;
-      return deploy(deploymentOptions);
-    });
-    ops.smoke = vi.fn(async () => {
-      await update((j) => {
-        j.deployment!.attempt.phase = 'verified';
-        j.deployment!.attempt.smoke = 'passed';
+      const results = await database.executor.batch(
+        body.batch ?? [{ sql: body.sql ?? '', params: body.params ?? [] }],
+      );
+      return ok(
+        results.map(({ rows, changes }) => ({
+          success: true,
+          results: rows,
+          meta: { changes },
+        })),
+      );
+    }
+    if (path === '/client/v4/zones')
+      return new Response(
+        JSON.stringify({
+          success: true,
+          result: [
+            {
+              id: '1'.repeat(32),
+              name: 'example.com',
+              status: 'active',
+              account: { id: ACCOUNT },
+            },
+          ],
+          result_info: { page: 1, per_page: 50, count: 1, total_count: 1, total_pages: 1 },
+        }),
+      );
+    if (path === '/workers/scripts') return ok(created ? [{ id: identity.script_name, tags }] : []);
+    if (path === `/d1/database/${DB}`)
+      return ok({ uuid: DB, name: 'broker-production-db', jurisdiction: 'eu' });
+    if (path === `${base}/settings`)
+      return ok({
+        tags,
+        bindings: active ? candidateBindings : [{ type: 'd1', name: 'DB', id: DB }],
       });
-      return result('smoke');
-    });
-    const first = await setup(options, ops);
-    expect(first.exitCode, JSON.stringify(first.output)).toBe(
-      checkpoint === 'upload_pending' ? 6 : 0,
-    );
-    expect((await journal()).migrations.ledger).toEqual([
-      { id: 'core:0001_init', checksum: digest(migrationSql), phase: 'expand' },
-    ]);
-    await expect(vi.mocked(ops.migrate).mock.results[0]!.value).resolves.toMatchObject({
-      exitCode: 0,
-      value: { applied: ['core:0001_init'] },
-    });
-    expect(uploads).toBe(1);
-    if (firstInstall) {
-      expect(domain).toMatchObject({ zone_id: '1'.repeat(32), hostname: 'example.com' });
-      expect(
-        vi
-          .mocked(options.fetch!)
-          .mock.calls.some(
-            ([url, init]) => String(url).endsWith('/workers/domains') && init?.method === 'PUT',
-          ),
-      ).toBe(true);
-      return;
+    if (path === `${base}/secrets`)
+      return ok(
+        ['PB_MASTER_KEY', ...(active ? ['IDP_SECRET'] : [])].map((name) => ({
+          name,
+          type: 'secret_text',
+        })),
+      );
+    if (path === '/workers/subdomain') return ok({ subdomain: 'account' });
+    if (path === '/workers/domains') {
+      if (method === 'PUT') domain = { ...JSON.parse(String(init?.body)), id: 'managed-domain' };
+      return ok(domain ? [domain] : []);
     }
-    if (checkpoint === 'completed_deleted_files') {
-      delete options.masterKeyEnv;
-      options.keyFile = join(outside, 'deleted', 'master.key');
-      await rm(outside, { recursive: true });
-      vi.mocked(ops.admin).mockClear();
+    if (path === `${base}/subdomain`)
+      return ok({ enabled: !firstInstall, previews_enabled: false });
+    if (path === `${base}/schedules`) {
+      if (method !== 'GET') schedules = JSON.parse(String(init?.body));
+      return ok({ schedules });
     }
-    const rerun = await setup(options, ops);
-    if (checkpoint === 'completed_deleted_files') {
-      expect(ops.admin).not.toHaveBeenCalled();
-      expect(vi.mocked(ops.deploy).mock.lastCall![0].env.PB_MASTER_KEY).toBeUndefined();
-      await expect(stat(outside)).rejects.toMatchObject({ code: 'ENOENT' });
+    if (path === `${base}/assets-upload-session`) return ok({ jwt: 'ASSETS', buckets: [] });
+    if ((path === `${base}/versions` && method === 'POST') || (path === base && method === 'PUT')) {
+      uploads++;
+      const metadata = JSON.parse(String((init!.body as FormData).get('metadata')));
+      candidateBindings = [
+        ...metadata.bindings.map((b: Record<string, unknown>) =>
+          b.type === 'secret_text' ? { type: b.type, name: b.name } : b,
+        ),
+        ...(!firstInstall ? [{ type: 'secret_text', name: 'PB_MASTER_KEY' }] : []),
+      ];
+      candidate = {
+        id: versionId,
+        annotations: metadata.annotations,
+        resources: {
+          bindings: candidateBindings,
+          assets: { config: metadata.assets.config },
+          script_runtime: {
+            compatibility_date: '2026-10-01',
+            compatibility_flags: ['nodejs_compat'],
+          },
+        },
+      };
+      if (loseUpload) {
+        loseUpload = false;
+        throw new Error('upload acknowledgement lost');
+      }
+      if (path === base) {
+        created = true;
+        return ok({ id: identity.script_name });
+      }
+      return ok({ id: versionId });
     }
-    expect(rerun.exitCode).toBe(0);
-    expect(uploads).toBe(1);
-    expect(rerun.output.version_id).toBe(versionId);
-    expect(rerun.output.plan).toContainEqual({
-      stage: 'deploy',
-      action: checkpoint === 'upload_pending' ? 'reconcile' : 'unchanged',
+    if (path === `${base}/versions`) return ok({ items: candidate ? [candidate] : [] });
+    if (path === `${base}/versions/${versionId}`) return ok(candidate);
+    if (path === `${base}/deployments`) {
+      if (method !== 'GET') active = true;
+      const deployment = {
+        id: 'active-deployment',
+        versions: [{ version_id: versionId, percentage: 100 }],
+      };
+      return ok(
+        method === 'GET'
+          ? { deployments: active || (firstInstall && created) ? [deployment] : [] }
+          : deployment,
+      );
+    }
+    throw new Error(`Unexpected request ${method} ${path}`);
+  });
+  installed = exists = !firstInstall;
+  delete options.keyFile;
+  options.masterKeyEnv = 'CUSTOM_SOURCE';
+  options.secret = ['IDP_SECRET'];
+  options.env = { ...options.env, IDP_SECRET: 'IDP_SENTINEL' };
+  ops.validateArtifact = validateDeploymentArtifact;
+  ops.deploy = vi.fn((o) => {
+    const deploymentOptions: Parameters<typeof deploy>[0] = {
+      ...o,
+      contract: { ...cloudflareDeployContract, versionsCreateScript: true, assetHash: sha },
+    };
+    if (firstInstall) delete deploymentOptions.contract;
+    return deploy(deploymentOptions);
+  });
+  ops.smoke = vi.fn(async () => {
+    await update((j) => {
+      j.deployment!.attempt.phase = 'verified';
+      j.deployment!.attempt.smoke = 'passed';
     });
-  },
+    return result('smoke');
+  });
+  const first = await setup(options, ops);
+  expect(first.exitCode, JSON.stringify(first.output)).toBe(
+    checkpoint === 'upload_pending' ? 6 : 0,
+  );
+  expect((await journal()).migrations.ledger).toEqual([
+    { id: 'core:0001_init', checksum: digest(migrationSql), phase: 'expand' },
+  ]);
+  await expect(vi.mocked(ops.migrate).mock.results[0]!.value).resolves.toMatchObject({
+    exitCode: 0,
+    value: { applied: ['core:0001_init'] },
+  });
+  expect(uploads).toBe(1);
+  if (firstInstall) {
+    expect(domain).toMatchObject({ zone_id: '1'.repeat(32), hostname: 'example.com' });
+    expect(
+      vi
+        .mocked(options.fetch!)
+        .mock.calls.some(
+          ([url, init]) => String(url).endsWith('/workers/domains') && init?.method === 'PUT',
+        ),
+    ).toBe(true);
+    return;
+  }
+  if (checkpoint === 'completed_deleted_files') {
+    delete options.masterKeyEnv;
+    options.keyFile = join(outside, 'deleted', 'master.key');
+    await rm(outside, { recursive: true });
+    vi.mocked(ops.admin).mockClear();
+  }
+  const rerun = await setup(options, ops);
+  if (checkpoint === 'completed_deleted_files') {
+    expect(ops.admin).not.toHaveBeenCalled();
+    expect(vi.mocked(ops.deploy).mock.lastCall![0].env.PB_MASTER_KEY).toBeUndefined();
+    await expect(stat(outside)).rejects.toMatchObject({ code: 'ENOENT' });
+  }
+  expect(rerun.exitCode).toBe(0);
+  expect(uploads).toBe(1);
+  expect(rerun.output.version_id).toBe(versionId);
+  expect(rerun.output.plan).toContainEqual({
+    stage: 'deploy',
+    action: checkpoint === 'upload_pending' ? 'reconcile' : 'unchanged',
+  });
+}
+
+it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
+  'reuses the real deployment version on an identical %s rerun with selected secrets',
+  exerciseDeploymentCheckpoint,
 );
+it('creates the custom domain with the resolved zone on a first install through the production contract', () =>
+  exerciseDeploymentCheckpoint('first_install_domain'));
 
 it('normalizes a trailing slash public URL through deployment, smoke and browser setup', async () => {
   options.publicUrl = 'https://broker.example.test/';

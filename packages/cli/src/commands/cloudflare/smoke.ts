@@ -523,10 +523,12 @@ export async function smoke(o: SmokeOptions): Promise<CommandResult> {
         !['active', 'verified', 'failed', 'rollback_pending', 'rolled_back'].includes(a.phase))
     )
       return invalid();
+    if (a && a.requested_rollout < 100 && !a.candidate_probe_url)
+      throw new CloudflareError('invalid_inventory', 1, false, 'smoke');
     if (
       a &&
       a.requested_rollout < 100 &&
-      (!a.candidate_probe_url || !a.previous_version_id || a.candidate_probe_url === a.worker_url)
+      (!a.previous_version_id || a.candidate_probe_url === a.worker_url)
     )
       return invalid();
     if (
@@ -657,7 +659,7 @@ export async function smoke(o: SmokeOptions): Promise<CommandResult> {
         await probes(ctx, canonical, 'canonical', project, canonical, token);
         if (a && a.requested_rollout < 100) {
           if (!a.candidate_probe_url)
-            throw new CloudflareError('capability_unknown', 2, false, 'smoke');
+            throw new CloudflareError('invalid_inventory', 1, false, 'smoke');
           const previewApi = new CloudflareApi({
             ...apiOptions,
             deadline: end,

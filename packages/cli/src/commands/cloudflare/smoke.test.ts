@@ -751,6 +751,19 @@ it('preserves only allowlisted smoke evidence and rejects body or credential fie
   }
 });
 
+it('rejects a gradual rollout journal without a candidate probe URL', async () => {
+  const h = harness();
+  await gradual(h);
+  await change((a) => {
+    a.candidate_probe_url = null;
+  });
+  expect(await smoke(options(h))).toMatchObject({
+    exitCode: 1,
+    output: { error: { code: 'invalid_inventory', stage: 'smoke' } },
+  });
+  expect(h.calls).toHaveLength(0);
+});
+
 it('custom origin at full rollout never enables workers.dev or previews', async () => {
   const h = harness();
   await gradual(h);

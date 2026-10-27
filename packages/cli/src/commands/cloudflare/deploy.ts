@@ -429,7 +429,7 @@ function distribution(a: DeploymentAttempt): Distribution[] {
 async function endpoints(api: CloudflareApi, base: string): Promise<EndpointPolicy> {
   const r = object((await api.request(`${base}/subdomain`)).result);
   if (typeof r.enabled !== 'boolean' || typeof r.previews_enabled !== 'boolean')
-    throw new CloudflareError('capability_unknown');
+    throw new CloudflareError('provider_failure');
   return { enabled: r.enabled, previews_enabled: r.previews_enabled };
 }
 function routeInput(raw: string | undefined, script: string): ManagedRoute[] {

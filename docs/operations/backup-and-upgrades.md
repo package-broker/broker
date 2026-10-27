@@ -47,7 +47,7 @@ The Docker defaults put SQLite and blobs under `/data`; SSH and Git archive root
 
 Node accepts `PB_MASTER_KEY` or `PB_MASTER_KEY_FILE`, and `PB_MASTER_KEY_PREVIOUS` or `PB_MASTER_KEY_PREVIOUS_FILE`. Each pair is mutually exclusive. Workers reads `PB_MASTER_KEY` and `PB_MASTER_KEY_PREVIOUS`. Back up the values or file contents, including every version still used by stored data; a file path or a platform secret name is insufficient. Do not print these values or put them in a command line.
 
-<!-- source: packages/runtime-node/src/startup.ts:192 -->
+<!-- source: packages/runtime-node/src/startup.ts:193 -->
 <!-- source: packages/runtime-cloudflare/src/index.ts:432 -->
 <!-- source: packages/db-sqlite/src/repositories/keyring-verifier.ts:103 -->
 
@@ -58,7 +58,7 @@ This recipe follows the [Docker quickstart](../getting-started/quickstart-docker
 For a deployment that supplies key values through an environment file instead, set `DEPLOYMENT_ENV_FILE` to the original protected file. The alternative commands below copy and restore it. If keys are bind-mounted from outside `/data`, copy each file with `cp "$KEY_FILE" "$BACKUP_DIR/master.key"` (after creating the backup directory), repeat for previous-key files, and record their read-only mounts and `_FILE` settings for restore.
 
 <!-- source: Dockerfile:92 -->
-<!-- source: packages/runtime-node/src/startup.ts:192 -->
+<!-- source: packages/runtime-node/src/startup.ts:193 -->
 <!-- source: scripts/docker-smoke.mjs:1072 -->
 <!-- verify: docker-round-trip — maintainer: run these Docker CLI commands against a disposable deployment, including separate key-file and external-storage variants. -->
 
@@ -104,7 +104,7 @@ Keep the same private shell settings (`set -eu`, shell tracing off and `umask 07
 Verify the complete backup against the checksums recorded by your backup system before copying any files. Use the same artifact as the backup first. Supply `RESTORE_VOLUME` and `RESTORE_CONTAINER` as new, unused names. The following procedure refuses an existing volume, copies the backup before startup, and restores ownership for the image's runtime user. For the isolated local rehearsal below, override the public address to the loopback address shown in the command. Before starting it, pause all restored sources or block outbound traffic to vendors at the rehearsal host's firewall; the restored credentials can otherwise allow scheduled syncs against production vendor accounts. Keep local client access available for acceptance checks. Do not connect this copy to production external storage or producers. A production recovery should retain its configured public address instead. If your deployment uses key files outside `/data`, add their restored read-only bind mounts and `_FILE` settings before startup; an environment file containing paths does not preserve those files.
 
 <!-- source: Dockerfile:98 -->
-<!-- source: packages/runtime-node/src/startup.ts:232 -->
+<!-- source: packages/runtime-node/src/startup.ts:233 -->
 <!-- source: scripts/docker-smoke.mjs:1014 -->
 <!-- source: packages/runtime-node/src/restore-rehearsal/rehearsal.test.support.ts:131 -->
 <!-- verify: docker-round-trip — maintainer: verify fresh-volume refusal, restored ownership, original login/token and archive digest; record actual output and duration. -->
@@ -343,7 +343,7 @@ Docker users can use the CLI in their image instead. In the same private shell, 
 3. Keep the previous keys loaded. There is a credential resealing service, but this CLI exposes no command to run it. Password hashes and token peppers can also retain old versions. Startup refuses removal of a version still used by credentials, tokens or local logins. Do not treat generating and activating a key as completion of old-key retirement.
 4. Take a new recovery set after activation. Retain the previous set and its keys for its entire recovery window.
 
-<!-- source: packages/runtime-node/src/startup.ts:192 -->
+<!-- source: packages/runtime-node/src/startup.ts:193 -->
 <!-- source: packages/core/src/secrets/cipher.ts:47 -->
 <!-- source: packages/core/src/secrets/credential-store.ts:106 -->
 <!-- source: packages/db-sqlite/src/repositories/keyring-verifier.ts:103 -->

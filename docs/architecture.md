@@ -31,9 +31,9 @@ Package Broker runs on Cloudflare Workers or as a Node process, and both run the
 <!-- source: packages/core/src/plugin.ts:66 -->
 <!-- source: packages/runtime-cloudflare/src/index.ts:1009 -->
 <!-- source: packages/runtime-cloudflare/src/index.ts:1366 -->
-<!-- source: packages/runtime-node/src/startup.ts:533 -->
-<!-- source: packages/runtime-node/src/startup.ts:570 -->
-<!-- source: packages/runtime-node/src/startup.ts:602 -->
+<!-- source: packages/runtime-node/src/startup.ts:534 -->
+<!-- source: packages/runtime-node/src/startup.ts:571 -->
+<!-- source: packages/runtime-node/src/startup.ts:603 -->
 
 ## Build-time composition of plugins
 
@@ -147,7 +147,7 @@ Jobs use Queues and Cron Triggers on Cloudflare and a leased job table polled by
 
 One observability port in `packages/core/src/platform` covers logs, metrics and traces. Node writes JSON logs to standard output, and Cloudflare uses Workers Logs with optional Analytics Engine metrics. Both can export logs, metrics and traces over OTLP without a vendor SDK. Each HTTP request emits a server span when trace export is configured.
 
-<!-- source: packages/runtime-node/src/startup.ts:408 -->
+<!-- source: packages/runtime-node/src/startup.ts:409 -->
 <!-- source: packages/core/src/platform/completion-span.ts:5 -->
 
 Source requests emit `upstream.fetch` client spans when a parent trace context is available; see [Observability](operations/observability.md) for tracing behavior and configuration.

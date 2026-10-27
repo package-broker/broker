@@ -89,17 +89,30 @@ deferred attempt between requests and starts at most one attempt per second.
 
 ## Node client IP behind a proxy
 
-Node records the socket peer address in sessions and audit `source_ip` by default,
-ignoring `cf-connecting-ip`, `x-forwarded-for` and `forwarded`. Set `PB_TRUSTED_PROXY=1` only when
-Node is reachable exclusively through a trusted proxy that removes client-supplied
-values and writes these headers. `PB_TRUSTED_PROXY=0` (or unset) keeps the default;
-other values fail startup. Programmatic servers use `trustedProxy: true`.
+Node records the socket peer address in sessions and audit `source_ip` by default and
+uses it for IP-based limits, ignoring `cf-connecting-ip`, `x-forwarded-for` and
+`forwarded`. `PB_TRUSTED_PROXY` selects the one header to read instead:
 
-When enabled, `cf-connecting-ip` takes precedence over the first `x-forwarded-for`
-entry, followed by the first `forwarded` element's `for` parameter. Missing, empty
-or invalid selected values fall back to the socket address (or `null` without a
-socket peer). Both IPv4 and IPv6 literals are accepted, including bracketed IPv6
-with a port in `forwarded`.
+- unset or `0`: the socket address, no header is read (default).
+- `cloudflare`: `cf-connecting-ip` only, for a Node server that only Cloudflare can
+  reach. `x-forwarded-for` and `forwarded` are ignored.
+- `xff:<n>`, `n` from 1 to 10: the `n`-th `x-forwarded-for` entry counted from the right,
+  where `n` is the number of trusted proxies in front of the server. Several
+  `x-forwarded-for` lines are read as one list in order; `cf-connecting-ip` is ignored.
+  One nginx in front with `proxy_set_header X-Forwarded-For $remote_addr;` (or
+  `$proxy_add_x_forwarded_for`) is `xff:1`.
+  This is safe only when the Node port is reachable solely through those `n` proxies:
+  a client that can reach Node directly sets `x-forwarded-for` itself.
+- `1`: deprecated. It takes `cf-connecting-ip`, then the leftmost `x-forwarded-for`
+  entry, then the first `forwarded` element's `for` parameter, all of which a client
+  can set. The server logs a `config.deprecated` warning for `PB_TRUSTED_PROXY` at start.
+
+Any other value fails startup. When the selected header is missing, its value is not an
+IP literal (a port or brackets count as not an IP literal), or the list is shorter than
+`n`, the socket address is used (or `null` without a socket peer). Programmatic servers
+pass the same modes as the `trustedProxy` option: `{ kind: 'none' }`,
+`{ kind: 'cloudflare' }`, `{ kind: 'xff', hops: n }` or `{ kind: 'legacy' }`; `true`
+still means the deprecated `1` behaviour and `false` the default.
 Cloudflare's client IP handling is unchanged.
 
 ## Operating sources

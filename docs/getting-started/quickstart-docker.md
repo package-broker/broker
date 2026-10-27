@@ -65,12 +65,12 @@ docker run --rm \
 <!-- source: Dockerfile:90 -->
 <!-- source: Dockerfile:99 -->
 <!-- source: packages/cli/src/commands/admin.ts:68 -->
-<!-- source: packages/runtime-node/src/startup.ts:171 -->
+<!-- source: packages/runtime-node/src/startup.ts:173 -->
 
 Keep the same volume and key when recreating the container. Store a backup copy of the key in your secret manager or an encrypted backup outside this volume and host before adding vendor credentials. The [backup and upgrades guide](../operations/backup-and-upgrades.md#back-up-docker) copies the whole volume, including this key; protect that backup as secret material. Losing the key prevents recovery of encrypted credentials.
 
 <!-- source: docs/operations/backup-and-upgrades.md:56 -->
-<!-- source: packages/runtime-node/src/startup.ts:192 -->
+<!-- source: packages/runtime-node/src/startup.ts:193 -->
 
 Create a private directory outside the checkout for the runtime settings. Replace `<private-directory>` with its absolute path and keep this shell open for the remaining commands:
 
@@ -86,7 +86,7 @@ PB_ORG_NAME=Agency evaluation
 ENV
 ```
 
-<!-- source: packages/runtime-node/src/startup.ts:192 -->
+<!-- source: packages/runtime-node/src/startup.ts:193 -->
 <!-- source: packages/runtime-node/src/startup.ts:737 -->
 <!-- source: packages/runtime-node/src/startup.ts:759 -->
 
@@ -116,7 +116,7 @@ Use `http://localhost:8787` in the browser, matching `PB_PUBLIC_URL` exactly. Th
 
 <!-- source: packages/core/src/auth/cookies.ts:36 -->
 <!-- source: packages/core/src/kernel/public-origin.ts:15 -->
-<!-- source: packages/runtime-node/src/startup.ts:240 -->
+<!-- source: packages/runtime-node/src/startup.ts:241 -->
 <!-- source: Dockerfile:111 -->
 
 ## Verify the deployment

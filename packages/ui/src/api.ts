@@ -19,6 +19,12 @@ const API_ERROR_CODES = [
   'payload_too_large',
   'unsupported_media_type',
   'unavailable',
+  'unsupported_package',
+  'unsupported_source_kind',
+  'package_not_found',
+  'source_paused',
+  'upstream_refused',
+  'bad_gateway',
 ] as const;
 
 const DETAIL_CODES = [

@@ -692,6 +692,10 @@ export function createSourcesModel(
           });
         } else if (result.status === 400 && result.code === 'invalid_request') {
           set({ packageFieldError: 'Enter a valid package name for this source.' });
+        } else if (result.code === 'package_not_found') {
+          set({
+            packageAlert: 'Not found upstream. Check the package name or use another source.',
+          });
         } else if (result.status === 400) {
           set({
             packageFieldError:

@@ -14,6 +14,7 @@ import { authCallMetaOf, sessionMetaOf } from './session.js';
 import type { AuthCallMeta, AuthenticatedSession, SessionMeta, SessionService } from './session.js';
 import type { OrgContext } from '../db/port.js';
 import type { SessionRepository } from '../db/sessions.js';
+import type { ProviderBindingReader } from '../db/users.js';
 import type { Clock } from '../ids.js';
 import type { ProviderMap } from '../identity/providers.js';
 import { isValidProviderId } from '../identity/port.js';
@@ -35,6 +36,7 @@ import type { SecretCipher } from '../secrets/cipher.js';
 export type ReauthOutcome = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
 export interface SsoRouteDeps {
+  readonly bindings: ProviderBindingReader;
   readonly providers: ProviderMap;
   readonly sessions: SessionService;
   /** Re-authentication fails closed when the session reader is unavailable. */
@@ -266,6 +268,34 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     return envelopeResponse(403, 'forbidden', 'Forbidden', rc.requestId);
   }
 
+  async function anchorGate(
+    rc: RequestContext,
+    provider: IdentityProvider,
+    purpose: Purpose,
+  ): Promise<Response | null> {
+    const org = orgOf(rc);
+    let anchor: string | null;
+    try {
+      anchor = await deps.bindings.anchor(org, provider.id);
+    } catch (error) {
+      logRefusal(rc.requestId, provider.id, 'provider_binding_unavailable', error);
+      return envelopeResponse(
+        503,
+        'provider_binding_unavailable',
+        'Provider binding unavailable',
+        rc.requestId,
+      );
+    }
+    if (purpose === 'reauth') {
+      return anchor !== null && anchor === provider.trustAnchor
+        ? null
+        : loginFailed(rc, provider.id, 'anchor_mismatch');
+    }
+    return anchor === null || anchor === provider.trustAnchor
+      ? null
+      : loginFailed(rc, provider.id, 'provider_rebound');
+  }
+
   function callbackUrl(provider: IdentityProvider): string {
     return `${publicOrigin}/_pb/auth/sso/${provider.id}/callback`;
   }
@@ -389,6 +419,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       }
     }
 
+    const gated = await anchorGate(rc, provider, purpose);
+    if (gated !== null) return gated;
+
     let started: StartOutcome | null;
     let startError: unknown;
     try {
@@ -481,6 +514,9 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     ) {
       return loginFailed(rc, provider.id, 'session_inactive', cleared);
     }
+    const gated = await anchorGate(rc, provider, state.purpose);
+    if (gated !== null) return withCookies(gated, cleared);
+
     const verified = await verify(rc, provider, state.data);
     if ('reason' in verified) {
       return loginFailed(

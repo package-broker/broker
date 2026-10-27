@@ -33,6 +33,7 @@ import {
 } from './http.js';
 import { createJwksCache } from './jwks.js';
 import { JwtError, verifyJwt, type KeySource, type VerifiedClaims } from './jwt.js';
+import { providerPresentation } from './presentation.js';
 
 export interface OidcConfig {
   readonly id: string;
@@ -488,6 +489,25 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
   const secretName = providerSecretName(id, 'CLIENT_SECRET');
   const discoveryUrl = `${issuer}/.well-known/openid-configuration`;
 
+  let definitionDigest: Promise<string> | null = null;
+  function digest(): Promise<string> {
+    definitionDigest ??= crypto.subtle
+      .digest(
+        'SHA-256',
+        new TextEncoder().encode(
+          JSON.stringify([
+            issuer,
+            clientId,
+            scope.split(' ').sort(),
+            [...trustedAudiences].sort(),
+            [...trusted].sort(),
+          ]),
+        ),
+      )
+      .then((hash) => `v1:${base64urlEncode(new Uint8Array(hash))}`);
+    return definitionDigest;
+  }
+
   let discovery: Promise<Endpoints> | null = null;
   let failure: { readonly at: number; readonly detail: OidcFailureDetail } | null = null;
 
@@ -638,8 +658,12 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
   return Object.freeze({
     id,
     kind: 'oidc' as const,
-    displayName: (source['displayName'] as string | undefined) ?? id,
-    trustAnchor: `oidc:${issuer}`,
+    ...providerPresentation({
+      id,
+      kind: 'oidc',
+      issuer,
+      displayName: source['displayName'] as string | undefined,
+    }),
     policy: Object.freeze({
       verifiedDomains: Object.freeze(policy.verifiedDomains.slice()),
       emailAuthoritativeDomains: Object.freeze([...(policy.emailAuthoritativeDomains ?? [])]),
@@ -677,7 +701,7 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
         params.set('prompt', 'login');
         params.set('max_age', '0');
       }
-      const loginState: LoginStateData = { state, nonce, verifier };
+      const loginState: LoginStateData = { state, nonce, verifier, digest: await digest() };
       return { kind: 'redirect', location: url.toString(), state: loginState };
     },
 
@@ -686,6 +710,12 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
       readonly state: LoginStateData | null;
       readonly callbackUrl: string;
     }): Promise<IdentityResult> {
+      if (
+        typeof input.state?.['digest'] !== 'string' ||
+        input.state['digest'] !== (await digest())
+      ) {
+        return refuse('state_mismatch');
+      }
       const login = readLoginState(input.state);
       if (login === null) {
         return refuse('state_mismatch');

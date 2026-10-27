@@ -231,8 +231,14 @@ export interface DeploymentJournal {
 export interface DeploymentHistory {
   version_ids: string[];
   plain_bindings: { name: string; texts: string[] }[];
+  hashed_bindings?: { name: string; sha256: string[] }[];
 }
-export const deploymentHistoryLimits = { versions: 10_000, plainValues: 64 } as const;
+export const hashedBindingNames: ReadonlySet<string> = new Set(['PB_IDP_PROVIDERS']);
+export const deploymentHistoryLimits = {
+  versions: 10_000,
+  plainValues: 64,
+  hashedValues: 64,
+} as const;
 
 export class DeploymentHistoryCapacityError extends CloudflareError {
   constructor() {
@@ -266,6 +272,19 @@ export function recordDeploymentHistory(
     ...(receipt.plainBinding ? [receipt.plainBinding] : []),
   ];
   for (const binding of bindings) {
+    if (hashedBindingNames.has(binding.name)) {
+      const hashes = (history.hashed_bindings ??= []);
+      const existing = hashes.find((b) => b.name === binding.name);
+      const sha256 = digest(binding.text);
+      if (!existing) hashes.push({ name: binding.name, sha256: [sha256] });
+      else {
+        const index = existing.sha256.indexOf(sha256);
+        if (index !== -1) existing.sha256.splice(index, 1);
+        existing.sha256.push(sha256);
+        if (existing.sha256.length > deploymentHistoryLimits.hashedValues) existing.sha256.shift();
+      }
+      continue;
+    }
     const existing = history.plain_bindings.find((b) => b.name === binding.name);
     if (!existing) history.plain_bindings.push({ name: binding.name, texts: [binding.text] });
     else if (!existing.texts.includes(binding.text)) existing.texts.push(binding.text);
@@ -539,7 +558,28 @@ function deploymentValid(raw: unknown): boolean {
     );
   };
   const history = (v: unknown): boolean =>
-    exact(v, ['version_ids', 'plain_bindings']) &&
+    record(v) &&
+    exact(v, [
+      'version_ids',
+      'plain_bindings',
+      ...(Object.hasOwn(v, 'hashed_bindings') ? ['hashed_bindings'] : []),
+    ]) &&
+    (!Object.hasOwn(v, 'hashed_bindings') ||
+      (Array.isArray(v.hashed_bindings) &&
+        v.hashed_bindings.length > 0 &&
+        new Set(v.hashed_bindings.map((b) => record(b) && b.name)).size ===
+          v.hashed_bindings.length &&
+        v.hashed_bindings.every(
+          (b) =>
+            exact(b, ['name', 'sha256']) &&
+            typeof b.name === 'string' &&
+            hashedBindingNames.has(b.name) &&
+            Array.isArray(b.sha256) &&
+            b.sha256.length > 0 &&
+            b.sha256.length <= deploymentHistoryLimits.hashedValues &&
+            b.sha256.every(hash) &&
+            new Set(b.sha256).size === b.sha256.length,
+        ))) &&
     Array.isArray(v.version_ids) &&
     v.version_ids.length <= deploymentHistoryLimits.versions &&
     v.version_ids.every(id) &&
@@ -551,6 +591,7 @@ function deploymentValid(raw: unknown): boolean {
       (b) =>
         exact(b, ['name', 'texts']) &&
         typeof b.name === 'string' &&
+        !hashedBindingNames.has(b.name) &&
         /^[A-Z][A-Z0-9_]{0,127}$/.test(b.name) &&
         Array.isArray(b.texts) &&
         b.texts.length > 0 &&

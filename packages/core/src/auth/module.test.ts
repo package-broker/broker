@@ -74,6 +74,7 @@ function fixture(resolve?: HookMap['auth.resolveIdentity'], map?: HookMap['auth.
       Promise.resolve({ reserved: true, snapshot: { ...snapshot, failedCount: 5, lockedUntil } }),
   );
   const repositories = {
+    bindings: { anchor: () => Promise.resolve(provider.trustAnchor) },
     sessions: { findActiveById: () => Promise.resolve(session) },
     localReader: {
       findByEmail: () => Promise.resolve(snapshot),

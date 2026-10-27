@@ -203,11 +203,21 @@ describe('start', () => {
     const p = provider(h);
     const first = (await redirectOf(start(p))).state;
     const second = (await redirectOf(start(p))).state;
-    expect(Object.keys(first).sort()).toEqual(['nonce', 'state', 'verifier']);
-    for (const value of [...Object.values(first), ...Object.values(second)]) {
+    expect(Object.keys(first).sort()).toEqual(['digest', 'nonce', 'state', 'verifier']);
+    const tokens = [
+      first.state,
+      first.nonce,
+      first.verifier,
+      second.state,
+      second.nonce,
+      second.verifier,
+    ];
+    for (const value of tokens) {
       expect(value).toMatch(TOKEN);
     }
-    expect(new Set([...Object.values(first), ...Object.values(second)]).size).toBe(6);
+    expect(new Set(tokens).size).toBe(6);
+    expect(first.digest).toMatch(/^v1:[A-Za-z0-9_-]{43}$/);
+    expect(second.digest).toBe(first.digest);
   });
 
   it('adds openid to custom scopes that lack it', async () => {

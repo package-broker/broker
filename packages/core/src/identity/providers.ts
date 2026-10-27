@@ -1,26 +1,15 @@
 import { reportableErrorName } from '../kernel/error-name.js';
 import { KernelConfigError, type Registration } from '../kernel/registry.js';
 import type { PluginDefinition } from '../plugin.js';
-import { domainPolicyProblems } from './policy.js';
+import { copyIndexed, providerFieldProblems, readLength } from './provider-fields.js';
 import { ENV_PREFIX } from './secret-name.js';
-import {
-  isReservedProviderId,
-  isValidProviderId,
-  isValidTrustAnchor,
-  type DomainPolicy,
-  type IdentityContext,
-  type IdentityProvider,
-} from './port.js';
+import { type DomainPolicy, type IdentityContext, type IdentityProvider } from './port.js';
 
 export { PROVIDER_SECRET_SUFFIXES, providerSecretName } from './secret-name.js';
 
-const UNSAFE_DISPLAY_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
 const MAX_QUOTED_LENGTH = 80;
-const MAX_DISPLAY_NAME_LENGTH = 100;
 const MAX_PROVIDERS = 64;
-const MAX_DOMAINS = 100;
-const PROVIDER_KINDS: readonly string[] = ['cloudflare-access', 'oidc'];
 
 export interface ProviderMap {
   get(id: string): IdentityProvider | undefined;
@@ -76,66 +65,6 @@ function canonicalAnchor(anchor: string): string {
   } catch {
     return anchor;
   }
-}
-
-function readLength(list: readonly unknown[]): number | null {
-  const length: unknown = list.length;
-  return typeof length === 'number' && Number.isSafeInteger(length) && length >= 0 ? length : null;
-}
-
-function copyIndexed(list: readonly unknown[], length: number): unknown[] {
-  const items: unknown[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(list, String(index));
-    let value: unknown;
-    if (descriptor !== undefined) {
-      value =
-        'value' in descriptor
-          ? descriptor.value
-          : descriptor.get === undefined
-            ? undefined
-            : Reflect.apply(descriptor.get, list, []);
-    }
-    Object.defineProperty(items, index, {
-      value,
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
-  }
-  return items;
-}
-
-function snapshotPolicy(raw: unknown): {
-  readonly policy: DomainPolicy;
-  readonly problems: string[];
-} {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return { policy: raw as DomainPolicy, problems: domainPolicyProblems(raw as DomainPolicy) };
-  }
-  const source = raw as {
-    verifiedDomains?: unknown;
-    emailAuthoritativeDomains?: unknown;
-    autoJoin?: unknown;
-  };
-  const snapshot: Record<string, unknown> = {};
-  for (const key of ['verifiedDomains', 'emailAuthoritativeDomains'] as const) {
-    const domains = source[key];
-    if (Array.isArray(domains)) {
-      const length = readLength(domains as unknown[]);
-      if (length === null || length > MAX_DOMAINS) {
-        return {
-          policy: { verifiedDomains: [], autoJoin: false },
-          problems: [`${key} must be an array of at most ${MAX_DOMAINS} entries`],
-        };
-      }
-      snapshot[key] = copyIndexed(domains as unknown[], length);
-    } else {
-      snapshot[key] = domains;
-    }
-  }
-  const policy = { ...snapshot, autoJoin: source.autoJoin } as unknown as DomainPolicy;
-  return { policy, problems: domainPolicyProblems(policy) };
 }
 
 function ignore(): void {}
@@ -267,23 +196,27 @@ export function buildIdentityProviders(
       const supportsReauth: unknown = source.supportsReauth;
       const start: unknown = source.start;
       const finish: unknown = source.finish;
-      const { policy, problems: policyProblems } = snapshotPolicy(source.policy);
-
-      if (typeof id !== 'string' || !isValidProviderId(id)) {
-        problems.push(`${label} id is not a valid provider id (type ${typeof id})`);
-      } else if (isReservedProviderId(id)) {
-        problems.push(`${label} id ${quoted(id)} is reserved`);
-      } else if (idIndex.has(id)) {
-        problems.push(`${label} id ${quoted(id)} duplicates provider[${idIndex.get(id)}]`);
-      } else {
-        idIndex.set(id, index);
+      const { policy, byField } = providerFieldProblems({
+        id,
+        kind,
+        displayName,
+        trustAnchor,
+        policy: source.policy,
+      });
+      const appendProblems = (messages: readonly string[]): void => {
+        problems.push(...messages.map((problem) => `${label} ${problem}`));
+      };
+      appendProblems(byField.id);
+      if (byField.id.length === 0 && typeof id === 'string') {
+        if (idIndex.has(id)) {
+          problems.push(`${label} id ${quoted(id)} duplicates provider[${idIndex.get(id)}]`);
+        } else {
+          idIndex.set(id, index);
+        }
       }
-      if (typeof kind !== 'string' || !PROVIDER_KINDS.includes(kind)) {
-        problems.push(`${label} kind must be "cloudflare-access" or "oidc"`);
-      }
-      if (typeof trustAnchor !== 'string' || !isValidTrustAnchor(trustAnchor)) {
-        problems.push(`${label} trustAnchor is not a valid trust anchor`);
-      } else {
+      appendProblems(byField.kind);
+      appendProblems(byField.trustAnchor);
+      if (byField.trustAnchor.length === 0 && typeof trustAnchor === 'string') {
         const key = canonicalAnchor(trustAnchor);
         if (anchorIndex.has(key)) {
           problems.push(`${label} trustAnchor duplicates provider[${anchorIndex.get(key)}]`);
@@ -291,28 +224,9 @@ export function buildIdentityProviders(
           anchorIndex.set(key, index);
         }
       }
-      if (
-        typeof displayName !== 'string' ||
-        displayName.length < 1 ||
-        displayName.length > MAX_DISPLAY_NAME_LENGTH ||
-        UNSAFE_DISPLAY_CHARACTER.test(displayName)
-      ) {
-        problems.push(
-          `${label} displayName must be 1 to ${MAX_DISPLAY_NAME_LENGTH} characters without control or format characters`,
-        );
-      }
-      if (
-        typeof kind === 'string' &&
-        PROVIDER_KINDS.includes(kind) &&
-        typeof trustAnchor === 'string' &&
-        isValidTrustAnchor(trustAnchor) &&
-        !trustAnchor.startsWith(kind === 'oidc' ? 'oidc:' : 'access:')
-      ) {
-        problems.push(`${label} kind does not match the trustAnchor prefix`);
-      }
-      for (const problem of policyProblems) {
-        problems.push(`${label} policy: ${problem}`);
-      }
+      appendProblems(byField.displayName);
+      appendProblems(byField.kindPrefix);
+      appendProblems(byField.policy);
       if (typeof supportsReauth !== 'boolean') {
         problems.push(`${label} supportsReauth must be a boolean`);
       }

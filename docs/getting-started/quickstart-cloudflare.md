@@ -128,6 +128,14 @@ For unattended setup, the CLI also supports `--worker-name`, `--org-slug`, `--or
 
 Read [Workers fill limits and self-origin aliases](../reference/workers-fill-limits.md) before importing a large catalog or adding a custom domain alongside the account Workers alias; it explains metadata sizing, D1 invocation budgets and the required outbound deny entries.
 
+### Custom domain
+
+To use a custom hostname, its Cloudflare zone must be active in the same account as the Worker. In addition to the account permissions above, the API token needs **Zone Read**, **Workers Routes Edit** and **DNS Edit**, scoped to that zone.
+
+When running setup above, add `--domain packages.example.com --public-url https://packages.example.com`, replacing both example hostnames with yours. `--domain` binds the hostname to the Worker; `--public-url` sets the canonical HTTPS origin used by the broker. Use the same hostname for both options.
+
+If setup reports `domain_zone_not_found`, check the hostname, activate its zone in the selected account and ensure the token has access to that zone with the permissions above. If it reports `domain_zone_ambiguous`, resolve the duplicate matching zones in that account so exactly one active zone matches the hostname, then retry.
+
 ## First administrator
 
 Open the returned `bootstrap_url` and use the separately delivered setup token to enroll your password and authenticator. The token expires after 24 hours and works once. Follow [Set up the first administrator](../workers-install.md) for the browser steps or the curl alternative, then return here signed in.

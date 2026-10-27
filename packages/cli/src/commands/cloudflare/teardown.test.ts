@@ -2082,6 +2082,125 @@ it('deletes the provisioned R2 bucket whose only lifecycle rule is the recorded 
   );
 });
 
+const fixtureBody = (fixture: unknown, from: string, bucket: string) =>
+  JSON.stringify(fixture).replaceAll(from, bucket);
+const noNotificationsBody = (bucket: string) =>
+  fixtureBody(
+    providerFixtures.r2NotificationsNotConfigured,
+    'package-broker-production-blobs',
+    bucket,
+  );
+const bucketNotFoundBody = (bucket: string) =>
+  fixtureBody(providerFixtures.r2BucketNotFound, 'pb-live-917-production-blobs', bucket);
+const notFound = (body: string) =>
+  new Response(body, { status: 404, headers: { 'content-type': 'application/json' } });
+const notificationPath = (bucket: string) =>
+  `/client/v4/accounts/${ACCOUNT}/event_notifications/r2/${bucket}/configuration`;
+
+it('treats a 404/11015 notification configuration as no notifications on foreign and selected buckets', async () => {
+  const name = await provisionedBucket();
+  const foreign = 'external-default-bucket';
+  const requested: string[] = [];
+  interceptRead(async (url, fallback, init) => {
+    const jurisdiction = new Headers(init?.headers).get('cf-r2-jurisdiction');
+    if (url.pathname.endsWith('/r2/buckets') && jurisdiction === 'default')
+      return listingResponse({ buckets: [{ name: foreign }] });
+    if (url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`))
+      return response({ rules: [ABORT_RULE] });
+    for (const bucket of [foreign, name])
+      if (url.pathname === notificationPath(bucket)) {
+        requested.push(`${jurisdiction} ${url.pathname}`);
+        return notFound(noNotificationsBody(bucket));
+      }
+    return fallback;
+  });
+  expect((await teardown(options)).exitCode).toBe(0);
+  expect(requested).toContain(`default ${notificationPath(foreign)}`);
+  expect(requested).toContain(`eu ${notificationPath(name)}`);
+  expect(trace.some((e) => e.method === 'DELETE' && e.path.endsWith(`/r2/buckets/${name}`))).toBe(
+    true,
+  );
+});
+
+it.each([
+  'bucket_not_found',
+  'unparsable',
+  'extra_code',
+  'success_true',
+  'string_code',
+  'missing_errors',
+  'empty_errors',
+] as const)(
+  'refuses any other 404 from the notification configuration (%s) before mutation',
+  async (kind) => {
+    const name = await provisionedBucket();
+    const real = JSON.parse(noNotificationsBody(name)) as Record<string, unknown>;
+    const bodies = {
+      bucket_not_found: bucketNotFoundBody(name),
+      unparsable: '<html>not found</html>',
+      extra_code: JSON.stringify({ ...real, errors: [{ code: 11015 }, { code: 10085 }] }),
+      success_true: JSON.stringify({ ...real, success: true }),
+      string_code: JSON.stringify({ ...real, errors: [{ code: '11015' }] }),
+      missing_errors: JSON.stringify({ success: false, result: null }),
+      empty_errors: JSON.stringify({ ...real, errors: [] }),
+    };
+    interceptRead(async (url, fallback) => {
+      if (url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`))
+        return response({ rules: [ABORT_RULE] });
+      if (url.pathname === notificationPath(name)) return notFound(bodies[kind]);
+      return fallback;
+    });
+    await expectOwnershipConflict();
+  },
+);
+
+it('refuses a foreign bucket in another jurisdiction whose notification read returns 404/10085', async () => {
+  const name = await provisionedBucket();
+  const foreign = 'external-fedramp-bucket';
+  interceptRead(async (url, fallback, init) => {
+    if (
+      url.pathname.endsWith('/r2/buckets') &&
+      new Headers(init?.headers).get('cf-r2-jurisdiction') === 'fedramp'
+    )
+      return listingResponse({ buckets: [{ name: foreign }] });
+    if (url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`))
+      return response({ rules: [ABORT_RULE] });
+    if (url.pathname === notificationPath(foreign)) return notFound(bucketNotFoundBody(foreign));
+    return fallback;
+  });
+  await expectOwnershipConflict();
+});
+
+it('fails as a provider failure when a notification 404 body exceeds 1 MiB', async () => {
+  const name = await provisionedBucket();
+  interceptRead(async (url, fallback) => {
+    if (url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`))
+      return response({ rules: [ABORT_RULE] });
+    if (url.pathname === notificationPath(name))
+      return notFound(
+        JSON.stringify({
+          ...(JSON.parse(noNotificationsBody(name)) as object),
+          padding: 'x'.repeat(1_048_577),
+        }),
+      );
+    return fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(1);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+});
+
+it('keeps a 404/11015 from a non-notification bucket configuration fail-closed', async () => {
+  const name = await provisionedBucket();
+  interceptRead(async (url, fallback) =>
+    url.pathname.endsWith(`/r2/buckets/${name}/lifecycle`)
+      ? notFound(noNotificationsBody(name))
+      : fallback,
+  );
+  await expectOwnershipConflict();
+});
+
 it('treats the documented empty storageClassTransitions as part of the abort-only default rule', async () => {
   const name = await provisionedBucket();
   interceptRead(async (url, fallback) =>

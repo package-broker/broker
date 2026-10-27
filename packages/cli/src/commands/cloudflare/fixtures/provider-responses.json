@@ -432,5 +432,25 @@
     "result": {
       "subdomain": "broker-account"
     }
+  },
+  "r2NotificationsNotConfigured": {
+    "success": false,
+    "errors": [
+      {
+        "code": 11015,
+        "message": "No event notification config found for bucket 'package-broker-production-blobs': no configurations found for bucket."
+      }
+    ],
+    "result": null
+  },
+  "r2BucketNotFound": {
+    "success": false,
+    "errors": [
+      {
+        "code": 10085,
+        "message": "R2 bucket 'pb-live-917-production-blobs' not found. Verify the bucket exists in your account and that the bucket_name in your configuration is correct."
+      }
+    ],
+    "result": null
   }
 }

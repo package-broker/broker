@@ -333,6 +333,12 @@ Docker users can use the CLI in their image instead. In the same private shell, 
 ```
 
 1. Through your deployment's secret delivery mechanism, set `PB_MASTER_KEY` to the new file's contents and `PB_MASTER_KEY_PREVIOUS` to the comma-separated old keys, newest first. Node can instead read the corresponding `_FILE` settings. Apply current and previous values together before restarting or deploying.
+   On Workers, set both secrets in one request so no request sees a half-updated keyring. Put the two values in a JSON file such as `{"PB_MASTER_KEY":"<new key>","PB_MASTER_KEY_PREVIOUS":"<old keys>"}`, protected like the key files, and run `wrangler secret bulk <file> --config <wrangler config>`. Two separate `wrangler secret put` calls leave the Worker failing every request between them, whichever order you use: with the previous key set first, the current and previous keys are the same and the keyring is refused; with the new key set first, the stored key versions are no longer loaded and the keyring check fails.
+
+<!-- source: packages/core/src/secrets/master-key.ts:122 -->
+<!-- source: packages/core/src/secrets/keyring-verifier.ts:143 -->
+<!-- source: packages/runtime-cloudflare/src/index.ts:405 -->
+
 2. Start the isolated candidate and verify readiness, an old install token, original local login and a source credential. New encrypted writes use the current key; old data can still be read using retained versions.
 3. Keep the previous keys loaded. There is a credential resealing service, but this CLI exposes no command to run it. Password hashes and token peppers can also retain old versions. Startup refuses removal of a version still used by credentials, tokens or local logins. Do not treat generating and activating a key as completion of old-key retirement.
 4. Take a new recovery set after activation. Retain the previous set and its keys for its entire recovery window.
@@ -391,10 +397,50 @@ When the release instructions permit it, repeat the selected migration command w
 <!-- source: packages/cli/src/commands/sqlite.ts:36 -->
 <!-- verify: rc-upgrade — maintainer: rehearse target migration, startup, install and recovery for the selected RC pair on Docker and Workers. -->
 
+### Migration lock
+
+Both migrate commands take a lock in the database before they apply pending migrations, so two runs at the same time do not both apply them. A run that finds the lock held waits up to 30 seconds and continues if the lock frees up in time; otherwise it exits with 4. The lock lasts 10 minutes and is renewed with each applied migration, on SQLite and on D1, so a crashed run blocks others for at most 10 minutes after its last applied migration. `--dry-run` takes no lock. Exit code 3 means a migration already recorded in the database, or a migration file in the bundle, differs from the build's manifest; nothing pending is applied. All exit codes are in the [pb CLI reference](../reference/cli.md#exit-codes-for-migrate-and-bootstrap).
+
+<!-- source: packages/db-sqlite/src/migrations/runner.ts:15 -->
+<!-- source: packages/db-sqlite/src/migrations/runner.ts:327 -->
+<!-- source: packages/db-sqlite/src/migrations/runner.ts:357 -->
+<!-- source: packages/cli/src/commands/sqlite.ts:38 -->
+<!-- source: packages/cli/src/commands/cloudflare.ts:404 -->
+
+When the Node server migrates at start and the lock stays held, the start fails with exit code 1.
+
+<!-- source: packages/runtime-node/src/startup.ts:750 -->
+
 For production, quiesce writers, take a fresh recovery set, apply the approved target migrations and deploy the tested artifact. Node migrates on startup unless `PB_MIGRATE=off`; account for that before starting a new image. Keep traffic held until checks pass. A code rollback is not a database rollback: after an incompatible migration, restore the complete pre-upgrade set or follow the release's forward-repair instructions. Writes after the backup are absent from a restored set. The Cloudflare deployment code refuses code rollback across a recorded contract migration boundary.
 
 <!-- source: packages/runtime-node/src/startup.ts:750 -->
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2044 -->
+
+## Health checks
+
+Both runtimes answer two health routes without authentication:
+
+- `GET /health/live` answers `200 {"status":"live"}` while the process serves requests. Use it for liveness probes.
+- `GET /health/ready` answers `200 {"status":"ready"}` when the database schema matches the build's migrations, the database answers and the organization exists, all within 2 seconds. Otherwise it answers `503`: with `{"status":"not_ready","reason":"schema_drift"}` when migrations are missing or differ, and with the error code `not_ready` for the other cases. Use it for readiness probes and before sending traffic to a new deployment.
+
+<!-- source: packages/core/src/kernel/kernel.ts:756 -->
+<!-- source: packages/core/src/kernel/health.ts:29 -->
+<!-- source: packages/core/src/kernel/health.ts:52 -->
+<!-- source: packages/core/src/kernel/health.ts:91 -->
+
+On Node, while the master key check has not passed (for example with `PB_MIGRATE=off` on a database that is not migrated), every route except `/health/live` answers `503 not_ready`. On Workers, a configuration error answers `503` with the code `misconfigured` on every route, the health routes included.
+
+<!-- source: packages/runtime-node/src/index.ts:1312 -->
+<!-- source: packages/core/src/kernel/errors.ts:65 -->
+
+## Stop the Node server
+
+`SIGTERM` or `SIGINT` stops the Node server gracefully. It stops accepting connections, waits for requests in progress, stops the job loop, flushes pending log and metric records, closes the database and exits with code 0. If that takes longer than `PB_SHUTDOWN_TIMEOUT_MS` (default 8000 milliseconds), it logs `shutdown.forced` and exits with code 1. Jobs still running at the stop are logged as `shutdown.jobs_abandoned`.
+
+<!-- source: packages/runtime-node/src/entry.ts:60 -->
+<!-- source: packages/runtime-node/src/entry.ts:145 -->
+<!-- source: packages/runtime-node/src/index.ts:1346 -->
+<!-- source: packages/runtime-node/src/startup.ts:688 -->
 
 ## Read logs and maintain the deployment
 

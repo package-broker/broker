@@ -346,11 +346,20 @@ function harness() {
     }
     if (path === '/workers/domains') {
       if (method !== 'GET') h.domain = { ...body, id: 'managed-domain' };
-      return ok(h.domain ? [h.domain] : []);
+      return method === 'GET'
+        ? new Response(
+            JSON.stringify({
+              ...providerFixtures.domainsEmpty,
+              result: h.domain ? [h.domain] : [],
+            }),
+          )
+        : ok(h.domain ? [h.domain] : []);
     }
     if (path === `/zones/${ZONE}/workers/routes`) {
       if (method !== 'GET') h.routes = [{ ...body, id: 'managed-route' }];
-      return ok(h.routes);
+      return method === 'GET'
+        ? new Response(JSON.stringify({ ...providerFixtures.zoneRoutesEmpty, result: h.routes }))
+        : ok(h.routes);
     }
     if (path === base + '/assets-upload-session') {
       h.sessionManifest = body.manifest;
@@ -4017,4 +4026,157 @@ it('treats a malformed contract zone id as provider failure before writes', asyn
     stage: 'deploy',
   });
   expect(mutations(h)).toEqual([]);
+});
+
+const routeFlags = {
+  publicUrl: 'https://broker.example.test',
+  routes: `${ZONE}:broker.example.test/*`,
+};
+const routeChecks = (output: Awaited<ReturnType<typeof deploy>>['output']) =>
+  output.checks.filter((check) => check.name === 'routes' || check.name.startsWith('routes:'));
+const conflictChecks = (...names: string[]) =>
+  names.map((name) => ({ name, status: 'configuration_conflict' }));
+const routeMutations = (h: ReturnType<typeof harness>) =>
+  mutations(h).filter((call) => call.path.includes('/workers/routes'));
+
+function routedFirstInstall() {
+  const { h, o } = firstInstall();
+  Object.assign(o, routeFlags);
+  const send = h.fetch;
+  h.fetch = vi.fn(async (input, init) => {
+    if (pathOf(input) === `/zones/${ZONE}/workers/routes` && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body));
+      h.calls.push({ path: pathOf(input), method: 'POST', body, auth: null });
+      const route = { ...body, id: '8'.repeat(32) };
+      h.routes.push(route);
+      return ok(route);
+    }
+    return send(input, init);
+  }) as typeof fetch;
+  o.fetch = h.fetch;
+  return { h, o };
+}
+
+it('installs routes in an empty zone on the recorded snapshot shape', async () => {
+  const { h, o } = routedFirstInstall();
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.exitCode).toBe(0);
+  expect(h.routes).toEqual([{ id: '8'.repeat(32), pattern: 'broker.example.test/*', script }]);
+  expect(routeMutations(h).map(({ method }) => method)).toEqual(['POST']);
+});
+
+it('leaves a foreign sibling host route untouched', async () => {
+  const { h, o } = routedFirstInstall();
+  const foreign = {
+    ...providerFixtures.zoneRoutesForeign.result[0],
+    pattern: 'shop.example.test/*',
+  };
+  h.routes = [foreign];
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.exitCode).toBe(0);
+  expect(h.routes).toEqual([
+    foreign,
+    { id: '8'.repeat(32), pattern: 'broker.example.test/*', script },
+  ]);
+  expect(routeMutations(h).map(({ method }) => method)).toEqual(['POST']);
+});
+
+it('redeploys the same routes without route mutations', async () => {
+  const { h, o } = routedFirstInstall();
+  expect((await deploy(o)).exitCode).toBe(0);
+  const route = { id: '8'.repeat(32), pattern: 'broker.example.test/*', script };
+  expect(h.routes).toEqual([route]);
+  const j = (await store.read())!;
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  await store.write(j);
+  const before = routeMutations(h).length;
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.exitCode).toBe(0);
+  expect(routeMutations(h).slice(before)).toEqual([]);
+  expect(h.routes).toEqual([route]);
+  expect((await store.read())!.deployment!.attempt.intended_settings.routes).toEqual([
+    { ...route, zone_id: ZONE },
+  ]);
+});
+
+it.each(['*.example.test/*', 'broker.example.test/api/*'])(
+  'refuses a foreign overlap %s with exact safe checks',
+  async (pattern) => {
+    const { h, o } = routedFirstInstall();
+    const id = '7'.repeat(32);
+    h.routes = [{ id, pattern, script: 'other-worker' }];
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(8);
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(routeChecks(result.output)).toEqual(
+      conflictChecks('routes', 'routes:overlap', `routes:route_id:${id}`),
+    );
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it('fails closed on route pagination metadata', async () => {
+  const { h, o } = routedFirstInstall();
+  const send = o.fetch!;
+  o.fetch = async (input, init) =>
+    pathOf(input) === `/zones/${ZONE}/workers/routes` && (init?.method ?? 'GET') === 'GET'
+      ? ok([], { total_pages: 2 })
+      : send(input, init);
+  const result = await deploy(o);
+  expect(result.output.error?.code).toBe('capability_unknown');
+  expect(result.exitCode).toBe(1);
+  expect(mutations(h)).toEqual([]);
+});
+
+it.each([
+  ['foreign_owner', '7'.repeat(32), 'broker.example.test/*', 'other-worker'],
+  ['overlap', 'PRIVATE_ROUTE_ID!', '*.example.test/private-pattern/*', 'other-worker'],
+  ['own_invalid', 'invalid route id', 'broker.example.test/*', script],
+  ['unmanaged_own', '7'.repeat(32), 'broker.example.test/unmanaged/*', script],
+])('pins route conflict fields for %s', async (reason, id, pattern, owner) => {
+  const { h, o } = routedFirstInstall();
+  h.routes = [{ id, pattern, script: owner }];
+  const result = await deploy(o);
+  expect(result.exitCode).toBe(8);
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(routeChecks(result.output)).toEqual(
+    conflictChecks(
+      'routes',
+      `routes:${reason}`,
+      ...(reason === 'foreign_owner' ? [`routes:route_id:${id}`] : []),
+    ),
+  );
+  expect(mutations(h)).toEqual([]);
+  if (reason === 'overlap') {
+    expect(JSON.stringify(result.output)).not.toContain(id);
+    expect(JSON.stringify(result.output)).not.toContain(pattern);
+    expect(JSON.stringify(result.output)).not.toContain('*.example.test');
+    expect(JSON.stringify(result.output)).not.toContain('private-pattern');
+  }
+});
+
+it('pins route drift during reconciliation after failed configuration', async () => {
+  const h = harness();
+  const o = options(h, routeFlags);
+  delete o.domain;
+  h.configFail = true;
+  expect((await deploy(o)).exitCode).not.toBe(0);
+  h.configFail = false;
+  const send = h.fetch;
+  let reads = 0;
+  o.fetch = async (input, init) => {
+    if (pathOf(input) === `/zones/${ZONE}/workers/routes` && ++reads === 2)
+      h.routes = [{ id: '7'.repeat(32), pattern: 'broker.example.test/drift/*', script }];
+    return send(input, init);
+  };
+  const count = routeMutations(h).length;
+  const result = await deploy(o);
+  expect(result.exitCode).toBe(8);
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(routeChecks(result.output)).toEqual(conflictChecks('routes', 'routes:drift'));
+  expect(routeMutations(h)).toHaveLength(count);
 });

@@ -39,6 +39,10 @@ import {
 import { provision } from './provision.js';
 import { setup, setupBuildEnvironment, type SetupOptions, type SetupOperations } from './setup.js';
 
+const providerFixtures = JSON.parse(
+  await readFile(new URL('./fixtures/provider-responses.json', import.meta.url), 'utf8'),
+);
+
 const ACCOUNT = 'a'.repeat(32),
   DB = '44444444-4444-4444-8444-444444444444';
 const identity = installIdentity({ accountId: ACCOUNT, workerName: 'broker' });
@@ -134,10 +138,12 @@ beforeEach(async () => {
       const path = new URL(String(input)).pathname;
       if (path.endsWith('/workers/subdomain'))
         return new Response(JSON.stringify({ success: true, result: { subdomain: 'account' } }));
+      if (path.endsWith('/workers/routes'))
+        return new Response(JSON.stringify(providerFixtures.zoneRoutesEmpty));
       if (path.endsWith('/workers/domains'))
         return new Response(
           JSON.stringify({
-            success: true,
+            ...providerFixtures.domainsEmpty,
             result: options.domain
               ? [
                   {
@@ -149,7 +155,6 @@ beforeEach(async () => {
                   },
                 ]
               : [],
-            result_info: { total_pages: 1 },
           }),
         );
       const value = path.endsWith('/secrets')
@@ -994,8 +999,14 @@ async function exerciseDeploymentCheckpoint(checkpoint: string) {
   const base = `/workers/scripts/${identity.script_name}`;
   const versionId = '22222222-2222-4222-8222-222222222222';
   const tags = ['pb-install-v1', `pb-owner-${identity.owner_digest}`];
-  const firstInstall = checkpoint === 'first_install_domain';
-  if (firstInstall) options.domain = 'example.com';
+  const firstInstallRoutes = checkpoint === 'first_install_routes';
+  const firstInstall = checkpoint === 'first_install_domain' || firstInstallRoutes;
+  if (checkpoint === 'first_install_domain') options.domain = 'example.com';
+  if (firstInstallRoutes) {
+    options.routes = `${'1'.repeat(32)}:broker.example.com/*`;
+    options.publicUrl = 'https://broker.example.com';
+  }
+  const routes: Record<string, unknown>[] = [];
   let created = !firstInstall;
   let domain: Record<string, unknown> | null = null;
   let uploads = 0;
@@ -1062,9 +1073,19 @@ async function exerciseDeploymentCheckpoint(checkpoint: string) {
         })),
       );
     if (path === '/workers/subdomain') return ok({ subdomain: 'account' });
+    if (path === `/client/v4/zones/${'1'.repeat(32)}/workers/routes`) {
+      if (method === 'POST') routes.push({ ...JSON.parse(String(init?.body)), id: '8'.repeat(32) });
+      return method === 'GET'
+        ? new Response(JSON.stringify({ ...providerFixtures.zoneRoutesEmpty, result: routes }))
+        : ok(routes.at(-1));
+    }
     if (path === '/workers/domains') {
       if (method === 'PUT') domain = { ...JSON.parse(String(init?.body)), id: 'managed-domain' };
-      return ok(domain ? [domain] : []);
+      return method === 'GET'
+        ? new Response(
+            JSON.stringify({ ...providerFixtures.domainsEmpty, result: domain ? [domain] : [] }),
+          )
+        : ok(domain ? [domain] : []);
     }
     if (path === `${base}/subdomain`)
       return ok({ enabled: !firstInstall, previews_enabled: false });
@@ -1153,6 +1174,29 @@ async function exerciseDeploymentCheckpoint(checkpoint: string) {
     value: { applied: ['core:0001_init'] },
   });
   expect(uploads).toBe(1);
+  if (firstInstallRoutes) {
+    expect(routes).toEqual([
+      { id: '8'.repeat(32), pattern: 'broker.example.com/*', script: identity.script_name },
+    ]);
+    const routeWrites = (since = 0) =>
+      vi
+        .mocked(options.fetch!)
+        .mock.calls.slice(since)
+        .filter(
+          ([url, init]) =>
+            String(url).includes('/workers/routes') && init?.method && init.method !== 'GET',
+        );
+    expect(routeWrites()).toHaveLength(1);
+    const before = vi.mocked(options.fetch!).mock.calls.length;
+    const redeployOptions = { ...vi.mocked(ops.deploy).mock.lastCall![0], secret: [] };
+    delete redeployOptions.transaction;
+    const redeployed = await deploy(redeployOptions);
+    expect(redeployed.output.error, JSON.stringify(redeployed.output)).toBeNull();
+    expect(redeployed.exitCode).toBe(0);
+    expect(routeWrites(before)).toEqual([]);
+    expect(routeWrites()).toHaveLength(1);
+    return;
+  }
   if (firstInstall) {
     expect(domain).toMatchObject({ zone_id: '1'.repeat(32), hostname: 'example.com' });
     expect(
@@ -2064,3 +2108,6 @@ it.each(['domain', 'publicUrl'] as const)(
     await expectPreflightRefusal('workers_dev_subdomain_missing', 2);
   },
 );
+
+it('sets up routes in an empty zone then deploys the same flags without route mutations', () =>
+  exerciseDeploymentCheckpoint('first_install_routes'));

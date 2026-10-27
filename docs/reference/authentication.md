@@ -167,17 +167,20 @@ export default defineConfig({
 
 <!-- source: packages/plugin-sso-oidc/src/index.ts:85 -->
 <!-- source: packages/plugin-sso-oidc/src/index.ts:88 -->
-<!-- source: packages/plugin-sso-oidc/src/definitions.ts:195 -->
+<!-- source: packages/plugin-sso-oidc/src/provider-checks.ts:195 -->
+<!-- source: packages/plugin-sso-oidc/src/provider-checks.ts:205 -->
 
 ### Providers at run time
 
-The root `broker.config.ts` enables `ssoOidc({ runtimeProviders: true })`. The plugin then reads `PB_IDP_PROVIDERS`, a JSON array of provider objects with the same fields as the `providers` list, at most 5120 bytes and 64 entries. Changing it needs a restart or a new deployment, not a new build. On Workers, set it as a variable or secret of the Worker.
+The root `broker.config.ts` enables `ssoOidc({ runtimeProviders: true })`. The plugin then reads `PB_IDP_PROVIDERS`, a JSON array of provider objects with the same fields as the `providers` list, at most 5120 bytes and 64 entries. Changing it needs a restart or a new deployment, not a new build. On Workers it is a plain-text variable of the Worker, set with `pb cloudflare deploy --providers <file>`; deploy refuses while a Worker secret named `PB_IDP_PROVIDERS` exists.
 
 For limits, deployment with `pb cloudflare deploy --providers`, removal and recovery, see [Runtime SSO providers](runtime-sso-providers.md).
 
 <!-- source: broker.config.ts:7 -->
 <!-- source: packages/plugin-sso-oidc/src/runtime.ts:5 -->
 <!-- source: packages/plugin-sso-oidc/src/index.ts:100 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1877 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1828 -->
 
 The two sources are merged:
 

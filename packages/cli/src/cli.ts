@@ -36,9 +36,9 @@ const USAGE =
   'Usage: pb build [--config <file>] [--target cloudflare|node] [--out <dir>]\n' +
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
-  '       pb cloudflare setup [--workers-paid] [--prebuilt] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
+  '       pb cloudflare setup [--workers-paid] [--prebuilt] [--providers <file|none>] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
   '       pb cloudflare provision [--prebuilt] --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
-  '       pb cloudflare deploy [--workers-paid] [--prebuilt] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
+  '       pb cloudflare deploy [--workers-paid] [--prebuilt] [--providers <file|none>] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
   '       pb cloudflare smoke --worker-name <slug> [--project <slug>] [--smoke-token-env <name>] [--deadline-seconds <1..300>] [--no-rollback] [--json] [--dry-run]\n' +
   '       pb cloudflare teardown --inventory <file> [--config <file>] [--project <dir>] [--inventory-id <owner_digest> --i-understand-this-deletes] [--json] [--dry-run]\n' +
   '       pb cloudflare janitor --repository-id <numeric-id> [--inventory <file>] [--config <file>] [--project <dir>] [--json] [--dry-run]\n' +

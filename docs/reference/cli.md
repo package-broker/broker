@@ -245,7 +245,7 @@ These commands install and operate a deployment on Cloudflare. They record the r
 ### `pb cloudflare setup`
 
 ```sh
-pnpm pb cloudflare setup [--prebuilt] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]
+pnpm pb cloudflare setup [--workers-paid] [--prebuilt] [--providers <file|none>] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]
 ```
 
 One guided run: build (or use the prebuilt bundle), provision, migrate, create the organization, deliver the master key, deploy, smoke-test and issue the administrator's setup token. The result names the setup page, `<origin>/_pb/ui/setup`. Without a terminal, `--token-file`, one of `--key-file` or `--master-key-env`, and `--yes` (to create resources) are required. Key and token files must lie outside the checkout and the build and state directories, must have mode 600 and must not be symlinks.
@@ -270,7 +270,7 @@ Creates, or adopts with `--adopt-resource`, the D1 database, R2 bucket, queues a
 ### `pb cloudflare deploy`
 
 ```sh
-pnpm pb cloudflare deploy [--prebuilt] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]
+pnpm pb cloudflare deploy [--workers-paid] [--prebuilt] [--providers <file|none>] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]
 ```
 
 Uploads the Worker with the bindings from the inventory and activates it. `--rollout` below 100 sends that share of traffic to the new version and needs an existing version. `--routes` takes newline-separated `<zone id>:<pattern>` entries and requires `--public-url`. `--secret` and `--secrets` name environment variables whose values are set as Worker secrets. An inventory is required; run `provision` first.
@@ -278,6 +278,31 @@ Uploads the Worker with the bindings from the inventory and activates it. `--rol
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1294 -->
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1342 -->
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1544 -->
+
+### `--providers` and `--workers-paid`
+
+`pb cloudflare setup` and `pb cloudflare deploy` take two more options:
+
+- `--providers <file>` reads a JSON file of single sign-on provider definitions (at most 65536 bytes), refuses it when any entry is invalid, and deploys it as the plain-text Worker variable `PB_IDP_PROVIDERS`. Every OIDC entry's client secret `PB_IDP_<ID>_CLIENT_SECRET` must already be a Worker secret or be delivered in the same run with `--secret` or `--secrets`. `--providers none` removes the variable; pass a file named `none` as `./none`. Without `--providers`, deploy keeps the value of the live deployment. The artifact must be built with `ssoOidc({ runtimeProviders: true })`, as the release configuration and the prebuilt distribution are.
+- `--workers-paid` raises the limit on the Worker's variables and secrets, counted together, from 64 to 128. Use it when the account is on Workers Paid. It is not saved; pass it on every run that needs the higher limit.
+
+Shape, precedence, partial rollouts, the dry-run `identity` section and trust anchor changes are described in [Runtime SSO providers](runtime-sso-providers.md#deploying-on-cloudflare).
+
+<!-- source: packages/cli/src/cli.ts:180 -->
+<!-- source: packages/cli/src/cli.ts:199 -->
+<!-- source: packages/cli/src/cli.ts:234 -->
+<!-- source: packages/cli/src/cli.ts:249 -->
+<!-- source: packages/cli/src/cli.ts:65 -->
+<!-- source: packages/cli/src/cli.ts:66 -->
+<!-- source: packages/cli/src/commands/cloudflare/providers-file.ts:18 -->
+<!-- source: packages/cli/src/commands/cloudflare/providers-file.ts:71 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1877 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1896 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:136 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:137 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:119 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1929 -->
+<!-- source: packages/cli/src/commands/cloudflare/setup.ts:812 -->
 
 ### `pb cloudflare smoke`
 

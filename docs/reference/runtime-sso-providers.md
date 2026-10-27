@@ -59,7 +59,7 @@ Limits:
 Every OIDC entry needs its client secret in `PB_IDP_<ID>_CLIENT_SECRET`, where `<ID>` is the provider `id` in uppercase with `-` replaced by `_`. Cloudflare Access entries need no secret. The client secret never goes into `PB_IDP_PROVIDERS`.
 
 <!-- source: packages/core/src/identity/secret-name.ts:3 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1738 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1896 -->
 
 ## Precedence
 
@@ -89,7 +89,7 @@ The value is read once per process or Worker version:
 - Node: a change takes effect at the next restart.
 
 <!-- source: packages/runtime-node/src/startup.ts:781 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1721 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1877 -->
 <!-- source: packages/core/src/identity/provider-anchors.ts:37 -->
 
 No rebuild is needed.
@@ -136,7 +136,7 @@ To restore a provider, put the same entry back with the same `id` and the same t
 
 `--providers none` on `pb cloudflare deploy` removes the variable, so only the compiled providers remain.
 
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:109 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:136 -->
 
 ## Changing the trust anchor
 
@@ -179,33 +179,35 @@ If the deploy in step 4 fails or is rolled back, the old definition stays live a
 
 <!-- source: packages/cli/src/commands/cloudflare/providers-file.ts:68 -->
 <!-- source: packages/cli/src/commands/cloudflare/providers-file.ts:71 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1721 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1877 -->
 <!-- source: packages/cli/src/cli.ts:65 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:122 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1712 -->
-<!-- source: packages/cli/src/commands/cloudflare/setup.ts:809 -->
-<!-- source: pending T918s.md -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:137 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:149 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1869 -->
+<!-- source: packages/cli/src/commands/cloudflare/setup.ts:811 -->
+<!-- source: packages/cli/src/commands/cloudflare/setup.ts:542 -->
+<!-- source: packages/cli/src/cli.ts:430 -->
 
 Deploy refuses `--providers <file>` when the artifact was built without `runtimeProviders: true`, or when it is an older artifact without provider metadata in its build manifest. It also refuses while a Worker secret named `PB_IDP_PROVIDERS` exists (remove it with `wrangler secret delete PB_IDP_PROVIDERS`), and `--secret` cannot deliver that name.
 
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:104 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:106 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1671 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:513 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:119 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:120 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1828 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:657 -->
 
 ### Client secrets
 
 Before it uploads anything, deploy checks that every OIDC entry's `PB_IDP_<ID>_CLIENT_SECRET` is already a Worker secret or is delivered in the same run with `--secret <ENV_NAME>` or `--secrets <ENV_NAMES>` from the environment of the `pb` process. A missing secret refuses the deploy and names it.
 
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1736 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1750 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1896 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1906 -->
 
 ### Variable limit and `--workers-paid`
 
 Deploy counts the Worker's plain-text variables and secrets together and refuses when the count exceeds 64, or 128 with `--workers-paid`. Use `--workers-paid` when the account is on Workers Paid. The flag is not saved: pass it on every `setup` and `deploy` run that needs the higher limit.
 
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1769 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1773 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1929 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1930 -->
 <!-- source: packages/cli/src/cli.ts:66 -->
 <!-- source: packages/cli/src/cli.ts:623 -->
 
@@ -213,21 +215,49 @@ Deploy counts the Worker's plain-text variables and secrets together and refuses
 
 A partial rollout (`--rollout` below 100) is refused when the SSO configuration, meaning the artifact's provider metadata together with the `PB_IDP_PROVIDERS` value, differs from the last verified deployment. Two versions with different provider sets would otherwise answer sign-ins at the same time. The first partial rollout after upgrading to a `pb` release with this check is refused as well, because the earlier deployment has no recorded SSO configuration: deploy once with `--rollout 100`, then use partial rollouts again.
 
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1716 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1858 -->
-<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1865 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2024 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2031 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2102 -->
 
 ### Dry run
 
-`pb cloudflare deploy --dry-run --json` adds an `identity` section: the effective providers with `id`, `type` and `source` (`compiled` or `runtime`), the overridden ids, the removed ids with the reason, the SHA-256 digest of the `PB_IDP_PROVIDERS` value (`null` when there is none), the digest of the SSO configuration, and the checks that could not run, such as `anchor_preflight` on a fresh install without a database schema. It shows no secret, issuer URL or trust anchor. For an older artifact without provider metadata, `identity` is `null`.
+`pb cloudflare deploy --dry-run --json` adds an `identity` section with these fields:
 
-<!-- source: pending T918l4.md -->
+- `providers`: the effective providers, each with `id`, `type` (`oidc` or `cloudflare-access`) and `source` (`compiled` or `runtime`).
+- `overrides`: the compiled ids replaced by a run-time entry with the same `id`.
+- `displaced`: the compiled or run-time ids left out, each with a `reason`: `displaced` (a run-time entry with the same trust anchor, named in `by`, removed it), `suppressed` (an invalid run-time entry carried its `id`) or `overflow` (over the 64-provider limit).
+- `runtime_providers_applied`: whether the artifact reads `PB_IDP_PROVIDERS` at all, and `runtime_document_problem`: why the value as a whole would be ignored, or `null`.
+- `providers_sha256`: the SHA-256 digest of the `PB_IDP_PROVIDERS` value, `null` when there is none, and `identity_sha256`: the digest of the SSO configuration.
+- `skipped_checks`: the checks that could not run, such as `anchor_preflight` before the migrations have created the database schema.
+
+It shows no secret, issuer URL or trust anchor. For an older artifact without provider metadata, `identity` is `null`.
+
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1874 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:243 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:249 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:255 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:259 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:263 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:264 -->
+<!-- source: packages/plugin-sso-oidc/src/planner.ts:30 -->
+<!-- source: packages/plugin-sso-oidc/src/planner.ts:40 -->
+<!-- source: packages/plugin-sso-oidc/src/planner.ts:53 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:265 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:267 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2003 -->
 
 ### Trust anchor check
 
-Before it uploads, deploy reads the recorded trust anchors from the database and compares them with the effective providers. When a provider that already has users would get a different anchor, deploy refuses with `provider_anchor_changed` and names the provider and `pb admin rebind-provider`. A fresh install, or a provider without a recorded anchor, passes. If the database cannot be read, deploy refuses. The check runs in a dry run too. It is a convenience: the Worker refuses mismatched sign-ins on its own.
+Before it uploads, deploy reads the recorded trust anchors from the database and compares them with the effective providers. When a provider that already has users would get a different anchor, deploy refuses with `provider_anchor_changed` (exit code 2) and names the provider and `pb admin rebind-provider`. A database without an organization yet, or a provider without a recorded anchor, passes. A dry run before the migrations have created the schema skips the check and lists `anchor_preflight` under `skipped_checks`. If the database cannot be read or holds a malformed anchor, deploy refuses with `provider_failure`. The check runs in a dry run too. It is a convenience: the Worker refuses mismatched sign-ins on its own.
 
-<!-- source: pending T918m.md -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:197 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:211 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:214 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:218 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:221 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:227 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:231 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:2000 -->
 <!-- source: packages/core/src/auth/routes-sso.ts:294 -->
 
 ## Node

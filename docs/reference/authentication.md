@@ -173,6 +173,8 @@ export default defineConfig({
 
 The root `broker.config.ts` enables `ssoOidc({ runtimeProviders: true })`. The plugin then reads `PB_IDP_PROVIDERS`, a JSON array of provider objects with the same fields as the `providers` list, at most 5120 bytes and 64 entries. Changing it needs a restart or a new deployment, not a new build. On Workers, set it as a variable or secret of the Worker.
 
+For limits, deployment with `pb cloudflare deploy --providers`, removal and recovery, see [Runtime SSO providers](runtime-sso-providers.md).
+
 <!-- source: broker.config.ts:7 -->
 <!-- source: packages/plugin-sso-oidc/src/runtime.ts:5 -->
 <!-- source: packages/plugin-sso-oidc/src/index.ts:100 -->

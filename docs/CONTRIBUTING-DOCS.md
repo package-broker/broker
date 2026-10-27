@@ -35,6 +35,7 @@ This folder is the source of the 2.0 documentation site at package.broker.
   - [Authentication and sessions](reference/authentication.md)
   - [Configuration](reference/configuration.md)
   - [pb CLI](reference/cli.md)
+  - [Runtime SSO providers](reference/runtime-sso-providers.md)
 - [Troubleshooting Composer and npm installs](troubleshooting/index.md)
   - [The 'https://repo.magento.com/packages.json' URL required authentication (HTTP 401).](troubleshooting/magento-http-401.md)
   - [Invalid credentials (HTTP 401) for 'https://repo.magento.com/packages.json', aborting.](troubleshooting/magento-invalid-credentials.md)

@@ -28,6 +28,14 @@ The single-tenant build is deployed once per customer on Cloudflare, so the appl
 - Negative: the column is decoration unless the discipline above holds (one to two days in the database port and migration runner, then minutes per table); one deployment per customer multiplies operations when one operator serves many customers ([ADR-003](platform-ports-and-adapters.md#adr-003-two-runtimes-cloudflare-workers-and-docker-on-node-behind-ports-and-adapters)).
 - Follow-ups: the two-organization fixture is part of the database port contract tests; isolation tests between projects replace cross-organization tests.
 
+### Amendment, 2026-10-27: single sign-on policy is set per deployment
+
+The domain policy of a single sign-on provider (`verifiedDomains`, `autoJoin`, `emailAuthoritativeDomains`) is part of that provider's definition, not an organization setting stored in the database. It is set per deployment, either in `broker.config.ts` or in the `PB_IDP_PROVIDERS` environment variable, and a change takes effect with a new deployment on Workers or a restart on Node. The database holds no copy of it and keeps no history of its changes. See [Runtime SSO providers](../reference/runtime-sso-providers.md).
+
+<!-- source: packages/core/src/auth/identity-login.ts:221 -->
+<!-- source: packages/plugin-sso-oidc/src/index.ts:117 -->
+<!-- source: packages/runtime-node/src/startup.ts:781 -->
+
 ## ADR-009: Identity and access through OIDC single sign-on, grants to SSO groups or emails, configurable roles
 
 Status: Accepted, 2026-10-15

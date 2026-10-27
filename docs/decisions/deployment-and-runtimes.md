@@ -25,6 +25,14 @@ The backup scope is what is needed to recreate the application, because package 
 - Negative: after a restore the first requests for blobs may be slow because they are fetched again; a version whose source is gone and whose blob is lost cannot be restored.
 - Follow-ups: restore runbook and the rehearsal checklist in the deployment documentation; master key custody ([ADR-012](secrets-and-tokens.md#adr-012-secrets-and-cryptography-with-a-deployment-master-key-hkdf-record-bound-aad-and-a-versioned-pepper)).
 
+### Amendment, 2026-10-27: the providers file is outside the database backup
+
+Single sign-on provider definitions set through `PB_IDP_PROVIDERS` live in the deployment's environment, not in the database, so the database backup does not contain them. The operator keeps the providers file under version control or in their own backup and restores it with the deployment. A restored database whose recorded provider trust anchors do not match the restored definitions refuses sign-ins through those providers until the definitions match or the provider is rebound. See [Runtime SSO providers](../reference/runtime-sso-providers.md).
+
+<!-- source: packages/plugin-sso-oidc/src/index.ts:117 -->
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:1721 -->
+<!-- source: packages/core/src/auth/routes-sso.ts:294 -->
+
 ## ADR-020: EU jurisdiction from the first deployment; residency controls in P1
 
 Status: Accepted, 2026-10-14

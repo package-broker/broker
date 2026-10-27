@@ -656,7 +656,7 @@ export async function smoke(o: SmokeOptions): Promise<CommandResult> {
         if (a) await candidateArtifact(api, base, a);
         await probes(ctx, canonical, 'canonical', project, canonical, token);
         if (a && a.requested_rollout < 100) {
-          if (!a.candidate_probe_url || !(o.contract ?? cloudflareDeployContract).preview)
+          if (!a.candidate_probe_url)
             throw new CloudflareError('capability_unknown', 2, false, 'smoke');
           const previewApi = new CloudflareApi({
             ...apiOptions,

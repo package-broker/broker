@@ -299,42 +299,59 @@ export const cloudflareDeployContract: DeployProviderContract = {
   domainZone: resolveZone,
   assetHash: cloudflareAssetHash,
   preview: async (api, script, version) => {
-    if (!uuid(version) || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(script) || script.length > 54)
-      return invalid();
-    const result = object(
-      (await api.request(`/workers/scripts/${script}/versions/${version}`)).result,
-    );
-    if (!uuid(result.id)) throw new CloudflareError('provider_failure', 1, false, 'deploy');
-    if (result.id !== version) return conflict('preview');
-    const resources = object(result.resources);
-    if (resources.bindings === undefined) return conflict('preview');
-    if (!Array.isArray(resources.bindings))
-      throw new CloudflareError('provider_failure', 1, false, 'deploy');
-    if (!resources.bindings.length) return conflict('preview');
-    const names = new Set<string>();
-    for (const raw of resources.bindings) {
-      const binding = object(raw);
-      if (typeof binding.type !== 'string' || typeof binding.name !== 'string' || !binding.name)
+    try {
+      if (!uuid(version) || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(script) || script.length > 54)
+        return invalid();
+      const result = object(
+        (await api.request(`/workers/scripts/${script}/versions/${version}`)).result,
+      );
+      if (!uuid(result.id)) throw new CloudflareError('provider_failure', 1, false, 'deploy');
+      if (result.id !== version) return conflict('preview');
+      const resources = object(result.resources);
+      if (resources.bindings === undefined) return conflict('preview');
+      if (!Array.isArray(resources.bindings))
         throw new CloudflareError('provider_failure', 1, false, 'deploy');
-      if (!Object.hasOwn(PREVIEW_BINDING_FIELDS, binding.type) || names.has(binding.name))
-        return conflict('preview');
-      names.add(binding.name);
-      const field = PREVIEW_BINDING_FIELDS[binding.type];
-      if (field && typeof binding[field] !== 'string')
-        throw new CloudflareError('provider_failure', 1, false, 'deploy');
-      if (field && field !== 'text' && !binding[field]) return conflict('preview');
-      if (
-        binding.type === 'secret_text' &&
-        (Object.hasOwn(binding, 'text') || Object.hasOwn(binding, 'value'))
-      )
-        return conflict('preview');
+      if (!resources.bindings.length) return conflict('preview');
+      const names = new Set<string>();
+      for (const raw of resources.bindings) {
+        const binding = object(raw);
+        if (typeof binding.type !== 'string' || typeof binding.name !== 'string' || !binding.name)
+          throw new CloudflareError('provider_failure', 1, false, 'deploy');
+        if (!Object.hasOwn(PREVIEW_BINDING_FIELDS, binding.type) || names.has(binding.name))
+          return conflict('preview');
+        names.add(binding.name);
+        const field = PREVIEW_BINDING_FIELDS[binding.type];
+        if (field && typeof binding[field] !== 'string')
+          throw new CloudflareError('provider_failure', 1, false, 'deploy');
+        if (field && field !== 'text' && !binding[field]) return conflict('preview');
+        if (
+          binding.type === 'secret_text' &&
+          (Object.hasOwn(binding, 'text') || Object.hasOwn(binding, 'value'))
+        )
+          return conflict('preview');
+      }
+      const workerOrigin = await workersDevOrigin(api, script);
+      return {
+        version_id: result.id,
+        url: `https://${version.slice(0, 8).toLowerCase()}-${new URL(workerOrigin).hostname}`,
+        bindings_verified: true,
+      };
+    } catch (error) {
+      if (!(error instanceof CloudflareError) || error.stage === 'deploy') throw error;
+      const staged = new CloudflareError(
+        error.code,
+        error.exitCode,
+        error.retryable,
+        'deploy',
+        error.status,
+        error.check,
+        error.providerCode,
+        error.source,
+        error.fields,
+      );
+      staged.message = error.message;
+      throw staged;
     }
-    const workerOrigin = await workersDevOrigin(api, script);
-    return {
-      version_id: result.id,
-      url: `https://${version.slice(0, 8).toLowerCase()}-${new URL(workerOrigin).hostname}`,
-      bindings_verified: true,
-    };
   },
   createScript: async (api, script, form) => {
     const result = object((await api.request(`/workers/scripts/${script}`, 'PUT', form)).result);
@@ -935,7 +952,7 @@ export async function withCandidatePreview<T>(
   probe: (url: string) => Promise<T>,
 ): Promise<T> {
   const a = j.deployment?.attempt;
-  if (!a?.version_id || a.requested_rollout === 100 || !contract.preview) return invalid();
+  if (!a?.version_id || a.requested_rollout === 100) return invalid();
   await reconcileCandidatePreview(api, store, j);
   const base = `/workers/scripts/${j.identity.script_name}`;
   await ownedWorkerSettings(api, base, j);
@@ -1541,11 +1558,12 @@ export async function deploy(
       if (annotations['pb-maintenance-shell'] === 'true')
         throw new CloudflareError('capability_unknown', 1, false, 'deploy');
     }
-    if (!url) url = await workersDevOrigin(api, identity.script_name);
+    const workerOrigin =
+      !url || rollout < 100 ? await workersDevOrigin(api, identity.script_name) : null;
+    if (!url) url = workerOrigin!;
     if (!exists && !contract.versionsCreateScript && !contract.createScript)
       throw new CloudflareError('capability_unknown');
     if (!contract.assetHash) throw new CloudflareError('capability_unknown');
-    if (rollout < 100 && !contract.preview) throw new CloudflareError('capability_unknown');
     const custom = !!(o.domain || requestedRoutes.length || o.publicUrl);
     const policy = { enabled: !custom, previews_enabled: false };
     const journalled = journal.deployment;
@@ -1620,9 +1638,9 @@ export async function deploy(
     if (headersEnv && !allNames.includes(headersEnv)) return invalid();
     let domain = live.domain;
     if (o.domain && !domain) {
-      if (!contract.domainZone) throw new CloudflareError('capability_unknown');
       const zone = await contract.domainZone(api, o.domain);
-      if (!/^[a-f0-9]{32}$/.test(zone)) throw new CloudflareError('capability_unknown');
+      if (!/^[a-f0-9]{32}$/.test(zone))
+        throw new CloudflareError('provider_failure', 1, false, 'deploy');
       domain = {
         id: null,
         zone_id: zone,
@@ -1913,14 +1931,8 @@ export async function deploy(
         return conflict('preview');
       const probeUrl = origin(preview.url);
       const host = new URL(probeUrl).hostname;
-      const subdomain = host.split('.')[1];
       const prefix = a.version_id.slice(0, 8).toLowerCase();
-      if (
-        !subdomain ||
-        probeUrl === url ||
-        host !== `${prefix}-${identity.script_name}.${subdomain}.workers.dev`
-      )
-        return conflict('preview');
+      if (host !== `${prefix}-${new URL(workerOrigin!).hostname}`) return conflict('preview');
       a.candidate_probe_url = probeUrl;
       await save(store, journal, now);
     }

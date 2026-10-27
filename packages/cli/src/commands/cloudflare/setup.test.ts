@@ -919,7 +919,7 @@ it('an identical completed rerun retains selected non-master secrets without res
   expect(deployed).not.toHaveProperty('secrets');
 });
 
-it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
+it.each(['completed', 'completed_deleted_files', 'upload_pending', 'first_install_domain'])(
   'reuses the real deployment version on an identical %s rerun with selected secrets',
   async (checkpoint) => {
     const database = openNodeSqliteExecutor();
@@ -996,6 +996,10 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
     const base = `/workers/scripts/${identity.script_name}`;
     const versionId = '22222222-2222-4222-8222-222222222222';
     const tags = ['pb-install-v1', `pb-owner-${identity.owner_digest}`];
+    const firstInstall = checkpoint === 'first_install_domain';
+    if (firstInstall) options.domain = 'example.com';
+    let created = !firstInstall;
+    let domain: Record<string, unknown> | null = null;
     let uploads = 0;
     let active = false;
     let loseUpload = checkpoint === 'upload_pending';
@@ -1031,7 +1035,23 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
           })),
         );
       }
-      if (path === '/workers/scripts') return ok([{ id: identity.script_name, tags }]);
+      if (path === '/client/v4/zones')
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: [
+              {
+                id: '1'.repeat(32),
+                name: 'example.com',
+                status: 'active',
+                account: { id: ACCOUNT },
+              },
+            ],
+            result_info: { page: 1, per_page: 50, count: 1, total_count: 1, total_pages: 1 },
+          }),
+        );
+      if (path === '/workers/scripts')
+        return ok(created ? [{ id: identity.script_name, tags }] : []);
       if (path === `/d1/database/${DB}`)
         return ok({ uuid: DB, name: 'broker-production-db', jurisdiction: 'eu' });
       if (path === `${base}/settings`)
@@ -1047,21 +1067,28 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
           })),
         );
       if (path === '/workers/subdomain') return ok({ subdomain: 'account' });
-      if (path === '/workers/domains') return ok([]);
-      if (path === `${base}/subdomain`) return ok({ enabled: true, previews_enabled: false });
+      if (path === '/workers/domains') {
+        if (method === 'PUT') domain = { ...JSON.parse(String(init?.body)), id: 'managed-domain' };
+        return ok(domain ? [domain] : []);
+      }
+      if (path === `${base}/subdomain`)
+        return ok({ enabled: !firstInstall, previews_enabled: false });
       if (path === `${base}/schedules`) {
         if (method !== 'GET') schedules = JSON.parse(String(init?.body));
         return ok({ schedules });
       }
       if (path === `${base}/assets-upload-session`) return ok({ jwt: 'ASSETS', buckets: [] });
-      if (path === `${base}/versions` && method === 'POST') {
+      if (
+        (path === `${base}/versions` && method === 'POST') ||
+        (path === base && method === 'PUT')
+      ) {
         uploads++;
         const metadata = JSON.parse(String((init!.body as FormData).get('metadata')));
         candidateBindings = [
           ...metadata.bindings.map((b: Record<string, unknown>) =>
             b.type === 'secret_text' ? { type: b.type, name: b.name } : b,
           ),
-          { type: 'secret_text', name: 'PB_MASTER_KEY' },
+          ...(!firstInstall ? [{ type: 'secret_text', name: 'PB_MASTER_KEY' }] : []),
         ];
         candidate = {
           id: versionId,
@@ -1079,6 +1106,10 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
           loseUpload = false;
           throw new Error('upload acknowledgement lost');
         }
+        if (path === base) {
+          created = true;
+          return ok({ id: identity.script_name });
+        }
         return ok({ id: versionId });
       }
       if (path === `${base}/versions`) return ok({ items: candidate ? [candidate] : [] });
@@ -1089,22 +1120,28 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
           id: 'active-deployment',
           versions: [{ version_id: versionId, percentage: 100 }],
         };
-        return ok(method === 'GET' ? { deployments: active ? [deployment] : [] } : deployment);
+        return ok(
+          method === 'GET'
+            ? { deployments: active || (firstInstall && created) ? [deployment] : [] }
+            : deployment,
+        );
       }
       throw new Error(`Unexpected request ${method} ${path}`);
     });
-    installed = exists = true;
+    installed = exists = !firstInstall;
     delete options.keyFile;
     options.masterKeyEnv = 'CUSTOM_SOURCE';
     options.secret = ['IDP_SECRET'];
     options.env = { ...options.env, IDP_SECRET: 'IDP_SENTINEL' };
     ops.validateArtifact = validateDeploymentArtifact;
-    ops.deploy = vi.fn((o) =>
-      deploy({
+    ops.deploy = vi.fn((o) => {
+      const deploymentOptions: Parameters<typeof deploy>[0] = {
         ...o,
-        contract: { versionsCreateScript: true, secretInheritance: true, assetHash: sha },
-      }),
-    );
+        contract: { ...cloudflareDeployContract, versionsCreateScript: true, assetHash: sha },
+      };
+      if (firstInstall) delete deploymentOptions.contract;
+      return deploy(deploymentOptions);
+    });
     ops.smoke = vi.fn(async () => {
       await update((j) => {
         j.deployment!.attempt.phase = 'verified';
@@ -1124,6 +1161,17 @@ it.each(['completed', 'completed_deleted_files', 'upload_pending'])(
       value: { applied: ['core:0001_init'] },
     });
     expect(uploads).toBe(1);
+    if (firstInstall) {
+      expect(domain).toMatchObject({ zone_id: '1'.repeat(32), hostname: 'example.com' });
+      expect(
+        vi
+          .mocked(options.fetch!)
+          .mock.calls.some(
+            ([url, init]) => String(url).endsWith('/workers/domains') && init?.method === 'PUT',
+          ),
+      ).toBe(true);
+      return;
+    }
     if (checkpoint === 'completed_deleted_files') {
       delete options.masterKeyEnv;
       options.keyFile = join(outside, 'deleted', 'master.key');
@@ -1984,3 +2032,37 @@ it('setup preserves undefined merge values for keys other than prebuilt', async 
   expect(completed.output).toHaveProperty('artifact_sha256', undefined);
   expect(completed.output).not.toHaveProperty('prebuilt');
 });
+
+it.each(['domain', 'publicUrl'] as const)(
+  'refuses gradual rollout before writes without registration with %s',
+  async (option) => {
+    exists = true;
+    options.rollout = 25;
+    options.reveal = vi.fn();
+    options[option] = option === 'domain' ? 'broker.example.test' : 'https://broker.example.test';
+    const send = options.fetch!;
+    options.fetch = vi.fn(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/deployments'))
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: {
+              deployments: [
+                {
+                  id: 'active',
+                  versions: [
+                    { version_id: '22222222-2222-4222-8222-222222222222', percentage: 100 },
+                  ],
+                },
+              ],
+            },
+          }),
+        );
+      if (path.endsWith('/workers/subdomain'))
+        return new Response(JSON.stringify({ success: true, result: {} }));
+      return send(input, init);
+    });
+    await expectPreflightRefusal('workers_dev_subdomain_missing', 2);
+  },
+);

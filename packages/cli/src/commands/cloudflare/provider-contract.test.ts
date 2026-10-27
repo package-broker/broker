@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
+import ts from 'typescript';
 import { CloudflareApi } from './api.js';
 import { cloudflareDeployContract, unverifiedDeployContract } from './deploy.js';
 import { installIdentity, type Operation, type ResourceKind } from './inventory.js';
@@ -34,6 +35,24 @@ function harness(responses: { body: unknown; status?: number }[]) {
   });
   return { api, fetch };
 }
+it('implements every deploy contract member unless explicitly allowed', async () => {
+  const source = ts.createSourceFile(
+    'deploy.ts',
+    await readFile(new URL('./deploy.ts', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const declaration = source.statements.find(
+    (node): node is ts.InterfaceDeclaration =>
+      ts.isInterfaceDeclaration(node) && node.name.text === 'DeployProviderContract',
+  )!;
+  const allowedMissing: readonly string[] = [];
+  const missing = declaration.members
+    .map((member) => member.name!.getText(source))
+    .filter((name) => !Object.hasOwn(cloudflareDeployContract, name));
+  expect(missing).toEqual(allowedMissing);
+});
+
 const previewVersion = '12345678-1234-4234-8234-123456789abc';
 const previewResult = fixtures.versionPreview!.result as Record<string, unknown>;
 it('reads the exact version and constructs its documented version URL without mutations', async () => {
@@ -132,7 +151,7 @@ it.each([
   const h = harness([{ body: { success: true, result } }]);
   await expect(
     cloudflareDeployContract.preview(h.api, 'broker', previewVersion),
-  ).rejects.toMatchObject({ code: 'provider_failure' });
+  ).rejects.toMatchObject({ code: 'provider_failure', stage: 'deploy' });
   expect(h.fetch).toHaveBeenCalledTimes(1);
 });
 it.each([

@@ -45,7 +45,8 @@ export type ErrorCode =
   | 'organization_slug_mismatch'
   | 'organization_not_found'
   | 'key_recovery_required'
-  | 'token_refresh_required';
+  | 'token_refresh_required'
+  | 'provider_anchor_changed';
 
 const GUIDANCE =
   'Workers Paid with Queues is the supported target. Enable the required service, verify token permissions, then rerun pb cloudflare setup. Resources were not created. For a different deployment target, use the documented single-replica Node installation.';
@@ -115,6 +116,8 @@ const MESSAGES: Record<ErrorCode, string> = {
     'Key delivery or installation is uncertain. Supply the saved --key-file or --master-key-env; setup will not generate another key.',
   token_refresh_required:
     'Token issuance is uncertain. Use the saved token or explicitly request --refresh-setup-token with safe delivery.',
+  provider_anchor_changed:
+    'A provider definition changes a bound trust anchor; run pb admin rebind-provider first.',
 };
 
 export class CloudflareError extends Error {

@@ -250,6 +250,13 @@ function harness() {
           : init?.body
             ? JSON.parse(String(init.body))
             : undefined;
+    if (
+      path === `/d1/database/${DB}/query` &&
+      body.batch === undefined &&
+      typeof body.sql === 'string' &&
+      /^\s*select\b[^;]*;?\s*$/i.test(body.sql)
+    )
+      return ok([{ success: true, results: [], meta: { changes: 0 } }]);
     h.calls.push({ path, method, body, auth: new Headers(init?.headers).get('authorization') });
     if (method === 'DELETE') throw new Error('forbidden deletion');
     if (path === '/workers/scripts')
@@ -5553,4 +5560,190 @@ it('a deploy that is not a dry run has no identity key', async () => {
   );
   expect(result.exitCode).toBe(0);
   expect(Object.hasOwn(result.output, 'identity')).toBe(false);
+});
+
+const ORG = 'org-anchor-preflight';
+type D1Fake = {
+  organization?: unknown[];
+  bindings?: Record<string, unknown[]>;
+  fail?: 'transport' | 'sql' | 'no_table';
+};
+function withD1(h: ReturnType<typeof harness>, fake: D1Fake) {
+  const queried: { sql: string; params: unknown[] }[] = [];
+  const upstream = h.fetch;
+  h.fetch = (async (input: unknown, init?: RequestInit) => {
+    if (!String(input).endsWith(`/accounts/${ACCOUNT}/d1/database/${DB}/query`))
+      return upstream(input as string, init);
+    const { sql, params } = JSON.parse(String(init?.body));
+    queried.push({ sql, params });
+    if (fake.fail === 'transport') throw new Error('connection reset');
+    if (fake.fail === 'sql' || fake.fail === 'no_table')
+      return new Response(
+        JSON.stringify({
+          success: false,
+          errors: [
+            {
+              code: 7500,
+              message:
+                fake.fail === 'sql' ? 'no such table' : 'no such table: organization: SQLITE_ERROR',
+            },
+          ],
+        }),
+        { status: 400 },
+      );
+    const results = sql.includes('"identity_provider_binding"')
+      ? (fake.bindings?.[params.at(-1)] ?? [])
+      : (fake.organization ?? [{ id: ORG, slug: 'acme', name: 'Acme' }]);
+    return new Response(
+      JSON.stringify({ success: true, result: [{ success: true, results, meta: { changes: 0 } }] }),
+    );
+  }) as typeof fetch;
+  return queried;
+}
+const bound = (anchor: unknown) => [{ anchor, created_at: '2026-10-01T00:00:00.000Z' }];
+const queriedProviders = (queried: { sql: string; params: unknown[] }[]) =>
+  queried.filter((q) => q.sql.includes('"identity_provider_binding"')).map((q) => q.params.at(-1));
+
+it('anchor preflight lets a deploy through when the stored anchor is equal', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+  const h = harness();
+  const queried = withD1(h, {
+    bindings: { corp: bound(compiledIdentity.anchor), access: bound(accessIdentity.anchor) },
+  });
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(0);
+  expect(queriedProviders(queried)).toEqual(['corp', 'access']);
+  expect(queried.every((q) => q.params.includes(ORG) || !q.sql.includes('binding'))).toBe(true);
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+it.each([true, false])(
+  'anchor preflight refuses a changed anchor for a bound id (dry run %s)',
+  async (dryRun) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+    const h = harness();
+    withD1(h, { bindings: { corp: bound('oidc:https://stored.example.org') } });
+    const result = await deploy(options(h, { dryRun }));
+    expect(result.exitCode).toBe(2);
+    expect(result.output.error).toMatchObject({
+      code: 'provider_anchor_changed',
+      stage: 'deploy',
+      message: expect.stringContaining('corp'),
+    });
+    expect(result.output.error!.message).toContain('pb admin rebind-provider');
+    const serialized = JSON.stringify(result.output);
+    for (const value of ['stored.example.org', 'idp.example.com', accessIdentity.anchor])
+      expect(serialized).not.toContain(value);
+    expect(providerUploads(h)).toHaveLength(0);
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each<[string, D1Fake]>([
+  ['no organization', { organization: [] }],
+  ['no binding for the id', { bindings: {} }],
+])('anchor preflight passes a fresh install: %s', async (_name, fake) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  const queried = withD1(h, fake);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(queried.length).toBeGreaterThan(0);
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+async function emptyLedger() {
+  const j = (await store.read())!;
+  j.migrations.ledger = [];
+  await store.write(j);
+}
+it('dry-run lists anchor_preflight as skipped when D1 has no organization table', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  await emptyLedger();
+  const h = harness();
+  const queried = withD1(h, { fail: 'no_table' });
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toMatchObject({ skipped_checks: ['anchor_preflight'] });
+  expect(queried).toHaveLength(1);
+  expect(mutations(h)).toEqual([]);
+});
+
+it.each<[string, D1Fake]>([
+  ['a changed anchor', { bindings: { corp: bound('oidc:https://stored.example.org') } }],
+  ['a transport failure', { fail: 'transport' }],
+  ['another SQL error', { fail: 'sql' }],
+])('dry-run with an empty ledger still reads D1 and refuses %s', async (name, fake) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  await emptyLedger();
+  const h = harness();
+  withD1(h, fake);
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.output.error?.code).toBe(
+    name === 'a changed anchor' ? 'provider_anchor_changed' : 'provider_failure',
+  );
+  expect(mutations(h)).toEqual([]);
+});
+
+it('a non-dry-run deploy does not skip on a missing organization table', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  withD1(h, { fail: 'no_table' });
+  const result = await deploy(options(h));
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(providerUploads(h)).toHaveLength(0);
+});
+
+it('anchor preflight refuses an unchanged redeploy after the stored anchor changed', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  const fake: D1Fake = { bindings: { corp: bound(compiledIdentity.anchor) } };
+  withD1(h, fake);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const verified = (await store.read())!;
+  verified.deployment!.attempt.phase = 'verified';
+  verified.deployment!.attempt.smoke = 'passed';
+  await store.write(verified);
+  const unchanged = await deploy(options(h));
+  expect(unchanged.output.plan).toEqual([{ stage: 'deploy', action: 'unchanged' }]);
+  fake.bindings = { corp: bound('oidc:https://stored.example.org') };
+  const before = await readFile(store.path, 'utf8');
+  const result = await deploy(options(h));
+  expect(result.output.error?.code).toBe('provider_anchor_changed');
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(await readFile(store.path, 'utf8')).toBe(before);
+});
+
+it.each<[string, D1Fake]>([
+  ['transport failure', { fail: 'transport' }],
+  ['sql error', { fail: 'sql' }],
+  ['non-string anchor', { bindings: { corp: bound(7) } }],
+  ['invalid anchor', { bindings: { corp: bound('not an anchor') } }],
+  ['null row', { bindings: { corp: [null] } }],
+  ['malformed organization row', { organization: [{ slug: 'acme' }] }],
+])('anchor preflight fails closed on %s', async (_name, fake) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = harness();
+  withD1(h, fake);
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(1);
+  expect(result.output.error).toMatchObject({ code: 'provider_failure', stage: 'deploy' });
+  expect(providerUploads(h)).toHaveLength(0);
+  expect(mutations(h)).toEqual([]);
+});
+
+it('anchor preflight does not check a provider removed from the effective set', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const value = JSON.stringify([
+    { ...JSON.parse(providersValue)[0], issuer: 'https://idp.example.com' },
+  ]);
+  const h = providerHarness();
+  const queried = withD1(h, {
+    bindings: {
+      corp: bound('oidc:https://stored.example.org'),
+      test: bound('oidc:https://idp.example.com'),
+    },
+  });
+  const result = await deploy(options(h, { providers: { kind: 'set', value, ids: ['test'] } }));
+  expect(result.exitCode).toBe(0);
+  expect(queriedProviders(queried)).toEqual(['test']);
 });

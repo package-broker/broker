@@ -20,6 +20,12 @@ import {
   type RuntimeProviders,
 } from '@package-broker/plugin-sso-oidc/definitions';
 import { snapshotIdentityDescriptor } from '@package-broker/core/kernel/registry';
+import { orgContext } from '@package-broker/core/db/port';
+import { isValidTrustAnchor } from '@package-broker/core/identity/port';
+import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { readProviderBinding } from '@package-broker/db-sqlite/repositories/provider-binding';
+import { DbError } from '@package-broker/core/db/errors';
+import { createD1HttpExecutor, isLostResponse } from '../../cloudflare/d1-http-executor.js';
 import {
   assertPrebuiltConfiguration,
   materializePrebuilt,
@@ -160,13 +166,7 @@ function identityDigest(descriptor: IdentityDescriptor | null, providers: string
     ? null
     : digest(canonical({ descriptor, providers }));
 }
-export function dryRunIdentity(
-  descriptor: IdentityDescriptor | null,
-  providersText: string | null,
-  identityHash: string | null,
-  skippedChecks: string[] = [],
-) {
-  if (descriptor === null) return null;
+function providerPlan(descriptor: IdentityDescriptor, providersText: string | null) {
   let runtime: RuntimeProviders = parseRuntimeProviders(undefined);
   if (descriptor.runtimeProviders)
     try {
@@ -177,6 +177,77 @@ export function dryRunIdentity(
   const plan = (
     planProviders as (c: readonly PlannedCompiled[], r: RuntimeProviders) => ProviderPlan
   )(descriptor.compiled.map(planned), runtime);
+  return { runtime, plan };
+}
+type EffectiveAnchor = { readonly id: string; readonly anchor: string };
+function effectiveAnchors(
+  descriptor: IdentityDescriptor | null,
+  providersText: string | null,
+): EffectiveAnchor[] {
+  if (descriptor === null) return [];
+  return providerPlan(descriptor, providersText).plan.effective.map((entry) => ({
+    id: entry.id,
+    anchor:
+      entry.kind === 'oidc'
+        ? `oidc:${entry.issuer}`
+        : `access:${entry.teamDomain}/${entry.audience}`,
+  }));
+}
+const MISSING_SCHEMA = /\bno such table: (?:main\.)?organization\b/;
+async function anchorPreflight(
+  connection: { accountId: string; apiToken: string; fetch?: typeof fetch },
+  databaseId: string | null | undefined,
+  anchors: readonly EffectiveAnchor[],
+  missingSchemaSkips: boolean,
+): Promise<'checked' | 'skipped'> {
+  let changed: string | undefined;
+  try {
+    if (typeof databaseId !== 'string' || databaseId === '') throw new TypeError('no database');
+    const executor = createD1HttpExecutor({ ...connection, databaseId });
+    let organization;
+    try {
+      organization = await createOrganizationBootstrap(executor).findSingleton();
+    } catch (error) {
+      if (missingSchemaSkips && missingSchema(error)) return 'skipped';
+      throw error;
+    }
+    if (organization === null) return 'checked';
+    const ctx = orgContext(organization.id);
+    for (const { id, anchor } of anchors) {
+      const binding = await readProviderBinding(executor, ctx, id);
+      if (binding === null) continue;
+      if (typeof binding.anchor !== 'string' || !isValidTrustAnchor(binding.anchor))
+        throw new TypeError('malformed provider binding');
+      if (binding.anchor !== anchor) {
+        changed = id;
+        break;
+      }
+    }
+  } catch {
+    throw new CloudflareError('provider_failure', 1, false, 'deploy');
+  }
+  if (changed === undefined) return 'checked';
+  const message = `Provider ${changed} is bound to a different trust anchor; run pb admin rebind-provider before deploying this definition`;
+  const error = new CloudflareError('provider_anchor_changed', 2, false, 'deploy');
+  inputMessages.set(error, message);
+  throw Object.assign(error, { message });
+}
+function missingSchema(error: unknown): boolean {
+  return (
+    error instanceof DbError &&
+    error.kind === 'unknown' &&
+    !isLostResponse(error) &&
+    MISSING_SCHEMA.test(error.message)
+  );
+}
+export function dryRunIdentity(
+  descriptor: IdentityDescriptor | null,
+  providersText: string | null,
+  identityHash: string | null,
+  skippedChecks: string[] = [],
+) {
+  if (descriptor === null) return null;
+  const { runtime, plan } = providerPlan(descriptor, providersText);
   return {
     providers: plan.effective.map((entry) => ({
       id: entry.id,
@@ -1799,6 +1870,7 @@ export async function deploy(
       providersText = values[0] ?? null;
     }
     const identityHash = identityDigest(artifact.identity, providersText);
+    const anchors = effectiveAnchors(artifact.identity, providersText);
     if (o.dryRun) output.identity = dryRunIdentity(artifact.identity, providersText, identityHash);
     const plainBindings = bindings(journal, artifact.ports, url);
     if (providersText !== null)
@@ -1919,6 +1991,16 @@ export async function deploy(
       livePlain !== undefined &&
       plainBindings.every((b) => livePlain.some((x) => equal(x, b))) &&
       livePlain.length === plainBindings.length;
+    if (
+      anchors.length &&
+      (await anchorPreflight(
+        { ...auth, ...(o.fetch ? { fetch: o.fetch } : {}) },
+        journal.resources.d1?.id,
+        anchors,
+        o.dryRun === true,
+      )) === 'skipped'
+    )
+      output.identity?.skipped_checks.push('anchor_preflight');
     if (
       verified &&
       plainMatch &&

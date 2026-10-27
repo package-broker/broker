@@ -145,7 +145,7 @@ Prints a new master key in the form `pbmk_v<version>_<key>` to stdout. `--key-ve
 pnpm pb admin bootstrap --email <e-mail> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]
 ```
 
-Adds the e-mail as a user with a local login and the `organization_admin` role, and issues a one-time setup token valid for 24 hours. If a user with that e-mail already exists but has not finished local setup, it gives them the role and a fresh token (result `refreshed`). It does not check for other administrators. Use the token in the web interface at `/_pb/ui/setup`, or with `POST /_pb/auth/local/setup/start` and `.../setup/finish`, described in [Authentication and sessions](authentication.md#local-accounts).
+Adds the e-mail as a user with a local login and the `organization_admin` role, and issues a one-time setup token valid for 24 hours. If a user with that e-mail already exists but has not finished local setup, it gives them the role and a fresh token (result `refreshed`) and sets their status to active, which also reactivates a suspended user. It does not check for other administrators. Use the token in the web interface at `/_pb/ui/setup`, or with `POST /_pb/auth/local/setup/start` and `.../setup/finish`, described in [Authentication and sessions](authentication.md#local-accounts).
 
 <!-- source: packages/cli/src/commands/admin.ts:51 -->
 <!-- source: packages/cli/src/commands/admin.ts:345 -->
@@ -299,9 +299,10 @@ pnpm pb cloudflare janitor --repository-id <numeric-id> [--inventory <file>] [--
 
 `teardown` deletes every resource recorded in an inventory. For a production inventory, pass the inventory's `identity.owner_digest` as `--inventory-id` together with `--i-understand-this-deletes`. Adopted D1 and R2 resources always require `--i-understand-this-deletes`. Deleting a Worker removes its versions.
 
-`janitor` removes test installs created by CI runs (`run_identity` `pb-e2e-<repository-id>-<epoch-seconds>`) whose run and inventory update are older than 6 hours. It keeps adopted D1 and R2 resources.
+`janitor` removes test installs created by CI runs (`run_identity` `pb-e2e-<repository-id>-<epoch-seconds>`) whose run and inventory update are older than 6 hours. It never passes `--i-understand-this-deletes`, so an expired inventory that holds an adopted D1 database or R2 bucket is not cleaned up at all: nothing in it is deleted and the command exits with status 2. Remove such an install with `teardown`.
 
 <!-- source: packages/cli/src/commands/cloudflare/teardown.ts:970 -->
+<!-- source: packages/cli/src/commands/cloudflare/janitor.ts:64 -->
 <!-- source: packages/cli/src/commands/cloudflare/janitor.ts:31 -->
 <!-- source: packages/cli/src/cli.ts:65 -->
 

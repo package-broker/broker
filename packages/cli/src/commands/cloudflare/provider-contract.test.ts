@@ -49,7 +49,11 @@ it('implements every deploy contract member unless explicitly allowed', async ()
   const allowedMissing: readonly string[] = [];
   const missing = declaration.members
     .map((member) => member.name!.getText(source))
-    .filter((name) => !Object.hasOwn(cloudflareDeployContract, name));
+    .filter(
+      (name) =>
+        !Object.hasOwn(cloudflareDeployContract, name) ||
+        cloudflareDeployContract[name as keyof typeof cloudflareDeployContract] === undefined,
+    );
   expect(missing).toEqual(allowedMissing);
 });
 

@@ -207,7 +207,6 @@ for (const width of [1440, 390]) {
     await expect(edit).toBeVisible();
     await scan(page, 'Edit source');
     await edit.getByText('Advanced settings', { exact: true }).click();
-    await edit.getByLabel('Replace type-specific configuration', { exact: true }).check();
     await scan(page, 'Edit source advanced settings');
     await edit.getByRole('button', { name: 'Close', exact: true }).click();
     await openDetails(page, 'More');

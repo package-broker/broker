@@ -924,7 +924,7 @@ test.describe('Node management UI', () => {
       .getByRole('button', { name: 'Close', exact: true })
       .click();
     const row = page.getByRole('row').filter({ hasText: 'Readable npm source' });
-    await row.getByRole('button', { name: 'Edit', exact: true }).click();
+    await row.getByRole('button', { name: 'Edit Readable npm source', exact: true }).click();
     const edit = activeDialog(page, 'Edit source');
     await expect(edit.getByLabel('Registry URL (required)', { exact: true })).toHaveValue(
       'https://npm.example.test/',
@@ -948,7 +948,7 @@ test.describe('Node management UI', () => {
     await expect(edit).toHaveCount(0);
     page.off('request', recordUnchanged);
     expect(unchangedRequests).toEqual([]);
-    await row.getByRole('button', { name: 'Edit', exact: true }).click();
+    await row.getByRole('button', { name: 'Edit Readable npm source', exact: true }).click();
     await edit.getByText('Advanced settings', { exact: true }).click();
     await edit.getByLabel('User-Agent override', { exact: true }).fill('Broker/3.0');
     const changed = page.waitForResponse(
@@ -960,7 +960,7 @@ test.describe('Node management UI', () => {
     expect(changedResponse.request().postDataJSON()).toEqual({ userAgent: 'Broker/3.0' });
     await expect(edit).toHaveCount(0);
     await row.getByText('More', { exact: true }).click();
-    await row.getByRole('button', { name: 'Registered names', exact: true }).click();
+    await page.getByRole('menuitem', { name: /^Registered names / }).click();
     const names = activeDialog(page, 'Registered names');
     await expect(names.getByLabel('Registered pattern', { exact: true })).toHaveValue('@one/*');
     const registered = page.waitForResponse(

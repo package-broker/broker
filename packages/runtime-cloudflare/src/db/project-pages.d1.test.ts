@@ -9,12 +9,13 @@ import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-org
 import { countCalls } from '@package-broker/db-sqlite/contract/count-calls';
 import { createProjectRepository } from '@package-broker/db-sqlite/repositories/project';
 import { createReadableProjectRepository } from '@package-broker/db-sqlite/repositories/project-readable';
-import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
+import { createD1Executor } from './d1-executor.js';
+import { bridgedD1Database, D1_BRIDGE_SCRIPT } from './d1-bridge.test.support.js';
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
-    script: 'export default { fetch() { return new Response("ok") } }',
+    script: D1_BRIDGE_SCRIPT,
     compatibilityDate: '2026-10-01',
     d1Databases: ['PAGES'],
   } as Parameters<typeof convertV4MiniflareOptions>[0]),
@@ -44,7 +45,11 @@ function lister(target = executor) {
   });
 }
 beforeAll(async () => {
-  executor = createD1Executor((await mf.getD1Database('PAGES')) as unknown as D1DatabaseLike);
+  executor = createD1Executor(
+    bridgedD1Database('PAGES', (body) =>
+      mf.dispatchFetch('http://pages.test/', { method: 'POST', body }),
+    ),
+  );
   await migrate(executor, await discoveredMigrations(), { holder: 'project-pages' });
   ctx = (await seedTwoOrganizations(executor)).a;
   const seed = (sql: string, ...params: Statement['params']) => executor.all({ sql, params });

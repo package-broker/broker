@@ -12,7 +12,7 @@ The release process has to settle how releases are built, whether plugins live i
 
 ### Decision
 
-- The 2.0 code lives in a new repository, `package-broker/broker`. `package-broker/server` stays for v1 security fixes only.
+- The 2.0 code lives in a new repository, `package-broker/broker`. v1 is end of life and receives no fixes; `package-broker/server` holds the 1.x code for reference.
 - Versioning starts at `2.0.0-rc.1` and continues `2.0.0-rc.X` until GA. Release Please runs with `prerelease: true` and `prerelease-type: rc`; the product packages (`core`, `cli`, `runtime-cloudflare`, `runtime-node`, `ui`) are linked on one version; the first tag is `v2.0.0-rc.1`. Plugins keep independent versions with component tags.
 - The default Docker image ships with all first-party plugins compiled in, inert until configured.
 - Images are published on GHCR only, no Docker Hub mirror.

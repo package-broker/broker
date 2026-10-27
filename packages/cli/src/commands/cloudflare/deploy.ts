@@ -8,7 +8,8 @@ import {
   validatePlatformPorts,
   type PlatformPortConfig,
 } from '@package-broker/core/platform/port-config';
-import { PLUGIN_BINDABLE_PORTS } from '@package-broker/core/plugin';
+import { PLUGIN_BINDABLE_PORTS, providerSecretName } from '@package-broker/core/plugin';
+import { parseRuntimeProviders } from '@package-broker/plugin-sso-oidc/definitions';
 import { snapshotIdentityDescriptor } from '@package-broker/core/kernel/registry';
 import {
   assertPrebuiltConfiguration,
@@ -126,6 +127,9 @@ function frozenProviders(attempt: DeploymentAttempt): string | null {
   const value = attempt.providers_text ?? null;
   if ((value === null ? null : digest(value)) !== (attempt.providers_sha256 ?? null))
     return conflict('providers');
+  const parsed = parseRuntimeProviders(value ?? undefined);
+  if (parsed.documentProblem !== null || parsed.rejected.length)
+    return invalid('Frozen PB_IDP_PROVIDERS is not valid');
   return value;
 }
 function canonical(value: unknown): string {
@@ -430,6 +434,7 @@ export interface DeployOptions {
   routes?: string;
   secret?: readonly string[];
   secrets?: string;
+  workersPaid?: boolean;
   allowContract?: readonly string[];
   dryRun?: boolean;
   json?: boolean;
@@ -1718,6 +1723,29 @@ export async function deploy(
     const collisionNames = new Set(plainBindings.map((b) => b.name));
     if ([...selectedSecrets, ...installedNames].some((n) => collisionNames.has(n)))
       return invalid();
+    const pending = journal.deployment?.attempt;
+    const pendingNames =
+      pending &&
+      ['upload_pending', 'uploaded', 'configuring', 'activation_pending'].includes(pending.phase)
+        ? pending.secret_names
+        : [];
+    const missingSecrets = [
+      ...new Set(
+        parseRuntimeProviders(providersText ?? undefined)
+          .accepted.filter((p) => p.kind === 'oidc')
+          .map((p) => providerSecretName(p.id, 'CLIENT_SECRET')),
+      ),
+    ].filter(
+      (name) =>
+        !installedNames.includes(name) &&
+        !pendingNames.includes(name) &&
+        !(selectedSecrets.includes(name) && o.env[name]),
+    );
+    if (missingSecrets.length)
+      return invalid(
+        `Missing provider secrets: ${missingSecrets.join(', ')}; deliver with --secret <ENV_NAME> or --secrets <ENV_NAMES>`,
+      );
+    output.checks.push({ name: 'provider_secrets', status: 'verified' });
     const updates: Record<string, unknown>[] = [];
     for (const name of selectedSecrets) {
       if (
@@ -1731,15 +1759,19 @@ export async function deploy(
       if (text) updates.push({ type: 'secret_text', name, text });
       else if (!installedNames.includes(name)) return invalid();
     }
-    const pending = journal.deployment?.attempt;
-    const pendingNames =
-      pending &&
-      ['upload_pending', 'uploaded', 'configuring', 'activation_pending'].includes(pending.phase)
-        ? pending.secret_names
-        : [];
     const allNames = [
       ...new Set([...installedNames, ...pendingNames, ...updates.map((b) => String(b.name))]),
     ].sort();
+    const variableCount = new Set([
+      ...plainBindings.filter((b) => b.type === 'plain_text').map((b) => String(b.name)),
+      ...allNames,
+    ]).size;
+    const variableLimit = o.workersPaid ? 128 : 64;
+    if (variableCount > variableLimit)
+      return invalid(
+        `Worker environment variable count ${variableCount} exceeds limit ${variableLimit}`,
+      );
+    output.checks.push({ name: 'variable_budget', status: 'verified' });
     if (!allNames.includes('PB_MASTER_KEY')) return invalid();
     if (headersEnv && !allNames.includes(headersEnv)) return invalid();
     let domain = live.domain;

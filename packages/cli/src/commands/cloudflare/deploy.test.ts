@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { envelopeResponse } from '@package-broker/core/kernel/errors';
 import { smoke } from './smoke.js';
+import { readProvidersOption } from './providers-file.js';
 import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
 import { CloudflareApi, CloudflareError, object } from './api.js';
@@ -811,7 +812,6 @@ it.each(['valid', 'consumer-drift', 'deployment-drift'] as const)(
     const failed = (await store.read())!;
     const a = failed.deployment!.attempt;
     expect(a.phase).toBe('failed');
-    // The old reader could not verify any setting once this consumer existed.
     for (const change of a.changes) if (change.kind !== 'endpoints') change.restoration = 'unknown';
     h.configFail = false;
     if (evidence === 'consumer-drift') h.consumer!.max_retries += 1;
@@ -4315,9 +4315,15 @@ const providerUploads = (h: ReturnType<typeof harness>) =>
 const uploadedProviders = (h: ReturnType<typeof harness>) =>
   (h.metadata!.bindings as Record<string, unknown>[]).filter((b) => b.name === 'PB_IDP_PROVIDERS');
 
+function providerHarness() {
+  const h = harness();
+  h.installed.push('PB_IDP_TEST_CLIENT_SECRET');
+  return h;
+}
+
 it('sets compact providers, journals only their hash, and changes versions only when needed', async () => {
   await writeIdentity({ runtimeProviders: true, compiled: [] });
-  const h = harness();
+  const h = providerHarness();
   const o = options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } });
   const success = await deploy(o);
   expect(success.exitCode).toBe(0);
@@ -4368,7 +4374,7 @@ it('removes live providers through the exact uploaded binding set', async () => 
 });
 
 it('preserves valid live providers byte for byte on a legacy artifact', async () => {
-  const h = harness();
+  const h = providerHarness();
   const value = ` \n${providersValue}\n `;
   liveProviders(h, value);
   expect((await deploy(options(h))).exitCode).toBe(0);
@@ -4416,7 +4422,7 @@ it.each(['legacy', 'disabled'])('refuses set providers for a %s artifact', async
 });
 
 it('resumes a lost upload with frozen providers after live providers become invalid', async () => {
-  const h = harness();
+  const h = providerHarness();
   liveProviders(h, providersValue);
   h.uploadLost = true;
   const first = await deploy(options(h));
@@ -4451,7 +4457,7 @@ it.each(['changed', 'remove', 'same', 'absent'])(
   'checks explicit providers on resume before upload: %s',
   async (mode) => {
     await writeIdentity({ runtimeProviders: true, compiled: [] });
-    const h = harness();
+    const h = providerHarness();
     await pendingProviders(h);
     expect(providerUploads(h)).toHaveLength(0);
     liveProviders(h, 'changed invalid live value');
@@ -4481,7 +4487,7 @@ it.each(['changed', 'remove', 'same', 'absent'])(
 it.each(['missing', 'mismatch'])(
   'refuses an unusable frozen provider attempt field: %s',
   async (mode) => {
-    const h = harness();
+    const h = providerHarness();
     await pendingProviders(h);
     const journal = (await store.read())!;
     if (mode === 'missing') delete journal.deployment!.attempt.providers_text;
@@ -4500,7 +4506,7 @@ it.each(['missing', 'mismatch'])(
 it.each(['verified', 'failed', 'rolled_back'] as const)(
   'removes frozen provider text atomically when inventory reaches %s',
   async (phase) => {
-    const h = harness();
+    const h = providerHarness();
     liveProviders(h, providersValue);
     expect((await deploy(options(h))).exitCode).toBe(0);
     const journal = (await store.read())!;
@@ -4518,7 +4524,7 @@ it.each(['verified', 'failed', 'rolled_back'] as const)(
 );
 
 it('rejects oversized UTF-8 provider text in inventory reads and writes', async () => {
-  const h = harness();
+  const h = providerHarness();
   await pendingProviders(h);
   const journal = (await store.read())!;
   journal.deployment!.attempt.providers_text = 'é'.repeat(2561);
@@ -4565,7 +4571,7 @@ it.each(['set', 'remove', 'absent'] as const)(
 );
 
 it('preserves active providers when script settings show a different version', async () => {
-  const h = harness();
+  const h = providerHarness();
   liveProviders(h, providersValue);
   h.settingsVersion = NEWEST;
   h.versions.get(NEWEST)!.resources = {
@@ -4581,7 +4587,7 @@ it('preserves active providers when script settings show a different version', a
 it.each(['equal', 'different', 'absent'])(
   'handles providers in a managed split deployment: %s',
   async (mode) => {
-    const h = harness();
+    const h = providerHarness();
     liveProviders(h, providersValue);
     expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
     const journal = (await store.read())!;
@@ -4604,7 +4610,7 @@ it.each(['absent', 'remove'] as const)(
   'allows %s on a runtimeProviders false artifact',
   async (kind) => {
     await writeIdentity({ runtimeProviders: false, compiled: [] });
-    const h = harness();
+    const h = providerHarness();
     liveProviders(h, providersValue);
     expect((await deploy(options(h, { providers: { kind } }))).exitCode).toBe(0);
     expect(uploadedProviders(h)).toHaveLength(kind === 'absent' ? 1 : 0);
@@ -4638,7 +4644,7 @@ it.each(['duplicate', 'duplicate-member', 'invalid-dry-run'])(
 );
 
 it('absent preserves providers on a verified receipt without another upload', async () => {
-  const h = harness();
+  const h = providerHarness();
   liveProviders(h, providersValue);
   expect((await deploy(options(h))).exitCode).toBe(0);
   const journal = (await store.read())!;
@@ -4680,7 +4686,7 @@ it('refuses preserved provider documents padded beyond the runtime byte bound', 
 
 it('resumes with an explicit compact set equal to the frozen non-compact value', async () => {
   await writeIdentity({ runtimeProviders: true, compiled: [] });
-  const h = harness();
+  const h = providerHarness();
   const value = JSON.stringify(JSON.parse(providersValue), null, 2);
   await pendingProviders(h, value);
   liveProviders(h, 'changed live value');
@@ -4728,7 +4734,7 @@ it.each([undefined, {}, { bindings: null }, { bindings: {} }])(
 );
 
 it('fetches the single active version only once while preserving providers', async () => {
-  const h = harness();
+  const h = providerHarness();
   liveProviders(h, providersValue);
   expect((await deploy(options(h))).exitCode).toBe(0);
   expect(
@@ -4739,7 +4745,7 @@ it('fetches the single active version only once while preserving providers', asy
 it.each(['artifact', 'rollout'])(
   'checks resumed %s before active provider bindings',
   async (field) => {
-    const h = harness();
+    const h = providerHarness();
     await pendingProviders(h);
     h.settingsVersion = NEWEST;
     h.versions.get(OLD)!.resources = { bindings: {} };
@@ -4769,7 +4775,7 @@ it('keeps no-op ordering before managed reconciliation without providers involve
 
 it('replaces in-flight provider text without copying it into history', async () => {
   await writeIdentity({ runtimeProviders: true, compiled: [] });
-  const h = harness();
+  const h = providerHarness();
   expect(
     (await deploy(options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } })))
       .exitCode,
@@ -4784,4 +4790,310 @@ it('replaces in-flight provider text without copying it into history', async () 
     sha256: [digest(providersValue), digest('[]')],
   });
   expect(await readFile(store.path, 'utf8')).not.toContain(providersSentinel);
+});
+
+const corpProviders = JSON.stringify([{ ...JSON.parse(providersValue)[0], id: 'corp' }]);
+it.each(['installed', 'secret', 'secrets'] as const)(
+  'accepts an OIDC client secret %s with the deploy',
+  async (delivery) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    const name = 'PB_IDP_CORP_CLIENT_SECRET';
+    if (delivery === 'installed') h.installed.push(name);
+    const o = options(h, {
+      providers: { kind: 'set', value: corpProviders, ids: ['corp'] },
+      ...(delivery === 'secret' ? { secret: [name] } : {}),
+      ...(delivery === 'secrets' ? { secrets: name } : {}),
+    });
+    o.env = { ...o.env, [name]: 'CORP_SECRET_SENTINEL' };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+    expect(providerUploads(h)).toHaveLength(1);
+    expect(JSON.stringify(result.output)).not.toContain('CORP_SECRET_SENTINEL');
+  },
+);
+it.each([
+  ['set', false, 'unselected'],
+  ['preserved', false, 'unselected'],
+  ['set', true, 'empty'],
+  ['preserved', true, 'empty'],
+] as const)(
+  'refuses missing OIDC secrets for %s (dry-run %s, %s env)',
+  async (mode, dryRun, env) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    if (mode === 'preserved') liveProviders(h, corpProviders);
+    const o = options(h, {
+      dryRun,
+      ...(mode === 'set'
+        ? { providers: { kind: 'set', value: corpProviders, ids: ['corp'] } }
+        : {}),
+      ...(env === 'empty' ? { secret: ['PB_IDP_CORP_CLIENT_SECRET'] } : {}),
+    });
+    o.env = { ...o.env, PB_IDP_CORP_CLIENT_SECRET: env === 'empty' ? '' : 'UNSELECTED_SECRET' };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(2);
+    expect(result.output.error).toMatchObject({ code: 'invalid_input' });
+    expect(result.output.error!.message).toContain('PB_IDP_CORP_CLIENT_SECRET');
+    expect(result.output.error!.message).toContain('--secret');
+    expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+    expect(JSON.stringify(result.output)).not.toContain('idp.example.test');
+    expect(JSON.stringify(result.output)).not.toContain('UNSELECTED_SECRET');
+    expect(mutations(h)).toEqual([]);
+  },
+);
+it('reports every missing OIDC secret name without provider values', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  const result = await deploy(
+    options(h, {
+      providers: {
+        kind: 'set',
+        value: JSON.stringify([
+          ...JSON.parse(corpProviders),
+          { ...JSON.parse(providersValue)[0], issuer: 'https://other.example.test' },
+        ]),
+        ids: ['corp', 'test'],
+      },
+    }),
+  );
+  expect(result.output.error).toMatchObject({ code: 'invalid_input' });
+  expect(result.output.error!.message).toContain(
+    'PB_IDP_CORP_CLIENT_SECRET, PB_IDP_TEST_CLIENT_SECRET',
+  );
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+  expect(mutations(h)).toEqual([]);
+});
+it.each([false, true])('accepts Access without a client secret (dry-run %s)', async (dryRun) => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  const value = JSON.stringify([
+    {
+      id: 'corp',
+      kind: 'cloudflare-access',
+      teamDomain: 'corp.cloudflareaccess.com',
+      audience: 'a'.repeat(64),
+      trustEmailVerification: true,
+      policy: { verifiedDomains: ['example.test'], autoJoin: false },
+    },
+  ]);
+  const result = await deploy(
+    options(h, { dryRun, providers: { kind: 'set', value, ids: ['corp'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+  expect(providerUploads(h)).toHaveLength(dryRun ? 0 : 1);
+});
+it('checks and reports installed secrets for preserved OIDC during dry-run', async () => {
+  const h = harness();
+  liveProviders(h, corpProviders);
+  h.installed.push('PB_IDP_CORP_CLIENT_SECRET');
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+  expect(mutations(h)).toEqual([]);
+});
+it.each([
+  [64, false, 0],
+  [65, false, 2],
+  [65, true, 0],
+  [128, true, 0],
+  [129, true, 2],
+] as const)(
+  'checks %i variable names with workersPaid=%s',
+  async (count, workersPaid, exitCode) => {
+    const h = harness();
+    h.installed.push(...Array.from({ length: count - 4 }, (_, i) => `ORPHAN_${i}`));
+    const result = await deploy(options(h, { workersPaid }));
+    expect(result.exitCode).toBe(exitCode);
+    if (exitCode) {
+      expect(result.output.error).toMatchObject({ code: 'invalid_input' });
+      expect(result.output.error!.message).toContain(`${count}`);
+      expect(result.output.error!.message).toContain(`${workersPaid ? 128 : 64}`);
+      expect(mutations(h)).toEqual([]);
+    } else {
+      expect(result.output.checks).toContainEqual({
+        name: 'variable_budget',
+        status: 'verified',
+      });
+      expect(providerUploads(h)).toHaveLength(1);
+      expect(h.metadata!.bindings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'd1' }),
+          expect.objectContaining({ type: 'r2_bucket' }),
+          expect.objectContaining({ type: 'queue' }),
+          expect.objectContaining({ type: 'analytics_engine' }),
+        ]),
+      );
+      expect(h.metadata).toHaveProperty('assets');
+    }
+  },
+);
+it.each([64, 65])(
+  'counts providers, telemetry and delivered secret union at %i during dry-run',
+  async (count) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const file = join(out, 'generated/manifest.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.platformPorts.observability.endpointEnv = 'OTEL_ENDPOINT';
+    await writeFile(file, JSON.stringify(manifest));
+    const h = harness();
+    h.installed.push(
+      'PB_IDP_CORP_CLIENT_SECRET',
+      ...Array.from({ length: count - 8 }, (_, i) => `ORPHAN_${i}`),
+    );
+    const o = options(h, {
+      dryRun: true,
+      providers: { kind: 'set', value: corpProviders, ids: ['corp'] },
+      secret: ['PB_IDP_CORP_CLIENT_SECRET', 'NEW_SECRET'],
+    });
+    o.env = {
+      ...o.env,
+      PB_IDP_CORP_CLIENT_SECRET: 'ROTATED_SENTINEL',
+      NEW_SECRET: 'NEW_SENTINEL',
+      OTEL_ENDPOINT: 'https://telemetry.example.test',
+    };
+    const result = await deploy(o);
+    expect(result.exitCode).toBe(count === 64 ? 0 : 2);
+    if (count === 64)
+      expect(result.output.checks).toContainEqual({
+        name: 'variable_budget',
+        status: 'verified',
+      });
+    else
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message: 'Worker environment variable count 65 exceeds limit 64',
+      });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+it('counts orphaned installed provider secrets after providers are removed', async () => {
+  const h = harness();
+  liveProviders(h, corpProviders);
+  h.installed.push(
+    'PB_IDP_CORP_CLIENT_SECRET',
+    ...Array.from({ length: 60 }, (_, i) => `ORPHAN_${i}`),
+  );
+  const result = await deploy(options(h, { providers: { kind: 'remove' } }));
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Worker environment variable count 65 exceeds limit 64',
+  });
+  expect(mutations(h)).toEqual([]);
+});
+
+it('includes pending secret names in the variable budget before reconciling a lost upload', async () => {
+  const h = harness();
+  h.uploadLost = true;
+  const o = options(h, { secret: ['PENDING_SECRET'] });
+  o.env = { ...o.env, PENDING_SECRET: 'PENDING_SENTINEL' };
+  expect((await deploy(o)).exitCode).toBe(6);
+  const uploads = providerUploads(h).length;
+  h.installed.push(...Array.from({ length: 60 }, (_, i) => `ORPHAN_${i}`));
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Worker environment variable count 65 exceeds limit 64',
+  });
+  expect(providerUploads(h)).toHaveLength(uploads);
+  expect(JSON.stringify(result.output)).not.toContain('PENDING_SENTINEL');
+});
+
+it.each(['invalid-live', 'disabled-artifact', 'resume-conflict'] as const)(
+  'keeps l1 sentinel redaction and no-upload guards effective with complete OIDC fixtures: %s',
+  async (mode) => {
+    const h = providerHarness();
+    let o = options(h);
+    if (mode === 'invalid-live') liveProviders(h, '{' + providersSentinel);
+    else if (mode === 'disabled-artifact') {
+      await writeIdentity({ runtimeProviders: false, compiled: [] });
+      o = options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } });
+    } else {
+      await writeIdentity({ runtimeProviders: true, compiled: [] });
+      await pendingProviders(h);
+      o = options(h, { providers: { kind: 'set', value: '[]', ids: [] } });
+    }
+    const result = await deploy(o);
+    expect(h.installed).toContain('PB_IDP_TEST_CLIENT_SECRET');
+    if (mode === 'invalid-live')
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message: 'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
+      });
+    else if (mode === 'disabled-artifact')
+      expect(result.output.error).toMatchObject({
+        code: 'invalid_input',
+        message: 'Cannot set providers: artifact runtimeProviders is false',
+      });
+    else {
+      expect(result.output.error).toMatchObject({ code: 'configuration_conflict' });
+      expect(result.output.checks).toContainEqual({
+        name: 'settings_sha256',
+        status: 'configuration_conflict',
+      });
+    }
+    expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it('resumes a lost provider upload using the pending client secret without selecting it again', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const file = join(project, 'corp.json');
+  await writeFile(file, corpProviders);
+  const h = harness();
+  h.uploadLost = true;
+  const firstOptions = options(h, {
+    providers: await readProvidersOption(file),
+    secret: ['PB_IDP_CORP_CLIENT_SECRET'],
+  });
+  firstOptions.env = { ...firstOptions.env, PB_IDP_CORP_CLIENT_SECRET: 'CORP_PENDING_SENTINEL' };
+  const first = await deploy(firstOptions);
+  expect(first.exitCode).toBe(6);
+  expect((await store.read())!.deployment!.attempt).toMatchObject({
+    phase: 'upload_pending',
+    secret_names: expect.arrayContaining(['PB_IDP_CORP_CLIENT_SECRET']),
+  });
+  expect(h.installed).not.toContain('PB_IDP_CORP_CLIENT_SECRET');
+  const resumed = await deploy(options(h));
+  expect(resumed.exitCode).toBe(0);
+  expect(resumed.output.checks).toContainEqual({ name: 'provider_secrets', status: 'verified' });
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(uploadedProviders(h)[0]!.text).toBe(corpProviders);
+  expect(JSON.stringify(resumed.output)).not.toContain('CORP_PENDING_SENTINEL');
+  expect(JSON.stringify(resumed.output)).not.toContain(providersSentinel);
+});
+
+it.each([
+  ['syntax', '{' + providersSentinel],
+  ['not-array', JSON.stringify({ displayName: providersSentinel })],
+  ['over-cap', JSON.stringify(Array.from({ length: 65 }, () => ({})))],
+  [
+    'rejected-entry',
+    JSON.stringify([
+      ...JSON.parse(providersValue),
+      { ...JSON.parse(corpProviders)[0], issuer: providersSentinel },
+    ]),
+  ],
+])('refuses invalid frozen providers before upload: %s', async (_mode, text) => {
+  const h = providerHarness();
+  await pendingProviders(h);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.providers_text = text;
+  journal.deployment!.attempt.providers_sha256 = digest(text);
+  await store.write(journal);
+  const before = mutations(h).length;
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(2);
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Frozen PB_IDP_PROVIDERS is not valid',
+  });
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(0);
+  expect(mutations(h)).toHaveLength(before);
 });

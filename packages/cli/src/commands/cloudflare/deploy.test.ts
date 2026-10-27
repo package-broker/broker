@@ -75,7 +75,7 @@ const fixtureContract: DeployProviderContract = {
   domainZone: async () => ZONE,
   preview: async (_api, _script, version) => ({
     version_id: version,
-    url: `https://${version}-${script}.account.workers.dev`,
+    url: `https://${version.slice(0, 8).toLowerCase()}-${script}.account.workers.dev`,
     bindings_verified: true,
   }),
 };
@@ -645,7 +645,7 @@ it('uses the production contract by default: adopts the created version and enab
     versionsCreateScript: false,
     secretInheritance: true,
   });
-  expect(cloudflareDeployContract.preview).toBeUndefined();
+  expect(cloudflareDeployContract.preview).toBeTypeOf('function');
   const result = await deploy(o);
   expect(result.output.error).toBeNull();
   expect(result.output).toMatchObject({ version_id: CREATED, previous_version_id: null });
@@ -1587,13 +1587,47 @@ it('does not require inheritance when the first install has no installed secrets
   o.contract = { ...cloudflareDeployContract, secretInheritance: false };
   expect((await deploy(o)).output.error).toBeNull();
 });
-it('the production contract refuses a gradual rollout before writes when preview is unavailable', async () => {
+it('the production contract builds the candidate version URL for a gradual rollout', async () => {
   const h = harness();
   const o = options(h, { rollout: 25 });
   delete o.contract;
   delete o.domain;
-  expect((await deploy(o)).output.error?.code).toBe('capability_unknown');
-  expect(mutations(h)).toEqual([]);
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(result.exitCode).toBe(0);
+  expect((await store.read())!.deployment!.attempt.candidate_probe_url).toBe(
+    `https://${CANDIDATE.slice(0, 8)}-${script}.${h.subdomain}.workers.dev`,
+  );
+  expect(h.calls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ path: `${base}/versions/${CANDIDATE}`, method: 'GET' }),
+    ]),
+  );
+  expect(h.active.versions).toEqual([
+    { version_id: OLD, percentage: 75 },
+    { version_id: CANDIDATE, percentage: 25 },
+  ]);
+});
+it.each([
+  `https://${CANDIDATE}-${script}.account.workers.dev`,
+  `https://${CANDIDATE.slice(0, 8)}-another-worker.account.workers.dev`,
+])('refuses a contract preview with a different exact hostname: %s', async (url) => {
+  const h = harness();
+  const result = await deploy(
+    options(h, {
+      rollout: 25,
+      contract: {
+        ...fixtureContract,
+        preview: async () => ({ version_id: CANDIDATE, url, bindings_verified: true }),
+      },
+    }),
+  );
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(result.output.checks).toContainEqual({
+    name: 'preview',
+    status: 'configuration_conflict',
+  });
+  expect(h.active.versions).toEqual([{ version_id: OLD, percentage: 100 }]);
 });
 it('the production contract retains installed secret bindings for an existing Worker', async () => {
   const h = harness();
@@ -1974,7 +2008,9 @@ it.each(['success', 'failure', 'timeout', 'interruption'])(
         sleep: h.sleep,
       });
     const p = withCandidatePreview(api, store, j, fixtureContract, async (url) => {
-      expect(url).toContain(CANDIDATE);
+      expect(url).toBe(
+        `https://${CANDIDATE.slice(0, 8).toLowerCase()}-${script}.account.workers.dev`,
+      );
       expect(h.endpoints).toEqual({ enabled: false, previews_enabled: true });
       if (mode === 'timeout') await h.sleep(600_001);
       if (mode !== 'success') throw new Error(mode);

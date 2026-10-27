@@ -61,6 +61,15 @@ export function tracesMetadata(
 
 const COMPATIBILITY = { compatibility_date: '2026-10-01', compatibility_flags: ['nodejs_compat'] };
 const ASSET_CONFIG = { run_worker_first: true, html_handling: 'none', not_found_handling: 'none' };
+const PREVIEW_BINDING_FIELDS: Readonly<Record<string, string | null>> = {
+  d1: 'id',
+  r2_bucket: 'bucket_name',
+  queue: 'queue_name',
+  analytics_engine: 'dataset',
+  plain_text: 'text',
+  secret_text: null,
+  assets: null,
+};
 const uuid = (v: unknown): v is string =>
   typeof v === 'string' &&
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(v);
@@ -261,7 +270,7 @@ export interface DeployProviderContract {
   domainZone: (api: CloudflareApi, hostname: string) => Promise<string>;
   secretInheritance: boolean;
   assetHash?: (bytes: Buffer, name: string) => string;
-  preview?: (
+  preview: (
     api: CloudflareApi,
     script: string,
     version: string,
@@ -270,6 +279,9 @@ export interface DeployProviderContract {
 export const unverifiedDeployContract: DeployProviderContract = {
   versionsCreateScript: false,
   secretInheritance: false,
+  preview: async () => {
+    throw new CloudflareError('capability_unknown', 1, false, 'deploy');
+  },
   domainZone: async () => {
     throw new CloudflareError('domain_zone_not_supported', 1, false, 'deploy');
   },
@@ -286,6 +298,44 @@ export const cloudflareDeployContract: DeployProviderContract = {
   secretInheritance: true,
   domainZone: resolveZone,
   assetHash: cloudflareAssetHash,
+  preview: async (api, script, version) => {
+    if (!uuid(version) || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(script) || script.length > 54)
+      return invalid();
+    const result = object(
+      (await api.request(`/workers/scripts/${script}/versions/${version}`)).result,
+    );
+    if (!uuid(result.id)) throw new CloudflareError('provider_failure', 1, false, 'deploy');
+    if (result.id !== version) return conflict('preview');
+    const resources = object(result.resources);
+    if (resources.bindings === undefined) return conflict('preview');
+    if (!Array.isArray(resources.bindings))
+      throw new CloudflareError('provider_failure', 1, false, 'deploy');
+    if (!resources.bindings.length) return conflict('preview');
+    const names = new Set<string>();
+    for (const raw of resources.bindings) {
+      const binding = object(raw);
+      if (typeof binding.type !== 'string' || typeof binding.name !== 'string' || !binding.name)
+        throw new CloudflareError('provider_failure', 1, false, 'deploy');
+      if (!Object.hasOwn(PREVIEW_BINDING_FIELDS, binding.type) || names.has(binding.name))
+        return conflict('preview');
+      names.add(binding.name);
+      const field = PREVIEW_BINDING_FIELDS[binding.type];
+      if (field && typeof binding[field] !== 'string')
+        throw new CloudflareError('provider_failure', 1, false, 'deploy');
+      if (field && field !== 'text' && !binding[field]) return conflict('preview');
+      if (
+        binding.type === 'secret_text' &&
+        (Object.hasOwn(binding, 'text') || Object.hasOwn(binding, 'value'))
+      )
+        return conflict('preview');
+    }
+    const workerOrigin = await workersDevOrigin(api, script);
+    return {
+      version_id: result.id,
+      url: `https://${version.slice(0, 8).toLowerCase()}-${new URL(workerOrigin).hostname}`,
+      bindings_verified: true,
+    };
+  },
   createScript: async (api, script, form) => {
     const result = object((await api.request(`/workers/scripts/${script}`, 'PUT', form)).result);
     if (result.id !== script) return unknown();
@@ -1858,14 +1908,17 @@ export async function deploy(
     if (!a.version_id) return unknown();
     await version(api, base, a.version_id, a, allNames, plainBindings);
     if (rollout < 100) {
-      const preview = await contract.preview!(api, identity.script_name, a.version_id);
+      const preview = await contract.preview(api, identity.script_name, a.version_id);
       if (preview.version_id !== a.version_id || !preview.bindings_verified)
         return conflict('preview');
       const probeUrl = origin(preview.url);
+      const host = new URL(probeUrl).hostname;
+      const subdomain = host.split('.')[1];
+      const prefix = a.version_id.slice(0, 8).toLowerCase();
       if (
-        !probeUrl.endsWith('.workers.dev') ||
+        !subdomain ||
         probeUrl === url ||
-        !new URL(probeUrl).hostname.startsWith(`${a.version_id}-`)
+        host !== `${prefix}-${identity.script_name}.${subdomain}.workers.dev`
       )
         return conflict('preview');
       a.candidate_probe_url = probeUrl;

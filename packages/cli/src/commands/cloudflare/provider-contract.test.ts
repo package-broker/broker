@@ -34,6 +34,130 @@ function harness(responses: { body: unknown; status?: number }[]) {
   });
   return { api, fetch };
 }
+const previewVersion = '12345678-1234-4234-8234-123456789abc';
+const previewResult = fixtures.versionPreview!.result as Record<string, unknown>;
+it('reads the exact version and constructs its documented version URL without mutations', async () => {
+  const h = harness([
+    { body: fixtures.versionPreview },
+    { body: fixtures.versionPreviewSubdomain },
+  ]);
+  expect(await cloudflareDeployContract.preview(h.api, 'broker', previewVersion)).toEqual({
+    version_id: previewVersion,
+    url: 'https://12345678-broker.broker-account.workers.dev',
+    bindings_verified: true,
+  });
+  expect(h.fetch.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+    `/client/v4/accounts/${identity.account_id}/workers/scripts/broker/versions/${previewVersion}`,
+    `/client/v4/accounts/${identity.account_id}/workers/subdomain`,
+  ]);
+  expect(h.fetch.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+});
+it('lowercases the preview URL prefix while retaining the exact version ID', async () => {
+  const version = 'ABCDEF12-1234-4234-8234-123456789ABC';
+  const h = harness([
+    { body: { success: true, result: { ...previewResult, id: version } } },
+    { body: fixtures.versionPreviewSubdomain },
+  ]);
+  expect(await cloudflareDeployContract.preview(h.api, 'broker', version)).toEqual({
+    version_id: version,
+    url: 'https://abcdef12-broker.broker-account.workers.dev',
+    bindings_verified: true,
+  });
+});
+it.each([
+  ['broker', 'invalid'],
+  ['another/worker', previewVersion],
+  ['a'.repeat(55), previewVersion],
+])('rejects malformed preview input before requests: %s %s', async (script, version) => {
+  const h = harness([]);
+  await expect(cloudflareDeployContract.preview(h.api, script, version)).rejects.toMatchObject({
+    code: 'invalid_input',
+    exitCode: 2,
+    stage: 'deploy',
+  });
+  expect(h.fetch).not.toHaveBeenCalled();
+});
+it.each([
+  ['different version', { ...previewResult, id: 'abcdef12-1234-4234-8234-123456789abc' }],
+  ['missing bindings', { ...previewResult, resources: {} }],
+  ['empty bindings', { ...previewResult, resources: { bindings: [] } }],
+  [
+    'duplicate bindings',
+    {
+      ...previewResult,
+      resources: {
+        bindings: [
+          { type: 'assets', name: 'ASSETS' },
+          { type: 'assets', name: 'ASSETS' },
+        ],
+      },
+    },
+  ],
+  [
+    'unsupported binding',
+    { ...previewResult, resources: { bindings: [{ type: 'unknown', name: 'SENTINEL' }] } },
+  ],
+  [
+    'empty resource identity',
+    { ...previewResult, resources: { bindings: [{ type: 'd1', name: 'DB', id: '' }] } },
+  ],
+  [
+    'secret value returned',
+    {
+      ...previewResult,
+      resources: { bindings: [{ type: 'secret_text', name: 'PB_MASTER_KEY', text: 'SENTINEL' }] },
+    },
+  ],
+])('refuses preview evidence with %s', async (_name, result) => {
+  const h = harness([{ body: { success: true, result } }]);
+  const error: unknown = await cloudflareDeployContract
+    .preview(h.api, 'broker', previewVersion)
+    .catch((error: unknown) => error);
+  expect(error).toMatchObject({ code: 'configuration_conflict', fields: ['preview'] });
+  expect(String(error)).not.toContain('SENTINEL');
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it.each([
+  null,
+  [],
+  {},
+  { ...previewResult, id: 'invalid' },
+  { ...previewResult, resources: null },
+  { ...previewResult, resources: { bindings: {} } },
+  { ...previewResult, resources: { bindings: null } },
+  { ...previewResult, resources: { bindings: [null] } },
+  { ...previewResult, resources: { bindings: [{ name: 'DB' }] } },
+  { ...previewResult, resources: { bindings: [{ type: 'd1', name: 'DB' }] } },
+])('fails closed on malformed version responses: %j', async (result) => {
+  const h = harness([{ body: { success: true, result } }]);
+  await expect(
+    cloudflareDeployContract.preview(h.api, 'broker', previewVersion),
+  ).rejects.toMatchObject({ code: 'provider_failure' });
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it.each([
+  { body: { success: true, result: {} } },
+  { body: { success: true, result: { subdomain: 'SENTINEL.invalid' } } },
+  { body: { success: false, errors: [], result: null }, status: 404 },
+])('refuses preview without a registered valid workers.dev subdomain: %j', async (subdomain) => {
+  const h = harness([{ body: fixtures.versionPreview }, subdomain]);
+  await expect(
+    cloudflareDeployContract.preview(h.api, 'broker', previewVersion),
+  ).rejects.toMatchObject({
+    code: 'workers_dev_subdomain_missing',
+    exitCode: 2,
+    stage: 'deploy',
+    message: expect.stringContaining('Register a workers.dev subdomain manually'),
+  });
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+});
+it('explicitly refuses preview with the unverified contract', async () => {
+  const h = harness([]);
+  await expect(
+    unverifiedDeployContract.preview(h.api, 'broker', previewVersion),
+  ).rejects.toMatchObject({ code: 'capability_unknown', exitCode: 1, stage: 'deploy' });
+  expect(h.fetch).not.toHaveBeenCalled();
+});
 it.each([
   [
     'subdomain',

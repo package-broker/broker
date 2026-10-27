@@ -221,7 +221,7 @@ describe('cloudflareAccessProblems', () => {
   it('rejects any groups key until the group shape is verified', () => {
     for (const groups of [['staff'], [], undefined, null, 'staff']) {
       expect(cloudflareAccessProblems(config({ groups }))).toContain(
-        'groups are not supported until spike T172',
+        'groups must be none or get-identity, and policy rules cannot match on groups',
       );
     }
   });
@@ -251,14 +251,16 @@ describe('cloudflareAccessProblems', () => {
     const inherited = Object.create({ groups: ['staff'] }) as Record<string, unknown>;
     Object.assign(inherited, config());
     expect(cloudflareAccessProblems(inherited)).toContain(
-      'groups are not supported until spike T172',
+      'groups must be none or get-identity, and policy rules cannot match on groups',
     );
     const inheritedOther = Object.create({ extra: 1 }) as Record<string, unknown>;
     Object.assign(inheritedOther, config());
     expect(cloudflareAccessProblems(inheritedOther)).not.toEqual([]);
     const hidden = config();
     Object.defineProperty(hidden, 'groups', { value: ['staff'], enumerable: false });
-    expect(cloudflareAccessProblems(hidden)).toContain('groups are not supported until spike T172');
+    expect(cloudflareAccessProblems(hidden)).toContain(
+      'groups must be none or get-identity, and policy rules cannot match on groups',
+    );
     expect(cloudflareAccessProblems({ ...config(), [Symbol('x')]: 1 })).toEqual([
       'unknown configuration key',
     ]);
@@ -290,7 +292,7 @@ describe('createCloudflareAccessProvider', () => {
   it('rejects an invalid configuration at creation time', () => {
     const { ctx } = certsHarness();
     expect(() => createCloudflareAccessProvider(config({ groups: ['staff'] }), ctx)).toThrow(
-      'groups are not supported until spike T172',
+      'groups must be none or get-identity, and policy rules cannot match on groups',
     );
     expect(() => createCloudflareAccessProvider(config({ audience: 'a'.repeat(63) }), ctx)).toThrow(
       RangeError,
@@ -601,7 +603,7 @@ describe('finish', () => {
 });
 
 describe('configuration key hardening', () => {
-  const GROUPS = 'groups are not supported until spike T172';
+  const GROUPS = 'groups must be none or get-identity, and policy rules cannot match on groups';
 
   it('refuses an allowed key that is inherited (inherited key)', () => {
     const { audience, ...rest } = config() as unknown as Record<string, unknown>;

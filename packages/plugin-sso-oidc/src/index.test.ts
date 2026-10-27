@@ -93,7 +93,7 @@ describe('plugin-sso-oidc', () => {
       }),
     );
     expect(message).toContain('trustEmailVerification must be a boolean');
-    expect(message).toContain('groups are not supported');
+    expect(message).toContain('groups must be none or get-identity');
     expect(message).toContain('issuer must be an https URL');
     expect(message).toContain('providers[0]');
     expect(message).toContain('providers[1]');

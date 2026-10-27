@@ -49,23 +49,23 @@ function scanMembers(raw: string, stage: Stage): void {
   }
 }
 
-export async function readProvidersOption(
-  value: string | undefined,
-  readFile = readBoundedFile,
+export function validateProvidersDocument(
+  document: string | Uint8Array,
   stage: Stage = 'deploy',
-): Promise<ProvidersOption> {
-  if (value === undefined) return { kind: 'absent' };
-  if (value === 'none') return { kind: 'remove' };
-  let problem = 'unreadable';
+  preserve = false,
+): ProvidersOption & { kind: 'set' } {
+  let problem = 'encoding';
   try {
-    const bytes = await readFile(value, stage);
-    if (bytes.byteLength > 65536) return invalid('file_too_large', stage);
-    problem = 'encoding';
-    const raw = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (typeof document !== 'string' && document.byteLength > 65536)
+      return invalid('file_too_large', stage);
+    const raw =
+      typeof document === 'string'
+        ? document
+        : new TextDecoder('utf-8', { fatal: true }).decode(document);
     problem = 'syntax';
     const compact = JSON.stringify(JSON.parse(raw));
     scanMembers(raw, stage);
-    const parsed = parseRuntimeProviders(compact);
+    const parsed = parseRuntimeProviders(preserve ? raw : compact);
     if (parsed.documentProblem !== null) return invalid(parsed.documentProblem, stage);
     const rejected = parsed.rejected.map(({ index, id, codes }) => ({ index, id, codes }));
     if (rejected.length) return invalid(`invalid_entries: ${JSON.stringify(rejected)}`, stage);
@@ -73,5 +73,20 @@ export async function readProvidersOption(
   } catch (error) {
     if (error instanceof CloudflareError) throw error;
     return invalid(problem, stage);
+  }
+}
+
+export async function readProvidersOption(
+  value: string | undefined,
+  readFile = readBoundedFile,
+  stage: Stage = 'deploy',
+): Promise<ProvidersOption> {
+  if (value === undefined) return { kind: 'absent' };
+  if (value === 'none') return { kind: 'remove' };
+  try {
+    return validateProvidersDocument(await readFile(value, stage), stage);
+  } catch (error) {
+    if (error instanceof CloudflareError) throw error;
+    return invalid('unreadable', stage);
   }
 }

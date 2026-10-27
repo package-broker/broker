@@ -17,7 +17,7 @@ import {
   removePrebuilt,
 } from '../../prebuilt.js';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
-import type { ProvidersOption } from './providers-file.js';
+import { validateProvidersDocument, type ProvidersOption } from './providers-file.js';
 import { normalizeQueueConsumer } from './queue-consumer.js';
 import { assertMigrationsApplied } from './migrations-check.js';
 import { d1BindingId, workerSettingsDifferences } from './worker-settings.js';
@@ -78,8 +78,11 @@ const uuid = (v: unknown): v is string =>
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(v);
 const safeId = (v: unknown): v is string =>
   typeof v === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(v);
-const invalid = (): never => {
-  throw new CloudflareError('invalid_input', 2, false, 'deploy');
+const inputMessages = new WeakMap<CloudflareError, string>();
+const invalid = (message?: string): never => {
+  const error = new CloudflareError('invalid_input', 2, false, 'deploy');
+  if (message) inputMessages.set(error, message);
+  throw error;
 };
 const conflict = (field: string, ...fields: string[]): never => {
   throw new CloudflareError('configuration_conflict', 8, false, 'deploy', null, null, null, null, [
@@ -90,6 +93,41 @@ const conflict = (field: string, ...fields: string[]): never => {
 const unknown = (): never => {
   throw new CloudflareError('outcome_unknown', 6, false, 'deploy');
 };
+function desiredProviders(
+  option: ProvidersOption | undefined,
+  identity: ReturnType<typeof snapshotIdentityDescriptor>,
+  live: Record<string, unknown> | null,
+): string | null {
+  if (option?.kind === 'set') {
+    if (!identity)
+      return invalid('Cannot set providers on a legacy artifact without identity metadata');
+    if (!identity.runtimeProviders)
+      return invalid('Cannot set providers: artifact runtimeProviders is false');
+    return option.value;
+  }
+  if (option?.kind === 'remove') return null;
+  const found = ((live?.bindings ?? []) as unknown[])
+    .map(object)
+    .filter((b) => b.name === 'PB_IDP_PROVIDERS');
+  if (!found.length) return null;
+  try {
+    const binding = found[0]!;
+    if (found.length !== 1 || binding.type !== 'plain_text' || typeof binding.text !== 'string')
+      throw new Error();
+    validateProvidersDocument(binding.text, 'deploy', true);
+    return binding.text;
+  } catch {
+    return invalid(
+      'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
+    );
+  }
+}
+function frozenProviders(attempt: DeploymentAttempt): string | null {
+  const value = attempt.providers_text ?? null;
+  if ((value === null ? null : digest(value)) !== (attempt.providers_sha256 ?? null))
+    return conflict('providers');
+  return value;
+}
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object')
@@ -465,7 +503,10 @@ function secretNames(o: DeployOptions): string[] {
   const names = [...(o.secret ?? []), ...(o.secrets === undefined ? [] : o.secrets.split('\n'))];
   if (
     new Set(names).size !== names.length ||
-    names.some((n) => !/^[A-Z][A-Z0-9_]{0,127}$/.test(n) || n === 'PB_TOKEN_PEPPER')
+    names.some(
+      (n) =>
+        !/^[A-Z][A-Z0-9_]{0,127}$/.test(n) || ['PB_TOKEN_PEPPER', 'PB_IDP_PROVIDERS'].includes(n),
+    )
   )
     return invalid();
   return names.sort();
@@ -1377,12 +1418,14 @@ export async function deploy(
     )
       return invalid();
     const artifact = await validateDeploymentArtifact(out);
+    if (o.providers?.kind === 'set') desiredProviders(o.providers, artifact.identity, null);
     const endpointEnv = artifact.ports?.observability.endpointEnv;
     const headersEnv = artifact.ports?.observability.headersEnv;
     const generatedNames = [
       'DB',
       'DEPLOYMENT_ID',
       'PB_PUBLIC_URL',
+      'PB_IDP_PROVIDERS',
       'ASSETS',
       ...(artifact.ports
         ? [
@@ -1548,8 +1591,9 @@ export async function deploy(
     )
       return conflict('deployment');
     if (!current.versions.length && rollout !== 100) return invalid();
+    let prior: Record<string, unknown> | undefined;
     if (current.versions.length === 1) {
-      const prior = object(
+      prior = object(
         (await api.request(`${base}/versions/${current.versions[0]!.version_id}`)).result,
       );
       if (prior.id !== current.versions[0]!.version_id) return conflict('version_id');
@@ -1602,7 +1646,70 @@ export async function deploy(
       return invalid();
     if (installedNames.length && !contract.secretInheritance)
       throw new CloudflareError('capability_unknown');
+    const priorAttempt = journal.deployment?.attempt;
+    const resuming =
+      priorAttempt &&
+      [
+        'preparing_upload',
+        'upload_pending',
+        'uploaded',
+        'configuring',
+        'activation_pending',
+      ].includes(priorAttempt.phase);
+    if (resuming) {
+      if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
+        return conflict('artifact_sha256');
+      if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
+    } else if (current.versions.length > 1 && recordedVerified?.requested_rollout !== rollout)
+      return conflict('deployment');
+    const removeSecret = () =>
+      invalid('Remove the secret first: wrangler secret delete PB_IDP_PROVIDERS');
+    if (installedNames.includes('PB_IDP_PROVIDERS')) return removeSecret();
+    const sources: Record<string, unknown>[] = [];
+    for (const version of current.versions) {
+      const result =
+        prior ?? object((await api.request(`${base}/versions/${version.version_id}`)).result);
+      if (result.id !== version.version_id) return conflict('version_id');
+      const resources = object(result.resources ?? {});
+      if (!Array.isArray(resources.bindings)) return conflict('providers');
+      if (
+        resources.bindings
+          .map(object)
+          .some((b) => b.name === 'PB_IDP_PROVIDERS' && b.type === 'secret_text')
+      )
+        return removeSecret();
+      sources.push(resources);
+    }
+    const frozen = resuming ? frozenProviders(priorAttempt) : null;
+    let providersText = frozen;
+    if (o.providers?.kind === 'set' || o.providers?.kind === 'remove') {
+      providersText = desiredProviders(o.providers, artifact.identity, null);
+      if (resuming) {
+        if (
+          providersText !== frozen &&
+          !(
+            o.providers.kind === 'set' &&
+            frozen !== null &&
+            validateProvidersDocument(frozen).value === providersText
+          )
+        )
+          return conflict('settings_sha256');
+        providersText = frozen;
+      }
+    } else if (!resuming) {
+      if (
+        sources.some((r) =>
+          (r.bindings as unknown[]).map(object).some((b) => b.name === 'PB_IDP_PROVIDERS'),
+        )
+      )
+        checkManaged();
+      const values = sources.map((r) => desiredProviders(o.providers, artifact.identity, r));
+      if (new Set(values).size > 1) return conflict('providers');
+      providersText = values[0] ?? null;
+    }
     const plainBindings = bindings(journal, artifact.ports, url);
+    if (providersText !== null)
+      plainBindings.push({ type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersText });
     if (endpointEnv) {
       if (selectedSecrets.includes(endpointEnv) || installedNames.includes(endpointEnv))
         return invalid();
@@ -1677,7 +1784,6 @@ export async function deploy(
       }),
     );
     const priorJournal = journal.deployment;
-    const priorAttempt = priorJournal?.attempt;
     const verified =
       priorAttempt?.phase === 'verified' && priorAttempt.smoke === 'passed'
         ? priorAttempt
@@ -1710,15 +1816,6 @@ export async function deploy(
       output.status = o.dryRun ? 'planned' : 'ok';
       return succeed();
     }
-    const resuming =
-      priorAttempt &&
-      [
-        'preparing_upload',
-        'upload_pending',
-        'uploaded',
-        'configuring',
-        'activation_pending',
-      ].includes(priorAttempt.phase);
     if (
       resuming &&
       (priorAttempt.phase !== 'preparing_upload' || priorAttempt.script_creation !== undefined) &&
@@ -1726,14 +1823,13 @@ export async function deploy(
     )
       return conflict('bindings:secret_text');
     if (resuming) {
-      if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
-        return conflict('artifact_sha256');
       if (priorAttempt.settings_sha256 !== settingsHash) return conflict('settings_sha256');
-      if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
     }
-    if (!resuming) {
-      if (current.versions.length > 1) return conflict('deployment');
-      let managed = priorAttempt?.intended_settings ?? verified?.intended_settings;
+    if (!resuming && current.versions.length > 1) return conflict('deployment');
+    checkManaged();
+    function checkManaged() {
+      if (resuming) return;
+      let managed = priorAttempt?.intended_settings ?? recordedVerified?.intended_settings;
       if (priorAttempt?.phase === 'failed' || priorAttempt?.phase === 'rolled_back')
         managed =
           restoredSnapshot(
@@ -1744,7 +1840,7 @@ export async function deploy(
           ) ?? conflict('managed_settings');
       if (
         live.routes.some(
-          (r) => !intended.routes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
+          (r) => !requestedRoutes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
         )
       )
         return conflict('routes', 'routes:unmanaged_own');
@@ -1786,6 +1882,8 @@ export async function deploy(
         artifact_sha256: artifact.artifactHash,
         assets_sha256: artifact.assetsHash,
         settings_sha256: settingsHash,
+        providers_sha256: providersText === null ? null : digest(providersText),
+        ...(providersText === null ? {} : { providers_text: providersText }),
         secret_names: allNames,
         build_info: artifact.info,
         version_id: null,
@@ -1924,6 +2022,12 @@ export async function deploy(
     }
     if (!a.version_id) return unknown();
     await version(api, base, a.version_id, a, allNames, plainBindings);
+    if (providersText !== null) {
+      recordDeploymentHistory(journal.deployment!, {
+        plainBinding: { name: 'PB_IDP_PROVIDERS', text: providersText },
+      });
+      await save(store, journal, now);
+    }
     if (rollout < 100) {
       const preview = await contract.preview(api, identity.script_name, a.version_id);
       if (preview.version_id !== a.version_id || !preview.bindings_verified)
@@ -2138,16 +2242,22 @@ export async function deploy(
           : failure instanceof CloudflareError && failure.stage === 'prebuilt'
             ? failure
             : failure instanceof CloudflareError
-              ? new CloudflareError(
-                  failure.code,
-                  failure.exitCode,
-                  failure.retryable,
-                  'deploy',
-                  failure.status,
-                  failure.check,
-                  failure.providerCode,
-                  failure.source,
-                  failure.fields,
+              ? Object.assign(
+                  new CloudflareError(
+                    failure.code,
+                    failure.exitCode,
+                    failure.retryable,
+                    'deploy',
+                    failure.status,
+                    failure.check,
+                    failure.providerCode,
+                    failure.source,
+                    failure.fields,
+                  ),
+                  {
+                    message:
+                      inputMessages.get(failure) ?? new CloudflareError(failure.code).message,
+                  },
                 )
               : new CloudflareError('provider_failure', 1, false, 'deploy'),
       ),

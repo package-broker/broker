@@ -218,6 +218,7 @@ function harness() {
       [NEWEST, { id: NEWEST, annotations: {}, resources: { bindings: [] } }],
     ]),
     calls: [] as { path: string; method: string; body: unknown; auth: string | null }[],
+    settingsVersion: null as string | null,
     uploadLost: false,
     uploadAbsent: false,
     activationLost: false,
@@ -316,7 +317,7 @@ function harness() {
       return ok(h.active);
     }
     if (path === base + '/settings') {
-      const current = h.versions.get(h.active.versions[0]?.version_id ?? '');
+      const current = h.versions.get(h.settingsVersion ?? h.active.versions[0]?.version_id ?? '');
       const currentBindings = (current?.resources as { bindings: unknown[] } | undefined)?.bindings;
       return ok({
         tags: [
@@ -4288,4 +4289,499 @@ it.each([
 ])('rejects malformed identity metadata: %s', async (_name, identity) => {
   await writeIdentity(identity);
   await expect(validateDeploymentArtifact(out)).rejects.toMatchObject({ code: 'invalid_input' });
+});
+
+const providersSentinel = 'PROVIDERS_DISPLAY_SENTINEL';
+const providersValue = JSON.stringify([
+  {
+    id: 'test',
+    kind: 'oidc',
+    displayName: providersSentinel,
+    issuer: 'https://idp.example.test',
+    clientId: 'broker',
+    policy: { verifiedDomains: ['example.test'], autoJoin: false },
+  },
+]);
+function liveProviders(h: ReturnType<typeof harness>, text: unknown, type = 'plain_text') {
+  h.versions.get(OLD)!.resources = {
+    bindings: [
+      { type: 'd1', name: 'DB', id: DB },
+      { type, name: 'PB_IDP_PROVIDERS', text },
+    ],
+  };
+}
+const providerUploads = (h: ReturnType<typeof harness>) =>
+  h.calls.filter((c) => c.path === base + '/versions' && c.method === 'POST');
+const uploadedProviders = (h: ReturnType<typeof harness>) =>
+  (h.metadata!.bindings as Record<string, unknown>[]).filter((b) => b.name === 'PB_IDP_PROVIDERS');
+
+it('sets compact providers, journals only their hash, and changes versions only when needed', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  const o = options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } });
+  const success = await deploy(o);
+  expect(success.exitCode).toBe(0);
+  expect(JSON.stringify(success.output)).not.toContain(providersSentinel);
+  expect(uploadedProviders(h)).toEqual([
+    { type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersValue },
+  ]);
+  expect((await store.read())!.deployment!.history!.hashed_bindings).toEqual([
+    { name: 'PB_IDP_PROVIDERS', sha256: [digest(providersValue)] },
+  ]);
+  expect((await store.read())!.deployment!.attempt.providers_text).toBe(providersValue);
+  expect(JSON.stringify((await store.read())!.deployment!.history)).not.toContain(
+    providersSentinel,
+  );
+  expect((await store.read())!.deployment!.history!.plain_bindings).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ name: 'PB_IDP_PROVIDERS' })]),
+  );
+  const verified = (await store.read())!;
+  verified.deployment!.attempt.phase = 'verified';
+  verified.deployment!.attempt.smoke = 'passed';
+  await store.write(verified);
+  expect((await deploy(o)).exitCode).toBe(0);
+  expect(providerUploads(h)).toHaveLength(1);
+  o.providers = { kind: 'set', value: '[]', ids: [] };
+  expect((await deploy(o)).exitCode).toBe(0);
+  expect(providerUploads(h)).toHaveLength(2);
+  expect(uploadedProviders(h)[0]!.text).toBe('[]');
+});
+
+it.each(['remove', 'absent'] as const)(
+  'uploads no providers for %s with nothing live',
+  async (kind) => {
+    const h = harness();
+    expect((await deploy(options(h, { providers: { kind } }))).exitCode).toBe(0);
+    expect(uploadedProviders(h)).toEqual([]);
+    expect((await store.read())!.deployment!.history!.hashed_bindings).toBeUndefined();
+  },
+);
+
+it('removes live providers through the exact uploaded binding set', async () => {
+  const h = harness();
+  liveProviders(h, providersValue);
+  expect((await deploy(options(h, { providers: { kind: 'remove' } }))).exitCode).toBe(0);
+  expect(uploadedProviders(h)).toEqual([]);
+  const candidate = h.versions.get(CANDIDATE)!.resources as { bindings: { name: string }[] };
+  expect(candidate.bindings.some((b) => b.name === 'PB_IDP_PROVIDERS')).toBe(false);
+  expect((await store.read())!.deployment!.history!.hashed_bindings).toBeUndefined();
+});
+
+it('preserves valid live providers byte for byte on a legacy artifact', async () => {
+  const h = harness();
+  const value = ` \n${providersValue}\n `;
+  liveProviders(h, value);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(uploadedProviders(h)[0]!.text).toBe(value);
+  expect((await store.read())!.deployment!.history!.hashed_bindings).toEqual([
+    { name: 'PB_IDP_PROVIDERS', sha256: [digest(value)] },
+  ]);
+});
+
+it.each<[string, unknown]>([
+  ['secret_text', undefined],
+  ['plain_text', 3],
+  ['plain_text', '{' + providersSentinel],
+  ['plain_text', JSON.stringify([{ displayName: providersSentinel }])],
+  ['json', providersValue],
+])('refuses invalid live providers (%s) without leaking values', async (type, value) => {
+  const h = harness();
+  liveProviders(h, value, type);
+  const result = await deploy(options(h));
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message:
+      type === 'secret_text'
+        ? 'Remove the secret first: wrangler secret delete PB_IDP_PROVIDERS'
+        : 'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
+  });
+  expect(providerUploads(h)).toHaveLength(0);
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+});
+
+it.each(['legacy', 'disabled'])('refuses set providers for a %s artifact', async (mode) => {
+  if (mode === 'disabled') await writeIdentity({ runtimeProviders: false, compiled: [] });
+  const h = harness();
+  const result = await deploy(
+    options(h, {
+      providers: { kind: 'set', value: providersValue, ids: ['test'] },
+    }),
+  );
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: expect.stringContaining(mode === 'legacy' ? 'legacy' : 'runtimeProviders'),
+  });
+  expect(JSON.stringify(result)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(0);
+});
+
+it('resumes a lost upload with frozen providers after live providers become invalid', async () => {
+  const h = harness();
+  liveProviders(h, providersValue);
+  h.uploadLost = true;
+  const first = await deploy(options(h));
+  expect(first.exitCode).not.toBe(0);
+  expect(JSON.stringify(first)).not.toContain(providersSentinel);
+  expect((await store.read())!.deployment!.attempt.phase).toBe('upload_pending');
+  liveProviders(h, 'invalid changed live value');
+  const second = await deploy(options(h));
+  expect(second.exitCode).toBe(0);
+  expect(JSON.stringify(second)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(1);
+  expect(uploadedProviders(h)[0]!.text).toBe(providersValue);
+});
+
+async function pendingProviders(h: ReturnType<typeof harness>, value = providersValue) {
+  liveProviders(h, value);
+  const send = h.fetch;
+  h.fetch = vi.fn(async (input, init) =>
+    String(input).endsWith('/assets-upload-session')
+      ? new Response('', { status: 403 })
+      : send(input, init),
+  );
+  expect((await deploy(options(h))).exitCode).not.toBe(0);
+  h.fetch = send;
+  const attempt = (await store.read())!.deployment!.attempt;
+  expect(attempt.phase).toBe('preparing_upload');
+  expect(attempt.providers_text).toBe(value);
+  return attempt;
+}
+
+it.each(['changed', 'remove', 'same', 'absent'])(
+  'checks explicit providers on resume before upload: %s',
+  async (mode) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    await pendingProviders(h);
+    expect(providerUploads(h)).toHaveLength(0);
+    liveProviders(h, 'changed invalid live value');
+    const providers: DeployOptions['providers'] =
+      mode === 'remove'
+        ? { kind: 'remove' }
+        : mode === 'absent'
+          ? { kind: 'absent' }
+          : { kind: 'set', value: mode === 'same' ? providersValue : '[]', ids: [] };
+    const result = await deploy(options(h, { providers }));
+    if (mode === 'changed' || mode === 'remove') {
+      expect(result.output.error?.code).toBe('configuration_conflict');
+      expect(result.output.checks).toContainEqual({
+        name: 'settings_sha256',
+        status: 'configuration_conflict',
+      });
+      expect(providerUploads(h)).toHaveLength(0);
+    } else {
+      expect(result.exitCode).toBe(0);
+      expect(providerUploads(h)).toHaveLength(1);
+      expect(uploadedProviders(h)[0]!.text).toBe(providersValue);
+      expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+    }
+  },
+);
+
+it.each(['missing', 'mismatch'])(
+  'refuses an unusable frozen provider attempt field: %s',
+  async (mode) => {
+    const h = harness();
+    await pendingProviders(h);
+    const journal = (await store.read())!;
+    if (mode === 'missing') delete journal.deployment!.attempt.providers_text;
+    else journal.deployment!.attempt.providers_text = '[]';
+    await store.write(journal);
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: 'providers',
+      status: 'configuration_conflict',
+    });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it.each(['verified', 'failed', 'rolled_back'] as const)(
+  'removes frozen provider text atomically when inventory reaches %s',
+  async (phase) => {
+    const h = harness();
+    liveProviders(h, providersValue);
+    expect((await deploy(options(h))).exitCode).toBe(0);
+    const journal = (await store.read())!;
+    const attempt = journal.deployment!.attempt;
+    expect(attempt.providers_text).toBe(providersValue);
+    attempt.phase = phase;
+    if (phase === 'verified') attempt.smoke = 'passed';
+    await store.write(journal);
+    const stored = (await store.read())!.deployment!;
+    expect(stored.attempt).not.toHaveProperty('providers_text');
+    expect(stored.attempt.providers_sha256).toBe(digest(providersValue));
+    expect(JSON.stringify(stored.history)).not.toContain(providersSentinel);
+    expect(await readFile(store.path, 'utf8')).not.toContain(providersSentinel);
+  },
+);
+
+it('rejects oversized UTF-8 provider text in inventory reads and writes', async () => {
+  const h = harness();
+  await pendingProviders(h);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.providers_text = 'é'.repeat(2561);
+  await expect(store.write(journal)).rejects.toMatchObject({ code: 'invalid_inventory' });
+  await writeFile(store.path, JSON.stringify(journal));
+  await expect(store.read()).rejects.toMatchObject({ code: 'invalid_inventory' });
+});
+
+it.each(['set', 'remove', 'absent'] as const)(
+  'refuses an installed provider secret for %s',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    h.installed.push('PB_IDP_PROVIDERS');
+    const result = await deploy(
+      options(h, {
+        providers: kind === 'set' ? { kind, value: providersValue, ids: ['test'] } : { kind },
+      }),
+    );
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: expect.stringContaining('wrangler secret delete PB_IDP_PROVIDERS'),
+    });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it.each(['set', 'remove', 'absent'] as const)(
+  'refuses selecting the provider secret for %s',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    for (const selection of [{ secret: ['PB_IDP_PROVIDERS'] }, { secrets: 'PB_IDP_PROVIDERS' }]) {
+      const h = harness();
+      const result = await deploy(
+        options(h, {
+          ...selection,
+          providers: kind === 'set' ? { kind, value: providersValue, ids: ['test'] } : { kind },
+        }),
+      );
+      expect(result.output.error?.code).toBe('invalid_input');
+      expect(mutations(h)).toHaveLength(0);
+    }
+  },
+);
+
+it('preserves active providers when script settings show a different version', async () => {
+  const h = harness();
+  liveProviders(h, providersValue);
+  h.settingsVersion = NEWEST;
+  h.versions.get(NEWEST)!.resources = {
+    bindings: [
+      { type: 'd1', name: 'DB', id: DB },
+      { type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: '[]' },
+    ],
+  };
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(uploadedProviders(h)[0]!.text).toBe(providersValue);
+});
+
+it.each(['equal', 'different', 'absent'])(
+  'handles providers in a managed split deployment: %s',
+  async (mode) => {
+    const h = harness();
+    liveProviders(h, providersValue);
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+    const journal = (await store.read())!;
+    journal.deployment!.attempt.phase = 'verified';
+    journal.deployment!.attempt.smoke = 'passed';
+    await store.write(journal);
+    h.settingsVersion = CANDIDATE;
+    if (mode === 'different') liveProviders(h, '[]');
+    if (mode === 'absent') h.versions.get(OLD)!.resources = { bindings: [] };
+    const result = await deploy(options(h, { rollout: 25 }));
+    if (mode === 'equal') {
+      expect(result.exitCode).toBe(0);
+      expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+    } else expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(providerUploads(h)).toHaveLength(1);
+  },
+);
+
+it.each(['absent', 'remove'] as const)(
+  'allows %s on a runtimeProviders false artifact',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: false, compiled: [] });
+    const h = harness();
+    liveProviders(h, providersValue);
+    expect((await deploy(options(h, { providers: { kind } }))).exitCode).toBe(0);
+    expect(uploadedProviders(h)).toHaveLength(kind === 'absent' ? 1 : 0);
+  },
+);
+
+it.each(['duplicate', 'duplicate-member', 'invalid-dry-run'])(
+  'refuses invalid preserved providers: %s',
+  async (mode) => {
+    const h = harness();
+    liveProviders(
+      h,
+      mode === 'duplicate-member'
+        ? '[{"id":"a","id":"b"}]'
+        : mode === 'invalid-dry-run'
+          ? '{'
+          : providersValue,
+    );
+    if (mode === 'duplicate') {
+      const resources = h.versions.get(OLD)!.resources as { bindings: unknown[] };
+      resources.bindings.push({
+        type: 'plain_text',
+        name: 'PB_IDP_PROVIDERS',
+        text: providersValue,
+      });
+    }
+    const result = await deploy(options(h, { dryRun: mode === 'invalid-dry-run' }));
+    expect(result.output.error?.code).toBe('invalid_input');
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it('absent preserves providers on a verified receipt without another upload', async () => {
+  const h = harness();
+  liveProviders(h, providersValue);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  await store.write(journal);
+  const result = await deploy(options(h, { providers: { kind: 'absent' } }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+it.each(['deployment', 'managed_settings'])(
+  'reports %s conflict before invalid live providers',
+  async (field) => {
+    const h = harness();
+    liveProviders(h, '{');
+    if (field === 'deployment')
+      h.active.versions = [
+        { version_id: OLD, percentage: 50 },
+        { version_id: NEWEST, percentage: 50 },
+      ];
+    else h.schedules = ['* * * * *'];
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({ name: field, status: 'configuration_conflict' });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it('refuses preserved provider documents padded beyond the runtime byte bound', async () => {
+  const h = harness();
+  liveProviders(h, `${providersValue}${' '.repeat(5121)}`);
+  const result = await deploy(options(h));
+  expect(result.output.error?.code).toBe('invalid_input');
+  expect(providerUploads(h)).toHaveLength(0);
+});
+
+it('resumes with an explicit compact set equal to the frozen non-compact value', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  const value = JSON.stringify(JSON.parse(providersValue), null, 2);
+  await pendingProviders(h, value);
+  liveProviders(h, 'changed live value');
+  const result = await deploy(
+    options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(uploadedProviders(h)[0]!.text).toBe(value);
+  expect(JSON.stringify(result.output)).not.toContain(providersSentinel);
+});
+
+it.each(['set', 'remove', 'absent'] as const)(
+  'refuses an active-version provider secret for %s',
+  async (kind) => {
+    await writeIdentity({ runtimeProviders: true, compiled: [] });
+    const h = harness();
+    liveProviders(h, undefined, 'secret_text');
+    h.settingsVersion = NEWEST;
+    const result = await deploy(
+      options(h, {
+        providers: kind === 'set' ? { kind, value: providersValue, ids: ['test'] } : { kind },
+      }),
+    );
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: expect.stringContaining('wrangler secret delete PB_IDP_PROVIDERS'),
+    });
+    expect(providerUploads(h)).toHaveLength(0);
+  },
+);
+
+it.each([undefined, {}, { bindings: null }, { bindings: {} }])(
+  'reports providers conflict for non-array version bindings: %j',
+  async (resources) => {
+    const h = harness();
+    h.settingsVersion = NEWEST;
+    h.versions.get(OLD)!.resources = resources;
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: 'providers',
+      status: 'configuration_conflict',
+    });
+  },
+);
+
+it('fetches the single active version only once while preserving providers', async () => {
+  const h = harness();
+  liveProviders(h, providersValue);
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  expect(
+    h.calls.filter((c) => c.path === `${base}/versions/${OLD}` && c.method === 'GET'),
+  ).toHaveLength(1);
+});
+
+it.each(['artifact', 'rollout'])(
+  'checks resumed %s before active provider bindings',
+  async (field) => {
+    const h = harness();
+    await pendingProviders(h);
+    h.settingsVersion = NEWEST;
+    h.versions.get(OLD)!.resources = { bindings: {} };
+    if (field === 'artifact') await writeFile(join(out, 'worker.js'), 'export default {};');
+    const result = await deploy(options(h, field === 'rollout' ? { rollout: 25 } : {}));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(result.output.checks).toContainEqual({
+      name: field === 'artifact' ? 'artifact_sha256' : 'requested_rollout',
+      status: 'configuration_conflict',
+    });
+  },
+);
+
+it('keeps no-op ordering before managed reconciliation without providers involvement', async () => {
+  const h = harness();
+  expect((await deploy(options(h))).exitCode).toBe(0);
+  const journal = (await store.read())!;
+  journal.deployment!.attempt.phase = 'verified';
+  journal.deployment!.attempt.smoke = 'passed';
+  journal.deployment!.attempt.intended_settings.schedules = [];
+  await store.write(journal);
+  const result = await deploy(options(h));
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({ stage: 'deploy', action: 'unchanged' });
+  expect(providerUploads(h)).toHaveLength(1);
+});
+
+it('replaces in-flight provider text without copying it into history', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [] });
+  const h = harness();
+  expect(
+    (await deploy(options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } })))
+      .exitCode,
+  ).toBe(0);
+  expect(
+    (await deploy(options(h, { providers: { kind: 'set', value: '[]', ids: [] } }))).exitCode,
+  ).toBe(0);
+  const journal = (await store.read())!.deployment!;
+  expect(journal.attempt.providers_text).toBe('[]');
+  expect(journal.history!.hashed_bindings).toContainEqual({
+    name: 'PB_IDP_PROVIDERS',
+    sha256: [digest(providersValue), digest('[]')],
+  });
+  expect(await readFile(store.path, 'utf8')).not.toContain(providersSentinel);
 });

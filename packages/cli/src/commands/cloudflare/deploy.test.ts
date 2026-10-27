@@ -5338,3 +5338,219 @@ it('copies the identity hash into last_verified through the real smoke path', as
   expect(deployment.attempt.identity_sha256).toBe(expected);
   expect(deployment.last_verified!.identity_sha256).toBe(expected);
 });
+
+const identityOf = (result: Awaited<ReturnType<typeof deploy>>) =>
+  (result.output as Record<string, unknown>).identity;
+const hexDigest = expect.stringMatching(/^[a-f0-9]{64}$/);
+const identityLeaks = [
+  'IDP_SENTINEL',
+  providersSentinel,
+  'idp.example.com',
+  'idp.example.test',
+  'old.example.test',
+  'team.example.com',
+  'a'.repeat(64),
+  'oidc:',
+  'access:',
+];
+function expectNoIdentityLeak(result: Awaited<ReturnType<typeof deploy>>) {
+  const serialized = JSON.stringify(result.output);
+  for (const value of identityLeaks) expect(serialized).not.toContain(value);
+}
+it('dry-run lists compiled providers without overrides or values', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+  const h = harness();
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [
+      { id: 'corp', type: 'oidc', source: 'compiled' },
+      { id: 'access', type: 'cloudflare-access', source: 'compiled' },
+    ],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: null,
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+  expect(mutations(h)).toEqual([]);
+});
+it('dry-run reports a runtime entry that overrides a compiled id', async () => {
+  await writeIdentity({
+    runtimeProviders: true,
+    compiled: [{ id: 'test', kind: 'oidc', anchor: 'oidc:https://old.example.test' }],
+  });
+  const h = providerHarness();
+  const result = await deploy(
+    options(h, {
+      dryRun: true,
+      secret: ['PB_IDP_TEST_CLIENT_SECRET'],
+      providers: { kind: 'set', value: providersValue, ids: ['test'] },
+    }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [{ id: 'test', type: 'oidc', source: 'runtime' }],
+    overrides: ['test'],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: digest(providersValue),
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+  expect(mutations(h)).toEqual([]);
+});
+it('dry-run reports a compiled entry displaced by a runtime anchor with its reason', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity, accessIdentity] });
+  const value = JSON.stringify([
+    { ...JSON.parse(providersValue)[0], issuer: 'https://idp.example.com' },
+  ]);
+  const h = providerHarness();
+  const result = await deploy(
+    options(h, { dryRun: true, providers: { kind: 'set', value, ids: ['test'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [
+      { id: 'access', type: 'cloudflare-access', source: 'compiled' },
+      { id: 'test', type: 'oidc', source: 'runtime' },
+    ],
+    overrides: [],
+    displaced: [{ id: 'corp', reason: 'displaced', by: 'test' }],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: digest(value),
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+});
+it('dry-run with --providers none drops runtime entries and the providers digest', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = providerHarness();
+  liveProviders(h, providersValue);
+  const result = await deploy(options(h, { dryRun: true, providers: { kind: 'remove' } }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: null,
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+});
+it('dry-run plans compiled-only when the artifact ignores runtime providers', async () => {
+  await writeIdentity({ runtimeProviders: false, compiled: [compiledIdentity] });
+  const value = JSON.stringify([
+    { ...JSON.parse(providersValue)[0], id: 'corp', issuer: 'https://idp.example.com' },
+  ]);
+  const h = harness();
+  h.installed.push('PB_IDP_CORP_CLIENT_SECRET');
+  liveProviders(h, value);
+  const result = await deploy(options(h, { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(identityOf(result)).toEqual({
+    providers: [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: false,
+    runtime_document_problem: null,
+    providers_sha256: digest(value),
+    identity_sha256: hexDigest,
+    skipped_checks: [],
+  });
+  expectNoIdentityLeak(result);
+});
+it.each([
+  ['an explicit value', true],
+  ['the preserved live value', false],
+])('dry-run preview cleanup carries identity for %s', async (_name, explicit) => {
+  const h = harness();
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const j = (await store.read())!;
+  j.deployment!.attempt.preview = 'cleanup_pending';
+  await store.write(j);
+  const before = mutations(h).length;
+  const result = await deploy(
+    options(h, {
+      dryRun: true,
+      ...(explicit
+        ? { providers: { kind: 'set' as const, value: providersValue, ids: ['test'] } }
+        : {}),
+    }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.output.plan).toContainEqual({
+    stage: 'deploy',
+    action: 'reconcile_preview_cleanup',
+  });
+  expect(identityOf(result)).toEqual({
+    providers: explicit
+      ? [
+          { id: 'corp', type: 'oidc', source: 'compiled' },
+          { id: 'test', type: 'oidc', source: 'runtime' },
+        ]
+      : [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+    overrides: [],
+    displaced: [],
+    runtime_providers_applied: true,
+    runtime_document_problem: null,
+    providers_sha256: explicit ? digest(providersValue) : null,
+    identity_sha256: explicit ? hexDigest : null,
+    skipped_checks: explicit ? [] : ['live_providers'],
+  });
+  expectNoIdentityLeak(result);
+  expect(mutations(h)).toHaveLength(before);
+});
+it.each([
+  ['{', 'syntax'],
+  ['{}', 'not_array'],
+] as const)(
+  'reports a runtime document problem (%s) and keeps the compiled set',
+  async (value, problem) => {
+    const { dryRunIdentity } = await import('./deploy.js');
+    const identity = dryRunIdentity(
+      { runtimeProviders: true, compiled: [compiledIdentity as never] },
+      value,
+      null,
+    );
+    expect(identity).toMatchObject({
+      providers: [{ id: 'corp', type: 'oidc', source: 'compiled' }],
+      overrides: [],
+      displaced: [],
+      runtime_document_problem: problem,
+    });
+    expect(
+      dryRunIdentity(
+        { runtimeProviders: false, compiled: [compiledIdentity as never] },
+        value,
+        null,
+      ),
+    ).toMatchObject({ runtime_providers_applied: false, runtime_document_problem: null });
+  },
+);
+it('dry-run reports identity null for a legacy artifact', async () => {
+  const result = await deploy(options(harness(), { dryRun: true }));
+  expect(result.exitCode).toBe(0);
+  expect(result.output).toHaveProperty('identity', null);
+  expectNoIdentityLeak(result);
+});
+it('a deploy that is not a dry run has no identity key', async () => {
+  await writeIdentity({ runtimeProviders: true, compiled: [compiledIdentity] });
+  const h = providerHarness();
+  const result = await deploy(
+    options(h, { providers: { kind: 'set', value: providersValue, ids: ['test'] } }),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(Object.hasOwn(result.output, 'identity')).toBe(false);
+});

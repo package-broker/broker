@@ -8,8 +8,17 @@ import {
   validatePlatformPorts,
   type PlatformPortConfig,
 } from '@package-broker/core/platform/port-config';
-import { PLUGIN_BINDABLE_PORTS, providerSecretName } from '@package-broker/core/plugin';
-import { parseRuntimeProviders } from '@package-broker/plugin-sso-oidc/definitions';
+import {
+  PLUGIN_BINDABLE_PORTS,
+  providerSecretName,
+  type IdentityDescriptor,
+} from '@package-broker/core/plugin';
+import {
+  parseRuntimeProviders,
+  planProviders,
+  type ProviderPlan,
+  type RuntimeProviders,
+} from '@package-broker/plugin-sso-oidc/definitions';
 import { snapshotIdentityDescriptor } from '@package-broker/core/kernel/registry';
 import {
   assertPrebuiltConfiguration,
@@ -30,6 +39,7 @@ import {
   failCommand,
   object,
   wasNotSent,
+  type CommandEnvelope,
   type CommandResult,
 } from './api.js';
 import { resolveZone } from './zone.js';
@@ -133,6 +143,58 @@ function desiredProviders(
       'live PB_IDP_PROVIDERS is not valid; pass --providers <file> or --providers none',
     );
   }
+}
+type PlannedCompiled = { readonly id: string } & (
+  | { readonly kind: 'oidc'; readonly issuer: string }
+  | { readonly kind: 'cloudflare-access'; readonly teamDomain: string; readonly audience: string }
+);
+function planned({ id, kind, anchor }: IdentityDescriptor['compiled'][number]): PlannedCompiled {
+  const value = anchor.slice(anchor.indexOf(':') + 1);
+  const slash = value.indexOf('/');
+  return kind === 'oidc'
+    ? { id, kind, issuer: value }
+    : { id, kind, teamDomain: value.slice(0, slash), audience: value.slice(slash + 1) };
+}
+function identityDigest(descriptor: IdentityDescriptor | null, providers: string | null) {
+  return descriptor === null && providers === null
+    ? null
+    : digest(canonical({ descriptor, providers }));
+}
+export function dryRunIdentity(
+  descriptor: IdentityDescriptor | null,
+  providersText: string | null,
+  identityHash: string | null,
+  skippedChecks: string[] = [],
+) {
+  if (descriptor === null) return null;
+  let runtime: RuntimeProviders = parseRuntimeProviders(undefined);
+  if (descriptor.runtimeProviders)
+    try {
+      runtime = parseRuntimeProviders(providersText ?? undefined);
+    } catch {
+      runtime = { ...runtime, documentProblem: 'unreadable' };
+    }
+  const plan = (
+    planProviders as (c: readonly PlannedCompiled[], r: RuntimeProviders) => ProviderPlan
+  )(descriptor.compiled.map(planned), runtime);
+  return {
+    providers: plan.effective.map((entry) => ({
+      id: entry.id,
+      type: entry.kind,
+      source: runtime.accepted.includes(entry) ? 'runtime' : 'compiled',
+    })),
+    overrides: [...plan.overridden],
+    displaced: [
+      ...plan.displaced.map(({ compiled: id, by }) => ({ id, reason: 'displaced', by })),
+      ...plan.suppressed.map((id) => ({ id, reason: 'suppressed', by: null })),
+      ...plan.overflow.map((id) => ({ id, reason: 'overflow', by: null })),
+    ],
+    runtime_providers_applied: descriptor.runtimeProviders,
+    runtime_document_problem: runtime.documentProblem,
+    providers_sha256: providersText === null ? null : digest(providersText),
+    identity_sha256: identityHash,
+    skipped_checks: skippedChecks,
+  };
 }
 function frozenProviders(attempt: DeploymentAttempt): string | null {
   const value = attempt.providers_text ?? null;
@@ -1376,7 +1438,8 @@ export async function deploy(
   operations: { materializePrebuilt?: typeof materializePrebuilt } = {},
 ): Promise<CommandResult> {
   let prebuiltOut: string | undefined;
-  const output = commandEnvelope('deploy', o.dryRun);
+  const output: CommandEnvelope & { identity?: ReturnType<typeof dryRunIdentity> } =
+    commandEnvelope('deploy', o.dryRun);
   const result: CommandResult = { exitCode: 1, output };
   const succeed = () => {
     result.exitCode = 0;
@@ -1560,6 +1623,18 @@ export async function deploy(
     if (journal.deployment && journal.deployment.attempt.preview !== 'disabled') {
       if (o.dryRun) {
         output.plan.push({ stage: 'deploy', action: 'reconcile_preview_cleanup' });
+        const known =
+          o.providers?.kind === 'set'
+            ? o.providers.value
+            : o.providers?.kind === 'remove'
+              ? null
+              : undefined;
+        output.identity = dryRunIdentity(
+          artifact.identity,
+          known ?? null,
+          known === undefined ? null : identityDigest(artifact.identity, known),
+          known === undefined ? ['live_providers'] : [],
+        );
         output.status = 'planned';
         return succeed();
       }
@@ -1723,10 +1798,8 @@ export async function deploy(
       if (new Set(values).size > 1) return conflict('providers');
       providersText = values[0] ?? null;
     }
-    const identityHash =
-      artifact.identity === null && providersText === null
-        ? null
-        : digest(canonical({ descriptor: artifact.identity, providers: providersText }));
+    const identityHash = identityDigest(artifact.identity, providersText);
+    if (o.dryRun) output.identity = dryRunIdentity(artifact.identity, providersText, identityHash);
     const plainBindings = bindings(journal, artifact.ports, url);
     if (providersText !== null)
       plainBindings.push({ type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersText });

@@ -238,8 +238,8 @@ Exit codes: 0 success; 1 other error; 2 usage error, `--confirm` differs from `-
 
 These commands install and operate a deployment on Cloudflare. They record the resources they create in an inventory file under `.pb/state/cloudflare/` in the project. The Worker script is named `<worker-name>-<environment>`, where the environment defaults to `production`. Each command takes `--json` for a JSON result on stdout and `--dry-run` to show the plan without changing anything. `--prebuilt` uses the prebuilt Cloudflare distribution instead of a local build.
 
-<!-- source: packages/cli/src/commands/cloudflare/inventory.ts:587 -->
-<!-- source: packages/cli/src/commands/cloudflare/inventory.ts:916 -->
+<!-- source: packages/cli/src/commands/cloudflare/inventory.ts:628 -->
+<!-- source: packages/cli/src/commands/cloudflare/inventory.ts:957 -->
 <!-- source: packages/cli/src/cli.ts:418 -->
 
 ### `pb cloudflare setup`

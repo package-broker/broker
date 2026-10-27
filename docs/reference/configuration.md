@@ -20,7 +20,7 @@ import ssoOidc from '@package-broker/plugin-sso-oidc';
 
 export default defineConfig({
   platform: 'cloudflare',
-  plugins: [ssoOidc(), github()],
+  plugins: [ssoOidc({ runtimeProviders: true }), github()],
   assets: [defineAssets({ kind: 'ui', provider: '@package-broker/ui-assets' })],
   platformPorts: {
     cloudflare: {
@@ -213,6 +213,7 @@ The stanza holds names, never values. Every `...Env` key takes an environment va
 | `DEPLOYMENT_ID`                                           | when the build has a `node` ports stanza | Label on log and metric records. 1 to 64 characters from `A-Z a-z 0-9 _ . -`.                                                                                                                                                                                                    |
 | Variables named in the stanza                             | as the stanza says                       | For example `PB_BLOB_ROOT` in the root `broker.config.ts`.                                                                                                                                                                                                                       |
 | `PB_IDP_<PROVIDER>_CLIENT_SECRET`                         | for each OIDC provider                   | See [Authentication and sessions](authentication.md#single-sign-on).                                                                                                                                                                                                             |
+| `PB_IDP_PROVIDERS`                                        | no                                       | Single sign-on providers read at run time when the plugin is built with `runtimeProviders: true`. See [Providers at run time](authentication.md#providers-at-run-time).                                                                                                          |
 
 <!-- source: packages/runtime-node/src/startup.ts:141 -->
 <!-- source: packages/runtime-node/src/startup.ts:164 -->
@@ -229,6 +230,7 @@ The stanza holds names, never values. Every `...Env` key takes an environment va
 <!-- source: packages/core/src/secrets/keyring-verifier.ts:45 -->
 <!-- source: packages/runtime-node/src/startup.ts:408 -->
 <!-- source: packages/core/src/identity/secret-name.ts:3 -->
+<!-- source: packages/plugin-sso-oidc/src/runtime.ts:5 -->
 
 When startup fails, the server writes a `startup.failed` record to stderr with the error name, for example `StartupConfigError` or `SecretsConfigError`, and exits with code 1. For configuration errors the record also carries `config_key`, the name of the variable or setting that failed. An invalid `PORT` or `PB_SHUTDOWN_TIMEOUT_MS` is reported as a plain-text line instead, for example `Error: PORT must be an integer between 1 and 65535`.
 
@@ -237,20 +239,21 @@ When startup fails, the server writes a `startup.failed` record to stderr with t
 
 ## Worker bindings and variables
 
-| Name                                      | Kind             | Meaning                                                                       |
-| ----------------------------------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `DB`                                      | D1 binding       | The database. The name is fixed.                                              |
-| The `blob.binding` name                   | R2 binding       | `STORAGE` in the root config.                                                 |
-| The `jobs.binding` name                   | Queue producer   | `JOBS` in the root config. The same queue must have this Worker as consumer.  |
-| The `observability.analyticsBinding` name | Analytics Engine | `ANALYTICS` in the root config.                                               |
-| `MCP_RATE_LIMIT`                          | Rate Limiting    | Required when `mcp.enabled` is `true`.                                        |
-| `ASSETS`                                  | assets binding   | Optional. Serves the web interface; without it the UI routes are not mounted. |
-| `DEPLOYMENT_ID`                           | variable         | As on Node.                                                                   |
-| `PB_PUBLIC_URL`                           | variable         | As on Node.                                                                   |
-| `PB_MASTER_KEY`                           | secret           | The master key. There is no `_FILE` form on Workers.                          |
-| `PB_MASTER_KEY_PREVIOUS`                  | secret           | As on Node.                                                                   |
-| `PB_KEYRING_RESEED`                       | variable         | As on Node.                                                                   |
-| `PB_IDP_<PROVIDER>_CLIENT_SECRET`         | secret           | As on Node.                                                                   |
+| Name                                      | Kind               | Meaning                                                                       |
+| ----------------------------------------- | ------------------ | ----------------------------------------------------------------------------- |
+| `DB`                                      | D1 binding         | The database. The name is fixed.                                              |
+| The `blob.binding` name                   | R2 binding         | `STORAGE` in the root config.                                                 |
+| The `jobs.binding` name                   | Queue producer     | `JOBS` in the root config. The same queue must have this Worker as consumer.  |
+| The `observability.analyticsBinding` name | Analytics Engine   | `ANALYTICS` in the root config.                                               |
+| `MCP_RATE_LIMIT`                          | Rate Limiting      | Required when `mcp.enabled` is `true`.                                        |
+| `ASSETS`                                  | assets binding     | Optional. Serves the web interface; without it the UI routes are not mounted. |
+| `DEPLOYMENT_ID`                           | variable           | As on Node.                                                                   |
+| `PB_PUBLIC_URL`                           | variable           | As on Node.                                                                   |
+| `PB_MASTER_KEY`                           | secret             | The master key. There is no `_FILE` form on Workers.                          |
+| `PB_MASTER_KEY_PREVIOUS`                  | secret             | As on Node.                                                                   |
+| `PB_KEYRING_RESEED`                       | variable           | As on Node.                                                                   |
+| `PB_IDP_<PROVIDER>_CLIENT_SECRET`         | secret             | As on Node.                                                                   |
+| `PB_IDP_PROVIDERS`                        | variable or secret | As on Node.                                                                   |
 
 <!-- source: packages/runtime-cloudflare/src/index.ts:273 -->
 <!-- source: packages/runtime-cloudflare/src/index.ts:372 -->

@@ -49,6 +49,7 @@ import {
   createJobSender,
   createQueueHandler,
   enqueueAndNotify,
+  notifyCommitted,
   jobNotification,
   type QueueLike,
   type QueueMessageLike,
@@ -1036,6 +1037,31 @@ describe('producer', () => {
     expect(result).toEqual({ id, created: true });
     expect(order).toEqual([`send:${id}`, 'returned']);
     expect((await f.repository.status(f.ctx, id))?.state).toBe('queued');
+  });
+
+  it('wakes a committed job with one undelayed notification', async () => {
+    const { queue, sent } = fakeQueue();
+    await notifyCommitted({
+      send: createJobSender(queue),
+      observability: recorder().observability,
+    })(orgA, someJob);
+    expect(sent).toEqual([
+      { body: { v: JOB_NOTIFICATION_VERSION, org: orgA.orgId, job: someJob } },
+    ]);
+  });
+
+  it('logs a failed wake-up by error name only and resolves', async () => {
+    const recorded = recorder();
+    await expect(
+      notifyCommitted({
+        send: () => Promise.reject(new Error('https://user:secret@example.test')),
+        observability: recorded.observability,
+      })(orgA, someJob),
+    ).resolves.toBeUndefined();
+    expect(recorded.logs).toEqual([
+      expect.objectContaining({ level: 'warn', event: 'job.notify_failed', job_id: someJob }),
+    ]);
+    expect(JSON.stringify(recorded.logs)).not.toContain('secret');
   });
 
   it('passes delaySeconds for a future runAt and leaves runAt beyond the queue limit to Cron', async () => {

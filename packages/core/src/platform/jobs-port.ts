@@ -26,6 +26,7 @@ export interface JobStore {
     row: JobEnqueue,
   ): Promise<{ readonly id: string; readonly created: boolean }>;
   status(ctx: OrgContext, id: string): Promise<JobStatus | null>;
+  notify?(ctx: OrgContext, id: string): Promise<void>;
 }
 
 export interface JobInitiator {
@@ -136,6 +137,15 @@ export function createRepositoryJobs(input: RepositoryJobsInput): JobsFactory {
         const status = await store.status(ctx, id);
         if (status === null || !owns(pluginId, status.type)) return null;
         return status;
+      },
+      async notify(ctx, id) {
+        try {
+          const status = await store.status(ctx, id);
+          if (status === null || !owns(pluginId, status.type) || status.state !== 'queued') return;
+          await store.notify?.(ctx, id);
+        } catch {
+          // A lost wake-up leaves the committed row for the cron sweep.
+        }
       },
     } satisfies Jobs);
   };

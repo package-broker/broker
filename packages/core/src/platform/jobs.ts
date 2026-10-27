@@ -144,6 +144,8 @@ export interface Jobs {
     input: EnqueueInput,
   ): Promise<{ id: string; created: boolean }>;
   get(ctx: OrgContext, id: string): Promise<JobStatus | null>;
+  /** Wakes the runner for a job row committed outside `enqueue`; best effort, never rejects. */
+  notify?(ctx: OrgContext, id: string): Promise<void>;
 }
 
 function assertName(value: unknown): asserts value is string {

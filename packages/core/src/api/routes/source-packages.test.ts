@@ -9,6 +9,7 @@ import { collectRegistrations } from '../../kernel/registry.js';
 import { registerCoreJob } from '../../runtime/core-jobs.js';
 import type { BlobStore } from '../../platform/blob.js';
 import type { Cache } from '../../platform/cache.js';
+import type { JobStatus } from '../../platform/jobs.js';
 import { createKernel } from '../../kernel/kernel.js';
 import { createKeyring } from '../../secrets/keyring.js';
 import { defineApi } from '../route.js';
@@ -17,6 +18,7 @@ import { SOURCE_PACKAGE_API_SPEC } from './sources-schemas.js';
 import type { SourcePackageProbe } from '../../ingest/source-package.js';
 import type { SourcePackageStore } from './source-packages.js';
 import { packageSyncEnqueueInput, PACKAGE_SYNC_JOB_TYPE } from '../../ingest/package-sync-job.js';
+import * as packageSync from '../../ingest/package-sync-job.js';
 import { sourcePackageRoutes } from './source-packages.js';
 
 const ORIGIN = 'https://broker.test';
@@ -37,6 +39,7 @@ async function fixture(
     probeResult?: Awaited<ReturnType<SourcePackageProbe>>;
     requestResult?: Awaited<ReturnType<SourcePackageStore['request']>>;
     platform?: boolean;
+    wakeUp?: boolean;
     projectState?: 'absent' | 'archived' | 'invisible';
     sourceState?: 'absent' | 'foreign' | 'own';
     attached?: boolean;
@@ -77,14 +80,30 @@ async function fixture(
           ),
     ),
   };
+  const committedJobs = new Map<string, JobStatus>();
   const store = {
     present: vi.fn<SourcePackageStore['present']>().mockResolvedValue(options.present ?? false),
-    request: vi
-      .fn<SourcePackageStore['request']>()
-      .mockResolvedValue(options.requestResult ?? 'accepted'),
+    request: vi.fn<SourcePackageStore['request']>(async (_org, _fence, input) => {
+      const result = options.requestResult ?? 'accepted';
+      if (result === 'accepted' && input.job !== undefined) {
+        const job = input.job;
+        committedJobs.set(job.id, {
+          id: job.id,
+          type: job.type,
+          state: 'queued',
+          attempts: 0,
+          maxAttempts: job.maxAttempts,
+          runAt: clock.now().toISOString(),
+          lastErrorCode: null,
+          history: [],
+        });
+      }
+      return result;
+    }),
   };
   const probe = vi.fn<SourcePackageProbe>().mockResolvedValue(options.probeResult ?? 'found');
   const enqueue = vi.fn().mockResolvedValue({ id: 'job-1', created: true });
+  const notify = vi.fn().mockResolvedValue(undefined);
   const projectSources = {
     list: vi.fn(async () => (options.attached === false ? [] : [{ sourceId: SOURCE }])),
   };
@@ -119,7 +138,11 @@ async function fixture(
           platformServices: {
             blob: {} as BlobStore,
             cache: {} as Cache,
-            jobStore: { enqueue, status: async () => null },
+            jobStore: {
+              enqueue,
+              status: async (_org, id) => committedJobs.get(id) ?? null,
+              ...(options.wakeUp === false ? {} : { notify }),
+            },
           },
         }),
     resolveOrg: async () => orgContext('org-1'),
@@ -166,7 +189,12 @@ async function fixture(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
     );
-  return { request, store, probe, enqueue, projectSources, sources, projects, log };
+  return { request, store, probe, enqueue, notify, projectSources, sources, projects, log };
+}
+
+function expectNoJob(f: Awaited<ReturnType<typeof fixture>>) {
+  expect(f.store.request.mock.calls.filter((call) => call[2].job !== undefined)).toEqual([]);
+  expect(f.notify).not.toHaveBeenCalled();
 }
 
 it('declares a strict API spec with the same permission as source sync', () => {
@@ -183,7 +211,17 @@ it.each([
   const f = await fixture({ ecosystem, type });
   const response = await f.request('POST', path, { name });
   expect(response.status).toBe(202);
-  expect(await response.json()).toEqual({ name, state: 'queued', jobId: 'job-1' });
+  const job = f.store.request.mock.calls[1]?.[2].job;
+  expect(job).toBeDefined();
+  expect(await response.json()).toEqual({ name, state: 'queued', jobId: job?.id });
+  const opId = (
+    JSON.parse(f.store.request.mock.calls[1]![2].audit!.payloadJson) as { op_id: string }
+  ).op_id;
+  expect(job?.idempotencyKey).toBe(`${PACKAGE_SYNC_JOB_TYPE}:${opId}`);
+  expect(f.notify).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), job?.id);
+  expect(f.notify.mock.invocationCallOrder[0]).toBeGreaterThan(
+    f.store.request.mock.invocationCallOrder[1]!,
+  );
   expect(f.sources.get).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), SOURCE);
   expect(f.projectSources.list).toHaveBeenCalledExactlyOnceWith(orgContext('org-1'), {
     projectId: PROJECT,
@@ -209,6 +247,15 @@ it.each([
         sourceIp: '203.0.113.7',
         payloadJson: expect.any(String),
       }),
+      job: expect.objectContaining({
+        type: PACKAGE_SYNC_JOB_TYPE,
+        projectId: PROJECT,
+        initiatorTokenId: null,
+        payloadJson: JSON.stringify({ key: name, sourceId: SOURCE }),
+        resourceKey: await packageSyncEnqueueInput({ sourceId: SOURCE, key: name }, 'unused').then(
+          (x) => x.resourceKey,
+        ),
+      }),
     },
   );
   expect(f.store.request).toHaveBeenCalledTimes(2);
@@ -220,23 +267,8 @@ it.each([
   );
   const audit = f.store.request.mock.calls[1]?.[2].audit;
   expect(JSON.parse(audit!.payloadJson).changes).toEqual({ package_name: { new: name } });
-  expect(f.store.request.mock.invocationCallOrder[0]).toBeLessThan(
-    f.enqueue.mock.invocationCallOrder[0]!,
-  );
-  expect(f.enqueue.mock.invocationCallOrder[0]).toBeLessThan(
-    f.store.request.mock.invocationCallOrder[1]!,
-  );
-  expect(f.enqueue).toHaveBeenCalledExactlyOnceWith(
-    orgContext('org-1'),
-    expect.objectContaining({
-      type: PACKAGE_SYNC_JOB_TYPE,
-      projectId: PROJECT,
-      payloadJson: JSON.stringify({ key: name, sourceId: SOURCE }),
-      resourceKey: await packageSyncEnqueueInput({ sourceId: SOURCE, key: name }, 'unused').then(
-        (x) => x.resourceKey,
-      ),
-    }),
-  );
+  expect(f.store.request.mock.calls[0]?.[2].job).toBeUndefined();
+  expect(f.enqueue).not.toHaveBeenCalled();
 });
 
 it('returns 200 without upstream or queue work when already complete', async () => {
@@ -246,6 +278,7 @@ it('returns 200 without upstream or queue work when already complete', async () 
   expect(await response.json()).toEqual({ name: 'acme/widget', state: 'present' });
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
   expect(f.store.request).toHaveBeenCalledOnce();
   expect(f.store.request.mock.calls[0]?.[2].audit).toBeUndefined();
 });
@@ -256,7 +289,7 @@ it('normalizes Composer names and answers repeated completed requests with 200',
   expect(f.probe.mock.calls[0]?.[2]).toBe('acme/widget');
   f.store.present.mockResolvedValue(true);
   expect((await f.request('POST', path, { name: 'Acme/Widget' })).status).toBe(200);
-  expect(f.enqueue).toHaveBeenCalledTimes(1);
+  expect(f.store.request.mock.calls.filter((call) => call[2].job !== undefined)).toHaveLength(1);
 });
 
 it('returns package_not_found for a definitive upstream 404', async () => {
@@ -267,6 +300,7 @@ it('returns package_not_found for a definitive upstream 404', async () => {
     error: { code: 'package_not_found', message: 'Package not found' },
   });
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
   expect(f.store.request).not.toHaveBeenCalled();
 });
 
@@ -279,6 +313,7 @@ it.each(['vcs', 'composer_repository', 'hosted'] as const)(
     expect(await response.json()).toMatchObject({ error: { code: 'unsupported_source_kind' } });
     expect(f.probe).not.toHaveBeenCalled();
     expect(f.enqueue).not.toHaveBeenCalled();
+    expectNoJob(f);
   },
 );
 
@@ -294,6 +329,7 @@ it.each([
   expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(404);
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it('requires project source write before querying sources or upstream', async () => {
@@ -302,6 +338,7 @@ it('requires project source write before querying sources or upstream', async ()
   expect(f.sources.get).not.toHaveBeenCalled();
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it.each([
@@ -322,6 +359,7 @@ it.each([
   expect(await response.text()).not.toContain(name);
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it.each([{}, { name: '' }, { name: 1 }, { name: 'acme/widget', extra: true }])(
@@ -342,6 +380,8 @@ it.each([
   const f = await fixture({ requestResult });
   expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(status);
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
+  expect(f.store.request).toHaveBeenCalledOnce();
 });
 
 it.each([
@@ -353,6 +393,7 @@ it.each([
   const f = await fixture({ probeResult });
   expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(status);
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it('does not expose upstream exceptions', async () => {
@@ -363,6 +404,7 @@ it('does not expose upstream exceptions', async () => {
   expect(await response.text()).not.toContain('secret');
   expect(JSON.stringify(f.log.mock.calls)).not.toContain('secret');
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it('requires a queue for new packages', async () => {
@@ -371,33 +413,38 @@ it('requires a queue for new packages', async () => {
   expect(f.probe).not.toHaveBeenCalled();
 });
 
-it('does not expose queue exceptions', async () => {
+it('does not expose store exceptions', async () => {
   const f = await fixture();
-  f.enqueue.mockRejectedValue(new Error('https://user:secret@example.test'));
+  f.store.request
+    .mockResolvedValueOnce('accepted')
+    .mockRejectedValueOnce(new Error('https://user:secret@example.test'));
   const response = await f.request('POST', path, { name: 'acme/widget' });
-  expect(response.status).toBe(503);
+  expect(response.status).toBe(500);
+  expect(f.notify).not.toHaveBeenCalled();
   expect(await response.text()).not.toContain('secret');
   expect(JSON.stringify(f.log.mock.calls)).not.toContain('secret');
-  expect(f.store.request).toHaveBeenCalledOnce();
+  expect(f.store.request).toHaveBeenCalledTimes(2);
   expect(f.store.request.mock.calls[0]?.[2].audit).toBeUndefined();
+  expect(f.enqueue).not.toHaveBeenCalled();
 });
 
 it('queues an attached project-owned proxy', async () => {
   const f = await fixture({ sourceState: 'own' });
   expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(202);
-  expect(f.enqueue).toHaveBeenCalledOnce();
+  expect(f.store.request.mock.calls[1]?.[2].job).toBeDefined();
 });
 
 it('refuses an unattached project-owned proxy', async () => {
   const f = await fixture({ sourceState: 'own', attached: false });
   expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(404);
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it('allows project source write to request an attached organization proxy (DEC-9)', async () => {
   const f = await fixture({ permissions: ['project:sources:write'] });
   expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(202);
-  expect(f.enqueue).toHaveBeenCalledOnce();
+  expect(f.store.request.mock.calls[1]?.[2].job).toBeDefined();
 });
 
 it('requires the selected source attachment even when another source is attached', async () => {
@@ -407,6 +454,7 @@ it('requires the selected source attachment even when another source is attached
   expect(f.store.request).not.toHaveBeenCalled();
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it.each([false, true])(
@@ -425,7 +473,7 @@ it.each([false, true])(
         key,
         expect.any(AbortSignal),
       );
-      expect(JSON.parse(f.enqueue.mock.calls[0]![1].payloadJson)).toEqual({
+      expect(JSON.parse(f.store.request.mock.calls[1]![2].job!.payloadJson)).toEqual({
         sourceId: SOURCE,
         key,
       });
@@ -449,6 +497,7 @@ it('returns a fixed 400 unsupported_package when the private registry cannot ser
   });
   expect(f.store.request).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
+  expectNoJob(f);
 });
 
 it('documents DEC-9 and every route error with the shared OpenAPI error schema', () => {
@@ -466,5 +515,78 @@ it('documents DEC-9 and every route error with the shared OpenAPI error schema',
         content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
       },
     });
+  }
+});
+
+it('writes the job and the audit in one fenced call after the authority check', async () => {
+  const f = await fixture();
+  expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(202);
+  expect(f.store.request).toHaveBeenCalledTimes(2);
+  const [first, second] = f.store.request.mock.calls;
+  expect(first?.[2]).toEqual({ projectId: PROJECT, sourceId: SOURCE });
+  expect(second?.[2].audit).toBeDefined();
+  expect(second?.[2].job).toMatchObject({
+    maxAttempts: 25,
+    runAt: null,
+    idempotencyKey: expect.stringMatching(/^core:package-sync:v1:/),
+  });
+  expect(f.enqueue).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['forbidden', 403],
+  ['not_found', 404],
+  ['unavailable', 503],
+] as const)(
+  'returns %s when the atomic write is refused after the authority check',
+  async (refusal, status) => {
+    const f = await fixture();
+    f.store.request.mockResolvedValueOnce('accepted').mockResolvedValueOnce(refusal);
+    const response = await f.request('POST', path, { name: 'acme/widget' });
+    expect(response.status).toBe(status);
+    expect(await response.text()).not.toContain('queued');
+    expect(f.store.request.mock.calls[1]?.[2].job).toBeDefined();
+    expect(f.enqueue).not.toHaveBeenCalled();
+    expect(f.notify).not.toHaveBeenCalled();
+  },
+);
+
+it('answers 202 when the post-commit wake-up fails', async () => {
+  const f = await fixture();
+  f.notify.mockRejectedValue(new Error('https://user:secret@example.test'));
+  const response = await f.request('POST', path, { name: 'acme/widget' });
+  expect(response.status).toBe(202);
+  expect(await response.text()).not.toContain('secret');
+  expect(JSON.stringify(f.log.mock.calls)).not.toContain('secret');
+  expect(f.notify).toHaveBeenCalledOnce();
+});
+
+it('answers 202 when the platform has no wake-up, as on Node', async () => {
+  const f = await fixture({ wakeUp: false });
+  expect((await f.request('POST', path, { name: 'acme/widget' })).status).toBe(202);
+  expect(f.store.request.mock.calls[1]?.[2].job).toBeDefined();
+  expect(f.notify).not.toHaveBeenCalled();
+});
+
+it('answers 503 without writing when job building fails', async () => {
+  const f = await fixture();
+  const build = vi
+    .spyOn(packageSync, 'packageSyncEnqueueInput')
+    .mockRejectedValue(new Error('https://user:secret@example.test'));
+  try {
+    const response = await f.request('POST', path, { name: 'acme/widget' });
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain('secret');
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain('secret');
+    expect(build).toHaveBeenCalledOnce();
+    expect(f.store.request).toHaveBeenCalledExactlyOnceWith(
+      orgContext('org-1'),
+      expect.anything(),
+      { projectId: PROJECT, sourceId: SOURCE },
+    );
+    expect(f.enqueue).not.toHaveBeenCalled();
+    expectNoJob(f);
+  } finally {
+    build.mockRestore();
   }
 });

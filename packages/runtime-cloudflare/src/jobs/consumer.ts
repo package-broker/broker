@@ -218,6 +218,20 @@ export function enqueueAndNotify(deps: {
   };
 }
 
+/** Wakes the consumer for a job committed in another batch; a failed send is left to Cron. */
+export function notifyCommitted(deps: {
+  readonly send: SendJob;
+  readonly observability: Observability;
+}): (ctx: OrgContext, id: string) => Promise<void> {
+  return async (ctx, id) => {
+    try {
+      await deps.send(ctx, id);
+    } catch (error) {
+      reportJobEvent(deps.observability, 'warn', 'job.notify_failed', error, { job_id: id });
+    }
+  };
+}
+
 type Outcome = 'succeeded' | 'failed' | 'released' | 'lease_lost';
 
 interface Execution {

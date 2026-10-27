@@ -30,6 +30,7 @@ import {
   type CommandResult,
 } from './api.js';
 import { resolveZone } from './zone.js';
+import { routeConflict } from './routes.js';
 import {
   InventoryStore,
   InventoryTransaction,
@@ -720,31 +721,22 @@ async function readSettings(
   for (const zone of new Set([...routes.map((r) => r.zone_id), ...managedZones])) {
     const listed = await zoneRoutes(api, zone);
     for (const r of listed) {
-      if (r.script !== j.identity.script_name && typeof r.pattern === 'string') {
-        const attachedHost = r.pattern.replace(/^https?:\/\//, '').split('/')[0]!;
+      const reason = routeConflict(zone, r, routes, j.identity.script_name);
+      if (reason)
+        return conflict(
+          'routes',
+          `routes:${reason}`,
+          ...(typeof r.id === 'string' && /^[a-f0-9]{32}$/.test(r.id)
+            ? [`routes:route_id:${r.id}`]
+            : []),
+        );
+      if (r.script === j.identity.script_name) {
         if (
-          routes.some((x) => {
-            const wanted = x.pattern.replace(/^https?:\/\//, '').split('/')[0]!;
-            return (
-              attachedHost === '*' ||
-              attachedHost === wanted ||
-              (attachedHost.startsWith('*.') && wanted.endsWith(attachedHost.slice(1)))
-            );
-          })
-        )
-          return conflict('routes');
-      }
-      if (
-        r.script === j.identity.script_name ||
-        routes.some((x) => x.zone_id === zone && x.pattern === r.pattern)
-      ) {
-        if (
-          r.script !== j.identity.script_name ||
           !safeId(r.id) ||
           typeof r.pattern !== 'string' ||
           !/^[a-zA-Z0-9*./:-]{1,256}$/.test(r.pattern)
         )
-          return conflict('routes');
+          return conflict('routes', 'routes:own_invalid');
         foundRoutes.push({ id: r.id, zone_id: zone, pattern: r.pattern, script: r.script });
       }
     }
@@ -1748,7 +1740,7 @@ export async function deploy(
           (r) => !intended.routes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
         )
       )
-        return conflict('routes');
+        return conflict('routes', 'routes:unmanaged_own');
       // Never take over pre-existing attachments without a previous managed receipt.
       if (
         (live.consumer || live.schedules.length || live.routes.length || live.domain) &&
@@ -1964,7 +1956,10 @@ export async function deploy(
         !equal(part(expected), part(a.intended_settings)) &&
         !(kind === 'endpoints' && equal(expected.endpoints, restrictivePolicy(a)))
       )
-        return conflict(kind === 'consumer' ? 'queue_consumer' : kind);
+        return conflict(
+          kind === 'consumer' ? 'queue_consumer' : kind,
+          ...(kind === 'routes' ? ['routes:drift'] : []),
+        );
     }
     for (const kind of ['consumer', 'schedules', 'routes', 'domain'] as const) {
       const before = await readSettings(
@@ -1978,7 +1973,10 @@ export async function deploy(
       );
       const part = (v: ManagedSettings) => (withoutIds(v) as Record<string, unknown>)[kind];
       if (!equal(part(before), part(expected)) && !equal(part(before), part(a.intended_settings)))
-        return conflict(kind === 'consumer' ? 'queue_consumer' : kind);
+        return conflict(
+          kind === 'consumer' ? 'queue_consumer' : kind,
+          ...(kind === 'routes' ? ['routes:drift'] : []),
+        );
       if (!equal(part(before), part(a.intended_settings))) {
         const change = {
           kind,
@@ -2007,7 +2005,10 @@ export async function deploy(
         managedZones,
       );
       if (!equal(part(observed), part(a.intended_settings)))
-        return conflict(kind === 'consumer' ? 'queue_consumer' : kind);
+        return conflict(
+          kind === 'consumer' ? 'queue_consumer' : kind,
+          ...(kind === 'routes' ? ['routes:drift'] : []),
+        );
       expected = { ...expected, [kind]: observed[kind] };
       a.intended_settings = { ...a.intended_settings, [kind]: observed[kind] };
       if (!equal(withoutIds(observed), withoutIds(expected))) return conflict('managed_settings');

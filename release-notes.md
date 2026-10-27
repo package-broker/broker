@@ -1,0 +1,932 @@
+:robot: I have created a release *beep* *boop*
+---
+
+
+<details><summary>plugin-github: 0.1.0-rc.1</summary>
+
+## [0.1.0-rc.1](https://github.com/package-broker/broker/compare/plugin-github-v0.1.0-rc.0...plugin-github-v0.1.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* **core:** sync generations with package counts and child error codes ([#883](https://github.com/package-broker/broker/issues/883)) ([3390cd3](https://github.com/package-broker/broker/commit/3390cd371ff62330ebf2366f8ababef8efe32878))
+* **plugin-github:** GitHub webhook signature verifier ([#671](https://github.com/package-broker/broker/issues/671)) ([5dceeb3](https://github.com/package-broker/broker/commit/5dceeb32d61a9ff8b89c8ead76fc69586a5eb692))
+* **plugin-github:** per-repository discovery plan ([#509](https://github.com/package-broker/broker/issues/509)) ([2ae84dd](https://github.com/package-broker/broker/commit/2ae84dd2017565413137c7307e0bb8cc2dc96bf8))
+* **plugin-github:** wire the GitHub provider, App discovery and webhook verifier via SourceProviderContext ([#724](https://github.com/package-broker/broker/issues/724)) ([1a758df](https://github.com/package-broker/broker/commit/1a758df761df737cc967039d2ef0254c84375574))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+
+
+### Bug Fixes
+
+* **core:** narrowing a source selection never removes packages ([#771](https://github.com/package-broker/broker/issues/771)) ([ba1fc77](https://github.com/package-broker/broker/commit/ba1fc77d8561210d6eec594b4001b8b61e0637c4))
+* package-sync lease hold-back on finalize ([#727](https://github.com/package-broker/broker/issues/727)) ([142c79f](https://github.com/package-broker/broker/commit/142c79fbeb14ca84bf4fb86099f2e7fd6e95edc4))
+* **plugin-github:** bound token-source describes by manifest bytes and requests ([#858](https://github.com/package-broker/broker/issues/858)) ([4ca134a](https://github.com/package-broker/broker/commit/4ca134a807c3ad7fe5cb916e535411f42e0bdf95))
+* **plugin-github:** harden token sources after review ([#836](https://github.com/package-broker/broker/issues/836)) ([c903d15](https://github.com/package-broker/broker/commit/c903d15f99b84753cbc48af8bbebe8732acb7dd1))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>plugin-sso-oidc: 0.1.0-rc.1</summary>
+
+## [0.1.0-rc.1](https://github.com/package-broker/broker/compare/plugin-sso-oidc-v0.1.0-rc.0...plugin-sso-oidc-v0.1.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* **audit:** record SSO login in the session batch ([#827](https://github.com/package-broker/broker/issues/827)) ([1dd04e5](https://github.com/package-broker/broker/commit/1dd04e5a8e9f5a33b45b3f9c8b629b4f22d87cd6))
+* **core:** identity finish failures carry a closed-list detail code ([#752](https://github.com/package-broker/broker/issues/752)) ([afbf15f](https://github.com/package-broker/broker/commit/afbf15ff8a292ef866df079559688bb7b9997dee))
+* **plugin-sso-oidc:** groups claim mapping with a synthetic fixture ([#725](https://github.com/package-broker/broker/issues/725)) ([9a1bf63](https://github.com/package-broker/broker/commit/9a1bf6313f893e505fea4b5ae3fc5dd3833efdc7))
+* **sso-oidc:** accept email-authoritative domains for OIDC and Access ([#819](https://github.com/package-broker/broker/issues/819)) ([e439970](https://github.com/package-broker/broker/commit/e439970ffae924a2e6706c98743d26862f276444))
+
+
+### Bug Fixes
+
+* **core:** require an MCP limiter on Node and split non-touching session authentication ([#859](https://github.com/package-broker/broker/issues/859)) ([f14a75f](https://github.com/package-broker/broker/commit/f14a75fb9d001b77507f91d7f55840e17591a905))
+* **sso-oidc:** refuse an issuer host with uppercase letters ([#810](https://github.com/package-broker/broker/issues/810)) ([9fb58d1](https://github.com/package-broker/broker/commit/9fb58d128a2e8166cdac54a7de7b4cbc992b531c))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>ui-assets: 0.1.0-rc.1</summary>
+
+## [0.1.0-rc.1](https://github.com/package-broker/broker/compare/ui-assets-v0.1.0-rc.0...ui-assets-v0.1.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* **cli:** stage configured UI assets beside both build targets ([#648](https://github.com/package-broker/broker/issues/648)) ([1c4cae5](https://github.com/package-broker/broker/commit/1c4cae523b088b47c5f9824112bf4cb77ef2aa38))
+* **ui-assets:** build-only UI assets bridge package ([#626](https://github.com/package-broker/broker/issues/626)) ([3fc4b1e](https://github.com/package-broker/broker/commit/3fc4b1e6ed24baa6ba72bd983d90e4513c374c17))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/ui bumped to 2.0.0-rc.1
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>cli: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.0...cli-v2.0.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* `pb openapi` and manifest ([#427](https://github.com/package-broker/broker/issues/427)) ([5f48ada](https://github.com/package-broker/broker/commit/5f48ada0761d4ede983c833d556a2ccbe1f34626))
+* **audit:** record SSO login in the session batch ([#827](https://github.com/package-broker/broker/issues/827)) ([1dd04e5](https://github.com/package-broker/broker/commit/1dd04e5a8e9f5a33b45b3f9c8b629b4f22d87cd6))
+* **cli:** cutover check that compares lock resolution between two registries ([#881](https://github.com/package-broker/broker/issues/881)) ([8cca1f9](https://github.com/package-broker/broker/commit/8cca1f97ea7f775e6efe72a317b2009d51b67ded))
+* **cli:** deploy and set up Cloudflare from the prebuilt dist-cloudflare package ([#897](https://github.com/package-broker/broker/issues/897)) ([22c05ea](https://github.com/package-broker/broker/commit/22c05ea5466e1fdc9794c9e246c1fd94691a1544))
+* **cli:** emit release-date overrides from a Private Packagist snapshot ([#896](https://github.com/package-broker/broker/issues/896)) ([5a1d035](https://github.com/package-broker/broker/commit/5a1d035d93a942c6b0d5433c8d4bcfb7501184ca))
+* **cli:** fetch a Private Packagist organization snapshot for import ([#878](https://github.com/package-broker/broker/issues/878)) ([fe73a73](https://github.com/package-broker/broker/commit/fe73a73e70ccbaf4ea12d69f556508c1288b402b))
+* **cli:** opt-in Workers automatic tracing ([#869](https://github.com/package-broker/broker/issues/869)) ([136202d](https://github.com/package-broker/broker/commit/136202df128f88805e04b361a2bc089cf3953caf))
+* **cli:** pass BrokerConfig observability from broker.config.ts to both runtimes ([#542](https://github.com/package-broker/broker/issues/542)) ([e1a971d](https://github.com/package-broker/broker/commit/e1a971d7c6ad7a539341077e6188a4f44f2437b9))
+* **cli:** pb cloudflare deploy with artifact checks, guarded endpoints and journaled recovery ([#712](https://github.com/package-broker/broker/issues/712)) ([35a6635](https://github.com/package-broker/broker/commit/35a66355daa9121197fcaafaddb8ed7f0036a2a2))
+* **cli:** pb cloudflare provision with ownership and durable inventory ([#613](https://github.com/package-broker/broker/issues/613)) ([4b2fc04](https://github.com/package-broker/broker/commit/4b2fc043837ce025de7a971ae3d0b5ebb97de07d))
+* **cli:** pb cloudflare setup with resumable install and browser setup URL ([#746](https://github.com/package-broker/broker/issues/746)) ([f7ba99d](https://github.com/package-broker/broker/commit/f7ba99d99d40f97759edb065215d728558f90851))
+* **cli:** pb cloudflare smoke with bounded checks and guarded rollback ([#719](https://github.com/package-broker/broker/issues/719)) ([067c033](https://github.com/package-broker/broker/commit/067c033662c80e47a7b63673f435958602618697))
+* **cli:** pb cloudflare teardown and janitor delete only inventoried resources ([#770](https://github.com/package-broker/broker/issues/770)) ([1a79ab4](https://github.com/package-broker/broker/commit/1a79ab480509ccf76a9c142b0af5fb442e73a953))
+* **cli:** pb import client to submit, track, credential, verify and accept import runs ([#861](https://github.com/package-broker/broker/issues/861)) ([ee5bf17](https://github.com/package-broker/broker/commit/ee5bf17ea10ef4775f0af3dcb1df674db65a5df0))
+* **cli:** pb import satis plan compiles satis.json into a validated import manifest ([#660](https://github.com/package-broker/broker/issues/660)) ([6c84605](https://github.com/package-broker/broker/commit/6c84605310fc99a441d95ff249988119b9117083))
+* **cli:** plan an import manifest from a Private Packagist snapshot ([#894](https://github.com/package-broker/broker/issues/894)) ([8d9cc01](https://github.com/package-broker/broker/commit/8d9cc013b34e178e71694c6251d629abd104efc3))
+* **cli:** real Cloudflare provider and deploy contracts ([#807](https://github.com/package-broker/broker/issues/807)) ([f10dfb2](https://github.com/package-broker/broker/commit/f10dfb20d098eb308052fd0f3451d87f425bf541))
+* **cli:** record the git commit and dirty state in build info and test deploys against observed Cloudflare shapes ([#844](https://github.com/package-broker/broker/issues/844)) ([73a9acd](https://github.com/package-broker/broker/commit/73a9acdb4c76e0c6ef0c77b729f591fba84b1aa7))
+* **cli:** stage configured UI assets beside both build targets ([#648](https://github.com/package-broker/broker/issues/648)) ([1c4cae5](https://github.com/package-broker/broker/commit/1c4cae523b088b47c5f9824112bf4cb77ef2aa38))
+* **core:** audited one-shot acceptance of a refused source removal ([#769](https://github.com/package-broker/broker/issues/769)) ([f45ad6f](https://github.com/package-broker/broker/commit/f45ad6ffe0cbbb63992aae8e8480b9b10be7f121))
+* **core:** management API wave b: package manage and import routes with the token fence ([#780](https://github.com/package-broker/broker/issues/780)) ([11e6e05](https://github.com/package-broker/broker/commit/11e6e05fa6dbf4fcce99f1ec5322c47798cd6853))
+* **core:** report schema drift on /health/ready ([#901](https://github.com/package-broker/broker/issues/901)) ([4e79afd](https://github.com/package-broker/broker/commit/4e79afd3bbb6698b96b4835f7e267ad974f03fbe))
+* **core:** vulnerability status in the API and job wiring on Node and Workers ([#779](https://github.com/package-broker/broker/issues/779)) ([89a54fc](https://github.com/package-broker/broker/commit/89a54fc78a8a6d0e4e5154969389de66090cc8a9))
+* **db-sqlite:** composite (org_id, id) foreign keys in migrations 0020 and 0021 ([#681](https://github.com/package-broker/broker/issues/681)) ([4e49ba7](https://github.com/package-broker/broker/commit/4e49ba7e33cb0b3e2a728ebbfb09c25b9e6a0901))
+* **db:** keep package ecosystem equal to its source's ecosystem ([#818](https://github.com/package-broker/broker/issues/818)) ([89a1929](https://github.com/package-broker/broker/commit/89a1929c22bc7e31e9b4d2800482e4033842fa7e))
+* Docker smoke command and migration log wiring on the Node entry ([#715](https://github.com/package-broker/broker/issues/715)) ([c65e77b](https://github.com/package-broker/broker/commit/c65e77bc3b12548172773a23f3fe589f8554b5a2))
+* engine wiring prerequisites: token revoke adapters, provider-anchor reader, request-bound background work ([#437](https://github.com/package-broker/broker/issues/437)) ([39f71ba](https://github.com/package-broker/broker/commit/39f71ba13b78be8e25fa3df4e459d7ae0a6b7221))
+* **runtime-cloudflare:** wire the registry, codecs and guarded fetch into the Worker ([#654](https://github.com/package-broker/broker/issues/654)) ([5746d00](https://github.com/package-broker/broker/commit/5746d00238175bd9b1772f178ec65b2f2fe5659d))
+* **runtime-node:** Node entry: platformPorts manifest export, process handlers, sanitized startup failure ([#443](https://github.com/package-broker/broker/issues/443)) ([bf2634e](https://github.com/package-broker/broker/commit/bf2634edfef86b7d41458f1b6f86e5b478369c9a))
+* **runtime-node:** wire the registry, codecs and guarded fetch into the Node runtime ([#641](https://github.com/package-broker/broker/issues/641)) ([9c3f238](https://github.com/package-broker/broker/commit/9c3f238980324fb7bffa3c553b6d7c19e24e5d99))
+* **runtime:** compose organization Administration and carry config.tokens through the manifest ([#693](https://github.com/package-broker/broker/issues/693)) ([093998e](https://github.com/package-broker/broker/commit/093998e723c6ce591574490783acdd19cb6c5323))
+* **runtime:** mount /_pb/mcp when enabled; check the rate-limit binding at startup ([#802](https://github.com/package-broker/broker/issues/802)) ([79860d6](https://github.com/package-broker/broker/commit/79860d682570de674f3a2fae3f9ce598c24b7306))
+* **runtime:** serve /_pb/openapi.json and complete the API document ([#790](https://github.com/package-broker/broker/issues/790)) ([ec277e2](https://github.com/package-broker/broker/commit/ec277e2baf6226aa7e26be126fa30f39e7258a30))
+* **ui:** browser first-admin setup with a local QR and automated Playwright end to end ([#718](https://github.com/package-broker/broker/issues/718)) ([8fcda6e](https://github.com/package-broker/broker/commit/8fcda6ed00991b21ee544f410893d0750f9a05f1))
+* **ui:** committed openapi.json and generated UI types with a drift check ([#765](https://github.com/package-broker/broker/issues/765)) ([ab87962](https://github.com/package-broker/broker/commit/ab879625da660e2eca35e6a35968b6d9a050d856))
+* **ui:** sources page with write-only credentials and ordering ([#800](https://github.com/package-broker/broker/issues/800)) ([7b9718c](https://github.com/package-broker/broker/commit/7b9718cc5fdcb5335fca530657d1ec76643c0474))
+
+
+### Bug Fixes
+
+* **cli:** keep the OpenAPI document version at the API major ([#916](https://github.com/package-broker/broker/issues/916)) ([a37ff6a](https://github.com/package-broker/broker/commit/a37ff6af1244c0658f75c316eaee1406bc890814))
+* **cli:** look up Worker versions by name when the scripts listing has no worker_id ([#842](https://github.com/package-broker/broker/issues/842)) ([cac7652](https://github.com/package-broker/broker/commit/cac76528ad6c3fa04d2ea06d7ce6fd4aec2b7bb9))
+* **cli:** pb cloudflare provision hardening ([#632](https://github.com/package-broker/broker/issues/632)) ([f3edd17](https://github.com/package-broker/broker/commit/f3edd175e31c141d131683916687b04faa85fbf0))
+* **cli:** setup refuses deploy-time failures before provisioning ([#823](https://github.com/package-broker/broker/issues/823)) ([fe5ed0f](https://github.com/package-broker/broker/commit/fe5ed0f4b1c7cf08b6ab2d5b584b860baa9938ad))
+* **cli:** source-build deploy refuses pending migrations ([#888](https://github.com/package-broker/broker/issues/888)) ([000736b](https://github.com/package-broker/broker/commit/000736b54694b4498b36063665836f295e6ea8d4))
+* **cli:** teardown hardening: ownership tags, entry points disabled before the R2 drain, historical public-URL receipts ([#777](https://github.com/package-broker/broker/issues/777)) ([92976fd](https://github.com/package-broker/broker/commit/92976fd34948b169fc241c2c8eccd05dfae76e87))
+* **core:** D1 batches never exceed 200 statements ([#767](https://github.com/package-broker/broker/issues/767)) ([90cd307](https://github.com/package-broker/broker/commit/90cd307d702bbd790f4b0e73cd70574f71bfd9d7))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.1
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.1
+    * @package-broker/runtime-node bumped to 2.0.0-rc.1
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>core: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.0...core-v2.0.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* `authenticated` boundary ([#452](https://github.com/package-broker/broker/issues/452)) ([df90177](https://github.com/package-broker/broker/commit/df9017703cfaaf625c3a20c82f9cef6ad887c25a))
+* Administration holder checks from the repository, required provider anchors ([#414](https://github.com/package-broker/broker/issues/414)) ([3c7430a](https://github.com/package-broker/broker/commit/3c7430a0d07004fed9374fd13093be3a46b794dc))
+* Administration service: `audit` and idempotency ([#531](https://github.com/package-broker/broker/issues/531)) ([447dad7](https://github.com/package-broker/broker/commit/447dad78e9819bd179399984a8b8186da4f941c1))
+* apiRoute follow-ups: shared validation codes, linear-growth test, docs ([#431](https://github.com/package-broker/broker/issues/431)) ([8362a15](https://github.com/package-broker/broker/commit/8362a154fd1f211cbbf6406c4ec619a3ce38435a))
+* Audit verifier job ([#438](https://github.com/package-broker/broker/issues/438)) ([9e46394](https://github.com/package-broker/broker/commit/9e463944f98a67b08b2f4320db5ccbb9feb9fcc5))
+* **audit:** record identity unblock in the audit log ([#814](https://github.com/package-broker/broker/issues/814)) ([46fbb0f](https://github.com/package-broker/broker/commit/46fbb0f90f4992f2f9f40bc00e62726d4bb4103f))
+* **audit:** record local login and reauth in their session batches ([#825](https://github.com/package-broker/broker/issues/825)) ([04f64b3](https://github.com/package-broker/broker/commit/04f64b3e2f2916081b886de90bbe667fc33e1150))
+* **audit:** record logout in the revoke batch ([#830](https://github.com/package-broker/broker/issues/830)) ([d234716](https://github.com/package-broker/broker/commit/d23471642d72f73c643e1dfe1ed1acdac10be33c))
+* **audit:** record setup completion in the setup batch ([#828](https://github.com/package-broker/broker/issues/828)) ([8cdac9d](https://github.com/package-broker/broker/commit/8cdac9dbd2228f0f8f275329164523c07f4b29df))
+* **audit:** record SSO login in the session batch ([#827](https://github.com/package-broker/broker/issues/827)) ([1dd04e5](https://github.com/package-broker/broker/commit/1dd04e5a8e9f5a33b45b3f9c8b629b4f22d87cd6))
+* **audit:** record SSO reauthentication in the session batch ([#820](https://github.com/package-broker/broker/issues/820)) ([f9f500c](https://github.com/package-broker/broker/commit/f9f500c7b4d9ed941431fa24cb8295f4edbf1464))
+* **auth:** pass request id and client address into auth calls ([#812](https://github.com/package-broker/broker/issues/812)) ([bd522b1](https://github.com/package-broker/broker/commit/bd522b1f44f5432d9b93483c737f4fc447be7ebe))
+* branded NormalizedJson so catalogue writers cannot skip credential checks ([#418](https://github.com/package-broker/broker/issues/418)) ([57181d4](https://github.com/package-broker/broker/commit/57181d4e591e7f50b221e31f37f754303885b307))
+* BrokerConfig `mcp.enabled`, off by default ([#486](https://github.com/package-broker/broker/issues/486)) ([fd05ce1](https://github.com/package-broker/broker/commit/fd05ce1eed8aa35153bab2501f2a6f1482342141))
+* BrokerConfig flag to trust inbound W3C traceparent, off by default ([#476](https://github.com/package-broker/broker/issues/476)) ([692edd0](https://github.com/package-broker/broker/commit/692edd0e3048ec3380c83c4bf335524d1c585d96))
+* Caller permission routes for the UI: organization and project permissi ([#470](https://github.com/package-broker/broker/issues/470)) ([e341802](https://github.com/package-broker/broker/commit/e34180253951ca3bdb14a52ceaff4faba76251da))
+* **cli:** opt-in Workers automatic tracing ([#869](https://github.com/package-broker/broker/issues/869)) ([136202d](https://github.com/package-broker/broker/commit/136202df128f88805e04b361a2bc089cf3953caf))
+* **cli:** stage configured UI assets beside both build targets ([#648](https://github.com/package-broker/broker/issues/648)) ([1c4cae5](https://github.com/package-broker/broker/commit/1c4cae523b088b47c5f9824112bf4cb77ef2aa38))
+* Closure edges and leak-safe classification reads ([#422](https://github.com/package-broker/broker/issues/422)) ([f5b0b9a](https://github.com/package-broker/broker/commit/f5b0b9a148f548fe2232874413667fcc9d88e994))
+* Compose the catalogue writer and the visibility store ([#484](https://github.com/package-broker/broker/issues/484)) ([deff3b1](https://github.com/package-broker/broker/commit/deff3b108f73df1856922415f27b54e86e9dd5e6))
+* Composer corpus part 1: lookups and version forms ([#488](https://github.com/package-broker/broker/issues/488)) ([ce1a1db](https://github.com/package-broker/broker/commit/ce1a1dbde654cae387d97affeed33d566447bbea))
+* Composer document renderer: packages.json, p2 and ~dev ([#477](https://github.com/package-broker/broker/issues/477)) ([cdcc87a](https://github.com/package-broker/broker/commit/cdcc87a8148fdd06b2ec2ad1a104701513f3ae93))
+* Composer endpoints and route registration ([#612](https://github.com/package-broker/broker/issues/612)) ([a98b0ff](https://github.com/package-broker/broker/commit/a98b0ffb7f33b2531cf38347deebc110a92c9dbc))
+* Composer v1: accept a name listed in several include documents when th ([#469](https://github.com/package-broker/broker/issues/469)) ([d989343](https://github.com/package-broker/broker/commit/d989343b09e98374047ba93cacf3c1cb57d48b9b))
+* Composer v2 404 evidence: one absence rule for stable and ~dev ([#494](https://github.com/package-broker/broker/issues/494)) ([c5cfe19](https://github.com/package-broker/broker/commit/c5cfe191e2c586e8609e2d05dc33bc006f93920f))
+* **core:** access-loss paths enqueue selected-PAT revocation ([#694](https://github.com/package-broker/broker/issues/694)) ([c7a3077](https://github.com/package-broker/broker/commit/c7a307722ff7806c282186f4d577272be5ac3b53))
+* **core:** account e-mails for organization admins on admin routes ([#753](https://github.com/package-broker/broker/issues/753)) ([97536c8](https://github.com/package-broker/broker/commit/97536c826a31933a5d09864a8ae4c76d7d732e6a))
+* **core:** allowArchived route opt-in, projectActorOf and fence-key helpers ([#631](https://github.com/package-broker/broker/issues/631)) ([4d50dd8](https://github.com/package-broker/broker/commit/4d50dd88d8804c0e6e1b2e4228d4b8b9b06bc01d))
+* **core:** API module wave a mounts the management routes ([#762](https://github.com/package-broker/broker/issues/762)) ([78776e8](https://github.com/package-broker/broker/commit/78776e8f5bc6e687fde0ddecc9aa38dc5e6eaf91))
+* **core:** apply an ingest chunk under the session ([#582](https://github.com/package-broker/broker/issues/582)) ([7b33219](https://github.com/package-broker/broker/commit/7b33219f99735900eda2cc62da39f52344a47047))
+* **core:** attach and detach a source to a project ([#774](https://github.com/package-broker/broker/issues/774)) ([bd042b2](https://github.com/package-broker/broker/commit/bd042b26d72e8a2c9b5e451c4a0ff11688a2612e))
+* **core:** Audit catalogue, event builder and redaction ([#522](https://github.com/package-broker/broker/issues/522)) ([000b7d1](https://github.com/package-broker/broker/commit/000b7d1b11296f0f4f4014cb21a4aa0b36ef1fbb))
+* **core:** audit forwarder core for npm audit requests ([#882](https://github.com/package-broker/broker/issues/882)) ([72f1643](https://github.com/package-broker/broker/commit/72f1643ac42c87f71f339180c2a7f9dcf7755ad8))
+* **core:** Audit routes: list, head and project list ([#527](https://github.com/package-broker/broker/issues/527)) ([35c36b1](https://github.com/package-broker/broker/commit/35c36b1beea5d42d9bc14944695f82f105cad90a))
+* **core:** audit source create, update, resume and credential changes ([#853](https://github.com/package-broker/broker/issues/853)) ([f643cee](https://github.com/package-broker/broker/commit/f643cee62153cffa724b9da6c8b45f11eedd8a2d))
+* **core:** audited one-shot acceptance of a refused source removal ([#769](https://github.com/package-broker/broker/issues/769)) ([f45ad6f](https://github.com/package-broker/broker/commit/f45ad6ffe0cbbb63992aae8e8480b9b10be7f121))
+* **core:** auth route schemas and the api requirement for core routes ([#698](https://github.com/package-broker/broker/issues/698)) ([59f75a7](https://github.com/package-broker/broker/commit/59f75a7a9111239e8d981816fdddbda19e3bedf1))
+* **core:** authenticated routes refuse a stale or unbound SSO session ([#520](https://github.com/package-broker/broker/issues/520)) ([e383542](https://github.com/package-broker/broker/commit/e383542a11cf6111b40803b4352499c4ecdff27c))
+* **core:** baseline security headers on every response ([#513](https://github.com/package-broker/broker/issues/513)) ([83d3df1](https://github.com/package-broker/broker/commit/83d3df1e7279e50015912c85977803dc003b8a15))
+* **core:** blob lifecycle service with synchronous remove ([#588](https://github.com/package-broker/broker/issues/588)) ([aaba71a](https://github.com/package-broker/broker/commit/aaba71aaf47e7f150ec31b7cef23b1767c638b44))
+* **core:** bulk discovery with dry run and chunked apply ([#537](https://github.com/package-broker/broker/issues/537)) ([47e8339](https://github.com/package-broker/broker/commit/47e8339708cf205677adb6ba2f05b42c83388489))
+* **core:** Composer v1 include-kind describe ([#453](https://github.com/package-broker/broker/issues/453)) ([296676e](https://github.com/package-broker/broker/commit/296676e91162700e9c7cd75099f4908e907fd5bf))
+* **core:** composer_repository source provider (job-synced mirror) ([#804](https://github.com/package-broker/broker/issues/804)) ([e6b5914](https://github.com/package-broker/broker/commit/e6b5914c669769f4454f4bedd5274efc6dc6f3e8))
+* **core:** create, list and read service principals over HTTP ([#788](https://github.com/package-broker/broker/issues/788)) ([4788669](https://github.com/package-broker/broker/commit/4788669dedac1a5128a0a978b48733ac6ddf11e2))
+* **core:** credential references accept env: and file: only ([#594](https://github.com/package-broker/broker/issues/594)) ([6aec784](https://github.com/package-broker/broker/commit/6aec7849e10940da34ed3bc39208e252ac9464fc))
+* **core:** daily sweep enqueues offboarding for suspended users with live personal tokens ([#653](https://github.com/package-broker/broker/issues/653)) ([3376fed](https://github.com/package-broker/broker/commit/3376fed5eb3af7366d3396dc9cc188169ed0038f))
+* **core:** declared If-Match concurrency on POST actions ([#755](https://github.com/package-broker/broker/issues/755)) ([880d2d7](https://github.com/package-broker/broker/commit/880d2d73e90d0f2b038ff60d538346c0ef5c4a9d))
+* **core:** dist serving with lazy fill and re-mirror on miss ([#498](https://github.com/package-broker/broker/issues/498)) ([11a4e6e](https://github.com/package-broker/broker/commit/11a4e6ebc8820d8c4bebfe8f67c85039c87b80c7))
+* **core:** ETag and 304 on /_pb/ui assets ([#461](https://github.com/package-broker/broker/issues/461)) ([d3d4b80](https://github.com/package-broker/broker/commit/d3d4b809edda07d47e62a95aaffc570a7515ede6))
+* **core:** idempotent import run creation with credential window and binding status ([#841](https://github.com/package-broker/broker/issues/841)) ([855a7ce](https://github.com/package-broker/broker/commit/855a7ce7eb2ca5d159df5b7bcf98eb6180e4f9ad))
+* **core:** identity finish failures carry a closed-list detail code ([#752](https://github.com/package-broker/broker/issues/752)) ([afbf15f](https://github.com/package-broker/broker/commit/afbf15ff8a292ef866df079559688bb7b9997dee))
+* **core:** import apply job stages audited, fenced manifest writes ([#576](https://github.com/package-broker/broker/issues/576)) ([a2237eb](https://github.com/package-broker/broker/commit/a2237ebb92024e862beef2ce0f92f47983aa086b))
+* **core:** import credential window: write-only upload for approved runs ([#569](https://github.com/package-broker/broker/issues/569)) ([6ad54e9](https://github.com/package-broker/broker/commit/6ad54e98d82eaff157f404687ded0b778889ab31))
+* **core:** import rollback job and store contract ([#623](https://github.com/package-broker/broker/issues/623)) ([6586870](https://github.com/package-broker/broker/commit/658687095f57c3a7d06c97d4e938c79eb2781605))
+* **core:** import run service for create, approve, apply, cancel, accept and rollback ([#541](https://github.com/package-broker/broker/issues/541)) ([f3b9bdd](https://github.com/package-broker/broker/commit/f3b9bdd4e9d85812d59a795cd2a901e3e26d4817))
+* **core:** import verify job with rollback recovery from a dead verify ([#679](https://github.com/package-broker/broker/issues/679)) ([4f3f6a9](https://github.com/package-broker/broker/commit/4f3f6a9aacbb50d779cc35be56db21460a2549e8))
+* **core:** import-run API routes ([#732](https://github.com/package-broker/broker/issues/732)) ([8d13ce1](https://github.com/package-broker/broker/commit/8d13ce160139a7356b46de7af2bd56af7244e81f))
+* **core:** import-run get/list and token-capable verification request ([#720](https://github.com/package-broker/broker/issues/720)) ([5fb7a43](https://github.com/package-broker/broker/commit/5fb7a4362b6df181cdfa117a921a72a7a21ac077))
+* **core:** ingest apply reads only the window of existing versions ([#608](https://github.com/package-broker/broker/issues/608)) ([06015eb](https://github.com/package-broker/broker/commit/06015ebb4c26ef5319aef467d5dc5fa00dd80196))
+* **core:** ingest logs carry the source id ([#757](https://github.com/package-broker/broker/issues/757)) ([0db40e1](https://github.com/package-broker/broker/commit/0db40e1ab749ee6bd3f12c9cca389475568b703b))
+* **core:** job lease accessor and release signal for core jobs ([#664](https://github.com/package-broker/broker/issues/664)) ([116edfb](https://github.com/package-broker/broker/commit/116edfbb2bc00596f74eb7bad6a0d3cc387f43cb))
+* **core:** Keep kernel-only setters out of core exported wildcards ([#506](https://github.com/package-broker/broker/issues/506)) ([4199708](https://github.com/package-broker/broker/commit/4199708c5e78d2f6a880cb3fcf92813468db0af2))
+* **core:** kernel resolves the package before package-boundary handlers ([#495](https://github.com/package-broker/broker/issues/495)) ([e5bcd63](https://github.com/package-broker/broker/commit/e5bcd630937d793fff0f80b7a9af907f17c4fb69))
+* **core:** kernel self boundary: a live user session, no permission, tokens refused ([#545](https://github.com/package-broker/broker/issues/545)) ([4032c2d](https://github.com/package-broker/broker/commit/4032c2dfeee54e9ef1f385ef385cbffa71b66e15))
+* **core:** kernel waitUntil port, package-actor accessor and dist abort signal ([#628](https://github.com/package-broker/broker/issues/628)) ([afef485](https://github.com/package-broker/broker/commit/afef4857a48cff7cdb15094ebc7c634644207f89))
+* **core:** Kernel: ecosystem routes outside /_pb and literal-over-parameter precedence ([#507](https://github.com/package-broker/broker/issues/507)) ([a6f031b](https://github.com/package-broker/broker/commit/a6f031be6249738e119f3cd993eb0d3539d8de16))
+* **core:** keyring verifier follow-ups ([#602](https://github.com/package-broker/broker/issues/602)) ([906ce97](https://github.com/package-broker/broker/commit/906ce97af5ab187ef56aca5698d309fce8d9b610))
+* **core:** lease-bound fence issuer for import jobs ([#652](https://github.com/package-broker/broker/issues/652)) ([d638f8e](https://github.com/package-broker/broker/commit/d638f8ec85c5aa02d8584639013719aa503b751f))
+* **core:** management API wave b: package manage and import routes with the token fence ([#780](https://github.com/package-broker/broker/issues/780)) ([11e6e05](https://github.com/package-broker/broker/commit/11e6e05fa6dbf4fcce99f1ec5322c47798cd6853))
+* **core:** MCP rate-limit requirement with a transport limiter hook ([#697](https://github.com/package-broker/broker/issues/697)) ([0bd58f7](https://github.com/package-broker/broker/commit/0bd58f7957496b2b5aaee1b50db61e82864f5725))
+* **core:** MCP read tools and dispatch through the kernel ([#789](https://github.com/package-broker/broker/issues/789)) ([da2f44c](https://github.com/package-broker/broker/commit/da2f44c5903c60c9d6cbb94d29d913e81b0e7183))
+* **core:** MCP transport and bearer read-scope gate ([#682](https://github.com/package-broker/broker/issues/682)) ([6e816b1](https://github.com/package-broker/broker/commit/6e816b1ee13fa47747a6622d1eec2ca12fa3f631))
+* **core:** mount the UI root redirect (GET /) through the kernel ([#463](https://github.com/package-broker/broker/issues/463)) ([b3278ff](https://github.com/package-broker/broker/commit/b3278ff2064456565167a73daf24fb1157dc4a40))
+* **core:** npm audit forwarding with public names only ([#502](https://github.com/package-broker/broker/issues/502)) ([c8a558a](https://github.com/package-broker/broker/commit/c8a558a202faea73fa81f94e03938cb4906023ba))
+* **core:** npm endpoints and route registration ([#614](https://github.com/package-broker/broker/issues/614)) ([87bb962](https://github.com/package-broker/broker/commit/87bb9620f9faebcd7d34ec8efe827b031b029d65))
+* **core:** offboarding triggers enqueue the personal-token job ([#643](https://github.com/package-broker/broker/issues/643)) ([f53626e](https://github.com/package-broker/broker/commit/f53626ef62eb5799ba1cd7e212be3200aa4ef2b7))
+* **core:** on-demand fill with admission, freshness, negative cache and coalescing ([#609](https://github.com/package-broker/broker/issues/609)) ([0188873](https://github.com/package-broker/broker/commit/018887309b0838882461286b09b419189eac1b9a))
+* **core:** organization source list can include project-owned sources ([#856](https://github.com/package-broker/broker/issues/856)) ([f7bdd5b](https://github.com/package-broker/broker/commit/f7bdd5b6a30da716d84dbb156d30eefaf3dc048f))
+* **core:** organization source list carries an attached-project count ([#799](https://github.com/package-broker/broker/issues/799)) ([03fd0a2](https://github.com/package-broker/broker/commit/03fd0a294cdb11f4d5914e07a11b9084b25843b1))
+* **core:** organization, users and me routes ([#618](https://github.com/package-broker/broker/issues/618)) ([da84ac7](https://github.com/package-broker/broker/commit/da84ac7954ad2c8065c925e9b07a78801b134834))
+* **core:** OSV client and vulnerability refresh job with config default-on ([#714](https://github.com/package-broker/broker/issues/714)) ([01fdcbc](https://github.com/package-broker/broker/commit/01fdcbcabd806aa484d1c54c0ff4b445bb5554aa))
+* **core:** package manage routes ([#754](https://github.com/package-broker/broker/issues/754)) ([1d6b533](https://github.com/package-broker/broker/commit/1d6b533b548336714b7267ce8f9f1162e504b560))
+* **core:** package manage service with session-bound reauthentication ([#747](https://github.com/package-broker/broker/issues/747)) ([9eb985d](https://github.com/package-broker/broker/commit/9eb985d9e0ee22f34587b95dc978033fa53c1a6b))
+* **core:** package read routes ([#750](https://github.com/package-broker/broker/issues/750)) ([c9b7931](https://github.com/package-broker/broker/commit/c9b7931158233d0c28db571123afe539cc3dbf0e))
+* **core:** package sync job with the upstream 404 rule ([#616](https://github.com/package-broker/broker/issues/616)) ([614a2a8](https://github.com/package-broker/broker/commit/614a2a8ada7f76cc7264d44810c2b691167738bf))
+* **core:** package_key log field for ingest events ([#669](https://github.com/package-broker/broker/issues/669)) ([2963871](https://github.com/package-broker/broker/commit/2963871c18218f0d38ca8ab68ee2e4741795dcbf))
+* **core:** package-sync job module with lease, policy fetch and apply dispatch ([#680](https://github.com/package-broker/broker/issues/680)) ([ddfa4dc](https://github.com/package-broker/broker/commit/ddfa4dcf6e4f9aff7ec6c8b010ef1b862e3c515b))
+* **core:** package-sync job runs under the job lease with held release and hourly abandon backoff ([#675](https://github.com/package-broker/broker/issues/675)) ([b635a58](https://github.com/package-broker/broker/commit/b635a58df0d3fccae5832fafd3d6403ade8da492))
+* **core:** PAT and service-principal services carry audit and idempotency ([#556](https://github.com/package-broker/broker/issues/556)) ([d6dd962](https://github.com/package-broker/broker/commit/d6dd9620746cf63f5329a93b3095f54ab05b90ff))
+* **core:** periodic source poll, retention scan, sweep and due purge with premature-purge guard ([#673](https://github.com/package-broker/broker/issues/673)) ([aca62da](https://github.com/package-broker/broker/commit/aca62daedbe7fbcc9f994fc95b32cd21e9fe8a93))
+* **core:** persist the last successful audit verification time ([#778](https://github.com/package-broker/broker/issues/778)) ([2bf2347](https://github.com/package-broker/broker/commit/2bf234736e85cdb0b64d647d6d684155346fd58e))
+* **core:** project grant routes ([#620](https://github.com/package-broker/broker/issues/620)) ([163ae8d](https://github.com/package-broker/broker/commit/163ae8df0760adfe103f492e2fbab24c491f3709))
+* **core:** project grants list and source attachment and precedence for the UI ([#791](https://github.com/package-broker/broker/issues/791)) ([7873621](https://github.com/package-broker/broker/commit/787362114847001464624aaaabe42818fbad911f))
+* **core:** project routes ([#621](https://github.com/package-broker/broker/issues/621)) ([71f4362](https://github.com/package-broker/broker/commit/71f43620fbcc9049b711069d53fa4d9dcf7d14d1))
+* **core:** project services write audit and idempotency ([#586](https://github.com/package-broker/broker/issues/586)) ([eebc9e3](https://github.com/package-broker/broker/commit/eebc9e3b2c233352dc2081f325f52f56ebc04ecb))
+* **core:** projects list prefix filter and per-item ETags for restore ([#798](https://github.com/package-broker/broker/issues/798)) ([a45bea3](https://github.com/package-broker/broker/commit/a45bea3a0fc2f699b3948a032c2de1aad2814752))
+* **core:** queue-first byte removal on the jobs port ([#596](https://github.com/package-broker/broker/issues/596)) ([2f02979](https://github.com/package-broker/broker/commit/2f02979d40be787ea3a88914455570c041c32026))
+* **core:** registered names, ordering and who-wins routes ([#749](https://github.com/package-broker/broker/issues/749)) ([11d36e1](https://github.com/package-broker/broker/commit/11d36e1c49ac91ff5fd6c3d42b642ae6cb2b08fe))
+* **core:** registry module with routes, visibility port and dist service ([#622](https://github.com/package-broker/broker/issues/622)) ([9f8bd63](https://github.com/package-broker/broker/commit/9f8bd6329189a5a84ea180edf53b77c57e44688b))
+* **core:** registry.npmAudit.enabled configuration switch ([#850](https://github.com/package-broker/broker/issues/850)) ([cfa6d0a](https://github.com/package-broker/broker/commit/cfa6d0a5dff94a9e529462be209c1094d6888c70))
+* **core:** report schema drift on /health/ready ([#901](https://github.com/package-broker/broker/issues/901)) ([4e79afd](https://github.com/package-broker/broker/commit/4e79afd3bbb6698b96b4835f7e267ad974f03fbe))
+* **core:** request a package on a proxy source before the first install ([#904](https://github.com/package-broker/broker/issues/904)) ([9ce2457](https://github.com/package-broker/broker/commit/9ce24575d45802ef098e3c2bac02137558bc5eb2))
+* **core:** request id on auth events and the auth module log ([#723](https://github.com/package-broker/broker/issues/723)) ([33661f6](https://github.com/package-broker/broker/commit/33661f6e6327bae552441dc623ca9614fc2a075c))
+* **core:** revoke a selected-project PAT when its user loses every selected project ([#663](https://github.com/package-broker/broker/issues/663)) ([c90e119](https://github.com/package-broker/broker/commit/c90e11944d4fe54ee8857b87b9db817fe7362886))
+* **core:** role and grant routes ([#619](https://github.com/package-broker/broker/issues/619)) ([8e70812](https://github.com/package-broker/broker/commit/8e708126a4635b99c519f3532ff905a157fa3c97))
+* **core:** rollback of a failed, partly applied import ([#756](https://github.com/package-broker/broker/issues/756)) ([a544a2f](https://github.com/package-broker/broker/commit/a544a2f9a103ceb0e34ad8c8e9e5fe1c51431d47))
+* **core:** route outcome carries the original service error ([#606](https://github.com/package-broker/broker/issues/606)) ([60dcb2e](https://github.com/package-broker/broker/commit/60dcb2eb51702b98fe5cdec4c09db5808d562335))
+* **core:** sanitize npm bulk audit responses to an advisory allowlist ([#851](https://github.com/package-broker/broker/issues/851)) ([8dfbc11](https://github.com/package-broker/broker/commit/8dfbc11a4833faba379b2d17725c05449a4f1f05))
+* **core:** serve the UI shell publicly so the login screen is reachable ([#783](https://github.com/package-broker/broker/issues/783)) ([0ad4c6d](https://github.com/package-broker/broker/commit/0ad4c6d1c8cadf951290f0328f4f50227857af55))
+* **core:** service token rotation with overlap and token.rotate audit ([#683](https://github.com/package-broker/broker/issues/683)) ([7bb190e](https://github.com/package-broker/broker/commit/7bb190e72e0a60dc2f9335bd69d6dabf608fc4ac))
+* **core:** service-principal creation requires fresh reauth ([#597](https://github.com/package-broker/broker/issues/597)) ([93d079e](https://github.com/package-broker/broker/commit/93d079eba176ee6fb303d85cb496c4039390f192))
+* **core:** service-principal routes for permissions, suspend and restore ([#607](https://github.com/package-broker/broker/issues/607)) ([c202721](https://github.com/package-broker/broker/commit/c202721196a4c84a24fa4f581d553e4a2806984d))
+* **core:** session liveness on identity reauthentication ([#733](https://github.com/package-broker/broker/issues/733)) ([4411ac6](https://github.com/package-broker/broker/commit/4411ac649be776c6fd67b33fba915798d4f56abc))
+* **core:** source management API routes ([#734](https://github.com/package-broker/broker/issues/734)) ([788b3b0](https://github.com/package-broker/broker/commit/788b3b07b606716ec8e39a74a53fbea4d984c50a))
+* **core:** source pause and paginated source list ([#722](https://github.com/package-broker/broker/issues/722)) ([ad9d107](https://github.com/package-broker/broker/commit/ad9d107533a2bb91a4723843d786fcf9c7210bde))
+* **core:** source sync job with discovery, fan-out and guarded reconciliation ([#615](https://github.com/package-broker/broker/issues/615)) ([b8b2232](https://github.com/package-broker/broker/commit/b8b2232d57aff7641949aeec9656346157e38029))
+* **core:** SourceService registered names and enable carry ApiCall, audit and idempotency ([#571](https://github.com/package-broker/broker/issues/571)) ([2a41cd4](https://github.com/package-broker/broker/commit/2a41cd427d54207f22140dd456a9d2cf2ecc0467))
+* **core:** SourceService.create links an existing organization credential ([#504](https://github.com/package-broker/broker/issues/504)) ([6562f79](https://github.com/package-broker/broker/commit/6562f79634f0f69c1b6f45b49f1332dceb8e67e9))
+* **core:** strict request validation on auth routes with the weak-password problems schema ([#706](https://github.com/package-broker/broker/issues/706)) ([44b84e5](https://github.com/package-broker/broker/commit/44b84e554f0f5bcdd91079f0cf676de7fc18e9bb))
+* **core:** sync generations with package counts and child error codes ([#883](https://github.com/package-broker/broker/issues/883)) ([3390cd3](https://github.com/package-broker/broker/commit/3390cd371ff62330ebf2366f8ababef8efe32878))
+* **core:** token kind and scope in the engine grant and the access-context snapshot ([#533](https://github.com/package-broker/broker/issues/533)) ([9fa2990](https://github.com/package-broker/broker/commit/9fa29909ffb91d71195b6d2f59c6f229e97758d9))
+* **core:** token lifetime policy with one operator maximum ([#592](https://github.com/package-broker/broker/issues/592)) ([71ffb5f](https://github.com/package-broker/broker/commit/71ffb5fa56fab7cebd9d69ab3273ae4246f89a59))
+* **core:** token metadata and service-token rotate routes with atomic replay ([#688](https://github.com/package-broker/broker/issues/688)) ([6117676](https://github.com/package-broker/broker/commit/61176769f43774a5d07123804be4e21aab4de7b4))
+* **core:** token mutation fence actor for token-authenticated requests ([#773](https://github.com/package-broker/broker/issues/773)) ([76c5291](https://github.com/package-broker/broker/commit/76c52916c99a084236254898167db61f17db1419))
+* **core:** token project binding in the access snapshot, project list narrowing ([#634](https://github.com/package-broker/broker/issues/634)) ([e0bb9d4](https://github.com/package-broker/broker/commit/e0bb9d4228143748d7616064f1ecc93fdfc12267))
+* **core:** token routes for issue, list and revoke ([#627](https://github.com/package-broker/broker/issues/627)) ([4d6df67](https://github.com/package-broker/broker/commit/4d6df676ab3744f8e67f65e7fa51b370ec493c01))
+* **core:** token services bind to the route ([#585](https://github.com/package-broker/broker/issues/585)) ([1afa0ea](https://github.com/package-broker/broker/commit/1afa0eadb369b96a1959c6e739d41f7c7438971a))
+* **core:** trust-anchor binding on identity reauthentication ([#739](https://github.com/package-broker/broker/issues/739)) ([4ce649c](https://github.com/package-broker/broker/commit/4ce649c3189f61600b88fbafa3b3dc10983cd899))
+* **core:** typed pending validators validated on write ([#526](https://github.com/package-broker/broker/issues/526)) ([d9df3f6](https://github.com/package-broker/broker/commit/d9df3f655ebf8f3321c95f6973998228f1c1af21))
+* **core:** upstream.fetch child span for every upstream request ([#880](https://github.com/package-broker/broker/issues/880)) ([fd11ae0](https://github.com/package-broker/broker/commit/fd11ae03e22028d7970568ca8733805f8e1ffd33))
+* **core:** user_id and session_id log fields on auth events ([#748](https://github.com/package-broker/broker/issues/748)) ([a738520](https://github.com/package-broker/broker/commit/a738520a263adf0e3b3eee7439276ebd9883301e))
+* **core:** vulnerability status in the API and job wiring on Node and Workers ([#779](https://github.com/package-broker/broker/issues/779)) ([89a54fc](https://github.com/package-broker/broker/commit/89a54fc78a8a6d0e4e5154969389de66090cc8a9))
+* **core:** webhook intake and delivery outbox ([#656](https://github.com/package-broker/broker/issues/656)) ([b7e8fa4](https://github.com/package-broker/broker/commit/b7e8fa47b8af484650ec4d1e83c214ed56a1ce4a))
+* **core:** webhook route, source-sync and source-poll jobs when the job port is present ([#696](https://github.com/package-broker/broker/issues/696)) ([10c8335](https://github.com/package-broker/broker/commit/10c833576fada60877024b4a0160adf3a8392849))
+* **core:** Workers metadata cap default 8 MiB with measured limits doc ([#716](https://github.com/package-broker/broker/issues/716)) ([62dea06](https://github.com/package-broker/broker/commit/62dea06423478aa7cc3636b352e8261aa82b35f9))
+* creator offboarding counts group membership only with fresh evidence and a matching anchor ([#480](https://github.com/package-broker/broker/issues/480)) ([cf90ca8](https://github.com/package-broker/broker/commit/cf90ca8fe184888ef4abfbe95cb644bb36ef8134))
+* Creator offboarding when an organization grant revoke removes a user's last membership ([#489](https://github.com/package-broker/broker/issues/489)) ([fed1dcc](https://github.com/package-broker/broker/commit/fed1dcccf48eb9f1e37337a1c5278939f63ceb7b))
+* **db-sqlite:** administration repositories write audit and idempotency ([#565](https://github.com/package-broker/broker/issues/565)) ([3fb78c5](https://github.com/package-broker/broker/commit/3fb78c554cd6abc74d184dd7b4d03512274fa15e))
+* **db-sqlite:** authorize npm audit refs against the stored public catalogue ([#852](https://github.com/package-broker/broker/issues/852)) ([05548de](https://github.com/package-broker/broker/commit/05548deabbe703da1c3acf0cd534653cbaefb610))
+* **db-sqlite:** composite (org_id, id) foreign keys in migrations 0020 and 0021 ([#681](https://github.com/package-broker/broker/issues/681)) ([4e49ba7](https://github.com/package-broker/broker/commit/4e49ba7e33cb0b3e2a728ebbfb09c25b9e6a0901))
+* **db-sqlite:** mass-removal guard at the finalize call sites with per-registry not-found presets ([#546](https://github.com/package-broker/broker/issues/546)) ([9631882](https://github.com/package-broker/broker/commit/963188227ce5239efdc1185fb82caafdde749b74))
+* **db-sqlite:** org-scoped package id read for package sync ([#665](https://github.com/package-broker/broker/issues/665)) ([7697676](https://github.com/package-broker/broker/commit/76976767abc05d6f589e4c48bb9af0245a556cf8))
+* **db-sqlite:** package admin reader for project and organization lists ([#744](https://github.com/package-broker/broker/issues/744)) ([7a1e8c7](https://github.com/package-broker/broker/commit/7a1e8c74bbcc081a27ffcbe54629e1673857e86c))
+* **db-sqlite:** persist import rollback with counts and expiry ([#638](https://github.com/package-broker/broker/issues/638)) ([7466557](https://github.com/package-broker/broker/commit/746655795e343609913720a7b57460fcd5bccc6e))
+* **db-sqlite:** personal-token offboarding job and repository (migration 0018) ([#624](https://github.com/package-broker/broker/issues/624)) ([ebc2c24](https://github.com/package-broker/broker/commit/ebc2c2456c2c1375e5ef19e556384fe930ac83a6))
+* **db-sqlite:** project repositories write audit and idempotency ([#599](https://github.com/package-broker/broker/issues/599)) ([d2081ce](https://github.com/package-broker/broker/commit/d2081ceee45f9f51562cadacade6acb4e0709ad4))
+* **db-sqlite:** reconciliation removal cause, package revival, cascade and bound listings ([#492](https://github.com/package-broker/broker/issues/492)) ([6634a9b](https://github.com/package-broker/broker/commit/6634a9bf05e48a08eedf4b9983591706580bacac))
+* **db-sqlite:** registry reads for versionById and covers ([#625](https://github.com/package-broker/broker/issues/625)) ([0c7c9eb](https://github.com/package-broker/broker/commit/0c7c9ebe93d25fd3fb7feb0bf29274fe99e45cc7))
+* **db-sqlite:** schedule refetchable orphans past grace for purge ([#650](https://github.com/package-broker/broker/issues/650)) ([2e601c9](https://github.com/package-broker/broker/commit/2e601c9aded128fea40c766fd91dac74a5db358b))
+* **db-sqlite:** source lookup by VCS repository ([#505](https://github.com/package-broker/broker/issues/505)) ([739940c](https://github.com/package-broker/broker/commit/739940c3d4c7753cf833d8d515fc2b92f9e15edf))
+* **db-sqlite:** token and service-principal repositories write audit and idempotency ([#573](https://github.com/package-broker/broker/issues/573)) ([c536202](https://github.com/package-broker/broker/commit/c536202c2bbf2cb27239b1e23eac4b6e1b8d2f6a))
+* **db-sqlite:** visibility mutations write audit rows in the fenced batch ([#610](https://github.com/package-broker/broker/issues/610)) ([adb0d1e](https://github.com/package-broker/broker/commit/adb0d1e0e692cd1b0d3266dc1b38822f4797b9f2))
+* **db-sqlite:** vulnerability status storage, migration 0022 and contracts ([#701](https://github.com/package-broker/broker/issues/701)) ([ced5dff](https://github.com/package-broker/broker/commit/ced5dffd560c757a6775e3db9be2bf2d11ba689c))
+* Dependency-closure report service ([#508](https://github.com/package-broker/broker/issues/508)) ([0f68f4f](https://github.com/package-broker/broker/commit/0f68f4f40d91ddf5c1e195572c5cfd12e3608457))
+* Dist fetch with streaming verification and quarantine ([#487](https://github.com/package-broker/broker/issues/487)) ([3c28177](https://github.com/package-broker/broker/commit/3c28177636343f3f8e31760ee4ab19459185f248))
+* **e2e:** fixture service for Packagist, Composer v1, npm and Git ([#600](https://github.com/package-broker/broker/issues/600)) ([fa6315b](https://github.com/package-broker/broker/commit/fa6315be38a481aabd5fc1db4937bf4405bcd0e5))
+* **e2e:** release runner package with layered scenarios ([#587](https://github.com/package-broker/broker/issues/587)) ([d4ceb08](https://github.com/package-broker/broker/commit/d4ceb08672b59d6779854f60f1769edb5e4bcccb))
+* engine wiring prerequisites: token revoke adapters, provider-anchor reader, request-bound background work ([#437](https://github.com/package-broker/broker/issues/437)) ([39f71ba](https://github.com/package-broker/broker/commit/39f71ba13b78be8e25fa3df4e459d7ae0a6b7221))
+* Git provider follow-ups from the T723 reviews ([#481](https://github.com/package-broker/broker/issues/481)) ([0dc3d26](https://github.com/package-broker/broker/commit/0dc3d26e4034d98880a883db17403258ce5ed21f))
+* Idempotency record builder ([#524](https://github.com/package-broker/broker/issues/524)) ([45f9ff7](https://github.com/package-broker/broker/commit/45f9ff7ef0d5b26249e2645a703f4070ef9859a1))
+* Import run lifecycle contract ([#562](https://github.com/package-broker/broker/issues/562)) ([3a771d3](https://github.com/package-broker/broker/commit/3a771d33b3636c80385f39c0e883eac4d59b7210))
+* npm dist-tags: one invalid value makes the whole map unknown ([#471](https://github.com/package-broker/broker/issues/471)) ([75b07f3](https://github.com/package-broker/broker/commit/75b07f33155399a03ce1ae30c162f824ef952b12))
+* npm packument renderer: full and abbreviated streams ([#479](https://github.com/package-broker/broker/issues/479)) ([6a619b2](https://github.com/package-broker/broker/commit/6a619b258fe3451e4d88278a785a807c877ac9a8))
+* One actor permission contract across services ([#446](https://github.com/package-broker/broker/issues/446)) ([8dd500f](https://github.com/package-broker/broker/commit/8dd500f0a8bcea3be3b62666874933b6d830ef46))
+* one purge-generation fence for dist attach and re-blob ([#519](https://github.com/package-broker/broker/issues/519)) ([929ddee](https://github.com/package-broker/broker/commit/929ddee532d03f16d253f0caa70040d3802a631d))
+* OpenAPI contract suite ([#429](https://github.com/package-broker/broker/issues/429)) ([a2fa3fd](https://github.com/package-broker/broker/commit/a2fa3fdb67ff58e58438c748c765c8e6ada36cae))
+* OpenAPI document generated from apiRoute specs, served at a public route ([#426](https://github.com/package-broker/broker/issues/426)) ([d90b470](https://github.com/package-broker/broker/commit/d90b47041571d007a1313228e48c0b99ef40aa24))
+* Package access service and the three-outcome visibility port ([#458](https://github.com/package-broker/broker/issues/458)) ([b8aeb3d](https://github.com/package-broker/broker/commit/b8aeb3d484f8401874106e81feb93fa990558d9a))
+* **plugin-github:** wire the GitHub provider, App discovery and webhook verifier via SourceProviderContext ([#724](https://github.com/package-broker/broker/issues/724)) ([1a758df](https://github.com/package-broker/broker/commit/1a758df761df737cc967039d2ef0254c84375574))
+* Register the audit jobs in both runtimes ([#483](https://github.com/package-broker/broker/issues/483)) ([5fbadb6](https://github.com/package-broker/broker/commit/5fbadb65743f92bdbd3502c001b186b5d4ca1f4b))
+* **registry:** forward npm audit to the advisory endpoint and fail closed ([#891](https://github.com/package-broker/broker/issues/891)) ([66ac4fb](https://github.com/package-broker/broker/commit/66ac4fb8fe9b3fe64ca20eff4c935aaa569bb4f0))
+* **runtime-cloudflare:** wire the registry, codecs and guarded fetch into the Worker ([#654](https://github.com/package-broker/broker/issues/654)) ([5746d00](https://github.com/package-broker/broker/commit/5746d00238175bd9b1772f178ec65b2f2fe5659d))
+* **runtime-node:** bearer-only authenticated route for POST /_pb/mcp ([#577](https://github.com/package-broker/broker/issues/577)) ([b2e533d](https://github.com/package-broker/broker/commit/b2e533d80ca7b071c561d91b06e174b94c81ab27))
+* **runtime-node:** filesystem SSH archive store scoped per call by OrgContext ([#457](https://github.com/package-broker/broker/issues/457)) ([1596328](https://github.com/package-broker/broker/commit/15963287ff5acdd8a247c8bcf0074d1d5f98ca29))
+* **runtime-node:** generic Git sources on Node and source forms that offer only served providers ([#849](https://github.com/package-broker/broker/issues/849)) ([30bf3eb](https://github.com/package-broker/broker/commit/30bf3eb09c1c9e87bb970b28faa1c43b0dd9ef30))
+* **runtime-node:** offer SSH sources on Node now that SSH archives are served ([#884](https://github.com/package-broker/broker/issues/884)) ([1700b48](https://github.com/package-broker/broker/commit/1700b48b5ad6a633d87b17d4dfefcf1b57b43018))
+* **runtime-node:** trusted-proxy client IP for audit source_ip ([#776](https://github.com/package-broker/broker/issues/776)) ([b1008a0](https://github.com/package-broker/broker/commit/b1008a0df9af4fbc8911252c9e1af95da9136f97))
+* **runtime-node:** wire the registry, codecs and guarded fetch into the Node runtime ([#641](https://github.com/package-broker/broker/issues/641)) ([9c3f238](https://github.com/package-broker/broker/commit/9c3f238980324fb7bffa3c553b6d7c19e24e5d99))
+* **runtime:** keyring verifier that fails closed when PB_MASTER_KEY does not match the stored keyring ([#581](https://github.com/package-broker/broker/issues/581)) ([57612b7](https://github.com/package-broker/broker/commit/57612b76c16d6bc9b5c7eb0eda3bc0867eb36a6d))
+* **runtime:** mount /_pb/mcp when enabled; check the rate-limit binding at startup ([#802](https://github.com/package-broker/broker/issues/802)) ([79860d6](https://github.com/package-broker/broker/commit/79860d682570de674f3a2fae3f9ce598c24b7306))
+* **runtime:** register retention-scan and blob-purge jobs with a lease-safe purge outcome ([#687](https://github.com/package-broker/broker/issues/687)) ([47246d9](https://github.com/package-broker/broker/commit/47246d980561f72b6757bb2858c92fa9bd42d4c7))
+* **runtime:** serve /_pb/openapi.json and complete the API document ([#790](https://github.com/package-broker/broker/issues/790)) ([ec277e2](https://github.com/package-broker/broker/commit/ec277e2baf6226aa7e26be126fa30f39e7258a30))
+* Sealer job ([#435](https://github.com/package-broker/broker/issues/435)) ([7021085](https://github.com/package-broker/broker/commit/702108564caa5aecc9efcd3b3c9c21425f1b793d))
+* Shared public-origin parser ([#516](https://github.com/package-broker/broker/issues/516)) ([15eb515](https://github.com/package-broker/broker/commit/15eb515e6e6532cce6c2cb5e9890e30de8d758c9))
+* Source administration service and the who-wins preview ([#449](https://github.com/package-broker/broker/issues/449)) ([8aa00c2](https://github.com/package-broker/broker/commit/8aa00c22325aa680d73cbe8464be968abf5f10af))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+* **sources:** sync now, immediate poll on enable, sync outcome in the source DTO ([#826](https://github.com/package-broker/broker/issues/826)) ([9dcaf07](https://github.com/package-broker/broker/commit/9dcaf071593524d4c467a2bb52ed2576bd5695a0))
+* StaticAssets adapters: Workers ASSETS binding and Node dist directory ([#462](https://github.com/package-broker/broker/issues/462)) ([b0927b0](https://github.com/package-broker/broker/commit/b0927b0cb9124f0950236b828979c1418e262bb7))
+* syncPackageCost and a planner sync cost for large packages ([#570](https://github.com/package-broker/broker/issues/570)) ([8fd660a](https://github.com/package-broker/broker/commit/8fd660ae2762eee04f0507a051f3029f242cfb86))
+* Three permissions and migration 0013 ([#440](https://github.com/package-broker/broker/issues/440)) ([808fcc8](https://github.com/package-broker/broker/commit/808fcc88f8b1f8e7d5ed9a58b1ad1e03812d2de3))
+* **ui-assets:** build-only UI assets bridge package ([#626](https://github.com/package-broker/broker/issues/626)) ([3fc4b1e](https://github.com/package-broker/broker/commit/3fc4b1e6ed24baa6ba72bd983d90e4513c374c17))
+* **ui:** admin shell with login, setup, reauth and scope switcher ([#781](https://github.com/package-broker/broker/issues/781)) ([5e7f06e](https://github.com/package-broker/broker/commit/5e7f06ed87a76aee44a773d9a8a2ca6a3f4d6ab2))
+* **ui:** asset provider bridge between core and ui builds ([#603](https://github.com/package-broker/broker/issues/603)) ([cb1adf0](https://github.com/package-broker/broker/commit/cb1adf05c93c1f2627bb30cc0c64788977aefa43))
+* **ui:** browser first-admin setup with a local QR and automated Playwright end to end ([#718](https://github.com/package-broker/broker/issues/718)) ([8fcda6e](https://github.com/package-broker/broker/commit/8fcda6ed00991b21ee544f410893d0750f9a05f1))
+* **ui:** readable source configuration and a prefilled edit form ([#879](https://github.com/package-broker/broker/issues/879)) ([e5960a9](https://github.com/package-broker/broker/commit/e5960a9e08e667967f5180cc59070e7cc4e339ed))
+* **ui:** readable, responsive tables, status badges and confirmations ([#801](https://github.com/package-broker/broker/issues/801)) ([2b284a2](https://github.com/package-broker/broker/commit/2b284a2fccd97725a38e1aa5d289cb42a02cdfa8))
+* **ui:** sync status that matches listing and demand-fill behaviour ([#862](https://github.com/package-broker/broker/issues/862)) ([ffd65c3](https://github.com/package-broker/broker/commit/ffd65c38dda103b517784fe9309bf16f7fa86bec))
+* Version-state store: D8 authority, package match, expected status, aud ([#751](https://github.com/package-broker/broker/issues/751)) ([6b69d63](https://github.com/package-broker/broker/commit/6b69d633bbac1e1e6abd39158de5a7ab3c429e0e))
+* Visibility administration service ([#491](https://github.com/package-broker/broker/issues/491)) ([22f2334](https://github.com/package-broker/broker/commit/22f2334d032c4cbea58f8ea6b3569d2b18ff2bf9))
+* Visibility port: proxy_admissible for scoped npm registries ([#474](https://github.com/package-broker/broker/issues/474)) ([c66d79a](https://github.com/package-broker/broker/commit/c66d79a8af3c6b62a1f2d389a62d4c2cfdd9893b))
+* visibility setOrder as one fenced, audited batch ([#554](https://github.com/package-broker/broker/issues/554)) ([90281fc](https://github.com/package-broker/broker/commit/90281fc70c2d22a09d691f6b737e8f83071b1e74))
+
+
+### Bug Fixes
+
+* **auth:** bind the setup audit row to its session and normalise client IPs ([#838](https://github.com/package-broker/broker/issues/838)) ([242a316](https://github.com/package-broker/broker/commit/242a31617e3f562ae7d88b208f8d5bf648f02765))
+* **auth:** client address resolvers return only IP literals ([#821](https://github.com/package-broker/broker/issues/821)) ([8fffb73](https://github.com/package-broker/broker/commit/8fffb73c7a5872324b076e2fcefd761e2b910cd9))
+* authorization faults answer 503 with Retry-After ([#417](https://github.com/package-broker/broker/issues/417)) ([90d6f37](https://github.com/package-broker/broker/commit/90d6f37237c742914e6df9869729d72906c08bf1))
+* **cli:** keep the OpenAPI document version at the API major ([#916](https://github.com/package-broker/broker/issues/916)) ([a37ff6a](https://github.com/package-broker/broker/commit/a37ff6af1244c0658f75c316eaee1406bc890814))
+* Composer roots fail closed instead of answering a definitive not_found ([#454](https://github.com/package-broker/broker/issues/454)) ([71eb7b3](https://github.com/package-broker/broker/commit/71eb7b3e2d367379f890c369037725d393a0a92c))
+* **core:** a busy Packagist upstream answers 503 with Retry-After ([#670](https://github.com/package-broker/broker/issues/670)) ([68907bf](https://github.com/package-broker/broker/commit/68907bfd9370f4adeb11800c2088ce2cd04451fa))
+* **core:** a name outside the Composer source selection is not definitive upstream absence ([#668](https://github.com/package-broker/broker/issues/668)) ([d30a380](https://github.com/package-broker/broker/commit/d30a38008302115a8b4d1db0494b3940dfe3833d))
+* **core:** a project outside a token project cap answers the uniform 404 ([#793](https://github.com/package-broker/broker/issues/793)) ([4f0ec36](https://github.com/package-broker/broker/commit/4f0ec36d30af73b2b1fd3b620b36c83f5a44bff5))
+* **core:** allow enabling the Packagist GitHub token mode through the API ([#831](https://github.com/package-broker/broker/issues/831)) ([6a7ecd8](https://github.com/package-broker/broker/commit/6a7ecd8f06c0685ef09f72b31a60b9eb5783f749))
+* **core:** answer 503 for sources that cannot be bound instead of 404 ([#854](https://github.com/package-broker/broker/issues/854)) ([1533eb5](https://github.com/package-broker/broker/commit/1533eb5535e23a577345e47a791133b8f42c95fb))
+* **core:** bind a Packagist credential only in GitHub token mode ([#835](https://github.com/package-broker/broker/issues/835)) ([242ddc2](https://github.com/package-broker/broker/commit/242ddc28c18134ecabf1de9cf9cfab944eff8769))
+* **core:** cache fills validate against the live epoch so narrowing writes discard in-flight fills ([#442](https://github.com/package-broker/broker/issues/442)) ([b42df33](https://github.com/package-broker/broker/commit/b42df33f87b5a58fc40ab33cafd0278ac7839f80))
+* **core:** Composer fill fails fast on an incomplete upstream document; dist hash refusal answers 502 ([#657](https://github.com/package-broker/broker/issues/657)) ([612934f](https://github.com/package-broker/broker/commit/612934fd39aa9834917f573547ea1c1a3091f4ae))
+* **core:** composer v1 index classifies the deadline from the pass signal ([#709](https://github.com/package-broker/broker/issues/709)) ([e282574](https://github.com/package-broker/broker/commit/e282574c80af55358beee18f2e4748e596fca214))
+* **core:** composer v1 package deadline classification no longer races the wall clock ([#704](https://github.com/package-broker/broker/issues/704)) ([bd8baca](https://github.com/package-broker/broker/commit/bd8baca2444b40a86fe700191253fae99c704d12))
+* **core:** D1 batches never exceed 200 statements ([#767](https://github.com/package-broker/broker/issues/767)) ([90cd307](https://github.com/package-broker/broker/commit/90cd307d702bbd790f4b0e73cd70574f71bfd9d7))
+* **core:** error envelopes on every route, npm errors in npm shape ([#579](https://github.com/package-broker/broker/issues/579)) ([3c5cd3e](https://github.com/package-broker/broker/commit/3c5cd3e3eb7af9c9bf23869d749c34dc8a48fe6d))
+* **core:** fence registered-name writes and map stale ordering revisions to 412 ([#758](https://github.com/package-broker/broker/issues/758)) ([c0100f8](https://github.com/package-broker/broker/commit/c0100f85b10961c2311f7b3c55dbfb4db23233ce))
+* **core:** fence source-sync selection changes during listing marks and finalize ([#784](https://github.com/package-broker/broker/issues/784)) ([6f51703](https://github.com/package-broker/broker/commit/6f5170303eb6463d88d47f04ae5a7987e070c7bd))
+* **core:** Git provider: linear bisection cost, bounded UpstreamError handling, cached discovery, attributes read once ([#439](https://github.com/package-broker/broker/issues/439)) ([8dde8fc](https://github.com/package-broker/broker/commit/8dde8fc85a0254eceddcf8d053657377804d34ad))
+* **core:** identity audit rows target the affected user and carry the provider id ([#865](https://github.com/package-broker/broker/issues/865)) ([8790849](https://github.com/package-broker/broker/commit/87908494d91208ab441ef8fff06cc41d74f702cd))
+* **core:** logout always revokes and does not touch the session ([#834](https://github.com/package-broker/broker/issues/834)) ([438d651](https://github.com/package-broker/broker/commit/438d651964e2644d9188ac41d35b167ce7a7ac6f))
+* **core:** narrowing a source selection never removes packages ([#771](https://github.com/package-broker/broker/issues/771)) ([ba1fc77](https://github.com/package-broker/broker/commit/ba1fc77d8561210d6eec594b4001b8b61e0637c4))
+* **core:** outbound policy: explicit TLS ports are https-only and the DNS guard requires a scheme ([#464](https://github.com/package-broker/broker/issues/464)) ([f2bfa1e](https://github.com/package-broker/broker/commit/f2bfa1e0aa599285545ba89cd123341da2e5a928))
+* **core:** package sync never reports success for a refused or incomplete chunk ([#647](https://github.com/package-broker/broker/issues/647)) ([42dcca6](https://github.com/package-broker/broker/commit/42dcca6336cf57dfa84a2f75e2d413407c43d1f6))
+* **core:** package-sync lease_lost skips session cleanup; takeover mid-chunk test ([#690](https://github.com/package-broker/broker/issues/690)) ([83d064a](https://github.com/package-broker/broker/commit/83d064ada377c163f6370b9d781c22925d78b01f))
+* **core:** project list pages are always full ([#759](https://github.com/package-broker/broker/issues/759)) ([5f1ad42](https://github.com/package-broker/broker/commit/5f1ad4209e021e58ae29d54c7fce6ea9a7938e0f))
+* **core:** refuse and quarantine an upstream archive over the size cap ([#846](https://github.com/package-broker/broker/issues/846)) ([72eaf1c](https://github.com/package-broker/broker/commit/72eaf1cbfe02dfb2467a8814682621a7223df310))
+* **core:** refused upstream answers 502 upstream_refused; refusal log at debug only ([#796](https://github.com/package-broker/broker/issues/796)) ([5bd73b1](https://github.com/package-broker/broker/commit/5bd73b13197e92f05c5b32457b6017fcc944a03b))
+* **core:** rehash a local password only after a successful login, by compare-and-swap ([#729](https://github.com/package-broker/broker/issues/729)) ([a8e3d52](https://github.com/package-broker/broker/commit/a8e3d5226c617bc2324461687962f8c477e73625))
+* **core:** require an explicit client-IP resolver and keep forwarding headers out of core ([#864](https://github.com/package-broker/broker/issues/864)) ([f4c8ea9](https://github.com/package-broker/broker/commit/f4c8ea9985f50144585a3399f3b5027977918a34))
+* **core:** require an MCP limiter on Node and split non-touching session authentication ([#859](https://github.com/package-broker/broker/issues/859)) ([f14a75f](https://github.com/package-broker/broker/commit/f14a75fb9d001b77507f91d7f55840e17591a905))
+* **core:** restricted PAT project list pages through bound ids ([#642](https://github.com/package-broker/broker/issues/642)) ([f3e57e6](https://github.com/package-broker/broker/commit/f3e57e6c4d1d75504259cc8eafc0532ef95a5fd7))
+* **core:** retention follow-ups: crash dedupe, churn metric, per-source enqueue isolation ([#703](https://github.com/package-broker/broker/issues/703)) ([9981000](https://github.com/package-broker/broker/commit/99810000f801abb8e39b36f95125f646ddee81c5))
+* **core:** retryable blob contention answers 503 with Retry-After ([#742](https://github.com/package-broker/broker/issues/742)) ([c127b0d](https://github.com/package-broker/broker/commit/c127b0d5131a1d0b1e9d06bb0612e645e8b520e6))
+* **core:** snapshot plugin route definitions once before validation ([#637](https://github.com/package-broker/broker/issues/637)) ([44bb57b](https://github.com/package-broker/broker/commit/44bb57b653ccce75ea55d83d14d95eca40324ffb))
+* **core:** verify a staged snapshot before apply writes a bounded window ([#589](https://github.com/package-broker/broker/issues/589)) ([5b5e419](https://github.com/package-broker/broker/commit/5b5e41908ae39d79b1f59da8ca1996f660484128))
+* **db-sqlite:** finalize applies the mass-removal share inside the batch ([#630](https://github.com/package-broker/broker/issues/630)) ([a57e133](https://github.com/package-broker/broker/commit/a57e13306d054857c9e79c09f017dbc8759e1008))
+* **db-sqlite:** imported source config omits absent fields so the runtime binds generic Git sources ([#886](https://github.com/package-broker/broker/issues/886)) ([b56f11f](https://github.com/package-broker/broker/commit/b56f11f88d183527b4d60afcd8e55cac2f20c4d0))
+* **db-sqlite:** never-started ingest session generations are deleted ([#629](https://github.com/package-broker/broker/issues/629)) ([95e02c5](https://github.com/package-broker/broker/commit/95e02c591b5cbe819fe095f8faf88aaf667f4019))
+* **db-sqlite:** writers stay within 200 statements per D1 batch ([#763](https://github.com/package-broker/broker/issues/763)) ([f748882](https://github.com/package-broker/broker/commit/f7488824ba2f2e9f3cd2da9d10e3cc87e03b352f))
+* npm absence and completeness fail closed ([#455](https://github.com/package-broker/broker/issues/455)) ([c8eacb3](https://github.com/package-broker/broker/commit/c8eacb3c6560a35381df379f424c1995a13bcbce))
+* outbound policy: bare allowlist entries admit HTTPS on 443 only, http on 443 refused ([#415](https://github.com/package-broker/broker/issues/415)) ([a3c8a60](https://github.com/package-broker/broker/commit/a3c8a603aadfc84a4db05967560beb7f7e871626))
+* package-sync lease hold-back on finalize ([#727](https://github.com/package-broker/broker/issues/727)) ([142c79f](https://github.com/package-broker/broker/commit/142c79fbeb14ca84bf4fb86099f2e7fd6e95edc4))
+* **plugin-github:** bound token-source describes by manifest bytes and requests ([#858](https://github.com/package-broker/broker/issues/858)) ([4ca134a](https://github.com/package-broker/broker/commit/4ca134a807c3ad7fe5cb916e535411f42e0bdf95))
+* **plugin-github:** harden token sources after review ([#836](https://github.com/package-broker/broker/issues/836)) ([c903d15](https://github.com/package-broker/broker/commit/c903d15f99b84753cbc48af8bbebe8732acb7dd1))
+* remaining access and authorization test gaps ([#726](https://github.com/package-broker/broker/issues/726)) ([8caa81b](https://github.com/package-broker/broker/commit/8caa81b2f6526513054b649b2514c44836d4952e))
+* **sources:** refuse the git provider on Workers with a clear problem ([#815](https://github.com/package-broker/broker/issues/815)) ([0f55e22](https://github.com/package-broker/broker/commit/0f55e22f415dc828a3ae60aa8886f549539a7781))
+* **ui:** Escape inside a menu never becomes a dialog close request; focus falls back when the opener stays disabled ([#875](https://github.com/package-broker/broker/issues/875)) ([511f51c](https://github.com/package-broker/broker/commit/511f51c2776b3ab4a1d5259955e946a4ab0a10ff))
+</details>
+
+<details><summary>db-sqlite: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/db-sqlite-v2.0.0-rc.0...db-sqlite-v2.0.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* `authenticated` boundary ([#452](https://github.com/package-broker/broker/issues/452)) ([df90177](https://github.com/package-broker/broker/commit/df9017703cfaaf625c3a20c82f9cef6ad887c25a))
+* Access race contract on SQLite and Miniflare D1 ([#473](https://github.com/package-broker/broker/issues/473)) ([4ee98cf](https://github.com/package-broker/broker/commit/4ee98cfc86ec13d21bfe5100ff9b8c2fd5a513e0))
+* Administration holder checks from the repository, required provider anchors ([#414](https://github.com/package-broker/broker/issues/414)) ([3c7430a](https://github.com/package-broker/broker/commit/3c7430a0d07004fed9374fd13093be3a46b794dc))
+* Administration service: `audit` and idempotency ([#531](https://github.com/package-broker/broker/issues/531)) ([447dad7](https://github.com/package-broker/broker/commit/447dad78e9819bd179399984a8b8186da4f941c1))
+* Audit query repository ([#433](https://github.com/package-broker/broker/issues/433)) ([d6ccd33](https://github.com/package-broker/broker/commit/d6ccd332ffb2c3e28ee85fbe1acf9996fceeccc8))
+* Audit seal repository: pending rows sealed into the per-organization hash chain ([#430](https://github.com/package-broker/broker/issues/430)) ([9e96589](https://github.com/package-broker/broker/commit/9e9658998931efeb69a47dd09569b02b1d707ea5))
+* **audit:** record identity unblock in the audit log ([#814](https://github.com/package-broker/broker/issues/814)) ([46fbb0f](https://github.com/package-broker/broker/commit/46fbb0f90f4992f2f9f40bc00e62726d4bb4103f))
+* **audit:** record local login and reauth in their session batches ([#825](https://github.com/package-broker/broker/issues/825)) ([04f64b3](https://github.com/package-broker/broker/commit/04f64b3e2f2916081b886de90bbe667fc33e1150))
+* **audit:** record logout in the revoke batch ([#830](https://github.com/package-broker/broker/issues/830)) ([d234716](https://github.com/package-broker/broker/commit/d23471642d72f73c643e1dfe1ed1acdac10be33c))
+* **audit:** record setup completion in the setup batch ([#828](https://github.com/package-broker/broker/issues/828)) ([8cdac9d](https://github.com/package-broker/broker/commit/8cdac9dbd2228f0f8f275329164523c07f4b29df))
+* **audit:** record SSO login in the session batch ([#827](https://github.com/package-broker/broker/issues/827)) ([1dd04e5](https://github.com/package-broker/broker/commit/1dd04e5a8e9f5a33b45b3f9c8b629b4f22d87cd6))
+* **audit:** record SSO reauthentication in the session batch ([#820](https://github.com/package-broker/broker/issues/820)) ([f9f500c](https://github.com/package-broker/broker/commit/f9f500c7b4d9ed941431fa24cb8295f4edbf1464))
+* **auth:** pass request id and client address into auth calls ([#812](https://github.com/package-broker/broker/issues/812)) ([bd522b1](https://github.com/package-broker/broker/commit/bd522b1f44f5432d9b93483c737f4fc447be7ebe))
+* branded NormalizedJson so catalogue writers cannot skip credential checks ([#418](https://github.com/package-broker/broker/issues/418)) ([57181d4](https://github.com/package-broker/broker/commit/57181d4e591e7f50b221e31f37f754303885b307))
+* Catalogue performance and query-plan contract ([#460](https://github.com/package-broker/broker/issues/460)) ([3d1cf5d](https://github.com/package-broker/broker/commit/3d1cf5dcba1ebcaf815ff46fbca310d18e28753d))
+* Catalogue read-leak contract suite ([#485](https://github.com/package-broker/broker/issues/485)) ([9eb235d](https://github.com/package-broker/broker/commit/9eb235dd384b6d779c83d648d3199324133d9c25))
+* Catalogue writer and narrowing contract suite ([#510](https://github.com/package-broker/broker/issues/510)) ([e5de5c7](https://github.com/package-broker/broker/commit/e5de5c75413bd2aee22a506d6e30d000645f71c8))
+* Closure edges and leak-safe classification reads ([#422](https://github.com/package-broker/broker/issues/422)) ([f5b0b9a](https://github.com/package-broker/broker/commit/f5b0b9a148f548fe2232874413667fcc9d88e994))
+* Compose the catalogue reader ([#450](https://github.com/package-broker/broker/issues/450)) ([01b58b3](https://github.com/package-broker/broker/commit/01b58b36f5feb8577b63bf86626893874d33decd))
+* Compose the catalogue writer and the visibility store ([#484](https://github.com/package-broker/broker/issues/484)) ([deff3b1](https://github.com/package-broker/broker/commit/deff3b108f73df1856922415f27b54e86e9dd5e6))
+* **core:** access-loss paths enqueue selected-PAT revocation ([#694](https://github.com/package-broker/broker/issues/694)) ([c7a3077](https://github.com/package-broker/broker/commit/c7a307722ff7806c282186f4d577272be5ac3b53))
+* **core:** allowArchived route opt-in, projectActorOf and fence-key helpers ([#631](https://github.com/package-broker/broker/issues/631)) ([4d50dd8](https://github.com/package-broker/broker/commit/4d50dd88d8804c0e6e1b2e4228d4b8b9b06bc01d))
+* **core:** apply an ingest chunk under the session ([#582](https://github.com/package-broker/broker/issues/582)) ([7b33219](https://github.com/package-broker/broker/commit/7b33219f99735900eda2cc62da39f52344a47047))
+* **core:** audit forwarder core for npm audit requests ([#882](https://github.com/package-broker/broker/issues/882)) ([72f1643](https://github.com/package-broker/broker/commit/72f1643ac42c87f71f339180c2a7f9dcf7755ad8))
+* **core:** audit source create, update, resume and credential changes ([#853](https://github.com/package-broker/broker/issues/853)) ([f643cee](https://github.com/package-broker/broker/commit/f643cee62153cffa724b9da6c8b45f11eedd8a2d))
+* **core:** audited one-shot acceptance of a refused source removal ([#769](https://github.com/package-broker/broker/issues/769)) ([f45ad6f](https://github.com/package-broker/broker/commit/f45ad6ffe0cbbb63992aae8e8480b9b10be7f121))
+* **core:** composer_repository source provider (job-synced mirror) ([#804](https://github.com/package-broker/broker/issues/804)) ([e6b5914](https://github.com/package-broker/broker/commit/e6b5914c669769f4454f4bedd5274efc6dc6f3e8))
+* **core:** create, list and read service principals over HTTP ([#788](https://github.com/package-broker/broker/issues/788)) ([4788669](https://github.com/package-broker/broker/commit/4788669dedac1a5128a0a978b48733ac6ddf11e2))
+* **core:** daily sweep enqueues offboarding for suspended users with live personal tokens ([#653](https://github.com/package-broker/broker/issues/653)) ([3376fed](https://github.com/package-broker/broker/commit/3376fed5eb3af7366d3396dc9cc188169ed0038f))
+* **core:** idempotent import run creation with credential window and binding status ([#841](https://github.com/package-broker/broker/issues/841)) ([855a7ce](https://github.com/package-broker/broker/commit/855a7ce7eb2ca5d159df5b7bcf98eb6180e4f9ad))
+* **core:** import verify job with rollback recovery from a dead verify ([#679](https://github.com/package-broker/broker/issues/679)) ([4f3f6a9](https://github.com/package-broker/broker/commit/4f3f6a9aacbb50d779cc35be56db21460a2549e8))
+* **core:** import-run get/list and token-capable verification request ([#720](https://github.com/package-broker/broker/issues/720)) ([5fb7a43](https://github.com/package-broker/broker/commit/5fb7a4362b6df181cdfa117a921a72a7a21ac077))
+* **core:** ingest apply reads only the window of existing versions ([#608](https://github.com/package-broker/broker/issues/608)) ([06015eb](https://github.com/package-broker/broker/commit/06015ebb4c26ef5319aef467d5dc5fa00dd80196))
+* **core:** kernel self boundary: a live user session, no permission, tokens refused ([#545](https://github.com/package-broker/broker/issues/545)) ([4032c2d](https://github.com/package-broker/broker/commit/4032c2dfeee54e9ef1f385ef385cbffa71b66e15))
+* **core:** keyring verifier follow-ups ([#602](https://github.com/package-broker/broker/issues/602)) ([906ce97](https://github.com/package-broker/broker/commit/906ce97af5ab187ef56aca5698d309fce8d9b610))
+* **core:** npm audit forwarding with public names only ([#502](https://github.com/package-broker/broker/issues/502)) ([c8a558a](https://github.com/package-broker/broker/commit/c8a558a202faea73fa81f94e03938cb4906023ba))
+* **core:** on-demand fill with admission, freshness, negative cache and coalescing ([#609](https://github.com/package-broker/broker/issues/609)) ([0188873](https://github.com/package-broker/broker/commit/018887309b0838882461286b09b419189eac1b9a))
+* **core:** organization source list can include project-owned sources ([#856](https://github.com/package-broker/broker/issues/856)) ([f7bdd5b](https://github.com/package-broker/broker/commit/f7bdd5b6a30da716d84dbb156d30eefaf3dc048f))
+* **core:** organization source list carries an attached-project count ([#799](https://github.com/package-broker/broker/issues/799)) ([03fd0a2](https://github.com/package-broker/broker/commit/03fd0a294cdb11f4d5914e07a11b9084b25843b1))
+* **core:** package sync job with the upstream 404 rule ([#616](https://github.com/package-broker/broker/issues/616)) ([614a2a8](https://github.com/package-broker/broker/commit/614a2a8ada7f76cc7264d44810c2b691167738bf))
+* **core:** package-sync job runs under the job lease with held release and hourly abandon backoff ([#675](https://github.com/package-broker/broker/issues/675)) ([b635a58](https://github.com/package-broker/broker/commit/b635a58df0d3fccae5832fafd3d6403ade8da492))
+* **core:** PAT and service-principal services carry audit and idempotency ([#556](https://github.com/package-broker/broker/issues/556)) ([d6dd962](https://github.com/package-broker/broker/commit/d6dd9620746cf63f5329a93b3095f54ab05b90ff))
+* **core:** periodic source poll, retention scan, sweep and due purge with premature-purge guard ([#673](https://github.com/package-broker/broker/issues/673)) ([aca62da](https://github.com/package-broker/broker/commit/aca62daedbe7fbcc9f994fc95b32cd21e9fe8a93))
+* **core:** persist the last successful audit verification time ([#778](https://github.com/package-broker/broker/issues/778)) ([2bf2347](https://github.com/package-broker/broker/commit/2bf234736e85cdb0b64d647d6d684155346fd58e))
+* **core:** project grants list and source attachment and precedence for the UI ([#791](https://github.com/package-broker/broker/issues/791)) ([7873621](https://github.com/package-broker/broker/commit/787362114847001464624aaaabe42818fbad911f))
+* **core:** project services write audit and idempotency ([#586](https://github.com/package-broker/broker/issues/586)) ([eebc9e3](https://github.com/package-broker/broker/commit/eebc9e3b2c233352dc2081f325f52f56ebc04ecb))
+* **core:** projects list prefix filter and per-item ETags for restore ([#798](https://github.com/package-broker/broker/issues/798)) ([a45bea3](https://github.com/package-broker/broker/commit/a45bea3a0fc2f699b3948a032c2de1aad2814752))
+* **core:** registered names, ordering and who-wins routes ([#749](https://github.com/package-broker/broker/issues/749)) ([11d36e1](https://github.com/package-broker/broker/commit/11d36e1c49ac91ff5fd6c3d42b642ae6cb2b08fe))
+* **core:** report schema drift on /health/ready ([#901](https://github.com/package-broker/broker/issues/901)) ([4e79afd](https://github.com/package-broker/broker/commit/4e79afd3bbb6698b96b4835f7e267ad974f03fbe))
+* **core:** request a package on a proxy source before the first install ([#904](https://github.com/package-broker/broker/issues/904)) ([9ce2457](https://github.com/package-broker/broker/commit/9ce24575d45802ef098e3c2bac02137558bc5eb2))
+* **core:** request id on auth events and the auth module log ([#723](https://github.com/package-broker/broker/issues/723)) ([33661f6](https://github.com/package-broker/broker/commit/33661f6e6327bae552441dc623ca9614fc2a075c))
+* **core:** revoke a selected-project PAT when its user loses every selected project ([#663](https://github.com/package-broker/broker/issues/663)) ([c90e119](https://github.com/package-broker/broker/commit/c90e11944d4fe54ee8857b87b9db817fe7362886))
+* **core:** rollback of a failed, partly applied import ([#756](https://github.com/package-broker/broker/issues/756)) ([a544a2f](https://github.com/package-broker/broker/commit/a544a2f9a103ceb0e34ad8c8e9e5fe1c51431d47))
+* **core:** service token rotation with overlap and token.rotate audit ([#683](https://github.com/package-broker/broker/issues/683)) ([7bb190e](https://github.com/package-broker/broker/commit/7bb190e72e0a60dc2f9335bd69d6dabf608fc4ac))
+* **core:** service-principal creation requires fresh reauth ([#597](https://github.com/package-broker/broker/issues/597)) ([93d079e](https://github.com/package-broker/broker/commit/93d079eba176ee6fb303d85cb496c4039390f192))
+* **core:** source management API routes ([#734](https://github.com/package-broker/broker/issues/734)) ([788b3b0](https://github.com/package-broker/broker/commit/788b3b07b606716ec8e39a74a53fbea4d984c50a))
+* **core:** source pause and paginated source list ([#722](https://github.com/package-broker/broker/issues/722)) ([ad9d107](https://github.com/package-broker/broker/commit/ad9d107533a2bb91a4723843d786fcf9c7210bde))
+* **core:** SourceService registered names and enable carry ApiCall, audit and idempotency ([#571](https://github.com/package-broker/broker/issues/571)) ([2a41cd4](https://github.com/package-broker/broker/commit/2a41cd427d54207f22140dd456a9d2cf2ecc0467))
+* **core:** SourceService.create links an existing organization credential ([#504](https://github.com/package-broker/broker/issues/504)) ([6562f79](https://github.com/package-broker/broker/commit/6562f79634f0f69c1b6f45b49f1332dceb8e67e9))
+* **core:** sync generations with package counts and child error codes ([#883](https://github.com/package-broker/broker/issues/883)) ([3390cd3](https://github.com/package-broker/broker/commit/3390cd371ff62330ebf2366f8ababef8efe32878))
+* **core:** token lifetime policy with one operator maximum ([#592](https://github.com/package-broker/broker/issues/592)) ([71ffb5f](https://github.com/package-broker/broker/commit/71ffb5fa56fab7cebd9d69ab3273ae4246f89a59))
+* **core:** token metadata and service-token rotate routes with atomic replay ([#688](https://github.com/package-broker/broker/issues/688)) ([6117676](https://github.com/package-broker/broker/commit/61176769f43774a5d07123804be4e21aab4de7b4))
+* **core:** token project binding in the access snapshot, project list narrowing ([#634](https://github.com/package-broker/broker/issues/634)) ([e0bb9d4](https://github.com/package-broker/broker/commit/e0bb9d4228143748d7616064f1ecc93fdfc12267))
+* **core:** token services bind to the route ([#585](https://github.com/package-broker/broker/issues/585)) ([1afa0ea](https://github.com/package-broker/broker/commit/1afa0eadb369b96a1959c6e739d41f7c7438971a))
+* **core:** typed pending validators validated on write ([#526](https://github.com/package-broker/broker/issues/526)) ([d9df3f6](https://github.com/package-broker/broker/commit/d9df3f655ebf8f3321c95f6973998228f1c1af21))
+* **core:** user_id and session_id log fields on auth events ([#748](https://github.com/package-broker/broker/issues/748)) ([a738520](https://github.com/package-broker/broker/commit/a738520a263adf0e3b3eee7439276ebd9883301e))
+* **core:** webhook intake and delivery outbox ([#656](https://github.com/package-broker/broker/issues/656)) ([b7e8fa4](https://github.com/package-broker/broker/commit/b7e8fa47b8af484650ec4d1e83c214ed56a1ce4a))
+* creator offboarding counts group membership only with fresh evidence and a matching anchor ([#480](https://github.com/package-broker/broker/issues/480)) ([cf90ca8](https://github.com/package-broker/broker/commit/cf90ca8fe184888ef4abfbe95cb644bb36ef8134))
+* Creator offboarding when an organization grant revoke removes a user's last membership ([#489](https://github.com/package-broker/broker/issues/489)) ([fed1dcc](https://github.com/package-broker/broker/commit/fed1dcccf48eb9f1e37337a1c5278939f63ceb7b))
+* **db-sqlite:** administration repositories write audit and idempotency ([#565](https://github.com/package-broker/broker/issues/565)) ([3fb78c5](https://github.com/package-broker/broker/commit/3fb78c554cd6abc74d184dd7b4d03512274fa15e))
+* **db-sqlite:** authorize npm audit refs against the stored public catalogue ([#852](https://github.com/package-broker/broker/issues/852)) ([05548de](https://github.com/package-broker/broker/commit/05548deabbe703da1c3acf0cd534653cbaefb610))
+* **db-sqlite:** blob purge claim and recheck include reference eligibility ([#601](https://github.com/package-broker/broker/issues/601)) ([3c5a63b](https://github.com/package-broker/broker/commit/3c5a63bc3e820d92a498be92240eaeab2aa4e88a))
+* **db-sqlite:** blob replacer for the dist-fetch replace port ([#518](https://github.com/package-broker/broker/issues/518)) ([941e1b2](https://github.com/package-broker/broker/commit/941e1b25e64dd2dcc4d5c192f82e3df5593a7584))
+* **db-sqlite:** closure-edge indexes with project_package names (migration 0024) ([#735](https://github.com/package-broker/broker/issues/735)) ([14cecfd](https://github.com/package-broker/broker/commit/14cecfd2a1ac89e686557c5c05178c44090373ab))
+* **db-sqlite:** composite (org_id, id) foreign keys in migrations 0020 and 0021 ([#681](https://github.com/package-broker/broker/issues/681)) ([4e49ba7](https://github.com/package-broker/broker/commit/4e49ba7e33cb0b3e2a728ebbfb09c25b9e6a0901))
+* **db-sqlite:** import credential store ([#591](https://github.com/package-broker/broker/issues/591)) ([a8f5658](https://github.com/package-broker/broker/commit/a8f5658897f35e81fc07ce540af2c0b13fc03c33))
+* **db-sqlite:** import journal repository with before-images and expiry ([#598](https://github.com/package-broker/broker/issues/598)) ([ff040bb](https://github.com/package-broker/broker/commit/ff040bbe62c6cebc53e2d3122062b3ef28a92448))
+* **db-sqlite:** ingest session finalize with completeness proofs, validators and refetchable ([#511](https://github.com/package-broker/broker/issues/511)) ([4f18b48](https://github.com/package-broker/broker/commit/4f18b4810fd44849193a21d4fe9c0d57fcd8a495))
+* **db-sqlite:** marked and unseen counts for source sync, reusing the finalize builders ([#667](https://github.com/package-broker/broker/issues/667)) ([b7bb40f](https://github.com/package-broker/broker/commit/b7bb40f25b2646106d311ca1347f0b4f16d1e3f8))
+* **db-sqlite:** mass-removal guard at the finalize call sites with per-registry not-found presets ([#546](https://github.com/package-broker/broker/issues/546)) ([9631882](https://github.com/package-broker/broker/commit/963188227ce5239efdc1185fb82caafdde749b74))
+* **db-sqlite:** org-scoped package id read for package sync ([#665](https://github.com/package-broker/broker/issues/665)) ([7697676](https://github.com/package-broker/broker/commit/76976767abc05d6f589e4c48bb9af0245a556cf8))
+* **db-sqlite:** package admin reader for project and organization lists ([#744](https://github.com/package-broker/broker/issues/744)) ([7a1e8c7](https://github.com/package-broker/broker/commit/7a1e8c74bbcc081a27ffcbe54629e1673857e86c))
+* **db-sqlite:** persist import rollback with counts and expiry ([#638](https://github.com/package-broker/broker/issues/638)) ([7466557](https://github.com/package-broker/broker/commit/746655795e343609913720a7b57460fcd5bccc6e))
+* **db-sqlite:** personal-token offboarding job and repository (migration 0018) ([#624](https://github.com/package-broker/broker/issues/624)) ([ebc2c24](https://github.com/package-broker/broker/commit/ebc2c2456c2c1375e5ef19e556384fe930ac83a6))
+* **db-sqlite:** project repositories write audit and idempotency ([#599](https://github.com/package-broker/broker/issues/599)) ([d2081ce](https://github.com/package-broker/broker/commit/d2081ceee45f9f51562cadacade6acb4e0709ad4))
+* **db-sqlite:** quarantine release respects the blob purge lease ([#512](https://github.com/package-broker/broker/issues/512)) ([a4c8dba](https://github.com/package-broker/broker/commit/a4c8dbab14e4062e9edb5abee2aa2a99f19f3775))
+* **db-sqlite:** reconcile finalize respects the blob purge lease ([#547](https://github.com/package-broker/broker/issues/547)) ([c9d57a4](https://github.com/package-broker/broker/commit/c9d57a4410a64fcec3b1deed400a76e063ec16c6))
+* **db-sqlite:** reconciliation removal cause, package revival, cascade and bound listings ([#492](https://github.com/package-broker/broker/issues/492)) ([6634a9b](https://github.com/package-broker/broker/commit/6634a9bf05e48a08eedf4b9983591706580bacac))
+* **db-sqlite:** Registered-name repository writes audit ([#535](https://github.com/package-broker/broker/issues/535)) ([da6b91e](https://github.com/package-broker/broker/commit/da6b91e3614ccf823069c5358ee5dd49f68e465a))
+* **db-sqlite:** registry reads for versionById and covers ([#625](https://github.com/package-broker/broker/issues/625)) ([0c7c9eb](https://github.com/package-broker/broker/commit/0c7c9ebe93d25fd3fb7feb0bf29274fe99e45cc7))
+* **db-sqlite:** removed-upstream bytes stay in backups on every removal path ([#525](https://github.com/package-broker/broker/issues/525)) ([d1c23df](https://github.com/package-broker/broker/commit/d1c23df22ae40de1064cdefe6e7a0ee6b036a8ff))
+* **db-sqlite:** schedule refetchable orphans past grace for purge ([#650](https://github.com/package-broker/broker/issues/650)) ([2e601c9](https://github.com/package-broker/broker/commit/2e601c9aded128fea40c766fd91dac74a5db358b))
+* **db-sqlite:** schema-level session-to-identity binding ([#764](https://github.com/package-broker/broker/issues/764)) ([2d8974f](https://github.com/package-broker/broker/commit/2d8974f1f97dbc0738881d256eef6aa017af86e3))
+* **db-sqlite:** source lookup by VCS repository ([#505](https://github.com/package-broker/broker/issues/505)) ([739940c](https://github.com/package-broker/broker/commit/739940c3d4c7753cf833d8d515fc2b92f9e15edf))
+* **db-sqlite:** source-sync reads for existing and stale held keys ([#692](https://github.com/package-broker/broker/issues/692)) ([18574ea](https://github.com/package-broker/broker/commit/18574eac5f17c051862f445f6743013fea29fbd0))
+* **db-sqlite:** token and service-principal repositories write audit and idempotency ([#573](https://github.com/package-broker/broker/issues/573)) ([c536202](https://github.com/package-broker/broker/commit/c536202c2bbf2cb27239b1e23eac4b6e1b8d2f6a))
+* **db-sqlite:** token issue batches enforce the configured lifetime on database time ([#617](https://github.com/package-broker/broker/issues/617)) ([3fc6406](https://github.com/package-broker/broker/commit/3fc6406c4c41e07900e5c24f9c78a63f57f86f45))
+* **db-sqlite:** version (package_id, status) index for package list status ([#730](https://github.com/package-broker/broker/issues/730)) ([665542b](https://github.com/package-broker/broker/commit/665542b5c346c9a716958bd416d2a70fea9127c5))
+* **db-sqlite:** visibility mutations write audit rows in the fenced batch ([#610](https://github.com/package-broker/broker/issues/610)) ([adb0d1e](https://github.com/package-broker/broker/commit/adb0d1e0e692cd1b0d3266dc1b38822f4797b9f2))
+* **db-sqlite:** vulnerability status storage, migration 0022 and contracts ([#701](https://github.com/package-broker/broker/issues/701)) ([ced5dff](https://github.com/package-broker/broker/commit/ced5dffd560c757a6775e3db9be2bf2d11ba689c))
+* **db:** keep package ecosystem equal to its source's ecosystem ([#818](https://github.com/package-broker/broker/issues/818)) ([89a1929](https://github.com/package-broker/broker/commit/89a1929c22bc7e31e9b4d2800482e4033842fa7e))
+* engine wiring prerequisites: token revoke adapters, provider-anchor reader, request-bound background work ([#437](https://github.com/package-broker/broker/issues/437)) ([39f71ba](https://github.com/package-broker/broker/commit/39f71ba13b78be8e25fa3df4e459d7ae0a6b7221))
+* Idempotency repository ([#532](https://github.com/package-broker/broker/issues/532)) ([5c0bb54](https://github.com/package-broker/broker/commit/5c0bb54bd943723c442866ca3a3f5cfcb8b071ba))
+* Import run lifecycle contract ([#562](https://github.com/package-broker/broker/issues/562)) ([3a771d3](https://github.com/package-broker/broker/commit/3a771d33b3636c80385f39c0e883eac4d59b7210))
+* Import run repository: runs, approval columns and the manifest blob ([#555](https://github.com/package-broker/broker/issues/555)) ([aa6854b](https://github.com/package-broker/broker/commit/aa6854b2b19d89a52fafb8a0c7a8bdb2bf61521f))
+* Listing reconciliation by mark and sweep ([#451](https://github.com/package-broker/broker/issues/451)) ([ea4b110](https://github.com/package-broker/broker/commit/ea4b110b889ce875805078e27aea1bfb47b2fca2))
+* Migration 0012: import columns ([#434](https://github.com/package-broker/broker/issues/434)) ([ab870a9](https://github.com/package-broker/broker/commit/ab870a91a6a40a62884f53449bc9bd4f9f4a5cd4))
+* one purge-generation fence for dist attach and re-blob ([#519](https://github.com/package-broker/broker/issues/519)) ([929ddee](https://github.com/package-broker/broker/commit/929ddee532d03f16d253f0caa70040d3802a631d))
+* Pending audit insert ([#530](https://github.com/package-broker/broker/issues/530)) ([235dd93](https://github.com/package-broker/broker/commit/235dd93b123234991b1ebe8fd4ed600342c65774))
+* Register the audit jobs in both runtimes ([#483](https://github.com/package-broker/broker/issues/483)) ([5fbadb6](https://github.com/package-broker/broker/commit/5fbadb65743f92bdbd3502c001b186b5d4ca1f4b))
+* Register the mutation cases the T717n allowlist deferred ([#423](https://github.com/package-broker/broker/issues/423)) ([faf91b7](https://github.com/package-broker/broker/commit/faf91b779893c13ebeb9b2f7192fbd34d6673515))
+* **registry:** forward npm audit to the advisory endpoint and fail closed ([#891](https://github.com/package-broker/broker/issues/891)) ([66ac4fb](https://github.com/package-broker/broker/commit/66ac4fb8fe9b3fe64ca20eff4c935aaa569bb4f0))
+* Replace a version's blob only when no published digest pins it ([#475](https://github.com/package-broker/broker/issues/475)) ([c057f95](https://github.com/package-broker/broker/commit/c057f95422670a2f141436645475d67ad2b2ca69))
+* **runtime-node:** generic Git sources on Node and source forms that offer only served providers ([#849](https://github.com/package-broker/broker/issues/849)) ([30bf3eb](https://github.com/package-broker/broker/commit/30bf3eb09c1c9e87bb970b28faa1c43b0dd9ef30))
+* **runtime-node:** trusted-proxy client IP for audit source_ip ([#776](https://github.com/package-broker/broker/issues/776)) ([b1008a0](https://github.com/package-broker/broker/commit/b1008a0df9af4fbc8911252c9e1af95da9136f97))
+* **runtime:** keyring verifier that fails closed when PB_MASTER_KEY does not match the stored keyring ([#581](https://github.com/package-broker/broker/issues/581)) ([57612b7](https://github.com/package-broker/broker/commit/57612b76c16d6bc9b5c7eb0eda3bc0867eb36a6d))
+* **runtime:** mount the management API wave a on Node and Workers ([#766](https://github.com/package-broker/broker/issues/766)) ([2268b87](https://github.com/package-broker/broker/commit/2268b87705dc38732040aa253a13fc8a473e2e32))
+* **runtime:** register the import apply and rollback jobs on both runtimes ([#666](https://github.com/package-broker/broker/issues/666)) ([a8da9fa](https://github.com/package-broker/broker/commit/a8da9fa05023d0cf0d8be03567750557a3d79d0d))
+* Source administration service and the who-wins preview ([#449](https://github.com/package-broker/broker/issues/449)) ([8aa00c2](https://github.com/package-broker/broker/commit/8aa00c22325aa680d73cbe8464be968abf5f10af))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+* **sources:** sync now, immediate poll on enable, sync outcome in the source DTO ([#826](https://github.com/package-broker/broker/issues/826)) ([9dcaf07](https://github.com/package-broker/broker/commit/9dcaf071593524d4c467a2bb52ed2576bd5695a0))
+* syncPackageCost and a planner sync cost for large packages ([#570](https://github.com/package-broker/broker/issues/570)) ([8fd660a](https://github.com/package-broker/broker/commit/8fd660ae2762eee04f0507a051f3029f242cfb86))
+* T591b: explicit database-time descriptor replaces the lower_ms/upper_m ([#416](https://github.com/package-broker/broker/issues/416)) ([4537b2f](https://github.com/package-broker/broker/commit/4537b2f7d4aa5f035cab536de6b5b489655b9930))
+* Three permissions and migration 0013 ([#440](https://github.com/package-broker/broker/issues/440)) ([808fcc8](https://github.com/package-broker/broker/commit/808fcc88f8b1f8e7d5ed9a58b1ad1e03812d2de3))
+* **ui:** sync status that matches listing and demand-fill behaviour ([#862](https://github.com/package-broker/broker/issues/862)) ([ffd65c3](https://github.com/package-broker/broker/commit/ffd65c38dda103b517784fe9309bf16f7fa86bec))
+* Version-state store: D8 authority, package match, expected status, aud ([#751](https://github.com/package-broker/broker/issues/751)) ([6b69d63](https://github.com/package-broker/broker/commit/6b69d633bbac1e1e6abd39158de5a7ab3c429e0e))
+* visibility setOrder as one fenced, audited batch ([#554](https://github.com/package-broker/broker/issues/554)) ([90281fc](https://github.com/package-broker/broker/commit/90281fc70c2d22a09d691f6b737e8f83071b1e74))
+
+
+### Bug Fixes
+
+* **auth:** bind the setup audit row to its session and normalise client IPs ([#838](https://github.com/package-broker/broker/issues/838)) ([242a316](https://github.com/package-broker/broker/commit/242a31617e3f562ae7d88b208f8d5bf648f02765))
+* blob reserve decides the lease once per batch; per-path clock rule ([#413](https://github.com/package-broker/broker/issues/413)) ([f43aea2](https://github.com/package-broker/broker/commit/f43aea247d6e9a6401d3b42fdab1dfbbde69ca3a))
+* **core:** a project outside a token project cap answers the uniform 404 ([#793](https://github.com/package-broker/broker/issues/793)) ([4f0ec36](https://github.com/package-broker/broker/commit/4f0ec36d30af73b2b1fd3b620b36c83f5a44bff5))
+* **core:** answer 503 for sources that cannot be bound instead of 404 ([#854](https://github.com/package-broker/broker/issues/854)) ([1533eb5](https://github.com/package-broker/broker/commit/1533eb5535e23a577345e47a791133b8f42c95fb))
+* **core:** cache fills validate against the live epoch so narrowing writes discard in-flight fills ([#442](https://github.com/package-broker/broker/issues/442)) ([b42df33](https://github.com/package-broker/broker/commit/b42df33f87b5a58fc40ab33cafd0278ac7839f80))
+* **core:** D1 batches never exceed 200 statements ([#767](https://github.com/package-broker/broker/issues/767)) ([90cd307](https://github.com/package-broker/broker/commit/90cd307d702bbd790f4b0e73cd70574f71bfd9d7))
+* **core:** error envelopes on every route, npm errors in npm shape ([#579](https://github.com/package-broker/broker/issues/579)) ([3c5cd3e](https://github.com/package-broker/broker/commit/3c5cd3e3eb7af9c9bf23869d749c34dc8a48fe6d))
+* **core:** fence registered-name writes and map stale ordering revisions to 412 ([#758](https://github.com/package-broker/broker/issues/758)) ([c0100f8](https://github.com/package-broker/broker/commit/c0100f85b10961c2311f7b3c55dbfb4db23233ce))
+* **core:** fence source-sync selection changes during listing marks and finalize ([#784](https://github.com/package-broker/broker/issues/784)) ([6f51703](https://github.com/package-broker/broker/commit/6f5170303eb6463d88d47f04ae5a7987e070c7bd))
+* **core:** narrowing a source selection never removes packages ([#771](https://github.com/package-broker/broker/issues/771)) ([ba1fc77](https://github.com/package-broker/broker/commit/ba1fc77d8561210d6eec594b4001b8b61e0637c4))
+* **core:** package-sync lease_lost skips session cleanup; takeover mid-chunk test ([#690](https://github.com/package-broker/broker/issues/690)) ([83d064a](https://github.com/package-broker/broker/commit/83d064ada377c163f6370b9d781c22925d78b01f))
+* **core:** project list pages are always full ([#759](https://github.com/package-broker/broker/issues/759)) ([5f1ad42](https://github.com/package-broker/broker/commit/5f1ad4209e021e58ae29d54c7fce6ea9a7938e0f))
+* **core:** rehash a local password only after a successful login, by compare-and-swap ([#729](https://github.com/package-broker/broker/issues/729)) ([a8e3d52](https://github.com/package-broker/broker/commit/a8e3d5226c617bc2324461687962f8c477e73625))
+* **core:** require an explicit client-IP resolver and keep forwarding headers out of core ([#864](https://github.com/package-broker/broker/issues/864)) ([f4c8ea9](https://github.com/package-broker/broker/commit/f4c8ea9985f50144585a3399f3b5027977918a34))
+* **core:** retention follow-ups: crash dedupe, churn metric, per-source enqueue isolation ([#703](https://github.com/package-broker/broker/issues/703)) ([9981000](https://github.com/package-broker/broker/commit/99810000f801abb8e39b36f95125f646ddee81c5))
+* **core:** verify a staged snapshot before apply writes a bounded window ([#589](https://github.com/package-broker/broker/issues/589)) ([5b5e419](https://github.com/package-broker/broker/commit/5b5e41908ae39d79b1f59da8ca1996f660484128))
+* **db-sqlite:** apply the unseen share to version-listing finalize in batch ([#635](https://github.com/package-broker/broker/issues/635)) ([b5839dc](https://github.com/package-broker/broker/commit/b5839dc02c4ca414101a3473d0a6ca18a0322c38))
+* **db-sqlite:** bound and count-check npm audit and OSV evidence before any grant ([#868](https://github.com/package-broker/broker/issues/868)) ([928d5ac](https://github.com/package-broker/broker/commit/928d5ace915d4a148f8619af630e715661ac0ba1))
+* **db-sqlite:** bounded dead-letter update and drop legacy job tables ([#590](https://github.com/package-broker/broker/issues/590)) ([a1f930e](https://github.com/package-broker/broker/commit/a1f930eb007e11cecc30d8b13177a7384ad15e6d))
+* **db-sqlite:** count held-back revivals inside the finalize batch ([#575](https://github.com/package-broker/broker/issues/575)) ([22f9c20](https://github.com/package-broker/broker/commit/22f9c20a7df4d4f0a4b38b2768865ee1a3633b3a))
+* **db-sqlite:** expired idempotency keys are replaced, never a permanent conflict ([#633](https://github.com/package-broker/broker/issues/633)) ([722ddc6](https://github.com/package-broker/broker/commit/722ddc6479114efd0f5f23c09ac03cf379fc5cf0))
+* **db-sqlite:** finalize applies the mass-removal share inside the batch ([#630](https://github.com/package-broker/broker/issues/630)) ([a57e133](https://github.com/package-broker/broker/commit/a57e13306d054857c9e79c09f017dbc8759e1008))
+* **db-sqlite:** import rollback waiver reasons, package and role org predicates, unscoped blocking probes ([#651](https://github.com/package-broker/broker/issues/651)) ([7e466be](https://github.com/package-broker/broker/commit/7e466be794ee4c47a0339df76be0321b07c45ce2))
+* **db-sqlite:** imported source config omits absent fields so the runtime binds generic Git sources ([#886](https://github.com/package-broker/broker/issues/886)) ([b56f11f](https://github.com/package-broker/broker/commit/b56f11f88d183527b4d60afcd8e55cac2f20c4d0))
+* **db-sqlite:** live idempotency-key collisions classify as conflicts ([#760](https://github.com/package-broker/broker/issues/760)) ([69ad7e8](https://github.com/package-broker/broker/commit/69ad7e82dc13b966374f2043e5c897becf473208))
+* **db-sqlite:** never-started ingest session generations are deleted ([#629](https://github.com/package-broker/broker/issues/629)) ([95e02c5](https://github.com/package-broker/broker/commit/95e02c591b5cbe819fe095f8faf88aaf667f4019))
+* **db-sqlite:** org consistency follow-ups: tag history on a foreign-org row, subset owner org, shared catalogue contract ([#472](https://github.com/package-broker/broker/issues/472)) ([183b9cf](https://github.com/package-broker/broker/commit/183b9cf5a4d837eefd7621aaef84bc11dd7cd28c))
+* **db-sqlite:** org-consistent foreign key for token.validation_identity_id ([#775](https://github.com/package-broker/broker/issues/775)) ([94e580b](https://github.com/package-broker/broker/commit/94e580bde0618a33980014c157aa83e3ddb02163))
+* **db-sqlite:** protectedHolder decides group freshness on the database clock ([#552](https://github.com/package-broker/broker/issues/552)) ([c62ae32](https://github.com/package-broker/broker/commit/c62ae32fe535ba04caf4ffad0dcb6d5a768b25ce))
+* **db-sqlite:** registered-name mutations persist the idempotency record ([#584](https://github.com/package-broker/broker/issues/584)) ([39abea3](https://github.com/package-broker/broker/commit/39abea31fed9eb4831e7619ab3b685d16c5048b6))
+* **db-sqlite:** source sweep cascades only under packages it newly removes ([#646](https://github.com/package-broker/broker/issues/646)) ([ddaa1ff](https://github.com/package-broker/broker/commit/ddaa1ffeaf830475edaa6b69624f7917b206ba4e))
+* **db-sqlite:** version-by-id reads honour package visibility; removed counter ignores relabels ([#659](https://github.com/package-broker/broker/issues/659)) ([75a92ae](https://github.com/package-broker/broker/commit/75a92ae16defc111982cc6a3296bfae732beb26c))
+* **db-sqlite:** writers stay within 200 statements per D1 batch ([#763](https://github.com/package-broker/broker/issues/763)) ([f748882](https://github.com/package-broker/broker/commit/f7488824ba2f2e9f3cd2da9d10e3cc87e03b352f))
+* org-consistent catalogue child rows ([#436](https://github.com/package-broker/broker/issues/436)) ([13087f6](https://github.com/package-broker/broker/commit/13087f61f139fb57912937ada3529a2220004407))
+* package-sync lease hold-back on finalize ([#727](https://github.com/package-broker/broker/issues/727)) ([142c79f](https://github.com/package-broker/broker/commit/142c79fbeb14ca84bf4fb86099f2e7fd6e95edc4))
+* remaining access and authorization test gaps ([#726](https://github.com/package-broker/broker/issues/726)) ([8caa81b](https://github.com/package-broker/broker/commit/8caa81b2f6526513054b649b2514c44836d4952e))
+
+
+### Performance Improvements
+
+* **db-sqlite:** drive the package rev advance from the incoming versions ([#708](https://github.com/package-broker/broker/issues/708)) ([71fc6a5](https://github.com/package-broker/broker/commit/71fc6a51afb4f5f11145294b46344c94218ec69b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>dist: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/dist-v2.0.0-rc.0...dist-v2.0.0-rc.1) (2026-10-27)
+
+
+### Miscellaneous Chores
+
+* **dist:** Synchronize product versions
+</details>
+
+<details><summary>dist-cloudflare: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/dist-cloudflare-v2.0.0-rc.0...dist-cloudflare-v2.0.0-rc.1) (2026-10-27)
+
+
+### Miscellaneous Chores
+
+* **dist-cloudflare:** Synchronize product versions
+</details>
+
+<details><summary>runtime-cloudflare: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.0...runtime-cloudflare-v2.0.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* Audit seal repository: pending rows sealed into the per-organization hash chain ([#430](https://github.com/package-broker/broker/issues/430)) ([9e96589](https://github.com/package-broker/broker/commit/9e9658998931efeb69a47dd09569b02b1d707ea5))
+* **audit:** record local login and reauth in their session batches ([#825](https://github.com/package-broker/broker/issues/825)) ([04f64b3](https://github.com/package-broker/broker/commit/04f64b3e2f2916081b886de90bbe667fc33e1150))
+* **audit:** record setup completion in the setup batch ([#828](https://github.com/package-broker/broker/issues/828)) ([8cdac9d](https://github.com/package-broker/broker/commit/8cdac9dbd2228f0f8f275329164523c07f4b29df))
+* **auth:** pass request id and client address into auth calls ([#812](https://github.com/package-broker/broker/issues/812)) ([bd522b1](https://github.com/package-broker/broker/commit/bd522b1f44f5432d9b93483c737f4fc447be7ebe))
+* BrokerConfig flag to trust inbound W3C traceparent, off by default ([#476](https://github.com/package-broker/broker/issues/476)) ([692edd0](https://github.com/package-broker/broker/commit/692edd0e3048ec3380c83c4bf335524d1c585d96))
+* **cli:** opt-in Workers automatic tracing ([#869](https://github.com/package-broker/broker/issues/869)) ([136202d](https://github.com/package-broker/broker/commit/136202df128f88805e04b361a2bc089cf3953caf))
+* **cli:** pass BrokerConfig observability from broker.config.ts to both runtimes ([#542](https://github.com/package-broker/broker/issues/542)) ([e1a971d](https://github.com/package-broker/broker/commit/e1a971d7c6ad7a539341077e6188a4f44f2437b9))
+* Closure edges and leak-safe classification reads ([#422](https://github.com/package-broker/broker/issues/422)) ([f5b0b9a](https://github.com/package-broker/broker/commit/f5b0b9a148f548fe2232874413667fcc9d88e994))
+* **core:** access-loss paths enqueue selected-PAT revocation ([#694](https://github.com/package-broker/broker/issues/694)) ([c7a3077](https://github.com/package-broker/broker/commit/c7a307722ff7806c282186f4d577272be5ac3b53))
+* **core:** apply an ingest chunk under the session ([#582](https://github.com/package-broker/broker/issues/582)) ([7b33219](https://github.com/package-broker/broker/commit/7b33219f99735900eda2cc62da39f52344a47047))
+* **core:** attach and detach a source to a project ([#774](https://github.com/package-broker/broker/issues/774)) ([bd042b2](https://github.com/package-broker/broker/commit/bd042b26d72e8a2c9b5e451c4a0ff11688a2612e))
+* **core:** baseline security headers on every response ([#513](https://github.com/package-broker/broker/issues/513)) ([83d3df1](https://github.com/package-broker/broker/commit/83d3df1e7279e50015912c85977803dc003b8a15))
+* **core:** composer_repository source provider (job-synced mirror) ([#804](https://github.com/package-broker/broker/issues/804)) ([e6b5914](https://github.com/package-broker/broker/commit/e6b5914c669769f4454f4bedd5274efc6dc6f3e8))
+* **core:** import verify job with rollback recovery from a dead verify ([#679](https://github.com/package-broker/broker/issues/679)) ([4f3f6a9](https://github.com/package-broker/broker/commit/4f3f6a9aacbb50d779cc35be56db21460a2549e8))
+* **core:** import-run get/list and token-capable verification request ([#720](https://github.com/package-broker/broker/issues/720)) ([5fb7a43](https://github.com/package-broker/broker/commit/5fb7a4362b6df181cdfa117a921a72a7a21ac077))
+* **core:** ingest logs carry the source id ([#757](https://github.com/package-broker/broker/issues/757)) ([0db40e1](https://github.com/package-broker/broker/commit/0db40e1ab749ee6bd3f12c9cca389475568b703b))
+* **core:** job lease accessor and release signal for core jobs ([#664](https://github.com/package-broker/broker/issues/664)) ([116edfb](https://github.com/package-broker/broker/commit/116edfbb2bc00596f74eb7bad6a0d3cc387f43cb))
+* **core:** keyring verifier follow-ups ([#602](https://github.com/package-broker/broker/issues/602)) ([906ce97](https://github.com/package-broker/broker/commit/906ce97af5ab187ef56aca5698d309fce8d9b610))
+* **core:** lease-bound fence issuer for import jobs ([#652](https://github.com/package-broker/broker/issues/652)) ([d638f8e](https://github.com/package-broker/broker/commit/d638f8ec85c5aa02d8584639013719aa503b751f))
+* **core:** management API wave b: package manage and import routes with the token fence ([#780](https://github.com/package-broker/broker/issues/780)) ([11e6e05](https://github.com/package-broker/broker/commit/11e6e05fa6dbf4fcce99f1ec5322c47798cd6853))
+* **core:** MCP rate-limit requirement with a transport limiter hook ([#697](https://github.com/package-broker/broker/issues/697)) ([0bd58f7](https://github.com/package-broker/broker/commit/0bd58f7957496b2b5aaee1b50db61e82864f5725))
+* **core:** PAT and service-principal services carry audit and idempotency ([#556](https://github.com/package-broker/broker/issues/556)) ([d6dd962](https://github.com/package-broker/broker/commit/d6dd9620746cf63f5329a93b3095f54ab05b90ff))
+* **core:** periodic source poll, retention scan, sweep and due purge with premature-purge guard ([#673](https://github.com/package-broker/broker/issues/673)) ([aca62da](https://github.com/package-broker/broker/commit/aca62daedbe7fbcc9f994fc95b32cd21e9fe8a93))
+* **core:** persist the last successful audit verification time ([#778](https://github.com/package-broker/broker/issues/778)) ([2bf2347](https://github.com/package-broker/broker/commit/2bf234736e85cdb0b64d647d6d684155346fd58e))
+* **core:** project grants list and source attachment and precedence for the UI ([#791](https://github.com/package-broker/broker/issues/791)) ([7873621](https://github.com/package-broker/broker/commit/787362114847001464624aaaabe42818fbad911f))
+* **core:** project services write audit and idempotency ([#586](https://github.com/package-broker/broker/issues/586)) ([eebc9e3](https://github.com/package-broker/broker/commit/eebc9e3b2c233352dc2081f325f52f56ebc04ecb))
+* **core:** report schema drift on /health/ready ([#901](https://github.com/package-broker/broker/issues/901)) ([4e79afd](https://github.com/package-broker/broker/commit/4e79afd3bbb6698b96b4835f7e267ad974f03fbe))
+* **core:** request a package on a proxy source before the first install ([#904](https://github.com/package-broker/broker/issues/904)) ([9ce2457](https://github.com/package-broker/broker/commit/9ce24575d45802ef098e3c2bac02137558bc5eb2))
+* **core:** serve the UI shell publicly so the login screen is reachable ([#783](https://github.com/package-broker/broker/issues/783)) ([0ad4c6d](https://github.com/package-broker/broker/commit/0ad4c6d1c8cadf951290f0328f4f50227857af55))
+* **core:** service-principal creation requires fresh reauth ([#597](https://github.com/package-broker/broker/issues/597)) ([93d079e](https://github.com/package-broker/broker/commit/93d079eba176ee6fb303d85cb496c4039390f192))
+* **core:** source pause and paginated source list ([#722](https://github.com/package-broker/broker/issues/722)) ([ad9d107](https://github.com/package-broker/broker/commit/ad9d107533a2bb91a4723843d786fcf9c7210bde))
+* **core:** sync generations with package counts and child error codes ([#883](https://github.com/package-broker/broker/issues/883)) ([3390cd3](https://github.com/package-broker/broker/commit/3390cd371ff62330ebf2366f8ababef8efe32878))
+* **core:** token services bind to the route ([#585](https://github.com/package-broker/broker/issues/585)) ([1afa0ea](https://github.com/package-broker/broker/commit/1afa0eadb369b96a1959c6e739d41f7c7438971a))
+* **core:** upstream.fetch child span for every upstream request ([#880](https://github.com/package-broker/broker/issues/880)) ([fd11ae0](https://github.com/package-broker/broker/commit/fd11ae03e22028d7970568ca8733805f8e1ffd33))
+* **core:** vulnerability status in the API and job wiring on Node and Workers ([#779](https://github.com/package-broker/broker/issues/779)) ([89a54fc](https://github.com/package-broker/broker/commit/89a54fc78a8a6d0e4e5154969389de66090cc8a9))
+* **core:** Workers metadata cap default 8 MiB with measured limits doc ([#716](https://github.com/package-broker/broker/issues/716)) ([62dea06](https://github.com/package-broker/broker/commit/62dea06423478aa7cc3636b352e8261aa82b35f9))
+* **db-sqlite:** blob purge claim and recheck include reference eligibility ([#601](https://github.com/package-broker/broker/issues/601)) ([3c5a63b](https://github.com/package-broker/broker/commit/3c5a63bc3e820d92a498be92240eaeab2aa4e88a))
+* **db-sqlite:** closure-edge indexes with project_package names (migration 0024) ([#735](https://github.com/package-broker/broker/issues/735)) ([14cecfd](https://github.com/package-broker/broker/commit/14cecfd2a1ac89e686557c5c05178c44090373ab))
+* **db-sqlite:** composite (org_id, id) foreign keys in migrations 0020 and 0021 ([#681](https://github.com/package-broker/broker/issues/681)) ([4e49ba7](https://github.com/package-broker/broker/commit/4e49ba7e33cb0b3e2a728ebbfb09c25b9e6a0901))
+* **db-sqlite:** marked and unseen counts for source sync, reusing the finalize builders ([#667](https://github.com/package-broker/broker/issues/667)) ([b7bb40f](https://github.com/package-broker/broker/commit/b7bb40f25b2646106d311ca1347f0b4f16d1e3f8))
+* **db-sqlite:** mass-removal guard at the finalize call sites with per-registry not-found presets ([#546](https://github.com/package-broker/broker/issues/546)) ([9631882](https://github.com/package-broker/broker/commit/963188227ce5239efdc1185fb82caafdde749b74))
+* **db-sqlite:** org-scoped package id read for package sync ([#665](https://github.com/package-broker/broker/issues/665)) ([7697676](https://github.com/package-broker/broker/commit/76976767abc05d6f589e4c48bb9af0245a556cf8))
+* **db-sqlite:** package admin reader for project and organization lists ([#744](https://github.com/package-broker/broker/issues/744)) ([7a1e8c7](https://github.com/package-broker/broker/commit/7a1e8c74bbcc081a27ffcbe54629e1673857e86c))
+* **db-sqlite:** persist import rollback with counts and expiry ([#638](https://github.com/package-broker/broker/issues/638)) ([7466557](https://github.com/package-broker/broker/commit/746655795e343609913720a7b57460fcd5bccc6e))
+* **db-sqlite:** personal-token offboarding job and repository (migration 0018) ([#624](https://github.com/package-broker/broker/issues/624)) ([ebc2c24](https://github.com/package-broker/broker/commit/ebc2c2456c2c1375e5ef19e556384fe930ac83a6))
+* **db-sqlite:** registry reads for versionById and covers ([#625](https://github.com/package-broker/broker/issues/625)) ([0c7c9eb](https://github.com/package-broker/broker/commit/0c7c9ebe93d25fd3fb7feb0bf29274fe99e45cc7))
+* **db-sqlite:** schedule refetchable orphans past grace for purge ([#650](https://github.com/package-broker/broker/issues/650)) ([2e601c9](https://github.com/package-broker/broker/commit/2e601c9aded128fea40c766fd91dac74a5db358b))
+* **db-sqlite:** source lookup by VCS repository ([#505](https://github.com/package-broker/broker/issues/505)) ([739940c](https://github.com/package-broker/broker/commit/739940c3d4c7753cf833d8d515fc2b92f9e15edf))
+* **db-sqlite:** source-sync reads for existing and stale held keys ([#692](https://github.com/package-broker/broker/issues/692)) ([18574ea](https://github.com/package-broker/broker/commit/18574eac5f17c051862f445f6743013fea29fbd0))
+* **db-sqlite:** token and service-principal repositories write audit and idempotency ([#573](https://github.com/package-broker/broker/issues/573)) ([c536202](https://github.com/package-broker/broker/commit/c536202c2bbf2cb27239b1e23eac4b6e1b8d2f6a))
+* **db-sqlite:** token issue batches enforce the configured lifetime on database time ([#617](https://github.com/package-broker/broker/issues/617)) ([3fc6406](https://github.com/package-broker/broker/commit/3fc6406c4c41e07900e5c24f9c78a63f57f86f45))
+* **db-sqlite:** visibility mutations write audit rows in the fenced batch ([#610](https://github.com/package-broker/broker/issues/610)) ([adb0d1e](https://github.com/package-broker/broker/commit/adb0d1e0e692cd1b0d3266dc1b38822f4797b9f2))
+* **db-sqlite:** vulnerability status storage, migration 0022 and contracts ([#701](https://github.com/package-broker/broker/issues/701)) ([ced5dff](https://github.com/package-broker/broker/commit/ced5dffd560c757a6775e3db9be2bf2d11ba689c))
+* **db:** keep package ecosystem equal to its source's ecosystem ([#818](https://github.com/package-broker/broker/issues/818)) ([89a1929](https://github.com/package-broker/broker/commit/89a1929c22bc7e31e9b4d2800482e4033842fa7e))
+* engine wiring prerequisites: token revoke adapters, provider-anchor reader, request-bound background work ([#437](https://github.com/package-broker/broker/issues/437)) ([39f71ba](https://github.com/package-broker/broker/commit/39f71ba13b78be8e25fa3df4e459d7ae0a6b7221))
+* Import run lifecycle contract ([#562](https://github.com/package-broker/broker/issues/562)) ([3a771d3](https://github.com/package-broker/broker/commit/3a771d33b3636c80385f39c0e883eac4d59b7210))
+* Import run repository: runs, approval columns and the manifest blob ([#555](https://github.com/package-broker/broker/issues/555)) ([aa6854b](https://github.com/package-broker/broker/commit/aa6854b2b19d89a52fafb8a0c7a8bdb2bf61521f))
+* mount the UI separately from the management API ([#523](https://github.com/package-broker/broker/issues/523)) ([34eee2d](https://github.com/package-broker/broker/commit/34eee2d9b9b1b8a7456000f3a4f7ab2cb4930840))
+* **plugin-github:** wire the GitHub provider, App discovery and webhook verifier via SourceProviderContext ([#724](https://github.com/package-broker/broker/issues/724)) ([1a758df](https://github.com/package-broker/broker/commit/1a758df761df737cc967039d2ef0254c84375574))
+* Register the audit jobs in both runtimes ([#483](https://github.com/package-broker/broker/issues/483)) ([5fbadb6](https://github.com/package-broker/broker/commit/5fbadb65743f92bdbd3502c001b186b5d4ca1f4b))
+* **runtime-cloudflare:** register the package-sync job on the Worker runtime ([#686](https://github.com/package-broker/broker/issues/686)) ([7df357c](https://github.com/package-broker/broker/commit/7df357c82774307e659302f8cf373a588c365155))
+* **runtime-cloudflare:** wire the authorization engine, pepper and access services ([#444](https://github.com/package-broker/broker/issues/444)) ([94b1713](https://github.com/package-broker/broker/commit/94b1713811a39d750e1f3a1f5c8a8d4935703f4f))
+* **runtime-cloudflare:** wire the catalogue ([#515](https://github.com/package-broker/broker/issues/515)) ([1f72388](https://github.com/package-broker/broker/commit/1f723883df484601d031b2cee1d3c926c2998f1f))
+* **runtime-cloudflare:** wire the registry, codecs and guarded fetch into the Worker ([#654](https://github.com/package-broker/broker/issues/654)) ([5746d00](https://github.com/package-broker/broker/commit/5746d00238175bd9b1772f178ec65b2f2fe5659d))
+* **runtime-node:** generic Git sources on Node and source forms that offer only served providers ([#849](https://github.com/package-broker/broker/issues/849)) ([30bf3eb](https://github.com/package-broker/broker/commit/30bf3eb09c1c9e87bb970b28faa1c43b0dd9ef30))
+* **runtime-node:** wire the registry, codecs and guarded fetch into the Node runtime ([#641](https://github.com/package-broker/broker/issues/641)) ([9c3f238](https://github.com/package-broker/broker/commit/9c3f238980324fb7bffa3c553b6d7c19e24e5d99))
+* **runtime:** compose organization Administration and carry config.tokens through the manifest ([#693](https://github.com/package-broker/broker/issues/693)) ([093998e](https://github.com/package-broker/broker/commit/093998e723c6ce591574490783acdd19cb6c5323))
+* **runtime:** compose source-sync and source-poll jobs on both runtimes ([#713](https://github.com/package-broker/broker/issues/713)) ([4256596](https://github.com/package-broker/broker/commit/425659674c11376edc5b9218cb08e34bb773ca77))
+* **runtime:** keyring verifier that fails closed when PB_MASTER_KEY does not match the stored keyring ([#581](https://github.com/package-broker/broker/issues/581)) ([57612b7](https://github.com/package-broker/broker/commit/57612b76c16d6bc9b5c7eb0eda3bc0867eb36a6d))
+* **runtime:** mount /_pb/mcp when enabled; check the rate-limit binding at startup ([#802](https://github.com/package-broker/broker/issues/802)) ([79860d6](https://github.com/package-broker/broker/commit/79860d682570de674f3a2fae3f9ce598c24b7306))
+* **runtime:** mount the API module on Node and Workers ([#809](https://github.com/package-broker/broker/issues/809)) ([1420bbd](https://github.com/package-broker/broker/commit/1420bbd41a8f561c660fddbe2fe8fcfa35a217f3))
+* **runtime:** mount the GitHub webhook route on both runtimes ([#731](https://github.com/package-broker/broker/issues/731)) ([6b4984b](https://github.com/package-broker/broker/commit/6b4984b37486b93bd1f35d35f6aad1548802f8bc))
+* **runtime:** mount the management API wave a on Node and Workers ([#766](https://github.com/package-broker/broker/issues/766)) ([2268b87](https://github.com/package-broker/broker/commit/2268b87705dc38732040aa253a13fc8a473e2e32))
+* **runtime:** register retention-scan and blob-purge jobs with a lease-safe purge outcome ([#687](https://github.com/package-broker/broker/issues/687)) ([47246d9](https://github.com/package-broker/broker/commit/47246d980561f72b6757bb2858c92fa9bd42d4c7))
+* **runtime:** register the import apply and rollback jobs on both runtimes ([#666](https://github.com/package-broker/broker/issues/666)) ([a8da9fa](https://github.com/package-broker/broker/commit/a8da9fa05023d0cf0d8be03567750557a3d79d0d))
+* **runtime:** serve /_pb/openapi.json and complete the API document ([#790](https://github.com/package-broker/broker/issues/790)) ([ec277e2](https://github.com/package-broker/broker/commit/ec277e2baf6226aa7e26be126fa30f39e7258a30))
+* **runtime:** streaming blob hashers and purge timing check ([#593](https://github.com/package-broker/broker/issues/593)) ([489b488](https://github.com/package-broker/broker/commit/489b488f58c31eff313b31cf95c30267fbdae01e))
+* **runtime:** wire the token lifetime policy and personal-token offboarding jobs ([#674](https://github.com/package-broker/broker/issues/674)) ([c707814](https://github.com/package-broker/broker/commit/c70781414bc98c994248be8cb9b604f2334324fb))
+* Sealer job ([#435](https://github.com/package-broker/broker/issues/435)) ([7021085](https://github.com/package-broker/broker/commit/702108564caa5aecc9efcd3b3c9c21425f1b793d))
+* Shared public-origin parser ([#516](https://github.com/package-broker/broker/issues/516)) ([15eb515](https://github.com/package-broker/broker/commit/15eb515e6e6532cce6c2cb5e9890e30de8d758c9))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+* **sources:** sync now, immediate poll on enable, sync outcome in the source DTO ([#826](https://github.com/package-broker/broker/issues/826)) ([9dcaf07](https://github.com/package-broker/broker/commit/9dcaf071593524d4c467a2bb52ed2576bd5695a0))
+* StaticAssets adapters: Workers ASSETS binding and Node dist directory ([#462](https://github.com/package-broker/broker/issues/462)) ([b0927b0](https://github.com/package-broker/broker/commit/b0927b0cb9124f0950236b828979c1418e262bb7))
+* **ui:** browser first-admin setup with a local QR and automated Playwright end to end ([#718](https://github.com/package-broker/broker/issues/718)) ([8fcda6e](https://github.com/package-broker/broker/commit/8fcda6ed00991b21ee544f410893d0750f9a05f1))
+* Version-state store: D8 authority, package match, expected status, aud ([#751](https://github.com/package-broker/broker/issues/751)) ([6b69d63](https://github.com/package-broker/broker/commit/6b69d633bbac1e1e6abd39158de5a7ab3c429e0e))
+* wire deployment composition and smokes from staged UI assets ([#677](https://github.com/package-broker/broker/issues/677)) ([bcddcdd](https://github.com/package-broker/broker/commit/bcddcdd9d91f985732a9c732120cd5bd001095a8))
+
+
+### Bug Fixes
+
+* **auth:** client address resolvers return only IP literals ([#821](https://github.com/package-broker/broker/issues/821)) ([8fffb73](https://github.com/package-broker/broker/commit/8fffb73c7a5872324b076e2fcefd761e2b910cd9))
+* blob reserve decides the lease once per batch; per-path clock rule ([#413](https://github.com/package-broker/broker/issues/413)) ([f43aea2](https://github.com/package-broker/broker/commit/f43aea247d6e9a6401d3b42fdab1dfbbde69ca3a))
+* **core:** allow enabling the Packagist GitHub token mode through the API ([#831](https://github.com/package-broker/broker/issues/831)) ([6a7ecd8](https://github.com/package-broker/broker/commit/6a7ecd8f06c0685ef09f72b31a60b9eb5783f749))
+* **core:** answer 503 for sources that cannot be bound instead of 404 ([#854](https://github.com/package-broker/broker/issues/854)) ([1533eb5](https://github.com/package-broker/broker/commit/1533eb5535e23a577345e47a791133b8f42c95fb))
+* **core:** bind a Packagist credential only in GitHub token mode ([#835](https://github.com/package-broker/broker/issues/835)) ([242ddc2](https://github.com/package-broker/broker/commit/242ddc28c18134ecabf1de9cf9cfab944eff8769))
+* **core:** D1 batches never exceed 200 statements ([#767](https://github.com/package-broker/broker/issues/767)) ([90cd307](https://github.com/package-broker/broker/commit/90cd307d702bbd790f4b0e73cd70574f71bfd9d7))
+* **core:** fence registered-name writes and map stale ordering revisions to 412 ([#758](https://github.com/package-broker/broker/issues/758)) ([c0100f8](https://github.com/package-broker/broker/commit/c0100f85b10961c2311f7b3c55dbfb4db23233ce))
+* **core:** narrowing a source selection never removes packages ([#771](https://github.com/package-broker/broker/issues/771)) ([ba1fc77](https://github.com/package-broker/broker/commit/ba1fc77d8561210d6eec594b4001b8b61e0637c4))
+* **core:** project list pages are always full ([#759](https://github.com/package-broker/broker/issues/759)) ([5f1ad42](https://github.com/package-broker/broker/commit/5f1ad4209e021e58ae29d54c7fce6ea9a7938e0f))
+* **core:** refuse and quarantine an upstream archive over the size cap ([#846](https://github.com/package-broker/broker/issues/846)) ([72eaf1c](https://github.com/package-broker/broker/commit/72eaf1cbfe02dfb2467a8814682621a7223df310))
+* **core:** refused upstream answers 502 upstream_refused; refusal log at debug only ([#796](https://github.com/package-broker/broker/issues/796)) ([5bd73b1](https://github.com/package-broker/broker/commit/5bd73b13197e92f05c5b32457b6017fcc944a03b))
+* **core:** require an explicit client-IP resolver and keep forwarding headers out of core ([#864](https://github.com/package-broker/broker/issues/864)) ([f4c8ea9](https://github.com/package-broker/broker/commit/f4c8ea9985f50144585a3399f3b5027977918a34))
+* **db-sqlite:** apply the unseen share to version-listing finalize in batch ([#635](https://github.com/package-broker/broker/issues/635)) ([b5839dc](https://github.com/package-broker/broker/commit/b5839dc02c4ca414101a3473d0a6ca18a0322c38))
+* **db-sqlite:** expired idempotency keys are replaced, never a permanent conflict ([#633](https://github.com/package-broker/broker/issues/633)) ([722ddc6](https://github.com/package-broker/broker/commit/722ddc6479114efd0f5f23c09ac03cf379fc5cf0))
+* **db-sqlite:** finalize applies the mass-removal share inside the batch ([#630](https://github.com/package-broker/broker/issues/630)) ([a57e133](https://github.com/package-broker/broker/commit/a57e13306d054857c9e79c09f017dbc8759e1008))
+* **db-sqlite:** org consistency follow-ups: tag history on a foreign-org row, subset owner org, shared catalogue contract ([#472](https://github.com/package-broker/broker/issues/472)) ([183b9cf](https://github.com/package-broker/broker/commit/183b9cf5a4d837eefd7621aaef84bc11dd7cd28c))
+* **db-sqlite:** protectedHolder decides group freshness on the database clock ([#552](https://github.com/package-broker/broker/issues/552)) ([c62ae32](https://github.com/package-broker/broker/commit/c62ae32fe535ba04caf4ffad0dcb6d5a768b25ce))
+* **db-sqlite:** source sweep cascades only under packages it newly removes ([#646](https://github.com/package-broker/broker/issues/646)) ([ddaa1ff](https://github.com/package-broker/broker/commit/ddaa1ffeaf830475edaa6b69624f7917b206ba4e))
+* **runtime-cloudflare:** accept an http loopback public origin like Node ([#772](https://github.com/package-broker/broker/issues/772)) ([df877ac](https://github.com/package-broker/broker/commit/df877aceddcf80a4484fc4a1fb23418a42a0aa03))
+* **runtime-cloudflare:** worker smoke stops only the processes it started ([#684](https://github.com/package-broker/broker/issues/684)) ([a7348f4](https://github.com/package-broker/broker/commit/a7348f461b4d4049862faced16b3999617c714ff))
+* **runtime:** serve the staged UI the same way on Node and the Worker ([#672](https://github.com/package-broker/broker/issues/672)) ([1350dfb](https://github.com/package-broker/broker/commit/1350dfbb3ed9c7b218945b86168ca9d08c8c6d4b))
+* **sources:** refuse the git provider on Workers with a clear problem ([#815](https://github.com/package-broker/broker/issues/815)) ([0f55e22](https://github.com/package-broker/broker/commit/0f55e22f415dc828a3ae60aa8886f549539a7781))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>runtime-node: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/runtime-node-v2.0.0-rc.0...runtime-node-v2.0.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* **audit:** record local login and reauth in their session batches ([#825](https://github.com/package-broker/broker/issues/825)) ([04f64b3](https://github.com/package-broker/broker/commit/04f64b3e2f2916081b886de90bbe667fc33e1150))
+* **audit:** record setup completion in the setup batch ([#828](https://github.com/package-broker/broker/issues/828)) ([8cdac9d](https://github.com/package-broker/broker/commit/8cdac9dbd2228f0f8f275329164523c07f4b29df))
+* BrokerConfig flag to trust inbound W3C traceparent, off by default ([#476](https://github.com/package-broker/broker/issues/476)) ([692edd0](https://github.com/package-broker/broker/commit/692edd0e3048ec3380c83c4bf335524d1c585d96))
+* **cli:** pass BrokerConfig observability from broker.config.ts to both runtimes ([#542](https://github.com/package-broker/broker/issues/542)) ([e1a971d](https://github.com/package-broker/broker/commit/e1a971d7c6ad7a539341077e6188a4f44f2437b9))
+* **core:** access-loss paths enqueue selected-PAT revocation ([#694](https://github.com/package-broker/broker/issues/694)) ([c7a3077](https://github.com/package-broker/broker/commit/c7a307722ff7806c282186f4d577272be5ac3b53))
+* **core:** attach and detach a source to a project ([#774](https://github.com/package-broker/broker/issues/774)) ([bd042b2](https://github.com/package-broker/broker/commit/bd042b26d72e8a2c9b5e451c4a0ff11688a2612e))
+* **core:** baseline security headers on every response ([#513](https://github.com/package-broker/broker/issues/513)) ([83d3df1](https://github.com/package-broker/broker/commit/83d3df1e7279e50015912c85977803dc003b8a15))
+* **core:** composer_repository source provider (job-synced mirror) ([#804](https://github.com/package-broker/broker/issues/804)) ([e6b5914](https://github.com/package-broker/broker/commit/e6b5914c669769f4454f4bedd5274efc6dc6f3e8))
+* **core:** identity finish failures carry a closed-list detail code ([#752](https://github.com/package-broker/broker/issues/752)) ([afbf15f](https://github.com/package-broker/broker/commit/afbf15ff8a292ef866df079559688bb7b9997dee))
+* **core:** import verify job with rollback recovery from a dead verify ([#679](https://github.com/package-broker/broker/issues/679)) ([4f3f6a9](https://github.com/package-broker/broker/commit/4f3f6a9aacbb50d779cc35be56db21460a2549e8))
+* **core:** ingest logs carry the source id ([#757](https://github.com/package-broker/broker/issues/757)) ([0db40e1](https://github.com/package-broker/broker/commit/0db40e1ab749ee6bd3f12c9cca389475568b703b))
+* **core:** job lease accessor and release signal for core jobs ([#664](https://github.com/package-broker/broker/issues/664)) ([116edfb](https://github.com/package-broker/broker/commit/116edfbb2bc00596f74eb7bad6a0d3cc387f43cb))
+* **core:** keyring verifier follow-ups ([#602](https://github.com/package-broker/broker/issues/602)) ([906ce97](https://github.com/package-broker/broker/commit/906ce97af5ab187ef56aca5698d309fce8d9b610))
+* **core:** lease-bound fence issuer for import jobs ([#652](https://github.com/package-broker/broker/issues/652)) ([d638f8e](https://github.com/package-broker/broker/commit/d638f8ec85c5aa02d8584639013719aa503b751f))
+* **core:** management API wave b: package manage and import routes with the token fence ([#780](https://github.com/package-broker/broker/issues/780)) ([11e6e05](https://github.com/package-broker/broker/commit/11e6e05fa6dbf4fcce99f1ec5322c47798cd6853))
+* **core:** PAT and service-principal services carry audit and idempotency ([#556](https://github.com/package-broker/broker/issues/556)) ([d6dd962](https://github.com/package-broker/broker/commit/d6dd9620746cf63f5329a93b3095f54ab05b90ff))
+* **core:** periodic source poll, retention scan, sweep and due purge with premature-purge guard ([#673](https://github.com/package-broker/broker/issues/673)) ([aca62da](https://github.com/package-broker/broker/commit/aca62daedbe7fbcc9f994fc95b32cd21e9fe8a93))
+* **core:** persist the last successful audit verification time ([#778](https://github.com/package-broker/broker/issues/778)) ([2bf2347](https://github.com/package-broker/broker/commit/2bf234736e85cdb0b64d647d6d684155346fd58e))
+* **core:** project grants list and source attachment and precedence for the UI ([#791](https://github.com/package-broker/broker/issues/791)) ([7873621](https://github.com/package-broker/broker/commit/787362114847001464624aaaabe42818fbad911f))
+* **core:** project services write audit and idempotency ([#586](https://github.com/package-broker/broker/issues/586)) ([eebc9e3](https://github.com/package-broker/broker/commit/eebc9e3b2c233352dc2081f325f52f56ebc04ecb))
+* **core:** report schema drift on /health/ready ([#901](https://github.com/package-broker/broker/issues/901)) ([4e79afd](https://github.com/package-broker/broker/commit/4e79afd3bbb6698b96b4835f7e267ad974f03fbe))
+* **core:** request a package on a proxy source before the first install ([#904](https://github.com/package-broker/broker/issues/904)) ([9ce2457](https://github.com/package-broker/broker/commit/9ce24575d45802ef098e3c2bac02137558bc5eb2))
+* **core:** serve the UI shell publicly so the login screen is reachable ([#783](https://github.com/package-broker/broker/issues/783)) ([0ad4c6d](https://github.com/package-broker/broker/commit/0ad4c6d1c8cadf951290f0328f4f50227857af55))
+* **core:** service-principal creation requires fresh reauth ([#597](https://github.com/package-broker/broker/issues/597)) ([93d079e](https://github.com/package-broker/broker/commit/93d079eba176ee6fb303d85cb496c4039390f192))
+* **core:** sync generations with package counts and child error codes ([#883](https://github.com/package-broker/broker/issues/883)) ([3390cd3](https://github.com/package-broker/broker/commit/3390cd371ff62330ebf2366f8ababef8efe32878))
+* **core:** token services bind to the route ([#585](https://github.com/package-broker/broker/issues/585)) ([1afa0ea](https://github.com/package-broker/broker/commit/1afa0eadb369b96a1959c6e739d41f7c7438971a))
+* **core:** upstream.fetch child span for every upstream request ([#880](https://github.com/package-broker/broker/issues/880)) ([fd11ae0](https://github.com/package-broker/broker/commit/fd11ae03e22028d7970568ca8733805f8e1ffd33))
+* **core:** vulnerability status in the API and job wiring on Node and Workers ([#779](https://github.com/package-broker/broker/issues/779)) ([89a54fc](https://github.com/package-broker/broker/commit/89a54fc78a8a6d0e4e5154969389de66090cc8a9))
+* **db-sqlite:** closure-edge indexes with project_package names (migration 0024) ([#735](https://github.com/package-broker/broker/issues/735)) ([14cecfd](https://github.com/package-broker/broker/commit/14cecfd2a1ac89e686557c5c05178c44090373ab))
+* **db-sqlite:** mass-removal guard at the finalize call sites with per-registry not-found presets ([#546](https://github.com/package-broker/broker/issues/546)) ([9631882](https://github.com/package-broker/broker/commit/963188227ce5239efdc1185fb82caafdde749b74))
+* **db-sqlite:** schedule refetchable orphans past grace for purge ([#650](https://github.com/package-broker/broker/issues/650)) ([2e601c9](https://github.com/package-broker/broker/commit/2e601c9aded128fea40c766fd91dac74a5db358b))
+* **db-sqlite:** visibility mutations write audit rows in the fenced batch ([#610](https://github.com/package-broker/broker/issues/610)) ([adb0d1e](https://github.com/package-broker/broker/commit/adb0d1e0e692cd1b0d3266dc1b38822f4797b9f2))
+* **db-sqlite:** vulnerability status storage, migration 0022 and contracts ([#701](https://github.com/package-broker/broker/issues/701)) ([ced5dff](https://github.com/package-broker/broker/commit/ced5dffd560c757a6775e3db9be2bf2d11ba689c))
+* Docker smoke command and migration log wiring on the Node entry ([#715](https://github.com/package-broker/broker/issues/715)) ([c65e77b](https://github.com/package-broker/broker/commit/c65e77bc3b12548172773a23f3fe589f8554b5a2))
+* engine wiring prerequisites: token revoke adapters, provider-anchor reader, request-bound background work ([#437](https://github.com/package-broker/broker/issues/437)) ([39f71ba](https://github.com/package-broker/broker/commit/39f71ba13b78be8e25fa3df4e459d7ae0a6b7221))
+* mount the UI separately from the management API ([#523](https://github.com/package-broker/broker/issues/523)) ([34eee2d](https://github.com/package-broker/broker/commit/34eee2d9b9b1b8a7456000f3a4f7ab2cb4930840))
+* **plugin-github:** wire the GitHub provider, App discovery and webhook verifier via SourceProviderContext ([#724](https://github.com/package-broker/broker/issues/724)) ([1a758df](https://github.com/package-broker/broker/commit/1a758df761df737cc967039d2ef0254c84375574))
+* Register the audit jobs in both runtimes ([#483](https://github.com/package-broker/broker/issues/483)) ([5fbadb6](https://github.com/package-broker/broker/commit/5fbadb65743f92bdbd3502c001b186b5d4ca1f4b))
+* **runtime-node:** filesystem SSH archive store scoped per call by OrgContext ([#457](https://github.com/package-broker/broker/issues/457)) ([1596328](https://github.com/package-broker/broker/commit/15963287ff5acdd8a247c8bcf0074d1d5f98ca29))
+* **runtime-node:** forced exit after a shutdown timeout ([#574](https://github.com/package-broker/broker/issues/574)) ([edcb078](https://github.com/package-broker/broker/commit/edcb0784379dd9571eaafec86fca1382c6390fdb))
+* **runtime-node:** generic Git sources on Node and source forms that offer only served providers ([#849](https://github.com/package-broker/broker/issues/849)) ([30bf3eb](https://github.com/package-broker/broker/commit/30bf3eb09c1c9e87bb970b28faa1c43b0dd9ef30))
+* **runtime-node:** Node entry: platformPorts manifest export, process handlers, sanitized startup failure ([#443](https://github.com/package-broker/broker/issues/443)) ([bf2634e](https://github.com/package-broker/broker/commit/bf2634edfef86b7d41458f1b6f86e5b478369c9a))
+* **runtime-node:** register the package-sync job on the Node runtime ([#685](https://github.com/package-broker/broker/issues/685)) ([32481d5](https://github.com/package-broker/broker/commit/32481d5c3791cc591b235daa059f681a68307a15))
+* **runtime-node:** serve SSH-built archives through the registry dist path ([#877](https://github.com/package-broker/broker/issues/877)) ([6e95071](https://github.com/package-broker/broker/commit/6e950719e0d62e55533ebb6c8c56bb1922f659ab))
+* **runtime-node:** shutdown reports abandoned work; auth records reach the sink with reason codes ([#419](https://github.com/package-broker/broker/issues/419)) ([b2b31d2](https://github.com/package-broker/broker/commit/b2b31d2e0a8eb44bff108fc78f3840c94b5a3bfb))
+* **runtime-node:** trusted-proxy client IP for audit source_ip ([#776](https://github.com/package-broker/broker/issues/776)) ([b1008a0](https://github.com/package-broker/broker/commit/b1008a0df9af4fbc8911252c9e1af95da9136f97))
+* **runtime-node:** wire the authorization engine, pepper and access services ([#447](https://github.com/package-broker/broker/issues/447)) ([d26762e](https://github.com/package-broker/broker/commit/d26762ecbf4fc47e97577adf4e48ce9397219cac))
+* **runtime-node:** wire the catalogue ([#521](https://github.com/package-broker/broker/issues/521)) ([86a73f8](https://github.com/package-broker/broker/commit/86a73f83ad95a7e87c83b6b7ae0d630390657772))
+* **runtime-node:** wire the registry, codecs and guarded fetch into the Node runtime ([#641](https://github.com/package-broker/broker/issues/641)) ([9c3f238](https://github.com/package-broker/broker/commit/9c3f238980324fb7bffa3c553b6d7c19e24e5d99))
+* **runtime:** compose organization Administration and carry config.tokens through the manifest ([#693](https://github.com/package-broker/broker/issues/693)) ([093998e](https://github.com/package-broker/broker/commit/093998e723c6ce591574490783acdd19cb6c5323))
+* **runtime:** compose source-sync and source-poll jobs on both runtimes ([#713](https://github.com/package-broker/broker/issues/713)) ([4256596](https://github.com/package-broker/broker/commit/425659674c11376edc5b9218cb08e34bb773ca77))
+* **runtime:** keyring verifier that fails closed when PB_MASTER_KEY does not match the stored keyring ([#581](https://github.com/package-broker/broker/issues/581)) ([57612b7](https://github.com/package-broker/broker/commit/57612b76c16d6bc9b5c7eb0eda3bc0867eb36a6d))
+* **runtime:** mount /_pb/mcp when enabled; check the rate-limit binding at startup ([#802](https://github.com/package-broker/broker/issues/802)) ([79860d6](https://github.com/package-broker/broker/commit/79860d682570de674f3a2fae3f9ce598c24b7306))
+* **runtime:** mount the API module on Node and Workers ([#809](https://github.com/package-broker/broker/issues/809)) ([1420bbd](https://github.com/package-broker/broker/commit/1420bbd41a8f561c660fddbe2fe8fcfa35a217f3))
+* **runtime:** mount the GitHub webhook route on both runtimes ([#731](https://github.com/package-broker/broker/issues/731)) ([6b4984b](https://github.com/package-broker/broker/commit/6b4984b37486b93bd1f35d35f6aad1548802f8bc))
+* **runtime:** mount the management API wave a on Node and Workers ([#766](https://github.com/package-broker/broker/issues/766)) ([2268b87](https://github.com/package-broker/broker/commit/2268b87705dc38732040aa253a13fc8a473e2e32))
+* **runtime:** register retention-scan and blob-purge jobs with a lease-safe purge outcome ([#687](https://github.com/package-broker/broker/issues/687)) ([47246d9](https://github.com/package-broker/broker/commit/47246d980561f72b6757bb2858c92fa9bd42d4c7))
+* **runtime:** register the import apply and rollback jobs on both runtimes ([#666](https://github.com/package-broker/broker/issues/666)) ([a8da9fa](https://github.com/package-broker/broker/commit/a8da9fa05023d0cf0d8be03567750557a3d79d0d))
+* **runtime:** serve /_pb/openapi.json and complete the API document ([#790](https://github.com/package-broker/broker/issues/790)) ([ec277e2](https://github.com/package-broker/broker/commit/ec277e2baf6226aa7e26be126fa30f39e7258a30))
+* **runtime:** streaming blob hashers and purge timing check ([#593](https://github.com/package-broker/broker/issues/593)) ([489b488](https://github.com/package-broker/broker/commit/489b488f58c31eff313b31cf95c30267fbdae01e))
+* **runtime:** wire the token lifetime policy and personal-token offboarding jobs ([#674](https://github.com/package-broker/broker/issues/674)) ([c707814](https://github.com/package-broker/broker/commit/c70781414bc98c994248be8cb9b604f2334324fb))
+* Sealer job ([#435](https://github.com/package-broker/broker/issues/435)) ([7021085](https://github.com/package-broker/broker/commit/702108564caa5aecc9efcd3b3c9c21425f1b793d))
+* Shared public-origin parser ([#516](https://github.com/package-broker/broker/issues/516)) ([15eb515](https://github.com/package-broker/broker/commit/15eb515e6e6532cce6c2cb5e9890e30de8d758c9))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+* **sources:** sync now, immediate poll on enable, sync outcome in the source DTO ([#826](https://github.com/package-broker/broker/issues/826)) ([9dcaf07](https://github.com/package-broker/broker/commit/9dcaf071593524d4c467a2bb52ed2576bd5695a0))
+* StaticAssets adapters: Workers ASSETS binding and Node dist directory ([#462](https://github.com/package-broker/broker/issues/462)) ([b0927b0](https://github.com/package-broker/broker/commit/b0927b0cb9124f0950236b828979c1418e262bb7))
+* **ui:** browser first-admin setup with a local QR and automated Playwright end to end ([#718](https://github.com/package-broker/broker/issues/718)) ([8fcda6e](https://github.com/package-broker/broker/commit/8fcda6ed00991b21ee544f410893d0750f9a05f1))
+* Version-state store: D8 authority, package match, expected status, aud ([#751](https://github.com/package-broker/broker/issues/751)) ([6b69d63](https://github.com/package-broker/broker/commit/6b69d633bbac1e1e6abd39158de5a7ab3c429e0e))
+
+
+### Bug Fixes
+
+* **auth:** client address resolvers return only IP literals ([#821](https://github.com/package-broker/broker/issues/821)) ([8fffb73](https://github.com/package-broker/broker/commit/8fffb73c7a5872324b076e2fcefd761e2b910cd9))
+* **core:** allow enabling the Packagist GitHub token mode through the API ([#831](https://github.com/package-broker/broker/issues/831)) ([6a7ecd8](https://github.com/package-broker/broker/commit/6a7ecd8f06c0685ef09f72b31a60b9eb5783f749))
+* **core:** answer 503 for sources that cannot be bound instead of 404 ([#854](https://github.com/package-broker/broker/issues/854)) ([1533eb5](https://github.com/package-broker/broker/commit/1533eb5535e23a577345e47a791133b8f42c95fb))
+* **core:** bind a Packagist credential only in GitHub token mode ([#835](https://github.com/package-broker/broker/issues/835)) ([242ddc2](https://github.com/package-broker/broker/commit/242ddc28c18134ecabf1de9cf9cfab944eff8769))
+* **core:** Composer fill fails fast on an incomplete upstream document; dist hash refusal answers 502 ([#657](https://github.com/package-broker/broker/issues/657)) ([612934f](https://github.com/package-broker/broker/commit/612934fd39aa9834917f573547ea1c1a3091f4ae))
+* **core:** D1 batches never exceed 200 statements ([#767](https://github.com/package-broker/broker/issues/767)) ([90cd307](https://github.com/package-broker/broker/commit/90cd307d702bbd790f4b0e73cd70574f71bfd9d7))
+* **core:** narrowing a source selection never removes packages ([#771](https://github.com/package-broker/broker/issues/771)) ([ba1fc77](https://github.com/package-broker/broker/commit/ba1fc77d8561210d6eec594b4001b8b61e0637c4))
+* **core:** outbound policy: explicit TLS ports are https-only and the DNS guard requires a scheme ([#464](https://github.com/package-broker/broker/issues/464)) ([f2bfa1e](https://github.com/package-broker/broker/commit/f2bfa1e0aa599285545ba89cd123341da2e5a928))
+* **core:** refuse and quarantine an upstream archive over the size cap ([#846](https://github.com/package-broker/broker/issues/846)) ([72eaf1c](https://github.com/package-broker/broker/commit/72eaf1cbfe02dfb2467a8814682621a7223df310))
+* **core:** refused upstream answers 502 upstream_refused; refusal log at debug only ([#796](https://github.com/package-broker/broker/issues/796)) ([5bd73b1](https://github.com/package-broker/broker/commit/5bd73b13197e92f05c5b32457b6017fcc944a03b))
+* **core:** require an MCP limiter on Node and split non-touching session authentication ([#859](https://github.com/package-broker/broker/issues/859)) ([f14a75f](https://github.com/package-broker/broker/commit/f14a75fb9d001b77507f91d7f55840e17591a905))
+* **db-sqlite:** imported source config omits absent fields so the runtime binds generic Git sources ([#886](https://github.com/package-broker/broker/issues/886)) ([b56f11f](https://github.com/package-broker/broker/commit/b56f11f88d183527b4d60afcd8e55cac2f20c4d0))
+* **db-sqlite:** protectedHolder decides group freshness on the database clock ([#552](https://github.com/package-broker/broker/issues/552)) ([c62ae32](https://github.com/package-broker/broker/commit/c62ae32fe535ba04caf4ffad0dcb6d5a768b25ce))
+* outbound policy: bare allowlist entries admit HTTPS on 443 only, http on 443 refused ([#415](https://github.com/package-broker/broker/issues/415)) ([a3c8a60](https://github.com/package-broker/broker/commit/a3c8a603aadfc84a4db05967560beb7f7e871626))
+* **runtime-node:** accept only IP literals from proxy forwarding headers ([#782](https://github.com/package-broker/broker/issues/782)) ([dc802f2](https://github.com/package-broker/broker/commit/dc802f2fb556fb352a3bc3e09793628b71095cef))
+* **runtime-node:** bind the packagist-proxy GitHub token to GitHub origins only ([#662](https://github.com/package-broker/broker/issues/662)) ([f6a57bb](https://github.com/package-broker/broker/commit/f6a57bb89364484a315a415f21cece7b76ad9a3b))
+* **runtime-node:** bound the registry drain by the shutdown deadline and move test seams out of the public entry ([#649](https://github.com/package-broker/broker/issues/649)) ([45e6dde](https://github.com/package-broker/broker/commit/45e6dde5158df4a2806d978c9d12ad713c0848ca))
+* **runtime:** serve the staged UI the same way on Node and the Worker ([#672](https://github.com/package-broker/broker/issues/672)) ([1350dfb](https://github.com/package-broker/broker/commit/1350dfbb3ed9c7b218945b86168ca9d08c8c6d4b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.1
+</details>
+
+<details><summary>ui: 2.0.0-rc.1</summary>
+
+## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.0...ui-v2.0.0-rc.1) (2026-10-27)
+
+
+### Features
+
+* **core:** attach and detach a source to a project ([#774](https://github.com/package-broker/broker/issues/774)) ([bd042b2](https://github.com/package-broker/broker/commit/bd042b26d72e8a2c9b5e451c4a0ff11688a2612e))
+* **core:** create, list and read service principals over HTTP ([#788](https://github.com/package-broker/broker/issues/788)) ([4788669](https://github.com/package-broker/broker/commit/4788669dedac1a5128a0a978b48733ac6ddf11e2))
+* **core:** idempotent import run creation with credential window and binding status ([#841](https://github.com/package-broker/broker/issues/841)) ([855a7ce](https://github.com/package-broker/broker/commit/855a7ce7eb2ca5d159df5b7bcf98eb6180e4f9ad))
+* **core:** management API wave b: package manage and import routes with the token fence ([#780](https://github.com/package-broker/broker/issues/780)) ([11e6e05](https://github.com/package-broker/broker/commit/11e6e05fa6dbf4fcce99f1ec5322c47798cd6853))
+* **core:** organization source list can include project-owned sources ([#856](https://github.com/package-broker/broker/issues/856)) ([f7bdd5b](https://github.com/package-broker/broker/commit/f7bdd5b6a30da716d84dbb156d30eefaf3dc048f))
+* **core:** organization source list carries an attached-project count ([#799](https://github.com/package-broker/broker/issues/799)) ([03fd0a2](https://github.com/package-broker/broker/commit/03fd0a294cdb11f4d5914e07a11b9084b25843b1))
+* **core:** project grants list and source attachment and precedence for the UI ([#791](https://github.com/package-broker/broker/issues/791)) ([7873621](https://github.com/package-broker/broker/commit/787362114847001464624aaaabe42818fbad911f))
+* **core:** projects list prefix filter and per-item ETags for restore ([#798](https://github.com/package-broker/broker/issues/798)) ([a45bea3](https://github.com/package-broker/broker/commit/a45bea3a0fc2f699b3948a032c2de1aad2814752))
+* **core:** request a package on a proxy source before the first install ([#904](https://github.com/package-broker/broker/issues/904)) ([9ce2457](https://github.com/package-broker/broker/commit/9ce24575d45802ef098e3c2bac02137558bc5eb2))
+* **core:** sync generations with package counts and child error codes ([#883](https://github.com/package-broker/broker/issues/883)) ([3390cd3](https://github.com/package-broker/broker/commit/3390cd371ff62330ebf2366f8ababef8efe32878))
+* **core:** vulnerability status in the API and job wiring on Node and Workers ([#779](https://github.com/package-broker/broker/issues/779)) ([89a54fc](https://github.com/package-broker/broker/commit/89a54fc78a8a6d0e4e5154969389de66090cc8a9))
+* **runtime-node:** generic Git sources on Node and source forms that offer only served providers ([#849](https://github.com/package-broker/broker/issues/849)) ([30bf3eb](https://github.com/package-broker/broker/commit/30bf3eb09c1c9e87bb970b28faa1c43b0dd9ef30))
+* **runtime-node:** offer SSH sources on Node now that SSH archives are served ([#884](https://github.com/package-broker/broker/issues/884)) ([1700b48](https://github.com/package-broker/broker/commit/1700b48b5ad6a633d87b17d4dfefcf1b57b43018))
+* **runtime:** serve /_pb/openapi.json and complete the API document ([#790](https://github.com/package-broker/broker/issues/790)) ([ec277e2](https://github.com/package-broker/broker/commit/ec277e2baf6226aa7e26be126fa30f39e7258a30))
+* **sources:** GitHub sources with a personal access token ([#822](https://github.com/package-broker/broker/issues/822)) ([ffaa78b](https://github.com/package-broker/broker/commit/ffaa78bc9a0eba5d734a242caf0b9dfc3ecdb10a))
+* **sources:** sync now, immediate poll on enable, sync outcome in the source DTO ([#826](https://github.com/package-broker/broker/issues/826)) ([9dcaf07](https://github.com/package-broker/broker/commit/9dcaf071593524d4c467a2bb52ed2576bd5695a0))
+* UI pending-action store for reauth replay ([#563](https://github.com/package-broker/broker/issues/563)) ([4f99bee](https://github.com/package-broker/broker/commit/4f99beeaf27649ed40172fbe467e7a20399814c1))
+* **ui:** add, edit, attach and detach sources ([#808](https://github.com/package-broker/broker/issues/808)) ([a3b30be](https://github.com/package-broker/broker/commit/a3b30be85bbbea4122e9a3f70cac727d0f139674))
+* **ui:** admin shell with login, setup, reauth and scope switcher ([#781](https://github.com/package-broker/broker/issues/781)) ([5e7f06e](https://github.com/package-broker/broker/commit/5e7f06ed87a76aee44a773d9a8a2ca6a3f4d6ab2))
+* **ui:** API client and types generated from openapi.json ([#551](https://github.com/package-broker/broker/issues/551)) ([b905b30](https://github.com/package-broker/broker/commit/b905b30562243be03a7599ef3657da2e87711f0c))
+* **ui:** apply the readability components to projects, access, sources and tokens ([#803](https://github.com/package-broker/broker/issues/803)) ([09d184d](https://github.com/package-broker/broker/commit/09d184d3d1c9b1ea3555104047e5156717cd67f8))
+* **ui:** asset provider bridge between core and ui builds ([#603](https://github.com/package-broker/broker/issues/603)) ([cb1adf0](https://github.com/package-broker/broker/commit/cb1adf05c93c1f2627bb30cc0c64788977aefa43))
+* **ui:** audit and import pages ([#787](https://github.com/package-broker/broker/issues/787)) ([2097bfe](https://github.com/package-broker/broker/commit/2097bfe3a35f564e1bef01fb90f1d15122ecdef7))
+* **ui:** browser first-admin setup with a local QR and automated Playwright end to end ([#718](https://github.com/package-broker/broker/issues/718)) ([8fcda6e](https://github.com/package-broker/broker/commit/8fcda6ed00991b21ee544f410893d0750f9a05f1))
+* **ui:** client returns ETag and Location; reauth keeps page filters ([#785](https://github.com/package-broker/broker/issues/785)) ([7470b28](https://github.com/package-broker/broker/commit/7470b288b3a27258ad654581fec825ffd672c15c))
+* **ui:** committed openapi.json and generated UI types with a drift check ([#765](https://github.com/package-broker/broker/issues/765)) ([ab87962](https://github.com/package-broker/broker/commit/ab879625da660e2eca35e6a35968b6d9a050d856))
+* **ui:** enable project-owned sources from the project view ([#845](https://github.com/package-broker/broker/issues/845)) ([d7f047f](https://github.com/package-broker/broker/commit/d7f047f0f607794355a1adf1f2fb6f065b47d510))
+* **ui:** packages page with versions and manage actions ([#792](https://github.com/package-broker/broker/issues/792)) ([c81eaaf](https://github.com/package-broker/broker/commit/c81eaafe600a9c5eef1d3ebba3a6c90a3656ad7c))
+* **ui:** projects and access pages ([#797](https://github.com/package-broker/broker/issues/797)) ([fff3f19](https://github.com/package-broker/broker/commit/fff3f1955332e2c2edee3d3f010cd04b5564cc7e))
+* **ui:** readable source configuration and a prefilled edit form ([#879](https://github.com/package-broker/broker/issues/879)) ([e5960a9](https://github.com/package-broker/broker/commit/e5960a9e08e667967f5180cc59070e7cc4e339ed))
+* **ui:** readable, responsive tables, status badges and confirmations ([#801](https://github.com/package-broker/broker/issues/801)) ([2b284a2](https://github.com/package-broker/broker/commit/2b284a2fccd97725a38e1aa5d289cb42a02cdfa8))
+* **ui:** RowActions owns the size of row buttons ([#908](https://github.com/package-broker/broker/issues/908)) ([8fce167](https://github.com/package-broker/broker/commit/8fce1677933fe92796b2e9d2c96f24842c5555ef))
+* **ui:** show advisory status per package version ([#811](https://github.com/package-broker/broker/issues/811)) ([2603b30](https://github.com/package-broker/broker/commit/2603b3072a7206850a8dccd9f0982a8d16799a44))
+* **ui:** show Composer and npm configuration with a new token ([#813](https://github.com/package-broker/broker/issues/813)) ([a61e757](https://github.com/package-broker/broker/commit/a61e757023774ea6ed69cce9ecc74a805ccfcd49))
+* **ui:** simpler source form with radio choices, advanced settings and a full-screen mobile dialog ([#843](https://github.com/package-broker/broker/issues/843)) ([9b60b50](https://github.com/package-broker/broker/commit/9b60b5068e5f0606c351bf37afb630ff19cf7c34))
+* **ui:** source row actions in a menu with dialogs instead of an inline edit card ([#847](https://github.com/package-broker/broker/issues/847)) ([99afa91](https://github.com/package-broker/broker/commit/99afa914904fe3ee69ada4352c7767e1f1e9bae9))
+* **ui:** sources page with write-only credentials and ordering ([#800](https://github.com/package-broker/broker/issues/800)) ([7b9718c](https://github.com/package-broker/broker/commit/7b9718cc5fdcb5335fca530657d1ec76643c0474))
+* **ui:** Sources row actions, credentials per source type and Add package ([#911](https://github.com/package-broker/broker/issues/911)) ([fc778fa](https://github.com/package-broker/broker/commit/fc778fa960da5937cf3c083b838c00297751c65a))
+* **ui:** sync now and sync status on the Sources page ([#833](https://github.com/package-broker/broker/issues/833)) ([52ee73b](https://github.com/package-broker/broker/commit/52ee73b85053cb91fb163e01e1bd1ed59d29fcf5))
+* **ui:** sync status that matches listing and demand-fill behaviour ([#862](https://github.com/package-broker/broker/issues/862)) ([ffd65c3](https://github.com/package-broker/broker/commit/ffd65c38dda103b517784fe9309bf16f7fa86bec))
+* **ui:** tokens and service principals page with show-once secrets ([#794](https://github.com/package-broker/broker/issues/794)) ([fe40a55](https://github.com/package-broker/broker/commit/fe40a55d4677bf64c44f5f89f8bb6370e0c972ad))
+
+
+### Bug Fixes
+
+* **cli:** keep the OpenAPI document version at the API major ([#916](https://github.com/package-broker/broker/issues/916)) ([a37ff6a](https://github.com/package-broker/broker/commit/a37ff6af1244c0658f75c316eaee1406bc890814))
+* **core:** allow enabling the Packagist GitHub token mode through the API ([#831](https://github.com/package-broker/broker/issues/831)) ([6a7ecd8](https://github.com/package-broker/broker/commit/6a7ecd8f06c0685ef09f72b31a60b9eb5783f749))
+* **core:** refused upstream answers 502 upstream_refused; refusal log at debug only ([#796](https://github.com/package-broker/broker/issues/796)) ([5bd73b1](https://github.com/package-broker/broker/commit/5bd73b13197e92f05c5b32457b6017fcc944a03b))
+* **plugin-github:** harden token sources after review ([#836](https://github.com/package-broker/broker/issues/836)) ([c903d15](https://github.com/package-broker/broker/commit/c903d15f99b84753cbc48af8bbebe8732acb7dd1))
+* **ui:** Escape inside a menu never becomes a dialog close request; focus falls back when the opener stays disabled ([#875](https://github.com/package-broker/broker/issues/875)) ([511f51c](https://github.com/package-broker/broker/commit/511f51c2776b3ab4a1d5259955e946a4ab0a10ff))
+* **ui:** projects page keeps a valid selection and lists active projects for members ([#817](https://github.com/package-broker/broker/issues/817)) ([253d521](https://github.com/package-broker/broker/commit/253d5219ddaecba7708375ef8f9cbb07d4d0c9de))
+* **ui:** row menus render outside the table frame ([#905](https://github.com/package-broker/broker/issues/905)) ([d8cbe74](https://github.com/package-broker/broker/commit/d8cbe749239e07aa92beb3aa5544c0659055b79b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.1
+</details>
+
+---
+This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).

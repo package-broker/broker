@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import { CloudflareApi } from './api.js';
+import { cloudflareDeployContract, unverifiedDeployContract } from './deploy.js';
 import { installIdentity, type Operation, type ResourceKind } from './inventory.js';
 import { cloudflareProviderContract, type RemoteResource } from './provision.js';
 
@@ -33,6 +34,284 @@ function harness(responses: { body: unknown; status?: number }[]) {
   });
   return { api, fetch };
 }
+it.each([
+  [
+    'subdomain',
+    'packages.example.com',
+    ['zonesEmpty', 'zonesApex', 'dnsNsEmpty'],
+    [
+      '/zones?name=packages.example.com&page=1&per_page=50',
+      '/zones?name=example.com&page=1&per_page=50',
+      `/zones/${'1'.repeat(32)}/dns_records?type=NS&name=packages.example.com&page=1&per_page=100`,
+    ],
+  ],
+  ['apex', 'example.com', ['zonesApex'], ['/zones?name=example.com&page=1&per_page=50']],
+] as const)(
+  'resolves the %s through the production deploy contract',
+  async (_name, hostname, bodies, candidates) => {
+    const h = harness(bodies.map((name) => ({ body: fixtures[name] })));
+    expect(await cloudflareDeployContract.domainZone(h.api, hostname)).toBe('1'.repeat(32));
+    expect(h.fetch.mock.calls.map(([url]) => String(url))).toEqual(
+      candidates.map((path) => `https://api.cloudflare.com/client/v4${path}`),
+    );
+  },
+);
+it.each([
+  ['other account', 'packages.example.com', ['zonesOtherAccount'], 'domain_zone_not_found', 1],
+  ['no zone', 'packages.example.com', ['zonesEmpty', 'zonesEmpty'], 'domain_zone_not_found', 1],
+  ['ambiguous', 'example.com', ['zonesAmbiguous'], 'domain_zone_ambiguous', 1],
+  ['malformed', 'example.com', ['zonesMalformed'], 'provider_failure', 1],
+  ['inconsistent pagination', 'example.com', ['zonesInconsistent'], 'provider_failure', 1],
+  ['pending', 'packages.example.com', ['zonesPending'], 'domain_zone_not_found', 1],
+] as const)('rejects %s zone responses', async (_name, hostname, bodies, code, exitCode) => {
+  const h = harness(bodies.map((name) => ({ body: fixtures[name] })));
+  await expect(cloudflareDeployContract.domainZone(h.api, hostname)).rejects.toMatchObject({
+    code,
+    exitCode,
+    stage: 'deploy',
+  });
+  expect(h.fetch.mock.calls.map(([url]) => new URL(String(url)).searchParams.get('name'))).toEqual(
+    bodies.map((_body, index) => (index === 0 ? hostname : 'example.com')),
+  );
+});
+it('rejects a delegated foreign subzone without falling back to our apex', async () => {
+  const h = harness([{ body: fixtures.zonesOtherAccount }, { body: fixtures.zonesApex }]);
+  await expect(
+    cloudflareDeployContract.domainZone(h.api, 'packages.example.com'),
+  ).rejects.toMatchObject({
+    code: 'domain_zone_not_found',
+    stage: 'deploy',
+    message: expect.stringContaining('Zone lookup for packages.example.com:'),
+  });
+  expect(h.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+    'https://api.cloudflare.com/client/v4/zones?name=packages.example.com&page=1&per_page=50',
+  ]);
+});
+it('uses our active apex despite a pending duplicate in another account', async () => {
+  const h = harness([{ body: fixtures.zonesApexWithForeignPending }]);
+  expect(await cloudflareDeployContract.domainZone(h.api, 'example.com')).toBe('1'.repeat(32));
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it('ignores a pending foreign subzone and resolves through our apex', async () => {
+  const h = harness([
+    { body: fixtures.zonesForeignPendingSubzone },
+    { body: fixtures.zonesApex },
+    { body: fixtures.dnsNsEmpty },
+  ]);
+  expect(await cloudflareDeployContract.domainZone(h.api, 'pkg.example.com')).toBe('1'.repeat(32));
+  expect(h.fetch.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+    '/client/v4/zones',
+    '/client/v4/zones',
+    `/client/v4/zones/${'1'.repeat(32)}/dns_records`,
+  ]);
+});
+it.each([
+  ['delegated', 'dnsNsDelegated'],
+  ['not delegated', 'dnsNsEmpty'],
+] as const)(
+  'checks a hostname for NS delegation before accepting its parent zone: %s',
+  async (_name, fixture) => {
+    const h = harness([
+      { body: fixtures.zonesEmpty },
+      { body: fixtures.zonesApex },
+      { body: fixtures[fixture] },
+    ]);
+    const result = cloudflareDeployContract.domainZone(h.api, 'pkg.example.com');
+    if (fixture === 'dnsNsDelegated')
+      await expect(result).rejects.toMatchObject({
+        code: 'domain_zone_not_found',
+        stage: 'deploy',
+        message: expect.stringMatching(/pkg\.example\.com.*delegated away from zone example\.com/),
+      });
+    else await expect(result).resolves.toBe('1'.repeat(32));
+    expect(h.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://api.cloudflare.com/client/v4/zones?name=pkg.example.com&page=1&per_page=50',
+      'https://api.cloudflare.com/client/v4/zones?name=example.com&page=1&per_page=50',
+      `https://api.cloudflare.com/client/v4/zones/${'1'.repeat(32)}/dns_records?type=NS&name=pkg.example.com&page=1&per_page=100`,
+    ]);
+  },
+);
+it('checks every intermediate name and stops on a delegation below the apex', async () => {
+  const h = harness([
+    { body: fixtures.zonesEmpty },
+    { body: fixtures.zonesEmpty },
+    { body: fixtures.zonesApex },
+    { body: fixtures.dnsNsEmpty },
+    { body: fixtures.dnsNsDelegated },
+  ]);
+  await expect(
+    cloudflareDeployContract.domainZone(h.api, 'deep.pkg.example.com'),
+  ).rejects.toMatchObject({ code: 'domain_zone_not_found', stage: 'deploy' });
+  expect(
+    h.fetch.mock.calls.slice(3).map(([url]) => new URL(String(url)).searchParams.get('name')),
+  ).toEqual(['deep.pkg.example.com', 'pkg.example.com']);
+});
+it.each([
+  [401, 'permission_denied', false],
+  [403, 'domain_zone_not_found', false],
+  [503, 'provider_failure', true],
+] as const)(
+  'preserves DNS read failure details at deploy stage: %s',
+  async (status, code, retryable) => {
+    const h = harness([
+      { body: fixtures.zonesEmpty },
+      { body: fixtures.zonesApex },
+      ...Array.from({ length: status === 503 ? 5 : 1 }, () => ({
+        body: fixtures.forbidden,
+        status,
+      })),
+    ]);
+    const error: unknown = await cloudflareDeployContract
+      .domainZone(h.api, 'pkg.example.com')
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({ code, status, retryable, stage: 'deploy' });
+    if (status === 403)
+      expect(error).toMatchObject({
+        message: expect.stringMatching(/pkg\.example\.com.*DNS Read.*DNS Edit/),
+      });
+  },
+);
+it('rejects inconsistent DNS listing pagination at deploy stage', async () => {
+  const h = harness([
+    { body: fixtures.zonesEmpty },
+    { body: fixtures.zonesApex },
+    { body: { ...fixtures.dnsNsEmpty, result_info: { total_pages: 1, total_count: 1 } } },
+  ]);
+  await expect(cloudflareDeployContract.domainZone(h.api, 'pkg.example.com')).rejects.toMatchObject(
+    { code: 'provider_failure', stage: 'deploy', retryable: false },
+  );
+});
+it('preserves transient zone lookup failure details at deploy stage', async () => {
+  const h = harness(Array.from({ length: 5 }, () => ({ body: fixtures.forbidden, status: 503 })));
+  await expect(cloudflareDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+    code: 'provider_failure',
+    status: 503,
+    retryable: true,
+    stage: 'deploy',
+  });
+});
+it('reports a malformed zone account at deploy stage', async () => {
+  const zone = (fixtures.zonesApex!.result as Record<string, unknown>[])[0]!;
+  const h = harness([{ body: { ...fixtures.zonesApex, result: [{ ...zone, account: null }] } }]);
+  await expect(cloudflareDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+    code: 'provider_failure',
+    status: null,
+    retryable: false,
+    stage: 'deploy',
+  });
+});
+it('never requests a single-label zone candidate', async () => {
+  const h = harness([{ body: fixtures.zonesEmpty }]);
+  await expect(cloudflareDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+    code: 'domain_zone_not_found',
+  });
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+  expect(new URL(String(h.fetch.mock.calls[0]?.[0])).searchParams.get('name')).toBe('example.com');
+  const single = harness([]);
+  await expect(cloudflareDeployContract.domainZone(single.api, 'com')).rejects.toMatchObject({
+    code: 'invalid_input',
+    exitCode: 2,
+    stage: 'deploy',
+  });
+  expect(single.fetch).not.toHaveBeenCalled();
+});
+it('prefers an exact zone for the longest suffix and ignores non-exact names', async () => {
+  const zone = (fixtures.zonesApex!.result as Record<string, unknown>[])[0]!;
+  const exact = harness([
+    { body: { ...fixtures.zonesApex, result: [{ ...zone, name: 'packages.example.com' }] } },
+  ]);
+  expect(await cloudflareDeployContract.domainZone(exact.api, 'packages.example.com')).toBe(
+    zone.id,
+  );
+  expect(exact.fetch).toHaveBeenCalledTimes(1);
+  const parent = harness([
+    { body: fixtures.zonesApex },
+    { body: fixtures.zonesApex },
+    { body: fixtures.dnsNsEmpty },
+  ]);
+  expect(await cloudflareDeployContract.domainZone(parent.api, 'packages.example.com')).toBe(
+    zone.id,
+  );
+  expect(parent.fetch).toHaveBeenCalledTimes(3);
+});
+it('checks all pages before accepting an exact zone match', async () => {
+  const body = fixtures.zonesApex!;
+  const h = harness([
+    { body: { ...body, result_info: { page: 1, count: 1, total_pages: 2, total_count: 2 } } },
+    { body: { ...body, result_info: { page: 2, count: 1, total_pages: 2, total_count: 2 } } },
+  ]);
+  await expect(cloudflareDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+    code: 'domain_zone_ambiguous',
+    stage: 'deploy',
+    message: expect.stringMatching(/^Zone lookup for example\.com:.*remove the duplicate zone/),
+  });
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+});
+it.each(['', 'invalid', 'A'.repeat(32), '1'.repeat(31)])(
+  'rejects invalid zone ids: %s',
+  async (id) => {
+    const zone = (fixtures.zonesApex!.result as Record<string, unknown>[])[0]!;
+    const h = harness([{ body: { ...fixtures.zonesApex, result: [{ ...zone, id }] } }]);
+    await expect(cloudflareDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+      code: 'domain_zone_not_found',
+    });
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  },
+);
+it.each([
+  { result: null },
+  { result: [null] },
+  { result_info: undefined },
+  { result_info: { page: 2, count: 1, total_pages: 1, total_count: 1 } },
+  { result_info: { page: 1, count: 0, total_pages: 1, total_count: 1 } },
+  { result_info: { total_pages: '1', total_count: 1 } },
+])('fails closed on malformed zone response details: %j', async (override) => {
+  const h = harness([{ body: { ...fixtures.zonesApex, ...override } }]);
+  await expect(cloudflareDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+    code: 'provider_failure',
+  });
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it('gives actionable zone guidance for a forbidden lookup', async () => {
+  const h = harness([{ body: fixtures.forbidden, status: 403 }]);
+  const error: unknown = await cloudflareDeployContract
+    .domainZone(h.api, 'example.com')
+    .catch((error: unknown) => error);
+  expect(error).toMatchObject({
+    code: 'domain_zone_not_found',
+    exitCode: 1,
+    status: 403,
+    stage: 'deploy',
+    message: expect.stringMatching(
+      /^Zone lookup for example\.com:.*Zone Read.*Workers Routes Edit.*DNS Edit/,
+    ),
+  });
+  expect(String(error)).not.toMatch(/SENTINEL|person@example.com|user:password|Workers Paid/);
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it('preserves an authentication failure instead of treating it as a missing zone', async () => {
+  const h = harness([{ body: fixtures.forbidden, status: 401 }]);
+  const error: unknown = await cloudflareDeployContract
+    .domainZone(h.api, 'example.com')
+    .catch((error: unknown) => error);
+  expect(error).toMatchObject({
+    code: 'permission_denied',
+    status: 401,
+    exitCode: 1,
+    stage: 'deploy',
+    retryable: false,
+  });
+  expect(String(error)).not.toMatch(/SENTINEL|person@example.com|user:password/);
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it('explicitly refuses zone lookup with the unverified contract', async () => {
+  const h = harness([]);
+  await expect(unverifiedDeployContract.domainZone(h.api, 'example.com')).rejects.toMatchObject({
+    code: 'domain_zone_not_supported',
+    stage: 'deploy',
+  });
+  expect(h.fetch).not.toHaveBeenCalled();
+});
 it('accepts the real empty queues response with null diagnostics and zero pages', async () => {
   const h = harness([{ body: fixtures.queuesEmpty }]);
   expect(await contract.capabilities(h.api, required, identity)).toEqual({

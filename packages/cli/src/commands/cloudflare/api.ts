@@ -29,6 +29,9 @@ export type ErrorCode =
   | 'permission_denied'
   | 'capacity_exceeded'
   | 'capability_unknown'
+  | 'domain_zone_not_found'
+  | 'domain_zone_ambiguous'
+  | 'domain_zone_not_supported'
   | 'queues_unavailable'
   | 'workers_paid_required'
   | 'workers_dev_subdomain_missing'
@@ -88,6 +91,11 @@ const MESSAGES: Record<ErrorCode, string> = {
   permission_denied: GUIDANCE,
   capacity_exceeded: GUIDANCE,
   capability_unknown: `Required capability is unresolved. ${GUIDANCE}`,
+  domain_zone_not_found:
+    'No active zone in this account serves the hostname, or the token lacks Zone Read on it. Grant Zone Read, Workers Routes Edit and DNS Edit on that zone.',
+  domain_zone_ambiguous:
+    'Several zones match the hostname; remove the duplicate zone before retrying.',
+  domain_zone_not_supported: 'This provider contract does not support hostname-to-zone lookup.',
   queues_unavailable: GUIDANCE,
   workers_paid_required: GUIDANCE,
   workers_dev_subdomain_missing:
@@ -294,6 +302,9 @@ export class CloudflareApi {
   get deadline(): number {
     return this.budgetEnd;
   }
+  get accountId(): string {
+    return this.options.accountId;
+  }
   restartDeadline(budgetMs = BUDGET_MS): void {
     if (!this.fixedDeadline) this.budgetEnd = this.now() + budgetMs;
   }
@@ -349,6 +360,20 @@ export class CloudflareApi {
   ): Promise<ApiResponse> {
     if (!/^[a-f0-9]{32}$/.test(zone)) throw new CloudflareError('invalid_input', 2);
     return this.enqueue(path, method, body, `/zones/${zone}`);
+  }
+  async listZones(name: string): Promise<Record<string, unknown>[]> {
+    return paginatedList(
+      `/zones?name=${encodeURIComponent(name)}`,
+      (path) => this.enqueue(path, 'GET', undefined, ''),
+      undefined,
+      () => {
+        throw new CloudflareError('provider_failure', 1, false, 'deploy');
+      },
+      () => {
+        throw new CloudflareError('provider_failure', 1, false, 'deploy');
+      },
+      50,
+    );
   }
   uploadAssets(body: FormData, sessionToken: string): Promise<ApiResponse> {
     if (!/^[A-Za-z0-9_.-]+$/.test(sessionToken)) throw new CloudflareError('provider_failure');
@@ -584,6 +609,7 @@ export async function paginatedList(
   malformed: () => never = () => {
     throw new CloudflareError('provider_failure');
   },
+  perPage = 100,
 ): Promise<Record<string, unknown>[]> {
   const all: Record<string, unknown>[] = [];
   let cursor: string | undefined;
@@ -593,7 +619,7 @@ export async function paginatedList(
   for (let page = 1; page <= 10_000; page++) {
     const separator = path.includes('?') ? '&' : '?';
     const response = await read(
-      `${path}${separator}${cursor === undefined ? `page=${page}&per_page=100` : `cursor=${encodeURIComponent(cursor)}`}`,
+      `${path}${separator}${cursor === undefined ? `page=${page}&per_page=${perPage}` : `cursor=${encodeURIComponent(cursor)}`}`,
     );
     const result = field === undefined ? response.result : object(response.result)[field];
     if (!Array.isArray(result)) return malformed();

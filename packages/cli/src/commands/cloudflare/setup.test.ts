@@ -1852,16 +1852,23 @@ it.each([undefined, '', 'a'.repeat(64), 'PRIVATE_SENTINEL', 'not.a.label'])(
   },
 );
 
-it('refuses custom domain creation when the deploy contract has no zone resolver', async () => {
+it('refuses custom domain creation before writes when no zone serves the hostname', async () => {
   options.domain = 'broker.example.test';
   options.reveal = vi.fn();
   const fetch = options.fetch!;
   options.fetch = vi.fn(async (input, init) =>
-    new URL(String(input)).pathname.endsWith('/workers/domains')
-      ? new Response(JSON.stringify({ success: true, result: [], result_info: { total_pages: 1 } }))
+    new URL(String(input)).pathname.endsWith('/workers/domains') ||
+    String(input).includes('/zones?name=')
+      ? new Response(
+          JSON.stringify({
+            success: true,
+            result: [],
+            result_info: { page: 1, per_page: 50, count: 0, total_count: 0, total_pages: 1 },
+          }),
+        )
       : fetch(input, init),
   );
-  await expectPreflightRefusal('capability_unknown', 1);
+  await expectPreflightRefusal('domain_zone_not_found', 1);
 });
 
 it('refuses an unregistered workers.dev account on a 404 before writes', async () => {

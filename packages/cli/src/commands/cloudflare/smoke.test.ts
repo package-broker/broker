@@ -569,6 +569,9 @@ async function gradual(h: ReturnType<typeof harness>) {
   const contract: DeployProviderContract = {
     versionsCreateScript: false,
     secretInheritance: false,
+    domainZone: async () => {
+      throw new Error('Unexpected zone lookup in smoke fixture');
+    },
     preview: async (_api, script, version) => {
       expect(script).toBe(identity.script_name);
       expect(version).toBe(CANDIDATE);

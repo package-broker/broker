@@ -1811,7 +1811,7 @@ async function expectPreflightRefusal(code: string, exitCode: number) {
   expect(JSON.stringify(outcome)).not.toContain('PRIVATE_SENTINEL');
 }
 
-it('refuses partial rollout with an active version when the deploy contract has no preview', async () => {
+it('passes partial rollout preflight with an active version and production preview support', async () => {
   exists = true;
   options.rollout = 50;
   options.reveal = vi.fn();
@@ -1835,7 +1835,20 @@ it('refuses partial rollout with an active version when the deploy contract has 
         )
       : fetch(input, init),
   );
-  await expectPreflightRefusal('capability_unknown', 1);
+  const outcome = await setup(options, ops);
+  expect(outcome).toMatchObject({ exitCode: 0, output: { error: null } });
+  expect(calls).toContain('provision');
+  for (const operation of [ops.migrate, ops.organization, ops.deploy, ops.admin])
+    expect(operation).toHaveBeenCalledOnce();
+  expect(options.reveal).not.toHaveBeenCalled();
+  expect((await journal()).secret_delivery.master_key).toBe('installed');
+  expect((await stat(options.keyFile!)).mode & 0o777).toBe(0o600);
+  expect(JSON.stringify(outcome)).not.toContain('PRIVATE_SENTINEL');
+  expect(
+    vi
+      .mocked(options.fetch!)
+      .mock.calls.every(([, init]) => !init?.method || init.method === 'GET'),
+  ).toBe(true);
 });
 
 it.each([undefined, '', 'a'.repeat(64), 'PRIVATE_SENTINEL', 'not.a.label'])(

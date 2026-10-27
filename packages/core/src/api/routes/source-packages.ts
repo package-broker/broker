@@ -3,8 +3,18 @@ import type { MutationFence } from '../../authz/fence.js';
 import { displayName, packageKey, PackageNameError } from '../../catalogue/names.js';
 import type { OrgContext } from '../../db/port.js';
 import type { SourceRepository } from '../../db/source.js';
-import { PACKAGE_SYNC_JOB_TYPE, packageSyncEnqueueInput } from '../../ingest/package-sync-job.js';
+import {
+  PACKAGE_SYNC_JOB_TYPE,
+  packageSyncEnqueueInput,
+  packageSyncJob,
+} from '../../ingest/package-sync-job.js';
 import type { SourcePackageProbe } from '../../ingest/source-package.js';
+import type { JobEnqueue } from '../../platform/job-repository.js';
+import {
+  canonicalPayload,
+  DEFAULT_MAX_ATTEMPTS,
+  storedIdempotencyKey,
+} from '../../platform/jobs.js';
 import type { RouteDefinition } from '../../plugin.js';
 import { apiRoute } from '../route.js';
 import { projectSessionCallContext, type ApiRouteDeps } from './context.js';
@@ -15,7 +25,13 @@ export interface SourcePackageStore {
   request(
     org: OrgContext,
     fence: MutationFence,
-    input: { readonly projectId: string; readonly sourceId: string; readonly audit?: AuditEvent },
+    input: {
+      readonly projectId: string;
+      readonly sourceId: string;
+      readonly audit?: AuditEvent;
+      /** Inserted in the same batch as the authority recheck and the audit row. */
+      readonly job?: JobEnqueue;
+    },
   ): Promise<'accepted' | 'forbidden' | 'not_found' | 'source_paused' | 'unavailable'>;
 }
 
@@ -91,20 +107,37 @@ export function sourcePackageRoutes(deps: SourcePackageRouteDeps): readonly Rout
       });
       if (!audit.ok) throw new TypeError('Invalid source audit event');
       const payload = { sourceId: source.id, key };
-      let jobId: string;
+      const jobId = deps.ids.ulid();
+      let job: JobEnqueue;
       try {
-        const job = await jobs!.enqueue(
-          c.org,
-          PACKAGE_SYNC_JOB_TYPE,
-          payload,
-          await packageSyncEnqueueInput(payload, c.call.audit.opId),
-        );
-        jobId = job.id;
+        const payloadJson = canonicalPayload(payload);
+        packageSyncJob.validate(JSON.parse(payloadJson));
+        const enqueue = await packageSyncEnqueueInput(payload, c.call.audit.opId);
+        job = {
+          id: jobId,
+          type: PACKAGE_SYNC_JOB_TYPE,
+          payloadJson,
+          idempotencyKey: storedIdempotencyKey(PACKAGE_SYNC_JOB_TYPE, enqueue.idempotencyKey),
+          resourceKey: enqueue.resourceKey ?? null,
+          runAt: null,
+          maxAttempts: packageSyncJob.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+          projectId: c.projectId,
+          initiatorTokenId: null,
+        };
       } catch {
         return { error: 'unavailable' };
       }
-      const recorded = await deps.store.request(c.org, c.fence, { ...input, audit: audit.event });
+      const recorded = await deps.store.request(c.org, c.fence, {
+        ...input,
+        audit: audit.event,
+        job,
+      });
       if (recorded !== 'accepted') return { error: recorded };
+      try {
+        await jobs?.notify?.(c.org, jobId);
+      } catch {
+        // The cron sweep claims the committed job when the wake-up is lost.
+      }
       return { status: 202, body: { name: displayName(key), state: 'queued', jobId } };
     }),
   ];

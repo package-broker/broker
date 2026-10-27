@@ -505,3 +505,68 @@ describe('createRepositoryJobs get', () => {
     expect(store.statusCalls).toEqual(['J1']);
   });
 });
+
+describe('createRepositoryJobs notify', () => {
+  const initiator = { projectId: null, tokenId: null };
+  const statuses = new Map([['job-1', status('job-1', 'core:package-sync:v1')]]);
+
+  it('passes an owned queued job id to the store wake-up', async () => {
+    const woken: string[] = [];
+    const { factory } = setup({
+      ...fakeStore({ statuses }),
+      notify: async (_ctx, id) => {
+        expect(_ctx).toBe(ctx);
+        woken.push(id);
+      },
+    } as FakeStore);
+    await factory('core', initiator).notify?.(ctx, 'job-1');
+    expect(woken).toEqual(['job-1']);
+  });
+
+  it.each<readonly [string, JobStatus | null]>([
+    ['another plugin', status('job-1', 'b:x:v1')],
+    ['core', status('job-1', 'core:package-sync:v1')],
+    ['unknown', null],
+    ...(['running', 'succeeded', 'dead'] as const).map(
+      (state) => [state, { ...status('job-1', 'a:sync:v1'), state }] as const,
+    ),
+  ])('does not wake a %s job for plugin a', async (_label, job) => {
+    const woken: string[] = [];
+    const { factory } = setup({
+      ...fakeStore({ statuses: new Map(job === null ? [] : [['job-1', job]]) }),
+      notify: async (_ctx, id) => {
+        woken.push(id);
+      },
+    } as FakeStore);
+    await expect(factory('a', initiator).notify?.(ctx, 'job-1')).resolves.toBeUndefined();
+    expect(woken).toEqual([]);
+  });
+
+  it('resolves without a store wake-up and when the wake-up fails', async () => {
+    const plain = setup(fakeStore({ statuses })).factory('core', initiator);
+    await expect(plain.notify?.(ctx, 'job-1')).resolves.toBeUndefined();
+    let attempts = 0;
+    const failing = setup({
+      ...fakeStore({ statuses }),
+      notify: () => {
+        attempts += 1;
+        return Promise.reject(new Error('queue down'));
+      },
+    } as FakeStore).factory('core', initiator);
+    await expect(failing.notify?.(ctx, 'job-1')).resolves.toBeUndefined();
+    expect(attempts).toBe(1);
+  });
+
+  it('resolves without waking when reading the status fails', async () => {
+    const woken: string[] = [];
+    const { factory } = setup({
+      ...fakeStore(),
+      status: () => Promise.reject(new Error('store down')),
+      notify: async (_ctx, id) => {
+        woken.push(id);
+      },
+    } as FakeStore);
+    await expect(factory('core', initiator).notify?.(ctx, 'job-1')).resolves.toBeUndefined();
+    expect(woken).toEqual([]);
+  });
+});

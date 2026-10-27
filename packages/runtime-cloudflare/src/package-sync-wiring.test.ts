@@ -772,6 +772,72 @@ describe.each([
     },
   );
 
+  async function proxySource(h: Awaited<ReturnType<typeof boot>>) {
+    const [project, id] = [ulid(), ulid()];
+    await h.seed("INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'p2', 'P2')", [
+      project,
+      h.org.orgId,
+    ]);
+    await h.seed(
+      `INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json, removal_policy)
+      VALUES (?, ?, 'npmjs', 'npm', 'npmjs_proxy', 'https://registry.npmjs.org', '{}', 'flag')`,
+      [id, h.org.orgId],
+    );
+    await h.seed(
+      'INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, ?, ?, 100)',
+      [h.org.orgId, project, id],
+    );
+    return { project, id };
+  }
+
+  it('wakes the queue once after an accepted package request and not after a refusal', async () => {
+    const h = await boot('npm');
+    upstream('npm', 1);
+    const source = await proxySource(h);
+    const requestPackage = () =>
+      h.request(
+        new Request(`${PUBLIC_URL}/_pb/projects/p2/sources/${source.id}/packages`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'widget' }),
+        }),
+      );
+    const accepted = await requestPackage();
+    expect(accepted.status).toBe(202);
+    const { jobId } = (await accepted.json()) as { jobId: string };
+    expect(h.notifications).toEqual([{ v: 1, org: h.org.orgId, job: jobId }]);
+    expect(await h.repository.status(h.org, jobId)).toMatchObject({ state: 'queued' });
+    h.notifications.length = 0;
+    await h.seed('DELETE FROM project_source WHERE org_id = ? AND project_id = ?', [
+      h.org.orgId,
+      source.project,
+    ]);
+    expect((await requestPackage()).status).toBe(404);
+    expect(h.notifications).toEqual([]);
+  });
+
+  it('answers 202 and keeps the job queued for Cron when the wake-up send fails', async () => {
+    const h = await boot('npm');
+    upstream('npm', 1);
+    const source = await proxySource(h);
+    const queue = h.env.JOBS as { send: (body: unknown) => Promise<void> };
+    queue.send = () => Promise.reject(new Error('queue down https://user:secret@example.test'));
+    const response = await h.request(
+      new Request(`${PUBLIC_URL}/_pb/projects/p2/sources/${source.id}/packages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'widget' }),
+      }),
+    );
+    expect(response.status).toBe(202);
+    const { jobId } = (await response.json()) as { jobId: string };
+    expect(await h.repository.status(h.org, jobId)).toMatchObject({ state: 'queued' });
+    expect(h.events).toContainEqual(
+      expect.objectContaining({ event: 'job.notify_failed', error_name: 'Error' }),
+    );
+    expect(JSON.stringify(h.events)).not.toContain('secret');
+  });
+
   it('registers package-sync alongside the existing core jobs and fails closed before binding', async () => {
     const kernel = vi.spyOn(kernelModule, 'createKernel');
     const original = coreJobsModule.registerCoreJob;

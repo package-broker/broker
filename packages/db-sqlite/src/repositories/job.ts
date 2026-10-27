@@ -143,7 +143,7 @@ function statement(query: RawBuilder<unknown>): Statement {
   return { sql: compiled.sql, params: compiled.parameters as readonly SqlValue[] };
 }
 
-function text(field: string, value: unknown): string {
+export function text(field: string, value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_TEXT) {
     throw new RangeError(
       `${field} must be a non-empty string of at most ${String(MAX_TEXT)} characters`,
@@ -168,7 +168,7 @@ function ulidOwner(value: unknown): string {
   return value;
 }
 
-function jsonPayload(value: unknown): string {
+export function jsonPayload(value: unknown): string {
   if (typeof value !== 'string' || encoder.encode(value).length > MAX_PAYLOAD_BYTES) {
     throw new JobError('invalid_payload');
   }

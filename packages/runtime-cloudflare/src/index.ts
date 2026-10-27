@@ -258,6 +258,7 @@ import {
   createJobSender,
   createQueueHandler,
   enqueueAndNotify,
+  notifyCommitted,
   JOB_EVENTS,
   JOB_REASON_CODES,
   QUEUE_RETRY_DELAY_SECONDS,
@@ -1476,6 +1477,7 @@ export function createWorker(
           observability,
         }),
         status: (ctx: OrgContext, id: string) => repository.status(ctx, id),
+        notify: notifyCommitted({ send: createJobSender(bound.queue), observability }),
       }),
     });
 

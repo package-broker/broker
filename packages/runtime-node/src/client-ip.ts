@@ -39,16 +39,78 @@ function forwardedIp(value: string | null): string | null {
   return ipLiteral(candidate);
 }
 
-export function nodeClientIp(
-  request: Request,
-  remoteAddress: string | null,
-  trustedProxy = false,
-): string | null {
-  if (!trustedProxy) return ipLiteral(remoteAddress);
+export type TrustedProxy =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'cloudflare' }
+  | { readonly kind: 'xff'; readonly hops: number }
+  | { readonly kind: 'legacy' };
+
+export const MAX_TRUSTED_PROXY_HOPS = 10;
+
+export const TRUSTED_PROXY_RULE = `must be 0, cloudflare or xff:<n> with n from 1 to ${MAX_TRUSTED_PROXY_HOPS}`;
+
+export const TRUSTED_PROXY_DEPRECATION = Object.freeze({
+  level: 'warn',
+  event: 'config.deprecated',
+  key: 'PB_TRUSTED_PROXY',
+});
+
+const NO_TRUSTED_PROXY: TrustedProxy = Object.freeze({ kind: 'none' });
+const LEGACY_TRUSTED_PROXY: TrustedProxy = Object.freeze({ kind: 'legacy' });
+
+/** Parses `PB_TRUSTED_PROXY`; null means the value is not accepted. */
+export function parseTrustedProxy(value: string | undefined): TrustedProxy | null {
+  if (value === undefined || value === '0') return NO_TRUSTED_PROXY;
+  if (value === '1') return LEGACY_TRUSTED_PROXY;
+  if (value === 'cloudflare') return Object.freeze({ kind: 'cloudflare' });
+  const hops = /^xff:([1-9][0-9]?)$/.exec(value)?.[1];
+  if (hops === undefined || Number(hops) > MAX_TRUSTED_PROXY_HOPS) return null;
+  return Object.freeze({ kind: 'xff', hops: Number(hops) });
+}
+
+function legacyClientIp(request: Request): string | null {
   const candidate =
     request.headers.get('cf-connecting-ip') ??
     request.headers.get('x-forwarded-for')?.split(',')[0];
-  const forwarded =
-    candidate === undefined ? forwardedIp(request.headers.get('forwarded')) : ipLiteral(candidate);
-  return forwarded ?? ipLiteral(remoteAddress);
+  return candidate === undefined
+    ? forwardedIp(request.headers.get('forwarded'))
+    : ipLiteral(candidate);
+}
+
+function forwardedForHop(request: Request, hops: number): string | null {
+  if (!Number.isInteger(hops) || hops < 1 || hops > MAX_TRUSTED_PROXY_HOPS) return null;
+  const header = request.headers.get('x-forwarded-for');
+  if (header === null) return null;
+  const entries = header.split(',');
+  return entries.length < hops ? null : ipLiteral(entries[entries.length - hops]);
+}
+
+function headerClientIp(request: Request, trustedProxy: TrustedProxy): string | null {
+  switch (trustedProxy.kind) {
+    case 'none':
+      return null;
+    case 'cloudflare':
+      return ipLiteral(request.headers.get('cf-connecting-ip'));
+    case 'xff':
+      return forwardedForHop(request, trustedProxy.hops);
+    case 'legacy':
+      return legacyClientIp(request);
+    default:
+      return null;
+  }
+}
+
+/** `true` is the deprecated `PB_TRUSTED_PROXY=1` behaviour. */
+export function nodeClientIp(
+  request: Request,
+  remoteAddress: string | null,
+  trustedProxy: TrustedProxy | boolean = NO_TRUSTED_PROXY,
+): string | null {
+  const policy: TrustedProxy =
+    trustedProxy === true
+      ? LEGACY_TRUSTED_PROXY
+      : trustedProxy === false
+        ? NO_TRUSTED_PROXY
+        : trustedProxy;
+  return headerClientIp(request, policy) ?? ipLiteral(remoteAddress);
 }

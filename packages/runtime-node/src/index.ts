@@ -155,7 +155,7 @@ import {
 } from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
-import { nodeClientIp } from './client-ip.js';
+import { nodeClientIp, type TrustedProxy } from './client-ip.js';
 import { nodeCodecs } from './codec/node-codec.js';
 import { reportedVcsProviders, type VcsProvider } from '@package-broker/core/sources/config';
 import { createDnsGuard } from './sources/dns-guard.js';
@@ -302,8 +302,8 @@ export interface NodeAuthOptions {
 
 export interface NodeServerOptions {
   readonly migrations?: readonly Pick<MigrationSource, 'id' | 'checksum'>[];
-  /** Trust client IP headers only when a proxy overwrites them. Default false. */
-  readonly trustedProxy?: boolean;
+  /** Proxy header that carries the client address. `true` is the deprecated `PB_TRUSTED_PROXY=1`. */
+  readonly trustedProxy?: TrustedProxy | boolean;
   readonly executor?: SqlExecutor;
   readonly auth?: NodeAuthOptions;
   readonly closeDatabase?: () => Promise<void>;
@@ -963,7 +963,7 @@ export function createNodeServer(
   const lifetime = resolveTokenLifetime(options.tokens);
   const remoteAddress = new AsyncLocalStorage<string | null>();
   const clientIp = (request: Request): string | null =>
-    nodeClientIp(request, remoteAddress.getStore() ?? null, options.trustedProxy === true);
+    nodeClientIp(request, remoteAddress.getStore() ?? null, options.trustedProxy);
 
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);

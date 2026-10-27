@@ -77,6 +77,7 @@ import {
   TokenConfigError,
 } from '@package-broker/core/authz/token-lifetime';
 import { createJobLoop, JOB_EVENTS, type JobLoop } from './jobs/loop.js';
+import { parseTrustedProxy, TRUSTED_PROXY_DEPRECATION, TRUSTED_PROXY_RULE } from './client-ip.js';
 import { createStdioSink, type StdioStream } from './observability/stdio.js';
 
 export interface StartOptions {
@@ -671,11 +672,10 @@ async function keyringGate(
 }
 
 export async function startNode(options: StartOptions): Promise<NodeBroker> {
-  const rawTrustedProxy = options.env['PB_TRUSTED_PROXY'];
-  if (rawTrustedProxy !== undefined && rawTrustedProxy !== '0' && rawTrustedProxy !== '1') {
-    throw new StartupConfigError('PB_TRUSTED_PROXY', 'must be 0 or 1');
-  }
-  const trustedProxy = rawTrustedProxy === '1';
+  const trustedProxy = parseTrustedProxy(options.env['PB_TRUSTED_PROXY']);
+  if (trustedProxy === null) throw new StartupConfigError('PB_TRUSTED_PROXY', TRUSTED_PROXY_RULE);
+  if (trustedProxy.kind === 'legacy') options.log?.(TRUSTED_PROXY_DEPRECATION);
+
   const log = options.log;
   const path = options.env['PB_SQLITE_PATH'] ?? DEFAULT_DATABASE_PATH;
   const ports = options.platformPorts ?? null;

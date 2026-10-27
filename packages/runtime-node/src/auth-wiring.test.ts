@@ -395,6 +395,33 @@ describe('node auth wiring', () => {
         expected: '127.0.0.1',
       },
       { name: 'trusted missing headers', setting: '1', headers: {}, expected: '127.0.0.1' },
+      {
+        name: 'cloudflare header',
+        setting: 'cloudflare',
+        headers: { 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' },
+        expected: '203.0.113.7',
+      },
+      {
+        name: 'cloudflare ignoring X-Forwarded-For',
+        setting: 'cloudflare',
+        headers: { 'x-forwarded-for': '198.51.100.1', forwarded: 'for=192.0.2.1' },
+        expected: '127.0.0.1',
+      },
+      {
+        name: 'xff:1 appended entry',
+        setting: 'xff:1',
+        headers: {
+          'cf-connecting-ip': '203.0.113.66',
+          'x-forwarded-for': '203.0.113.66, 198.51.100.1',
+        },
+        expected: '198.51.100.1',
+      },
+      {
+        name: 'xff:2 short list',
+        setting: 'xff:2',
+        headers: { 'x-forwarded-for': '198.51.100.1' },
+        expected: '127.0.0.1',
+      },
     ])(
       `uses $name IP policy for setup, login and audit over ${transport}`,
       async ({ setting, headers, expected }) => {
@@ -482,15 +509,51 @@ describe('node auth wiring', () => {
     );
   }
 
-  it.each(['', 'true', 'false', 'yes', '2', ' 1 ', 'invalid-setting-sentinel'])(
-    'rejects invalid PB_TRUSTED_PROXY value %j without echoing it',
-    async (setting) => {
-      const failure = await rejection(start({ PB_TRUSTED_PROXY: setting }));
-      expect(failure).toMatchObject({
-        name: 'StartupConfigError',
-        variable: 'PB_TRUSTED_PROXY',
-        message: 'PB_TRUSTED_PROXY must be 0 or 1',
+  it.each([
+    '',
+    'true',
+    'false',
+    'yes',
+    '2',
+    ' 1 ',
+    'invalid-setting-sentinel',
+    'Cloudflare',
+    'xff',
+    'xff:0',
+    'xff:11',
+    'xff:invalid-setting-sentinel',
+  ])('rejects invalid PB_TRUSTED_PROXY value %j without echoing it', async (setting) => {
+    const failure = await rejection(start({ PB_TRUSTED_PROXY: setting }));
+    expect(failure).toMatchObject({
+      name: 'StartupConfigError',
+      variable: 'PB_TRUSTED_PROXY',
+      message: 'PB_TRUSTED_PROXY must be 0, cloudflare or xff:<n> with n from 1 to 10',
+    });
+    expect(String((failure as Error).message)).not.toContain('sentinel');
+  });
+
+  it.each([
+    [undefined, false],
+    ['0', false],
+    ['cloudflare', false],
+    ['xff:1', false],
+    ['xff:10', false],
+    ['1', true],
+  ] as const)(
+    'starts with PB_TRUSTED_PROXY %j and warns about deprecation: %s',
+    async (setting, warns) => {
+      const records: Array<Readonly<Record<string, unknown>>> = [];
+      const broker = await startNode({
+        plugins: [],
+        migrations: await migrationSources(),
+        env: env({ PB_TRUSTED_PROXY: setting }),
+        log: (entry) => records.push(entry),
       });
+      running.push(broker);
+      const deprecations = records.filter((entry) => entry['event'] === 'config.deprecated');
+      expect(deprecations).toEqual(
+        warns ? [{ level: 'warn', event: 'config.deprecated', key: 'PB_TRUSTED_PROXY' }] : [],
+      );
     },
   );
 

@@ -233,6 +233,22 @@ export interface ApiResponse {
   result: unknown;
   result_info?: Record<string, unknown>;
 }
+function snapshotItems(response: ApiResponse): Record<string, unknown>[] {
+  const { result, result_info: info } = response;
+  if (!Array.isArray(result)) throw new CloudflareError('provider_failure');
+  if (
+    info &&
+    ((info.total_pages !== undefined &&
+      info.total_pages !== 1 &&
+      !(info.total_pages === 0 && result.length === 0)) ||
+      (info.cursor !== undefined && info.cursor !== '') ||
+      (info.total_count !== undefined && info.total_count !== result.length) ||
+      (info.page !== undefined && info.page !== 1) ||
+      (info.count !== undefined && info.count !== result.length))
+  )
+    throw new CloudflareError('capability_unknown');
+  return result.map(object);
+}
 export function object(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value))
     throw new CloudflareError('provider_failure');
@@ -577,18 +593,10 @@ export class CloudflareApi {
   }
   /** A collection whose documented response is one array without pagination metadata. */
   async snapshot(path: string): Promise<Record<string, unknown>[]> {
-    const { result, result_info: info } = await this.request(path);
-    if (!Array.isArray(result)) throw new CloudflareError('provider_failure');
-    if (
-      info &&
-      ((info.total_pages !== undefined &&
-        info.total_pages !== 1 &&
-        !(info.total_pages === 0 && result.length === 0)) ||
-        (info.cursor !== undefined && info.cursor !== '') ||
-        (info.total_count !== undefined && info.total_count !== result.length))
-    )
-      throw new CloudflareError('capability_unknown');
-    return result.map(object);
+    return snapshotItems(await this.request(path));
+  }
+  async snapshotZone(zone: string, path: string): Promise<Record<string, unknown>[]> {
+    return snapshotItems(await this.requestZone(zone, path));
   }
   async list(
     path: string,

@@ -463,5 +463,23 @@
     ],
     "messages": [],
     "result": null
+  },
+  "zoneRoutesEmpty": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": []
+  },
+  "zoneRoutesForeign": {
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": [
+      {
+        "id": "77777777777777777777777777777777",
+        "pattern": "shop.example.com/*",
+        "script": "other-worker"
+      }
+    ]
   }
 }

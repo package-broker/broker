@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { expect, it, vi } from 'vitest';
 import ts from 'typescript';
 import { CloudflareApi } from './api.js';
-import { cloudflareDeployContract, unverifiedDeployContract } from './deploy.js';
+import { cloudflareDeployContract, unverifiedDeployContract, zoneRoutes } from './deploy.js';
 import { installIdentity, type Operation, type ResourceKind } from './inventory.js';
 import { cloudflareProviderContract, type RemoteResource } from './provision.js';
 
@@ -763,3 +763,28 @@ it.each<ResourceKind>(['d1', 'r2', 'queue', 'worker', 'analytics'])(
     expect(contract.pendingCreation(resource, operation, now + 60_000)).toBe(false);
   },
 );
+
+it.each(['zoneRoutesEmpty', 'zoneRoutesForeign'])(
+  'reads the recorded %s through the deploy zoneRoutes path',
+  async (name) => {
+    const h = harness([{ body: fixtures[name] }]);
+    expect(await zoneRoutes(h.api, 'b'.repeat(32))).toEqual(fixtures[name]!.result);
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    expect(String(h.fetch.mock.calls[0]?.[0])).toBe(
+      `https://api.cloudflare.com/client/v4/zones/${'b'.repeat(32)}/workers/routes`,
+    );
+  },
+);
+it('fails closed on multiple pages through the deploy zoneRoutes path', async () => {
+  const h = harness([{ body: { ...fixtures.zoneRoutesEmpty, result_info: { total_pages: 2 } } }]);
+  await expect(zoneRoutes(h.api, 'b'.repeat(32))).rejects.toMatchObject({
+    code: 'capability_unknown',
+  });
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});
+it('reports a non-array through the deploy zoneRoutes path as provider failure', async () => {
+  const h = harness([{ body: { ...fixtures.zoneRoutesEmpty, result: {} } }]);
+  await expect(zoneRoutes(h.api, 'b'.repeat(32))).rejects.toMatchObject({
+    code: 'provider_failure',
+  });
+});

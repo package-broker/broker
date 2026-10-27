@@ -508,3 +508,38 @@ it('never lets caller headers replace the authorization header', async () => {
   expect(headers.get('authorization')).toBe(`Bearer ${apiToken}`);
   expect(headers.get('cf-r2-jurisdiction')).toBe('eu');
 });
+
+it.each([undefined, null, { total_pages: 1, page: 1, count: 1, total_count: 1 }])(
+  'reads a zone snapshot at the zone URL with metadata %j',
+  async (info) => {
+    const h = harness(() => json([{ id: 'route' }], info));
+    expect(await h.api.snapshotZone('b'.repeat(32), '/workers/routes')).toEqual([{ id: 'route' }]);
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(h.fetch).mock.calls[0]?.[0])).toBe(
+      `https://api.cloudflare.com/client/v4/zones/${'b'.repeat(32)}/workers/routes`,
+    );
+  },
+);
+it.each([
+  { result: [{ id: 1 }], info: { page: 2 } },
+  { result: [{ id: 1 }], info: { count: 0 } },
+  { result: [], info: { total_pages: 1, page: 2, count: 1 } },
+  { result: [], info: { count: 1 } },
+  { result: [], info: { total_pages: 2 } },
+  { result: [], info: { total_count: 1 } },
+  { result: [], info: { cursor: 'next' } },
+])('rejects inconsistent metadata in both snapshot scopes: %j', async ({ result, info }) => {
+  for (const zone of [false, true]) {
+    const h = harness(() => json(result, info));
+    await expect(
+      zone ? h.api.snapshotZone('b'.repeat(32), '/workers/routes') : h.api.snapshot('/x'),
+    ).rejects.toMatchObject({ code: 'capability_unknown' });
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+  }
+});
+it('rejects a non-array zone snapshot as a provider failure', async () => {
+  const h = harness(() => json({}));
+  await expect(h.api.snapshotZone('b'.repeat(32), '/workers/routes')).rejects.toMatchObject({
+    code: 'provider_failure',
+  });
+});

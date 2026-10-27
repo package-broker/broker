@@ -95,6 +95,15 @@ export interface PluginApi {
   readonly apiVersion: number;
 }
 
+export interface IdentityDescriptor {
+  readonly runtimeProviders: boolean;
+  readonly compiled: readonly {
+    readonly id: string;
+    readonly kind: 'oidc' | 'cloudflare-access';
+    readonly anchor: string;
+  }[];
+}
+
 export interface PluginDefinition extends PluginApi {
   /** Not 'core'. */
   readonly id: string;
@@ -106,6 +115,8 @@ export interface PluginDefinition extends PluginApi {
   readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
+  /** Static description of the identity providers this plugin builds; no secrets, no policy. */
+  readonly identityDescriptor?: IdentityDescriptor;
   /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
   readonly sourceProviders?: SourceProviderFactory;
   readonly migrations?: { readonly dir: string };

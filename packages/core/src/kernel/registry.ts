@@ -2,8 +2,12 @@ import { isRegisteredCoreJob, type RegisteredCoreJob } from '../runtime/core-job
 export type { RegisteredCoreJob } from '../runtime/core-jobs.js';
 import {
   PLUGIN_BINDABLE_PORTS,
+  isReservedProviderId,
+  isValidProviderId,
+  isValidTrustAnchor,
   SUPPORTED_PLUGIN_API,
   type HookMap,
+  type IdentityDescriptor,
   type PluginDefinition,
   type PortName,
   type SourceProviderFactory,
@@ -11,6 +15,8 @@ import {
   type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
+import { canonicalAnchor } from '../identity/providers.js';
+import { readLength } from '../identity/provider-fields.js';
 import type { SourceProvider } from '../sources/provider.js';
 import {
   JobError,
@@ -117,6 +123,7 @@ export interface Registration {
   readonly jobs: readonly RegisteredJob[];
   readonly bindings: ReadonlyMap<PortName, string>;
   readonly identityFactory: IdentityProviderFactory | null;
+  readonly identityDescriptor: IdentityDescriptor | null;
   readonly sourceProviders: ReadonlyMap<string, SourceProvider>;
 }
 
@@ -145,6 +152,7 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'capabilities',
   'binds',
   'identityProviders',
+  'identityDescriptor',
   'sourceProviders',
   'migrations',
   'register',
@@ -210,6 +218,7 @@ export function collectRegistrations(
   const jobNames = new Set<string>();
   const bindings = new Map<PortName, string>();
   let identityFactory: IdentityProviderFactory | null = null;
+  let identityDescriptor: IdentityDescriptor | null = null;
   const sourceProviders = new Map<string, SourceProvider>();
   const sourceProviderOwners = new Map<string, string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
@@ -262,6 +271,19 @@ export function collectRegistrations(
     }
 
     const bindsIdentity = binds.includes('identity');
+    let descriptorMalformed = false;
+    try {
+      const descriptor: unknown = plugin.identityDescriptor;
+      if (descriptor !== undefined && !bindsIdentity) {
+        problems.push(`plugin "${id}" identityDescriptor requires an identity binding`);
+      } else if (descriptor !== undefined) {
+        identityDescriptor = snapshotIdentityDescriptor(descriptor);
+        descriptorMalformed = identityDescriptor === null;
+      }
+    } catch {
+      descriptorMalformed = true;
+    }
+    if (descriptorMalformed) problems.push(`plugin "${id}" identityDescriptor is malformed`);
     const factory: unknown = plugin.identityProviders;
     problems.push(...providerFactoryProblems(id, 'identity', 'identityProviders', factory, binds));
     if (bindsIdentity && typeof factory === 'function' && bindings.get('identity') === id) {
@@ -423,8 +445,47 @@ export function collectRegistrations(
     jobs: Object.freeze(jobs),
     bindings,
     identityFactory,
+    identityDescriptor,
     sourceProviders,
   };
+}
+
+function fields(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  if (keys.some((key) => !Object.hasOwn(value, key))) return null;
+  if (Reflect.ownKeys(value).length !== keys.length) return null;
+  return Object.fromEntries(keys.map((key) => [key, (value as Record<string, unknown>)[key]]));
+}
+
+function snapshotIdentityDescriptor(value: unknown): IdentityDescriptor | null {
+  const { runtimeProviders, compiled } = fields(value, ['runtimeProviders', 'compiled']) ?? {};
+  if (typeof runtimeProviders !== 'boolean' || !Array.isArray(compiled)) return null;
+  const length = readLength(compiled as unknown[]);
+  if (length === null || length > 64) return null;
+  const ids = new Set<string>();
+  const anchors = new Set<string>();
+  const entries: IdentityDescriptor['compiled'][number][] = [];
+  for (let index = 0; index < length; index++) {
+    if (!Object.hasOwn(compiled, index)) return null;
+    const { id, kind, anchor } =
+      fields((compiled as unknown[])[index], ['id', 'kind', 'anchor']) ?? {};
+    if (
+      typeof id !== 'string' ||
+      !isValidProviderId(id) ||
+      isReservedProviderId(id) ||
+      (kind !== 'oidc' && kind !== 'cloudflare-access') ||
+      typeof anchor !== 'string' ||
+      !isValidTrustAnchor(anchor) ||
+      !anchor.startsWith(kind === 'oidc' ? 'oidc:' : 'access:')
+    )
+      return null;
+    const canonical = canonicalAnchor(anchor);
+    if (ids.has(id) || anchors.has(canonical)) return null;
+    ids.add(id);
+    anchors.add(canonical);
+    entries.push(Object.freeze({ id, kind, anchor }));
+  }
+  return Object.freeze({ runtimeProviders, compiled: Object.freeze(entries) });
 }
 
 function providerFactoryProblems(

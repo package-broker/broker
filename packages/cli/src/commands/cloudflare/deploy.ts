@@ -17,6 +17,7 @@ import {
   removePrebuilt,
 } from '../../prebuilt.js';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
+import type { ProvidersOption } from './providers-file.js';
 import { normalizeQueueConsumer } from './queue-consumer.js';
 import { assertMigrationsApplied } from './migrations-check.js';
 import { d1BindingId, workerSettingsDifferences } from './worker-settings.js';
@@ -374,6 +375,7 @@ export const cloudflareDeployContract: DeployProviderContract = {
 };
 
 export interface DeployOptions {
+  providers?: ProvidersOption;
   workerName: string;
   prebuilt?: boolean;
   configPath?: string;

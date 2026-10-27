@@ -13,6 +13,7 @@ import {
 } from './commands/admin.js';
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
+import { readProvidersOption, type ProvidersOption } from './commands/cloudflare/providers-file.js';
 import { runCloudflareDeploy } from './commands/cloudflare/deploy.js';
 import { runCloudflareSetup } from './commands/cloudflare/setup.js';
 import { runCloudflareSmoke } from './commands/cloudflare/smoke.js';
@@ -61,6 +62,7 @@ const USAGE =
   '       pb source accept-removal --url <https-origin> --source <id> (PB_SESSION and PB_CSRF_TOKEN)\n' +
   '       pb version\n' +
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
+  '--providers <file|none>: none removes the definitions; pass a file named none as ./none.\n' +
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
   'Exit codes for pb cloudflare teardown/janitor: 0 cleaned or skipped; 1 cleanup failed; 2 invalid inventory, wrong inventory id or missing destructive confirmation; 4 inventory locked; 6 unresolved resource or deletion outcome; 8 ownership conflict. Production confirmation uses identity.owner_digest as --inventory-id. Adopted D1 and R2 resources always require --i-understand-this-deletes; janitor retains them. Inventory schema version 2 records deployment history and lifecycle baselines. Janitor requires run_identity pb-e2e-<repository-id>-<epoch-seconds> (optional run suffix) and a matching worker_name stem; Worker stems may encode both numbers in lowercase base 36 to fit name limits. Both the run and inventory update must be older than 6 hours. Deleting a Worker removes its versions.\n' +
   'Import commands use PB_IMPORT_TOKEN or --token-file. --resume requires the same token (idempotency principal); --principal is only a non-secret receipt label. Approval, apply and accept stay in the UI. Import exit codes: 0 success; 1 API or run failure; 2 local validation; 3 pending UI action or wait timeout; 6 outcome unknown.\n' +
@@ -116,6 +118,7 @@ function parseCliArgs(argv: string[]) {
         'database-id': { type: 'string' },
         email: { type: 'string' },
         provider: { type: 'string' },
+        providers: { type: 'string' },
         confirm: { type: 'string' },
         'expected-anchor': { type: 'string' },
         'new-anchor': { type: 'string' },
@@ -172,6 +175,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   migrate: ['sqlite', 'out', 'dry-run'],
   bootstrap: ['sqlite', 'slug', 'name'],
   'cloudflare setup': [
+    'providers',
     'prebuilt',
     'worker-name',
     'config',
@@ -224,6 +228,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'dry-run',
   ],
   'cloudflare deploy': [
+    'providers',
     'prebuilt',
     'worker-name',
     'config',
@@ -415,6 +420,18 @@ export async function run(argv: readonly string[]): Promise<number> {
     return usageError();
   }
   const [command, subcommand] = positionals;
+  let providers: ProvidersOption = { kind: 'absent' };
+  if (command === 'cloudflare' && (subcommand === 'deploy' || subcommand === 'setup')) {
+    try {
+      providers = await readProvidersOption(values.providers, undefined, subcommand);
+    } catch (error) {
+      const result = failCommand(commandEnvelope(subcommand, values['dry-run'] ?? false), error);
+      if (values.json) console.log(JSON.stringify(result.output));
+      else console.error(result.output.error?.message);
+      return result.exitCode;
+    }
+  }
+
   if (command === 'cloudflare' && values.prebuilt) {
     try {
       await assertPrebuiltConfiguration(process.cwd(), values.config);
@@ -598,6 +615,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     )
       return usageError();
     return runCloudflareSetup({
+      providers,
       prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'] ?? '',
       env: process.env,
@@ -688,6 +706,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     )
       return usageError();
     return runCloudflareDeploy({
+      providers,
       prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'],
       env: process.env,

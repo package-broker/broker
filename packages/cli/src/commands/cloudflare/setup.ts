@@ -44,11 +44,13 @@ import {
   type Inventory,
 } from './inventory.js';
 import { provision, type ProvisionOptions } from './provision.js';
+import type { ProvidersOption } from './providers-file.js';
 import { smoke, type SmokeOptions } from './smoke.js';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
 export interface SetupOptions extends Omit<ProvisionOptions, 'contract' | 'transaction'> {
+  providers?: ProvidersOption;
   orgSlug?: string;
   orgName?: string;
   adminEmail?: string;

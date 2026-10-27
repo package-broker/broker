@@ -25,18 +25,35 @@ jobs:
   release-please:
     if: github.event_name == 'push'
     name: release please
-    permissions:
-      contents: write # creates the release tags and GitHub Releases
-      pull-requests: write # opens and updates the release pull request
+    permissions: {}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       paths_released: ${{ steps.release.outputs.paths_released }}
     steps:
+      - id: op
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          # Item ids, not titles: the action skips title references it cannot parse.
+          RELEASE_APP_CLIENT_ID: op://yzjgwve6mcgs7nhrnrcl7djahe/6rm3owqzkbetuqzjdtjswtkkrq/client_id
+          RELEASE_APP_PRIVATE_KEY: op://yzjgwve6mcgs7nhrnrcl7djahe/6rm3owqzkbetuqzjdtjswtkkrq/private_key
+      - id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ steps.op.outputs.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ steps.op.outputs.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -80,7 +97,7 @@ jobs:
           console.log(JSON.stringify(tags));
           NODE
           node scripts/publish-packages.mjs --dry-run --tags-file "$RUNNER_TEMP/rehearsal-tags.json" --pack-only .pb/publish-tarballs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-tarballs
           path: .pb/publish-tarballs/
@@ -107,7 +124,7 @@ jobs:
         with:
           node-version: 24.22.0
           package-manager-cache: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-tarballs
           path: .pb/publish-tarballs
@@ -131,7 +148,7 @@ jobs:
         with:
           node-version: 24.22.0
           package-manager-cache: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-tarballs
           path: .pb/publish-tarballs

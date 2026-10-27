@@ -94,16 +94,27 @@ const conflict = (field: string, ...fields: string[]): never => {
 const unknown = (): never => {
   throw new CloudflareError('outcome_unknown', 6, false, 'deploy');
 };
+export function assertProvidersAccepted(
+  option: ProvidersOption | undefined,
+  identity: ReturnType<typeof snapshotIdentityDescriptor>,
+): void {
+  if (option?.kind !== 'set' || identity?.runtimeProviders) return;
+  const message = identity
+    ? 'Cannot set providers: artifact runtimeProviders is false'
+    : 'Cannot set providers on a legacy artifact without identity metadata';
+  try {
+    invalid(message);
+  } catch (error) {
+    throw Object.assign(error as CloudflareError, { message });
+  }
+}
 function desiredProviders(
   option: ProvidersOption | undefined,
   identity: ReturnType<typeof snapshotIdentityDescriptor>,
   live: Record<string, unknown> | null,
 ): string | null {
   if (option?.kind === 'set') {
-    if (!identity)
-      return invalid('Cannot set providers on a legacy artifact without identity metadata');
-    if (!identity.runtimeProviders)
-      return invalid('Cannot set providers: artifact runtimeProviders is false');
+    assertProvidersAccepted(option, identity);
     return option.value;
   }
   if (option?.kind === 'remove') return null;

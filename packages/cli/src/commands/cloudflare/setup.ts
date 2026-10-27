@@ -30,6 +30,7 @@ import {
 } from './api.js';
 import {
   active,
+  assertProvidersAccepted,
   cloudflareDeployContract,
   deploy,
   deploymentDomain,
@@ -538,6 +539,7 @@ export async function setup(
     } else await operations.build(configPath, outDir, buildEnv);
     validateSmokeToken(o);
     const artifact = await operations.validateArtifact(outDir);
+    assertProvidersAccepted(o.providers, artifact.identity);
     output.build_info = artifact.info ?? null;
     output.artifact_sha256 = artifact.artifactHash ?? null;
     const generatedNames = [

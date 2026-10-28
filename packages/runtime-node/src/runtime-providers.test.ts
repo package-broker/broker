@@ -27,6 +27,10 @@ interface SsoOidcOptions {
   readonly runtimeProviders?: boolean;
 }
 
+const OIDC_MODULE = '@package-broker/plugin-sso-oidc/oidc';
+const oidcModule = (await import(OIDC_MODULE)) as {
+  createOidcProvider: (...args: unknown[]) => unknown;
+};
 const PLUGIN_PACKAGE = '@package-broker/plugin-sso-oidc';
 const { default: ssoOidc } = (await import(PLUGIN_PACKAGE)) as {
   default: (options?: SsoOidcOptions) => PluginDefinition;
@@ -431,6 +435,75 @@ describe('runtime SSO providers on the node runtime', () => {
       return token;
     });
   }
+
+  it.each(['runtime', 'compiled'] as const)(
+    'disabled local auth accepts a constructed %s provider and keeps SSO login working',
+    async (source) => {
+      const configured = definition(issuerA);
+      const { kernel } = await boot(
+        environment(source === 'runtime' ? [configured] : undefined, {
+          PB_AUTH_LOCAL: 'disabled',
+        }),
+        source === 'runtime' ? { runtimeProviders: true } : { providers: [configured] },
+      );
+      expect(await providerList(kernel)).toEqual({
+        local: false,
+        providers: [{ id: 'corp', displayName: 'Corp SSO', kind: 'oidc', supportsReauth: true }],
+      });
+      const refused = await call(kernel, 'POST', '/_pb/auth/local/login', { body: {} });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+      await expectSession(
+        kernel,
+        await login(kernel, idpA, { email: 'ada@example.test', subject: 'sub-ada' }),
+        'ada@example.test',
+      );
+    },
+  );
+
+  it.each(['empty', 'rejected', 'construction-failed', 'suppressed-compiled'] as const)(
+    'disabled local auth rejects an empty constructed map (%s)',
+    async (scenario) => {
+      const configured = definition(issuerA);
+      if (scenario === 'construction-failed') {
+        vi.spyOn(oidcModule, 'createOidcProvider').mockImplementation(() => {
+          throw new Error(SECRET);
+        });
+      }
+      const definitions =
+        scenario === 'empty'
+          ? []
+          : scenario === 'construction-failed'
+            ? [configured]
+            : [{ ...configured, issuer: 'http://insecure.example.test' }];
+      await expect(
+        boot(
+          environment(definitions, {
+            PB_AUTH_LOCAL: 'disabled',
+          }),
+          scenario === 'suppressed-compiled'
+            ? { runtimeProviders: true, providers: [configured] }
+            : { runtimeProviders: true },
+        ),
+      ).rejects.toMatchObject({ problems: ['auth_no_sign_in_method'] });
+      if (scenario === 'construction-failed') {
+        expect(warnings.join('\n')).toContain('construction_failed');
+        expect(warnings.join('\n')).not.toContain(SECRET);
+      }
+      expect(idpA.requests).toEqual([]);
+      expect(JSON.stringify(logs)).not.toContain(SECRET);
+    },
+  );
+
+  it('local policy is captured until restart', async () => {
+    const live = environment([definition(issuerA)], { PB_AUTH_LOCAL: 'disabled' });
+    const first = await boot(live);
+    expect((await providerList(first.kernel)).local).toBe(false);
+    live['PB_AUTH_LOCAL'] = 'enabled';
+    expect((await providerList(first.kernel)).local).toBe(false);
+    await stop(first.broker);
+    expect((await providerList((await boot(live)).kernel)).local).toBe(true);
+  });
 
   it('1: a provider defined only in PB_IDP_PROVIDERS is listed and completes a login that binds its anchor', async () => {
     const { kernel } = await boot(environment([definition(issuerA)]));

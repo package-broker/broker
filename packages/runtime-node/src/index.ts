@@ -57,6 +57,7 @@ import { createAuditSealRepository } from '@package-broker/db-sqlite/repositorie
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { createServer, type Server } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { parseLocalAuthPolicy } from '@package-broker/core/auth/module';
 import { getRequestListener } from '@hono/node-server';
 import type { SessionService } from '@package-broker/core/auth/session';
 import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
@@ -402,6 +403,7 @@ async function assembleAccess(
   tokens: TokenWiring,
   clientIp: (request: Request) => string | null,
 ): Promise<AccessAssembly> {
+  const localAuth = parseLocalAuthPolicy(auth.env['PB_AUTH_LOCAL']);
   await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
   const providers = buildIdentityProviders(registration, plugins, {
     fetch: (request) => fetch(request),
@@ -413,6 +415,7 @@ async function assembleAccess(
     keyring: auth.keyring,
     publicOrigin: auth.publicOrigin,
     providers,
+    localAuth,
     clock: systemClock,
     ids: { ulid },
     log,
@@ -974,7 +977,10 @@ export function createNodeServer(
     ids: { ulid },
   });
 
-  const { auth } = options;
+  const auth =
+    options.auth === undefined
+      ? undefined
+      : { ...options.auth, env: Object.freeze({ ...options.auth.env }) };
   const importJobs = createImportJobHolder();
   const patJobs = createPatJobHolder();
   let drainRegistry: (() => Promise<void>) | undefined;

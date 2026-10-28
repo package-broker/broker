@@ -17,6 +17,7 @@ import {
   bootstrapAdminWithTopUp,
   bootstrapSsoAdmin,
   resetLocalLogin,
+  SuspendedSsoAdminError,
   type BootstrapAdminInput,
 } from './admin-bootstrap.js';
 import { createLocalLoginReader } from './local-login.js';
@@ -503,6 +504,40 @@ describe('bootstrapAdmin', () => {
   });
 });
 
+describe('local admin grant cache invalidation', () => {
+  for (const operation of ['bootstrap', 'reset'] as const) {
+    for (const change of ['insert', 'promote'] as const) {
+      it(`${operation}: replaces the epoch on grant ${change} and preserves it on an admin rerun`, async () => {
+        await bootstrapAdmin(executor, a, input());
+        if (change === 'insert') {
+          await run('DELETE FROM access_grant WHERE org_id = ?', a.orgId);
+        } else {
+          await run(
+            'UPDATE access_grant SET role_id = ? WHERE org_id = ?',
+            ROLE_IDS.organization_auditor,
+            a.orgId,
+          );
+        }
+        const epoch = () => rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+        const before = await epoch();
+        const foreignBefore = await rows('SELECT * FROM cache_epoch WHERE org_id = ?', b.orgId);
+        const invoke = () =>
+          operation === 'bootstrap'
+            ? bootstrapAdmin(executor, a, input())
+            : resetLocalLogin(executor, a, resetInput());
+        await invoke();
+        const changed = await epoch();
+        expect(changed).not.toEqual(before);
+        await invoke();
+        expect(await epoch()).toEqual(changed);
+        expect(await rows('SELECT * FROM cache_epoch WHERE org_id = ?', b.orgId)).toEqual(
+          foreignBefore,
+        );
+      });
+    }
+  }
+});
+
 describe('bootstrapAdmin organization_admin top-up', () => {
   const TOPPED = ['org:projects:archive', 'project:service-principals:write'];
 
@@ -561,14 +596,14 @@ describe('bootstrapAdmin organization_admin top-up', () => {
       now: LATER,
     });
 
-  it('a fresh organization reports no top-up and keeps its cache epoch', async () => {
+  it('a fresh organization reports no top-up and replaces its epoch for the new grant', async () => {
     const epoch = await epochOf(a);
     expect(await bootstrapAdminWithTopUp(executor, a, input())).toEqual({
       result: 'created',
       toppedUp: 0,
     });
     expect((await adminRole(a))?.revision).toBe(1);
-    expect(await epochOf(a)).toBe(epoch);
+    expect(await epochOf(a)).not.toBe(epoch);
   });
 
   it('two missing permissions: toppedUp 2, revision +1, updated_at the batch time, cache epoch replaced', async () => {
@@ -1172,12 +1207,16 @@ describe('bootstrapSsoAdmin', () => {
         });
       }
       const foreignBefore = await snapshot(b);
+      const epochBefore = await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
       const record = recording(executor);
       expect(await bootstrapSsoAdmin(record.executor, a, makeInput())).toEqual({
         result: 'created',
         toppedUp: 0,
       });
       expect(record.calls).toEqual({ all: 0, batch: 1 });
+      expect(await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId)).not.toEqual(
+        epochBefore,
+      );
       expect(
         await rows('SELECT email, status FROM user_account WHERE org_id = ?', a.orgId),
       ).toEqual(variant === 'email' ? [{ email: EMAIL, status: 'active' }] : []);
@@ -1229,10 +1268,14 @@ describe('bootstrapSsoAdmin', () => {
         a.orgId,
       );
       const accounts = await rows('SELECT * FROM user_account WHERE org_id = ?', a.orgId);
+      const epochBefore = await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
       expect(await bootstrapSsoAdmin(executor, a, { ...makeInput(), now: LATER })).toEqual({
         result: 'promoted',
         toppedUp: 0,
       });
+      expect(await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId)).not.toEqual(
+        epochBefore,
+      );
       expect(
         await rows(
           'SELECT id, role_id, revision, last_op_id FROM access_grant WHERE org_id = ?',
@@ -1255,6 +1298,30 @@ describe('bootstrapSsoAdmin', () => {
       ).toEqual([]);
       expect(await rows('SELECT * FROM user_account WHERE org_id = ?', a.orgId)).toEqual(accounts);
     });
+
+    it.each(['insert', 'promote'] as const)(
+      `${variant}: missing epoch rolls back grant %s`,
+      async (change) => {
+        await bootstrapSsoAdmin(executor, a, makeInput());
+        if (change === 'insert') {
+          await run('DELETE FROM access_grant WHERE org_id = ?', a.orgId);
+        } else {
+          await run(
+            'UPDATE access_grant SET role_id = ? WHERE org_id = ?',
+            ROLE_IDS.organization_auditor,
+            a.orgId,
+          );
+        }
+        await run('DELETE FROM cache_epoch WHERE org_id = ?', a.orgId);
+        const before = await snapshot(a);
+        await expect(bootstrapSsoAdmin(executor, a, makeInput())).rejects.toMatchObject({
+          name: 'DbError',
+          kind: 'unique',
+          constraint: 'access_mutation_guard.key',
+        });
+        expect(await snapshot(a)).toEqual(before);
+      },
+    );
 
     it(`${variant}: rolls back all provisioning when the final grant insert fails`, async () => {
       await bootstrapAdmin(
@@ -1366,7 +1433,9 @@ describe('bootstrapSsoAdmin', () => {
       'org:projects:archive',
     );
     const before = await snapshot(a);
-    await expect(bootstrapSsoAdmin(executor, a, emailInput())).rejects.toThrow();
+    await expect(bootstrapSsoAdmin(executor, a, emailInput())).rejects.toThrow(
+      SuspendedSsoAdminError,
+    );
     expect(await snapshot(a)).toEqual(before);
   });
 

@@ -1,11 +1,13 @@
 import { sql, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import type { GrantSubject } from '@package-broker/core/db/grants';
 import { isValidProviderId } from '@package-broker/core/identity/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
 import {
   assertCheck,
+  cacheEpochBumpStatements,
   compile,
   db,
   existsGuard,
@@ -64,6 +66,13 @@ export type BootstrapSsoAdminInput = {
 export interface BootstrapSsoAdminOutcome {
   readonly result: 'created' | 'already_admin' | 'promoted';
   readonly toppedUp: number;
+}
+
+export class SuspendedSsoAdminError extends Error {
+  constructor() {
+    super('SSO admin account is suspended');
+    this.name = 'SuspendedSsoAdminError';
+  }
 }
 
 export interface ResetLocalLoginInput {
@@ -234,7 +243,18 @@ function adminGrantStatements(
     .expression(source)
     .returning('id');
 
-  return [scalar(promote), scalar(insert)];
+  const changed = sql<SqlBool>`${adminRoleExists(ctx)} and not ${existsGuard(() =>
+    db
+      .selectFrom('access_grant')
+      .select(sql.lit(1).as('one'))
+      .where(organizationGrant)
+      .where('role_id', '=', adminRoleIdOf(ctx)),
+  )}${guard === null ? sql`` : sql` and ${guard}`}`;
+  return [
+    ...(cacheEpochBumpStatements(ctx, changed) as ScalarStatement[]),
+    scalar(promote),
+    scalar(insert),
+  ];
 }
 
 function protectedAdminRoles(ctx: OrgContext) {
@@ -453,7 +473,7 @@ export async function bootstrapAdminWithTopUp(
 
 /**
  * Reports whether the organization grant was created, promoted, or already admin in the same batch.
- * Suspended email accounts fail the transactional guard; existing account state is preserved.
+ * Suspended email accounts throw SuspendedSsoAdminError; existing account state is preserved.
  */
 export async function bootstrapSsoAdmin(
   executor: ScalarSqlExecutor,
@@ -466,11 +486,12 @@ export async function bootstrapSsoAdmin(
   let subject: GrantSubject;
   const userStatements: ScalarStatement[] = [];
   const guards: ScalarStatement[] = [];
+  let suspended: Guard | null = null;
   if (input.subject.type === 'email') {
     const email = requireEmail(input.subject.value);
     const userId = requireId('userId', 'userId' in input ? input.userId : '');
     subject = { type: 'email', value: email };
-    const suspended = existsGuard((database) =>
+    suspended = existsGuard((database) =>
       database
         .selectFrom('user_account')
         .select(sql.lit(1).as('one'))
@@ -511,13 +532,28 @@ export async function bootstrapSsoAdmin(
     subject = { type: 'group', provider, value };
   }
   const topUp = adminTopUpStatements(ctx, input.now);
-  const results = await executor.batch([
-    ...guards,
-    ...topUp,
-    ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
-    ...userStatements,
-    ...adminGrantStatements(ctx, { subject, grantId: input.grantId, now: input.now }, null),
-  ]);
+  const results = await executor
+    .batch([
+      ...guards,
+      ...topUp,
+      ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
+      ...userStatements,
+      ...adminGrantStatements(ctx, { subject, grantId: input.grantId, now: input.now }, null),
+    ])
+    .catch(async (error: unknown) => {
+      if (
+        suspended !== null &&
+        error instanceof DbError &&
+        error.kind === 'unique' &&
+        error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+      ) {
+        const [state] = await executor.all<{ suspended: number }>(
+          scalar(db.selectNoFrom(sql<SqlBool>`${suspended}`.as('suspended'))),
+        );
+        if (Number(state?.suspended) === 1) throw new SuspendedSsoAdminError();
+      }
+      throw error;
+    });
   return {
     result:
       rowsOf(results[results.length - 1]) > 0

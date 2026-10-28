@@ -178,10 +178,20 @@ export function renderManifestJson(
           identity: {
             runtimeProviders: extra.registration.identityDescriptor.runtimeProviders,
             compiled: extra.registration.identityDescriptor.compiled.map(
-              ({ id, kind, anchor }) => ({
+              ({ id, kind, anchor, policy }) => ({
                 id,
                 kind,
                 anchor,
+                ...(policy === undefined
+                  ? {}
+                  : {
+                      policy: {
+                        verifiedDomains: [...policy.verifiedDomains],
+                        ...(policy.emailAuthoritativeDomains === undefined
+                          ? {}
+                          : { emailAuthoritativeDomains: [...policy.emailAuthoritativeDomains] }),
+                      },
+                    }),
               }),
             ),
           },

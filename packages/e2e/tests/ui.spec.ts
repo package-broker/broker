@@ -324,7 +324,7 @@ test.describe('Node management UI', () => {
     await go(page, 'projects');
     await openDetails(page, 'New project');
     await page.getByLabel('Project name', { exact: true }).fill('Browser archive target');
-    await page.getByLabel('Slug', { exact: true }).fill('browser-archive');
+    await page.getByLabel('Project slug', { exact: true }).fill('browser-archive');
     await page.getByRole('button', { name: 'Create project', exact: true }).click();
     await expect(
       page.getByRole('link', { name: 'Browser archive target', exact: true }),

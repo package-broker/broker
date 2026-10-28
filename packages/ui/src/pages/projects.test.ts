@@ -283,8 +283,10 @@ describe('projects', () => {
     await controller.update({
       name: 'New name',
       tokenMaxScope: 'write',
-      requirePublishApproval: true,
     });
+    expect(
+      JSON.parse(String(fetch.mock.calls.find(([, init]) => init.method === 'PATCH')?.[1].body)),
+    ).toEqual({ name: 'New name', tokenMaxScope: 'write' });
     expect(fetch.mock.calls.find(([, init]) => init.method === 'PATCH')?.[1].headers).toMatchObject(
       { 'If-Match': '"r7"' },
     );
@@ -748,4 +750,51 @@ describe('project row actions', () => {
       expect(markup(controller)).toContain('Project updated.');
     },
   );
+});
+
+describe('project form write results', () => {
+  it('returns field refusals to the form without reloading its draft', async () => {
+    const { controller, fetch } = fixture({ status: 409, code: 'duplicate' });
+    await controller.load({ project: null });
+    const before = fetch.mock.calls.filter(([, init]) => init.method === 'GET').length;
+    const result = await controller.create({
+      name: 'Typed name',
+      slug: 'typed',
+      tokenMaxScope: 'read',
+    });
+    expect(result).toMatchObject({ ok: false, code: 'duplicate' });
+    expect(fetch.mock.calls.filter(([, init]) => init.method === 'GET')).toHaveLength(before);
+    expect(markup(controller)).toContain('aria-label="New project"');
+    expect(markup(controller)).not.toContain('private-message');
+  });
+  it('keeps settings mounted and refuses repeat writes after a revision conflict', async () => {
+    const { controller, fetch } = fixture({ status: 412, code: 'precondition_failed' });
+    await controller.load(query);
+    const result = await controller.update({ name: 'Typed name', tokenMaxScope: 'read' });
+    expect(result).toMatchObject({ ok: false, status: 412 });
+    expect(markup(controller)).toContain('aria-label="Project settings"');
+    expect(markup(controller)).toContain(
+      'This project changed while you were editing. Reload the latest settings before saving.',
+    );
+    await controller.update({ name: 'Typed name', tokenMaxScope: 'read' });
+    expect(fetch.mock.calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(1);
+  });
+  it.each([
+    ['/_pb/projects', 'Project created.'],
+    ['/_pb/projects/web', 'Access policy saved. Existing tokens now use this limit.'],
+  ])('announces success after replaying %s', async (path, notice) => {
+    const { controller } = fixture();
+    await controller.load(query);
+    await controller.replayed({ path, ok: true, status: 204 });
+    expect(controller.snapshot().notice).toBe(notice);
+  });
+  it('explains a settings replay conflict without hiding the form', async () => {
+    const { controller } = fixture();
+    await controller.load(query);
+    await controller.replayed({ path: '/_pb/projects/web', ok: false, status: 412 });
+    expect(controller.snapshot().notice).toBe(
+      'This project changed while you were editing. Reload the latest settings before saving.',
+    );
+    expect(markup(controller)).toContain('aria-label="Project settings"');
+  });
 });

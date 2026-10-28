@@ -18,10 +18,25 @@ interface Row {
   readonly permissions: string;
 }
 
-function displayName(value: string | null, fallback: string, includeEmail: boolean): string {
-  return value === null || value.trim() === '' || (!includeEmail && value.includes('@'))
+function displayName(value: string | null, fallback: string, reveal: boolean): string {
+  return value === null || value.trim() === '' || (!reveal && value.includes('@'))
     ? fallback
     : value;
+}
+
+function subjectFields(row: Row, reveal: boolean) {
+  if (row.subject_type === 'group') {
+    return reveal
+      ? {
+          provider: row.subject_provider!,
+          groupValue: row.subject_value,
+          visibility: 'visible' as const,
+        }
+      : { provider: row.subject_provider!, visibility: 'redacted' as const };
+  }
+  return reveal
+    ? { email: row.subject_value, visibility: 'visible' as const }
+    : { visibility: 'redacted' as const };
 }
 
 export function createProjectGrantReader(executor: SqlExecutor): ProjectGrantReader {
@@ -69,7 +84,7 @@ export function createProjectGrantReader(executor: SqlExecutor): ProjectGrantRea
         .limit(input.limit + 1);
       if (input.after !== undefined) query = query.where('g.id', '>', input.after);
       const rows = await executor.all<Row>(compile(query));
-      const includeEmail = input.includeEmail === true;
+      const reveal = input.revealSubjects === true;
       const items = rows.slice(0, input.limit).map((row) => {
         const group = row.subject_type === 'group';
         return {
@@ -84,15 +99,11 @@ export function createProjectGrantReader(executor: SqlExecutor): ProjectGrantRea
                 : ('user' as const),
             id: row.user_id ?? row.id,
             displayName: displayName(
-              group ? row.subject_value : row.display_name,
+              group ? (reveal ? row.subject_value : null) : row.display_name,
               group ? 'Group' : row.user_id === null ? 'Pending user' : 'User',
-              includeEmail,
+              reveal,
             ),
-            ...(group
-              ? { provider: row.subject_provider! }
-              : includeEmail
-                ? { email: row.subject_value }
-                : {}),
+            ...subjectFields(row, reveal),
           },
           role: {
             id: row.role_id,

@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.1...ui-v2.0.0-rc.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **ui:** recognise the source error codes in the API client ([#935](https://github.com/package-broker/broker/issues/935)) ([81db48b](https://github.com/package-broker/broker/commit/81db48b5b4aa431131696f9d049daaacef6a6e3f))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.2
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.2
+
 ## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.0...ui-v2.0.0-rc.1) (2026-10-27)
 
 

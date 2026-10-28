@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.0-rc.2](https://github.com/package-broker/broker/compare/plugin-sso-oidc-v0.1.0-rc.1...plugin-sso-oidc-v0.1.0-rc.2) (2026-10-28)
+
+
+### Features
+
+* **cli:** deploy SSO providers at runtime for the prebuilt distribution ([#936](https://github.com/package-broker/broker/issues/936)) ([4fb21c3](https://github.com/package-broker/broker/commit/4fb21c351f106e16f91afaf334772f673f760544))
+
+
+### Bug Fixes
+
+* operator messages without internal ids and with the real migration lock expiry ([#938](https://github.com/package-broker/broker/issues/938)) ([a015d46](https://github.com/package-broker/broker/commit/a015d465dd9d4b671c89b208de6e82e32b76dd91))
+* read SSO providers at runtime and check the trust anchor before contacting the IdP ([#926](https://github.com/package-broker/broker/issues/926)) ([ee91a10](https://github.com/package-broker/broker/commit/ee91a1073b4af36c9429c75720676b5fc72d0f93)), closes [#918](https://github.com/package-broker/broker/issues/918)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.2
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.2
+
 ## [0.1.0-rc.1](https://github.com/package-broker/broker/compare/plugin-sso-oidc-v0.1.0-rc.0...plugin-sso-oidc-v0.1.0-rc.1) (2026-10-27)
 
 

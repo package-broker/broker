@@ -86,9 +86,27 @@
     },
     {
       "type": "index",
+      "name": "audit_ledger_range",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_range ON audit_ledger (org_id, from_seq, to_seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_ledger_sink",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_sink ON audit_ledger (org_id, sink_id, from_seq)"
+    },
+    {
+      "type": "index",
       "name": "audit_pending_org_id",
       "tbl_name": "audit_pending",
       "sql": "CREATE INDEX audit_pending_org_id ON audit_pending (org_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "audit_sink_state",
+      "tbl_name": "audit_sink",
+      "sql": "CREATE INDEX audit_sink_state ON audit_sink (org_id, state)"
     },
     {
       "type": "index",
@@ -746,15 +764,33 @@
     },
     {
       "type": "table",
+      "name": "audit_chain",
+      "tbl_name": "audit_chain",
+      "sql": "CREATE TABLE audit_chain (\n  org_id                TEXT NOT NULL PRIMARY KEY REFERENCES organization (id),\n  chain_id              TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),\n  epoch                 INTEGER NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 9007199254740991),\n  incarnation           INTEGER NOT NULL DEFAULT 0 CHECK (incarnation BETWEEN 0 AND 9007199254740991),\n  head_seq              INTEGER NOT NULL DEFAULT 0 CHECK (head_seq BETWEEN 0 AND 9007199254740991),\n  head_hash             TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' CHECK (length(head_hash) = 64),\n  boundary_seq          INTEGER NOT NULL DEFAULT 1 CHECK (boundary_seq BETWEEN 1 AND 9007199254740991),\n  boundary_prev_hash    TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' CHECK (length(boundary_prev_hash) = 64),\n  boundary_reason       TEXT,\n  mode                  TEXT NOT NULL DEFAULT 'trail' CHECK (mode IN ('trail', 'export', 'none')),\n  mode_generation       INTEGER NOT NULL DEFAULT 0 CHECK (mode_generation BETWEEN 0 AND 9007199254740991),\n  policy                TEXT NOT NULL DEFAULT 'availability' CHECK (policy IN ('availability', 'required')),\n  pending_mode          TEXT CHECK (pending_mode IN ('trail', 'export', 'none')),\n  cutover_seq           INTEGER CHECK (cutover_seq BETWEEN 0 AND 9007199254740991),\n  capacity_state        TEXT NOT NULL DEFAULT 'ok' CHECK (capacity_state IN ('ok', 'warning', 'refusing')),\n  journal_rows          INTEGER NOT NULL DEFAULT 0 CHECK (journal_rows >= 0),\n  journal_bytes         INTEGER NOT NULL DEFAULT 0 CHECK (journal_bytes >= 0),\n  restore_pending       INTEGER NOT NULL DEFAULT 0 CHECK (restore_pending IN (0, 1)),\n  verified_from_seq     INTEGER CHECK (verified_from_seq BETWEEN 1 AND 9007199254740991),\n  verified_through_seq  INTEGER CHECK (verified_through_seq BETWEEN 0 AND 9007199254740991),\n  verified_bodies       INTEGER CHECK (verified_bodies >= 0),\n  verified_withheld     INTEGER CHECK (verified_withheld >= 0),\n  verified_at           TEXT\n) STRICT"
+    },
+    {
+      "type": "table",
       "name": "audit_event",
       "tbl_name": "audit_event",
       "sql": "CREATE TABLE audit_event (\n  id             TEXT NOT NULL PRIMARY KEY,\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  seq            INTEGER NOT NULL CHECK (seq >= 1),\n  prev_hash      TEXT NOT NULL CHECK (length(prev_hash) = 64),\n  hash           TEXT NOT NULL CHECK (length(hash) = 64),\n  created_at     TEXT NOT NULL,\n  actor_type     TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id       TEXT,\n  token_selector TEXT,\n  source_ip      TEXT,\n  action         TEXT NOT NULL,\n  target_type    TEXT NOT NULL,\n  target_id      TEXT,\n  project_id     TEXT,\n  payload_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json))\n) STRICT"
     },
     {
       "type": "table",
+      "name": "audit_ledger",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE TABLE audit_ledger (\n  org_id           TEXT NOT NULL REFERENCES organization (id),\n  id               TEXT NOT NULL,\n  kind             TEXT NOT NULL CHECK (kind IN ('skipped', 'uncertain', 'gap', 'withheld', 'mode_change', 'policy_change', 'cutover', 'rebind', 'retire', 'unblock', 'restore_confirmed', 'export')),\n  chain_id         TEXT NOT NULL,\n  epoch            INTEGER NOT NULL CHECK (epoch BETWEEN 0 AND 9007199254740991),\n  from_seq         INTEGER NOT NULL CHECK (from_seq BETWEEN 0 AND 9007199254740991),\n  to_seq           INTEGER NOT NULL CHECK (to_seq BETWEEN from_seq AND 9007199254740991),\n  count            INTEGER NOT NULL CHECK (count >= 0),\n  sink_id          TEXT,\n  reason_code      TEXT NOT NULL,\n  policy           TEXT NOT NULL CHECK (policy IN ('availability', 'required')),\n  mode_generation  INTEGER NOT NULL CHECK (mode_generation BETWEEN 0 AND 9007199254740991),\n  actor_type       TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id         TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
       "name": "audit_pending",
       "tbl_name": "audit_pending",
       "sql": "CREATE TABLE audit_pending (\n  id             TEXT PRIMARY KEY,\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  created_at     TEXT NOT NULL,\n  actor_type     TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id       TEXT,\n  token_selector TEXT,\n  source_ip      TEXT,\n  action         TEXT NOT NULL CHECK (length(action) BETWEEN 3 AND 64),\n  target_type    TEXT NOT NULL,\n  target_id      TEXT,\n  project_id     TEXT,\n  payload_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json) AND length(CAST(payload_json AS BLOB)) <= 4096)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "audit_sink",
+      "tbl_name": "audit_sink",
+      "sql": "CREATE TABLE audit_sink (\n  org_id                TEXT NOT NULL REFERENCES organization (id),\n  sink_id               TEXT NOT NULL CHECK (length(sink_id) BETWEEN 1 AND 32 AND sink_id NOT GLOB '*[^a-z0-9-]*'),\n  plugin_id             TEXT NOT NULL,\n  kind                  TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 32 AND kind NOT GLOB '*[^a-z0-9-]*'),\n  generation            INTEGER NOT NULL CHECK (generation BETWEEN 0 AND 9007199254740991),\n  receiver_fingerprint  TEXT NOT NULL,\n  durable_ack           INTEGER NOT NULL CHECK (durable_ack IN (0, 1)),\n  activation_source     TEXT NOT NULL,\n  state                 TEXT NOT NULL CHECK (state IN ('active', 'inactive', 'blocked', 'disabled', 'retired')),\n  progress_seq          INTEGER NOT NULL CHECK (progress_seq BETWEEN 0 AND 9007199254740991),\n  progress_hash         TEXT NOT NULL CHECK (length(progress_hash) = 64),\n  custody_seq           INTEGER NOT NULL CHECK (custody_seq BETWEEN 0 AND progress_seq),\n  inflight_from         INTEGER CHECK (inflight_from BETWEEN 0 AND 9007199254740991),\n  inflight_to           INTEGER CHECK (inflight_to BETWEEN COALESCE(inflight_from, 0) AND 9007199254740991),\n  inflight_body         TEXT CHECK (json_valid(inflight_body) AND length(CAST(inflight_body AS BLOB)) <= 524288),\n  inflight_repr         TEXT CHECK (json_valid(inflight_repr)),\n  next_attempt_at       TEXT,\n  attempt               INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),\n  retry_count_for_seq   INTEGER NOT NULL DEFAULT 0 CHECK (retry_count_for_seq >= 0),\n  blocked_reason        TEXT,\n  last_error_code       TEXT,\n  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (org_id, sink_id)\n) STRICT"
     },
     {
       "type": "table",
@@ -1189,6 +1225,14 @@
       "partial": 0
     },
     {
+      "tbl_name": "audit_chain",
+      "seq": 0,
+      "name": "sqlite_autoindex_audit_chain_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
       "tbl_name": "audit_event",
       "seq": 0,
       "name": "audit_event_action",
@@ -1245,6 +1289,30 @@
       "partial": 0
     },
     {
+      "tbl_name": "audit_ledger",
+      "seq": 0,
+      "name": "audit_ledger_sink",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 1,
+      "name": "audit_ledger_range",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 2,
+      "name": "sqlite_autoindex_audit_ledger_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
       "tbl_name": "audit_pending",
       "seq": 0,
       "name": "audit_pending_org_id",
@@ -1256,6 +1324,22 @@
       "tbl_name": "audit_pending",
       "seq": 1,
       "name": "sqlite_autoindex_audit_pending_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_sink",
+      "seq": 0,
+      "name": "audit_sink_state",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_sink",
+      "seq": 1,
+      "name": "sqlite_autoindex_audit_sink_1",
       "unique": 1,
       "origin": "pk",
       "partial": 0

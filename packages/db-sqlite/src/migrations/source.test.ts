@@ -92,3 +92,9 @@ test('rejects a bad owner or file name', async () => {
   await rejects('core', '1_init.sql', 'SELECT 1;');
   await rejects('core', '0001-init.sql', 'SELECT 1;');
 });
+
+test('the published rc.2 baseline checksum stays unchanged', async () => {
+  expect(await sha256Hex(initText)).toBe(
+    'a1005fb24893ffe9174ae1f1642b3f1270d853476183a47ce2b5e4d32471e2fb',
+  );
+});

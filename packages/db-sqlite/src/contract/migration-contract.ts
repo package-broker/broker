@@ -491,6 +491,258 @@ export function describeMigrationContract(
   core0001: () => Promise<MigrationSource>,
 ): void {
   describe(`migration contract: ${name}`, () => {
+    it('a fresh database applies 0001 then 0002 and records both', async () => {
+      await withPair(open, async ({ executor }) => {
+        const sources = await discoveredMigrations();
+        const result = await migrate(executor, sources, { holder: 'audit-fresh' });
+        expect(result.applied).toEqual(['core:0001_init', 'core:0002_audit']);
+        expect(await countTables(executor)).toBe(59);
+        expect(await rows(executor, 'SELECT id FROM schema_migration ORDER BY id')).toEqual([
+          { id: 'core:0001_init' },
+          { id: 'core:0002_audit' },
+        ]);
+        expect(await rows(executor, 'SELECT * FROM audit_chain')).toEqual([]);
+      });
+    });
+
+    it('rolls back the entire audit migration and its back-fill on failure', async () => {
+      await withPair(open, async ({ executor }) => {
+        const legacy = await core0001();
+        const audit = (await discoveredMigrations())[1]!;
+        await migrate(executor, [legacy], { holder: 'audit-legacy' });
+        await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+          ORG,
+          'one',
+          'Organization',
+        ]);
+        const failing = await loadMigrationSource(
+          'core',
+          '0002_audit.sql',
+          audit.sql + '\nINSERT INTO audit_chain (org_id) VALUES (NULL);',
+        );
+        await expect(
+          migrate(executor, [legacy, failing], { holder: 'audit-failure' }),
+        ).rejects.toBeInstanceOf(MigrationApplyError);
+        expect(await countTables(executor)).toBe(56);
+        expect(
+          await rows(
+            executor,
+            "SELECT name FROM sqlite_schema WHERE name IN ('audit_chain', 'audit_sink', 'audit_ledger')",
+          ),
+        ).toEqual([]);
+        expect(await rows(executor, 'SELECT id FROM schema_migration')).toEqual([
+          { id: 'core:0001_init' },
+        ]);
+        expect(await lockHolder(executor)).toBeNull();
+        expect(
+          (await migrate(executor, [legacy, audit], { holder: 'audit-retry' })).applied,
+        ).toEqual(['core:0002_audit']);
+        expect(await rows(executor, 'SELECT org_id FROM audit_chain')).toEqual([{ org_id: ORG }]);
+      });
+    });
+
+    it.each(['empty', 'populated'])(
+      'audit state back-fills an %s legacy journal without changing evidence',
+      async (state) => {
+        await withPair(open, async ({ executor }) => {
+          const legacy = await core0001();
+          const sources = await discoveredMigrations();
+          const audit = sources[1]!;
+          expect(audit.id).toBe('core:0002_audit');
+          await migrate(executor, [legacy], { holder: 'audit-legacy' });
+          await run(executor, 'DROP INDEX organization_singleton');
+          for (const org of [ORG, OTHER_ORG]) {
+            await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+              org,
+              org === ORG ? 'one' : 'two',
+              'Organization',
+            ]);
+          }
+          if (state === 'populated') {
+            for (const [org, seq, hash, prevHash] of [
+              [ORG, 7, 'a'.repeat(64), 'b'.repeat(64)],
+              [ORG, 8, 'c'.repeat(64), 'a'.repeat(64)],
+              [OTHER_ORG, 1, 'd'.repeat(64), '0'.repeat(64)],
+            ] as const) {
+              await run(
+                executor,
+                `INSERT INTO audit_event
+              (id, org_id, seq, hash, prev_hash, created_at, actor_type, action, target_type, payload_json)
+              VALUES (?, ?, ?, ?, ?, ?, 'system', 'session.logout', 'session', ?)`,
+                [`${org}-${seq}`, org, seq, hash, prevHash, NOW, '{"value":"é"}'],
+              );
+            }
+          }
+          await run(
+            executor,
+            `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+          VALUES ('pending', ?, ?, 'system', 'session.logout', 'session')`,
+            [ORG, NOW],
+          );
+          const events = await rows<Record<string, ScalarSqlValue>>(
+            executor,
+            'SELECT * FROM audit_event ORDER BY org_id, seq',
+          );
+          const pending = await rows(executor, 'SELECT * FROM audit_pending');
+          const upgraded = await migrate(executor, [legacy, audit], { holder: 'audit-backfill' });
+          expect(upgraded.applied).toEqual(['core:0002_audit']);
+          expect(upgraded.skipped).toEqual(['core:0001_init']);
+          const chains = await rows<Record<string, ScalarSqlValue>>(
+            executor,
+            'SELECT * FROM audit_chain ORDER BY org_id',
+          );
+          expect(chains).toHaveLength(2);
+          expect(chains[0]).toMatchObject({
+            org_id: ORG,
+            head_seq: state === 'populated' ? 8 : 0,
+            head_hash: (state === 'populated' ? 'c' : '0').repeat(64),
+            boundary_seq: state === 'populated' ? 7 : 1,
+            boundary_prev_hash: (state === 'populated' ? 'b' : '0').repeat(64),
+            journal_rows: state === 'populated' ? 2 : 0,
+            mode: 'trail',
+            policy: 'availability',
+            epoch: 0,
+            incarnation: 0,
+            mode_generation: 0,
+            pending_mode: null,
+            cutover_seq: null,
+            capacity_state: 'ok',
+            restore_pending: 0,
+            verified_from_seq: null,
+            verified_through_seq: null,
+            verified_bodies: null,
+            verified_withheld: null,
+            verified_at: null,
+          });
+          expect(chains[1]).toMatchObject({
+            org_id: OTHER_ORG,
+            head_seq: state === 'populated' ? 1 : 0,
+            head_hash: (state === 'populated' ? 'd' : '0').repeat(64),
+            boundary_seq: 1,
+            boundary_prev_hash: '0'.repeat(64),
+            journal_rows: state === 'populated' ? 1 : 0,
+          });
+          for (const chain of chains) {
+            expect(chain.chain_id).toMatch(/^[0-9a-f]{32}$/);
+            const expectedBytes = events
+              .filter((event) => event.org_id === chain.org_id)
+              .reduce(
+                (sum, event) => sum + new TextEncoder().encode(JSON.stringify(event)).byteLength,
+                0,
+              );
+            expect(chain.journal_bytes).toBe(expectedBytes);
+          }
+          expect(chains[0]?.chain_id).not.toBe(chains[1]?.chain_id);
+          expect(await rows(executor, 'SELECT * FROM audit_event ORDER BY org_id, seq')).toEqual(
+            events,
+          );
+          expect(await rows(executor, 'SELECT * FROM audit_pending')).toEqual(pending);
+          expect(await rows(executor, 'SELECT * FROM audit_sink')).toEqual([]);
+          expect(await rows(executor, 'SELECT * FROM audit_ledger')).toEqual([]);
+          const counted = countCalls(executor);
+          const rerun = await migrate(counted.executor, [legacy, audit], { holder: 'audit-rerun' });
+          expect(rerun.applied).toEqual([]);
+          expect(rerun.skipped).toEqual(['core:0001_init', 'core:0002_audit']);
+          expect(counted.counts().batch).toBe(0);
+          expect(await rows(executor, 'SELECT * FROM audit_chain ORDER BY org_id')).toEqual(chains);
+        });
+      },
+    );
+
+    it('audit tables enforce org keys, state, watermarks and UTF-8 in-flight byte limits', async () => {
+      await withPair(open, async ({ executor }) => {
+        await migrate(executor, await discoveredMigrations(), { holder: 'audit-constraints' });
+        await run(executor, 'DROP INDEX organization_singleton');
+        for (const org of [ORG, OTHER_ORG]) {
+          await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+            org,
+            org === ORG ? 'one' : 'two',
+            'Organization',
+          ]);
+          await run(executor, 'INSERT INTO audit_chain (org_id) VALUES (?)', [org]);
+          await run(
+            executor,
+            `INSERT INTO audit_sink
+            (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq)
+            VALUES (?, 'archive', 'audit-webhook', 'webhook', 0, 'fingerprint', 1, 'build', 'active', 0, ?, 0)`,
+            [org, '0'.repeat(64)],
+          );
+          await run(
+            executor,
+            `INSERT INTO audit_ledger
+            (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type)
+            SELECT org_id, 'entry', 'gap', chain_id, epoch, 1, 2, 2, 'capacity', policy, mode_generation, 'system'
+            FROM audit_chain WHERE org_id = ?`,
+            [org],
+          );
+        }
+        for (const [table, column, value] of [
+          ['audit_chain', 'org_id', 'missing'],
+          ['audit_sink', 'org_id', 'missing'],
+          ['audit_ledger', 'org_id', 'missing'],
+          ['audit_chain', 'mode', 'invalid'],
+          ['audit_chain', 'policy', 'invalid'],
+          ['audit_chain', 'capacity_state', 'invalid'],
+          ['audit_chain', 'restore_pending', 2],
+          ['audit_chain', 'head_seq', -1],
+          ['audit_chain', 'head_hash', 'bad'],
+          ['audit_chain', 'journal_rows', -1],
+          ['audit_chain', 'journal_bytes', -1],
+          ['audit_chain', 'verified_through_seq', -1],
+          ['audit_sink', 'inflight_to', -1],
+          ['audit_sink', 'state', 'invalid'],
+          ['audit_sink', 'durable_ack', 2],
+          ['audit_sink', 'sink_id', 'BAD'],
+          ['audit_sink', 'kind', 'BAD'],
+          ['audit_sink', 'progress_seq', -1],
+          ['audit_sink', 'custody_seq', 1],
+          ['audit_sink', 'inflight_body', '{bad'],
+          ['audit_sink', 'inflight_repr', '{bad'],
+          ['audit_ledger', 'kind', 'invalid'],
+          ['audit_ledger', 'count', -1],
+          ['audit_ledger', 'to_seq', 0],
+        ] as const) {
+          const error = await rejection(
+            run(executor, `UPDATE ${table} SET ${column} = ? WHERE org_id = ?`, [value, ORG]),
+          );
+          expect(String((error as Error).message), `${table}.${column}`).toMatch(
+            /CHECK|FOREIGN KEY/i,
+          );
+        }
+        const unsafeSeq = await rejection(
+          run(executor, 'UPDATE audit_chain SET head_seq = 9007199254740992 WHERE org_id = ?', [
+            ORG,
+          ]),
+        );
+        expect(String((unsafeSeq as Error).message)).toMatch(/CHECK/i);
+        const body = JSON.stringify('é'.repeat(262143));
+        expect(new TextEncoder().encode(body).byteLength).toBe(524288);
+        await run(executor, 'UPDATE audit_sink SET inflight_body = ? WHERE org_id = ?', [
+          body,
+          ORG,
+        ]);
+        const error = await rejection(
+          run(executor, 'UPDATE audit_sink SET inflight_body = ? WHERE org_id = ?', [
+            JSON.stringify('é'.repeat(262144)),
+            ORG,
+          ]),
+        );
+        expect(String((error as Error).message)).toMatch(/CHECK/i);
+        expect(
+          await rows(executor, 'SELECT inflight_body FROM audit_sink WHERE org_id = ?', [
+            OTHER_ORG,
+          ]),
+        ).toEqual([{ inflight_body: null }]);
+        for (const table of ['audit_chain', 'audit_sink', 'audit_ledger']) {
+          const error = await rejection(
+            run(executor, `INSERT INTO ${table} SELECT * FROM ${table} WHERE org_id = ?`, [ORG]),
+          );
+          expect(String((error as Error).message)).toMatch(/UNIQUE/i);
+        }
+        expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
+      });
+    });
+
     it('1. applies the real 0001_init.sql: 56 tables, one bookkeeping row, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         const init = await core0001();
@@ -608,7 +860,7 @@ export function describeMigrationContract(
         expect(await readLock(executor)).toEqual(lockBefore);
       });
     });
-    it('8. fresh baseline with foreign keys on: one bookkeeping row, all tables, lock free', async () => {
+    it('8. fresh migrations with foreign keys on: two bookkeeping rows, all tables, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         await enableForeignKeys(executor);
         const sources = await discoveredMigrations();
@@ -621,7 +873,7 @@ export function describeMigrationContract(
         );
         const names = await tableNames(executor);
         for (const table of NEW_TABLES) expect(names).toContain(table);
-        expect(names).toHaveLength(56);
+        expect(names).toHaveLength(59);
         expect(await lockHolder(executor)).toBeNull();
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
         for (const table of ['token_project', 'service_principal_permission']) {
@@ -774,7 +1026,7 @@ export function describeMigrationContract(
           holder: 'contract-fresh',
         });
 
-        expect(result.applied).toEqual(['core:0001_init']);
+        expect(result.applied).toEqual(['core:0001_init', 'core:0002_audit']);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
       });
@@ -786,7 +1038,7 @@ export function describeMigrationContract(
         const result = await migrate(executor, await discoveredMigrations(), {
           holder: 'contract-fresh',
         });
-        expect(result.applied).toEqual(['core:0001_init']);
+        expect(result.applied).toEqual(['core:0001_init', 'core:0002_audit']);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
           { name: 'project_id', type: 'TEXT', notnull: 0, dflt_value: null },
@@ -804,7 +1056,7 @@ export function describeMigrationContract(
           { from: 'project_id', table: 'project', to: 'id' },
         ]);
         expect(await tableNames(executor)).not.toContain('job_attempt_0006');
-        expect(await countTables(executor)).toBe(56);
+        expect(await countTables(executor)).toBe(59);
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
 
         await seedPopulated(executor);
@@ -1089,7 +1341,7 @@ export function describeVulnerabilityMigrationContract(
       await withPair(open, async ({ executor }) => {
         const all = await discoveredMigrations();
         const migrated = await migrate(executor, all, { holder: 'vulnerability-migration' });
-        expect(migrated.applied).toEqual(['core:0001_init']);
+        expect(migrated.applied).toEqual(['core:0001_init', 'core:0002_audit']);
         expect(
           await executor.all({
             sql: "SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,14) = 'vulnerability_' ORDER BY name",
@@ -1176,6 +1428,7 @@ export function describeSchemaEquivalenceContract(
       const sources = await discoveredMigrations();
       expect(sources.map(({ id, phase }) => ({ id, phase }))).toEqual([
         { id: 'core:0001_init', phase: 'expand' },
+        { id: 'core:0002_audit', phase: 'expand' },
       ]);
       const opened = await open();
       try {

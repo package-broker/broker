@@ -26,6 +26,7 @@ import {
   qualifyJobName,
   type JobDefinition,
 } from '../platform/jobs.js';
+import { collectAuditDefinitions } from './registry-audit.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
 import {
@@ -113,6 +114,7 @@ export interface RegisteredJob {
 }
 
 export interface Registration {
+  readonly audit: ReturnType<typeof collectAuditDefinitions>;
   readonly routes: readonly RegisteredRoute[];
   readonly hooks: {
     readonly [K in keyof HookMap]: ReadonlyArray<{
@@ -154,6 +156,8 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'identityProviders',
   'identityDescriptor',
   'sourceProviders',
+  'auditTrail',
+  'auditSinks',
   'migrations',
   'register',
   'init',
@@ -208,6 +212,7 @@ export function collectRegistrations(
   options: RegistrationOptions = {},
 ): Registration {
   const problems: string[] = [];
+  const audit = collectAuditDefinitions(plugins, problems);
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
     'access.check': [],
@@ -440,6 +445,7 @@ export function collectRegistrations(
     Object.freeze(list);
   }
   return {
+    audit,
     routes,
     hooks: Object.freeze(hooks),
     jobs: Object.freeze(jobs),

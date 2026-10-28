@@ -95,7 +95,11 @@ export type Platform = 'cloudflare' | 'node';
 export type PortName =
   'database' | 'blob' | 'cache' | 'job' | 'identity' | 'observability' | 'source' | 'audit-trail';
 
-export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
+export const PLUGIN_BINDABLE_PORTS = [
+  'source',
+  'identity',
+  'audit-trail',
+] as const satisfies readonly PortName[];
 
 export interface SourceProviderContext {
   readonly runtime: 'docker' | 'cloudflare';

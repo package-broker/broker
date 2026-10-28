@@ -96,3 +96,15 @@ describe('createOrgResolver', () => {
     expect(secondSource).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('kernel organization context provenance', () => {
+  it('accepts resolved contexts and rejects public constructors, copies and forged values', async () => {
+    const { assertKernelOrgContext } = await import('./org.js');
+    const { orgContext } = await import('../db/port.js');
+    const context = await createOrgResolver({ findSingleton: async () => identity('org-1') })();
+    expect(() => assertKernelOrgContext(context)).not.toThrow();
+    for (const forged of [orgContext('org-1'), { ...context }, Object.freeze({ ...context })]) {
+      expect(() => assertKernelOrgContext(forged)).toThrow('kernel organization context required');
+    }
+  });
+});

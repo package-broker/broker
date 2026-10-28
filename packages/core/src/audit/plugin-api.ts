@@ -153,6 +153,7 @@ export interface AuditTrail {}
 export type AuditSinkErrorCode =
   'network' | 'timeout' | 'refused' | 'too_large' | 'http_status' | 'bad_response';
 export type AuditSinkWarningCode = 'partial_success';
+/** Core destination resolution raises transport configuration codes; plugins may raise invalid_option. */
 export type AuditSinkConfigErrorCode =
   | 'invalid_endpoint'
   | 'missing_credential'

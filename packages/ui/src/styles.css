@@ -38,6 +38,16 @@
 .shell-nav.is-open {
   display: grid;
 }
+.shell-nav-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.shell-nav-divider {
+  margin: 8px 0;
+  border: 0;
+  border-top: 1px solid #e5e5e5;
+}
 .shell-nav a {
   padding: 10px 12px;
 }
@@ -50,9 +60,22 @@
     display: flex;
     flex-wrap: wrap;
     order: 0;
+    flex: 1;
+    min-width: 0;
     width: auto;
     border: 0;
     padding: 0;
+  }
+  .shell-nav-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .shell-nav-administration {
+    margin-left: auto;
+  }
+  .shell-nav-divider {
+    display: none;
   }
   .shell-nav a {
     padding: 6px 10px;

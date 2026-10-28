@@ -96,6 +96,54 @@ describe('shell markup', () => {
     onSignOut: () => undefined,
   };
 
+  it('groups primary and administration links in one Main navigation before account controls', () => {
+    const html = renderToString(createElement(Shell, { ...base, project: 'acme' }));
+    expect(html.match(/<nav\b/g)).toHaveLength(1);
+    const nav = html.match(/<nav aria-label="Main"[^>]*>(.*?)<\/nav>/)![1]!;
+    const lists = [...nav.matchAll(/<ul([^>]*)>(.*?)<\/ul>/g)];
+    expect(lists).toHaveLength(2);
+    expect([...lists[0]![2]!.matchAll(/>([^<]+)<\/a>/g)].map((match) => match[1])).toEqual([
+      'Projects',
+      'Access',
+      'Sources',
+      'Packages',
+      'Tokens',
+    ]);
+    expect(lists[1]![1]).toContain('aria-label="Administration"');
+    expect([...lists[1]![2]!.matchAll(/>([^<]+)<\/a>/g)].map((match) => match[1])).toEqual([
+      'Audit',
+      'Import',
+    ]);
+    expect(nav.match(/<li>/g)).toHaveLength(7);
+    for (const route of PAGE_ROUTES) expect(nav).toContain(`href="#/${route}?project=acme"`);
+    expect(html.indexOf('</nav>')).toBeLessThan(html.indexOf('<select'));
+    expect(html.indexOf('<select')).toBeLessThan(html.indexOf('>Account</button>'));
+  });
+
+  it.each(['projects', 'tokens', 'audit', 'import'] as const)(
+    'keeps aria-current only on the active %s link',
+    (route) => {
+      const html = renderToString(createElement(Shell, { ...base, route }));
+      expect(html.match(/aria-current="page"/g)).toHaveLength(1);
+      expect(html).toContain(`href="#/${route}" aria-current="page"`);
+    },
+  );
+
+  it.each([{ visible: [] }, { visible: ['audit'] }, { visible: ['import'] }] as const)(
+    'renders administration only for visible routes %j',
+    ({ visible }) => {
+      const html = renderToString(
+        createElement(Shell, { ...base, visibleRoutes: ['projects', ...visible] }),
+      );
+      expect(html.includes('aria-label="Administration"')).toBe(visible.length > 0);
+      expect(html.includes('<hr')).toBe(visible.length > 0);
+      expect(html.match(/<ul\b/g)).toHaveLength(visible.length > 0 ? 2 : 1);
+      for (const route of ['audit', 'import']) {
+        expect(html.includes(`href="#/${route}"`)).toBe(visible.some((item) => item === route));
+      }
+    },
+  );
+
   it('renders hash text as escaped text, never as markup', () => {
     const html = renderToString(
       createElement(Shell, { ...base, unknown: '/<img onerror=alert(1)>' }, 'content'),

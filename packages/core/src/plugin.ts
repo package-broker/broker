@@ -1,4 +1,5 @@
 import type { $ZodType as ZodType } from 'zod/v4/core';
+import type { AuditSinkFactory, AuditTrailFactory } from './audit/plugin-api.js';
 import type { OrganizationRepository } from './db/organization.js';
 import type { OrgContext } from './db/port.js';
 import type { IdentityProviderFactory, VerifiedIdentity } from './identity/port.js';
@@ -11,6 +12,27 @@ import type { Observability } from './platform/observability.js';
 import type { GithubAppMaterial } from './sources/credentials.js';
 import type { UpstreamCredential } from './sources/policy-fetch.js';
 import type { ProviderSource, SourceProvider } from './sources/provider.js';
+
+export { AuditSinkConfigError } from './audit/plugin-api.js';
+export type {
+  AuditBatchV1,
+  AuditDelivery,
+  AuditFetch,
+  AuditHeadV1,
+  AuditJournalReader,
+  AuditMarkerV1,
+  AuditRecordV1,
+  AuditSink,
+  AuditSinkConfigErrorCode,
+  AuditSinkContext,
+  AuditSinkErrorCode,
+  AuditSinkFactory,
+  AuditSinkWarningCode,
+  AuditTrail,
+  AuditTrailContext,
+  AuditTrailFactory,
+  AuditVerificationScopeV1,
+} from './audit/plugin-api.js';
 
 export { PlatformUnavailableError } from './platform/errors.js';
 
@@ -65,9 +87,13 @@ export const SUPPORTED_PLUGIN_API = [3, 4] as const;
 export type Platform = 'cloudflare' | 'node';
 
 export type PortName =
-  'database' | 'blob' | 'cache' | 'job' | 'identity' | 'observability' | 'source';
+  'database' | 'blob' | 'cache' | 'job' | 'identity' | 'observability' | 'source' | 'audit-trail';
 
-export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
+export const PLUGIN_BINDABLE_PORTS = [
+  'source',
+  'identity',
+  'audit-trail',
+] as const satisfies readonly PortName[];
 
 export interface SourceProviderContext {
   readonly runtime: 'docker' | 'cloudflare';
@@ -111,7 +137,7 @@ export interface PluginDefinition extends PluginApi {
   readonly platforms: readonly Platform[];
   readonly dependsOn?: readonly string[];
   readonly capabilities?: readonly string[];
-  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders, 'source' needs sourceProviders. */
+  /** Ports this plugin supplies; runtime-owned ports cannot be bound. 'identity' needs identityProviders, 'source' needs sourceProviders, 'audit-trail' needs auditTrail. */
   readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
@@ -119,6 +145,10 @@ export interface PluginDefinition extends PluginApi {
   readonly identityDescriptor?: IdentityDescriptor;
   /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
   readonly sourceProviders?: SourceProviderFactory;
+  /** Required iff binds contains 'audit-trail'. Needs apiVersion 4. */
+  readonly auditTrail?: AuditTrailFactory;
+  /** Runs once after register; sink ids must be unique. Needs apiVersion 4. */
+  readonly auditSinks?: AuditSinkFactory;
   readonly migrations?: { readonly dir: string };
   /** Synchronous and pure: declares routes, hooks and jobs. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;

@@ -129,6 +129,8 @@ export interface ProjectGrantListItem {
     readonly displayName: string;
     readonly provider?: string;
     readonly email?: string;
+    readonly groupValue?: string;
+    readonly visibility: 'visible' | 'redacted';
   };
   readonly role: {
     readonly id: string;
@@ -144,7 +146,8 @@ export interface ProjectGrantReader {
       readonly projectId: string;
       readonly limit: number;
       readonly after?: string;
-      readonly includeEmail?: boolean;
+      /** Returns the e-mail or group value each grant names; absent means redacted. */
+      readonly revealSubjects?: boolean;
     },
   ): Promise<{ readonly items: readonly ProjectGrantListItem[]; readonly next: string | null }>;
 }

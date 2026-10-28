@@ -41,6 +41,7 @@ const cases: readonly ContractCase[] = targets.map((target) => ({
         kind: 'email',
         id: 'G',
         displayName: 'Pending user',
+        visibility: 'redacted',
       });
     } else if (target === 'rp') {
       expect(result.items).toHaveLength(1);

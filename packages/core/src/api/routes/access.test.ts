@@ -27,6 +27,7 @@ const CSRF = 'B'.repeat(43);
 const EMAIL = 'sentinel-user@example.test';
 const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
 const bearer = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
+const serviceBearer = formatToken('svc', 'mnopqrstuvwx', new Uint8Array(32).fill(9));
 const clock = fixedClock('2026-10-20T00:00:00.000Z');
 
 const ROLE_ADMIN = '01JA0000000000000000000010';
@@ -107,6 +108,10 @@ async function fixture(
     permissions?: readonly string[];
     roleResult?: Partial<Record<'create' | 'rename' | 'setPermissions' | 'delete', string>>;
     grantResult?: Partial<Record<'create' | 'delete' | 'changeRole', string>>;
+    tokenKind?: 'pat' | 'svc';
+    org?: string;
+    extraGrants?: readonly StoredGrant[];
+    distinctRoles?: boolean;
   } = {},
 ) {
   const roles: StoredRole[] = [
@@ -115,8 +120,14 @@ async function fixture(
       isSystem: true,
       protectsLastHolder: true,
       revision: 1,
+      ...(options.distinctRoles === true
+        ? { name: 'Organization Admin', permissions: ['org:grants:read', 'org:read'] }
+        : {}),
     }),
-    role(ROLE_CUSTOM),
+    role(
+      ROLE_CUSTOM,
+      options.distinctRoles === true ? { name: 'Auditor', permissions: ['org:audit:read'] } : {},
+    ),
     role(ROLE_PROJECT, { scope: 'project', permissions: ['project:read'], revision: 1 }),
     role(ROLE_INUSE),
     ...(options.wideRole === true ? [role(ROLE_WIDE, { permissions: ['org:audit:read'] })] : []),
@@ -132,6 +143,7 @@ async function fixture(
       subject: { type: 'group', provider: 'okta', value: 'ops@example.test' },
     }),
     grant(GRANT_FOREIGN, ROLE_CUSTOM, { orgId: 'org-2' }),
+    ...(options.extraGrants ?? []),
   ];
   const visibleRoles = (ctx: { orgId: string }) => roles.filter((r) => r.orgId === ctx.orgId);
   const visibleGrants = (ctx: { orgId: string }) => grants.filter((g) => g.orgId === ctx.orgId);
@@ -251,7 +263,12 @@ async function fixture(
     changeGrantRole: vi.spyOn(administration, 'changeGrantRole'),
   };
   const clientIp = vi.fn(() => '203.0.113.7');
-  const permissions = options.permissions ?? PERMISSIONS.map((p) => p.name);
+  let permissions = options.permissions ?? PERMISSIONS.map((p) => p.name);
+  const setPermissions = (next: readonly string[]) => {
+    permissions = next;
+  };
+  const tokenKind = options.tokenKind ?? 'pat';
+  const presented = tokenKind === 'svc' ? serviceBearer : bearer;
   const app = await createKernel({
     platform: 'node',
     plugins: [],
@@ -263,49 +280,54 @@ async function fixture(
       clientIp,
     }),
     ports: { organizations: { get: async () => null }, clock, ids },
-    resolveOrg: async () => orgContext('org-1'),
+    resolveOrg: async () => orgContext(options.org ?? 'org-1'),
     health: async () => true,
     log,
     authorization: createAuthorizationEngine({
       access: {
-        lookupSession: async () => ({
-          session: { id: 'session-1', csrfHash: await sha256Hex(CSRF) },
-          user: { id: 'user-1' },
-          identity: null,
-          protectedHolder: options.admin ?? true,
-          project: null,
-          organizationPermissions: permissions,
-          projectPermissions: options.projectPermissions ?? [],
-        }),
-        lookupToken: async () =>
-          Object.defineProperty(
-            {
-              token: {
-                id: 'token-1',
-                kind: 'pat',
-                expired: false,
-                revoked: false,
-                lastUsedAt: null,
-                userId: 'user-1',
-                servicePrincipalId: null,
-                bindingOk: true,
-                projectMode: 'all',
-                scope: {
-                  level: options.tokenScope ?? 'full',
-                  readOnly: options.tokenScope === 'read',
-                },
+        lookupSession: async (org) =>
+          org.orgId !== 'org-1'
+            ? null
+            : {
+                session: { id: 'session-1', csrfHash: await sha256Hex(CSRF) },
+                user: { id: 'user-1' },
+                identity: null,
+                protectedHolder: options.admin ?? true,
+                project: null,
+                organizationPermissions: permissions,
+                projectPermissions: options.projectPermissions ?? [],
               },
-              protectedHolder: options.admin ?? true,
-              principalStatus: 'active',
-              projectVisible: true,
-              validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
-              project: null,
-              organizationPermissions: permissions,
-              projectPermissions: options.projectPermissions ?? [],
-            },
-            'verifier',
-            { value: { secretHash: await hashToken(keyring, 1, bearer), pepperVersion: 1 } },
-          ) as unknown as EngineTokenAccess,
+        lookupToken: async (org) =>
+          org.orgId !== 'org-1'
+            ? null
+            : (Object.defineProperty(
+                {
+                  token: {
+                    id: 'token-1',
+                    kind: tokenKind,
+                    expired: false,
+                    revoked: false,
+                    lastUsedAt: null,
+                    userId: tokenKind === 'svc' ? null : 'user-1',
+                    servicePrincipalId: tokenKind === 'svc' ? 'service-1' : null,
+                    bindingOk: true,
+                    projectMode: 'all',
+                    scope: {
+                      level: options.tokenScope ?? 'full',
+                      readOnly: options.tokenScope === 'read',
+                    },
+                  },
+                  protectedHolder: options.admin ?? true,
+                  principalStatus: 'active',
+                  projectVisible: true,
+                  validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
+                  project: null,
+                  organizationPermissions: permissions,
+                  projectPermissions: options.projectPermissions ?? [],
+                },
+                'verifier',
+                { value: { secretHash: await hashToken(keyring, 1, presented), pepperVersion: 1 } },
+              ) as unknown as EngineTokenAccess),
         touchSession: async () => true,
         touchToken: async () => true,
       },
@@ -333,7 +355,7 @@ async function fixture(
     } = {},
   ) => {
     const headers = new Headers({ origin: ORIGIN, 'content-type': 'application/json' });
-    if (options.auth === 'token') headers.set('authorization', `Bearer ${bearer}`);
+    if (options.auth === 'token') headers.set('authorization', `Bearer ${presented}`);
     else if (options.auth !== 'anonymous') {
       headers.set('cookie', `${SESSION_COOKIE}=${SECRET}`);
       headers.set('x-csrf-token', CSRF);
@@ -347,7 +369,7 @@ async function fixture(
       new Request(ORIGIN + path, { method, headers, ...(body === undefined ? {} : { body }) }),
     );
   };
-  return { request, roleRepo, grantRepo, spies, clientIp, log };
+  return { request, roleRepo, grantRepo, spies, clientIp, log, setPermissions };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -710,47 +732,112 @@ describe('grants', () => {
   });
 });
 
-describe('grant listing e-mail visibility', () => {
+type ListedGrant = {
+  id: string;
+  subject: Record<string, unknown>;
+  roleId: string;
+  role: { id: string; name: string; permissions: string[] } | null;
+};
+
+async function listedGrants(response: Response) {
+  expect(response.status).toBe(200);
+  const text = await response.text();
+  expect(text).not.toContain(GRANT_FOREIGN);
+  expect(text).not.toContain('holder-25@');
+  const body = JSON.parse(text) as { items: ListedGrant[]; next: string | null };
+  expect(ACCESS_SPECS.listGrants.api.responses[200].safeParse(body).success).toBe(true);
+  return new Map(body.items.map((item) => [item.id, item]));
+}
+
+describe('grant listing subject visibility', () => {
   it.each([
-    ['project admin', { admin: false, projectPermissions: PERMISSIONS.map((p) => p.name) }, false],
-    ['organization reader', { admin: false, permissions: ['org:grants:read'] }, false],
-    ['custom role with every permission', { admin: false }, false],
-    ['read-only admin token', { tokenScope: 'read' }, true],
-    ['non-admin full token', { tokenScope: 'full', admin: false }, true],
-  ] as const)('omits e-mail values for a %s', async (_name, options, token) => {
+    ['organization admin', {}],
+    ['delegated org:grants:read holder', { admin: false, permissions: ['org:grants:read'] }],
+    ['custom role with every permission', { admin: false }],
+    [
+      'non-admin with project and organization permissions',
+      { admin: false, projectPermissions: PERMISSIONS.map((p) => p.name) },
+    ],
+  ] as const)('returns e-mail and group values to a session of an %s', async (_name, options) => {
     const f = await fixture(options);
-    const response = await f.request('GET', '/_pb/grants', token ? { auth: 'token' } : {});
-    expect(response.status).toBe(200);
-    const text = await response.text();
-    expect(text).not.toContain('@');
-    const body = JSON.parse(text) as { items: { id: string; subject: Record<string, unknown> }[] };
-    const subjects = new Map(body.items.map((item) => [item.id, item.subject]));
-    expect(subjects.get(GRANT_FIRST)).toEqual({ type: 'email' });
-    expect(subjects.get('01JA0000000000000000000026')).toEqual({
+    const grants = await listedGrants(await f.request('GET', '/_pb/grants'));
+    expect(grants.get(GRANT_FIRST)?.subject).toEqual({
+      type: 'email',
+      value: 'holder-21@example.test',
+      visibility: 'visible',
+    });
+    expect(grants.get('01JA0000000000000000000026')?.subject).toEqual({
       type: 'group',
       provider: 'okta',
       value: 'engineers',
+      visibility: 'visible',
     });
-    expect(subjects.get('01JA0000000000000000000027')).toEqual({ type: 'group', provider: 'okta' });
+    expect(grants.get('01JA0000000000000000000027')?.subject).toEqual({
+      type: 'group',
+      provider: 'okta',
+      value: 'ops@example.test',
+      visibility: 'visible',
+    });
   });
-  it.each([false, true])(
-    'returns e-mail subjects for an organization admin (token=%s)',
-    async (token) => {
-      const f = await fixture();
-      const response = await f.request('GET', '/_pb/grants', token ? { auth: 'token' } : {});
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { items: { id: string; subject: unknown }[] };
-      expect(body.items.find((item) => item.id === GRANT_FIRST)?.subject).toEqual({
-        type: 'email',
-        value: 'holder-21@example.test',
-      });
-      expect(body.items.find((item) => item.id === '01JA0000000000000000000027')?.subject).toEqual({
-        type: 'group',
-        provider: 'okta',
-      });
-      expect(ACCESS_SPECS.listGrants.api.responses[200].safeParse(body).success).toBe(true);
-    },
-  );
+
+  it.each([
+    ['read-only admin token', { tokenScope: 'read' }],
+    ['full admin token', {}],
+    ['non-admin full token', { tokenScope: 'full', admin: false }],
+    ['token holding only org:grants:read', { admin: false, permissions: ['org:grants:read'] }],
+    ['service token', { tokenKind: 'svc' }],
+  ] as const)('redacts every subject value for a %s', async (_name, options) => {
+    const f = await fixture(options);
+    const response = await f.request('GET', '/_pb/grants', { auth: 'token' });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain('@');
+    expect(text).not.toContain('engineers');
+    expect(text).not.toContain(GRANT_FOREIGN);
+    const body = JSON.parse(text) as { items: ListedGrant[] };
+    expect(ACCESS_SPECS.listGrants.api.responses[200].safeParse(body).success).toBe(true);
+    const subjects = new Map(body.items.map((item) => [item.id, item.subject]));
+    expect(subjects.get(GRANT_FIRST)).toEqual({ type: 'email', visibility: 'redacted' });
+    expect(subjects.get('01JA0000000000000000000026')).toEqual({
+      type: 'group',
+      provider: 'okta',
+      visibility: 'redacted',
+    });
+    expect(subjects.get('01JA0000000000000000000027')).toEqual({
+      type: 'group',
+      provider: 'okta',
+      visibility: 'redacted',
+    });
+  });
+
+  it('denies a session without org:grants:read before reading grants', async () => {
+    const f = await fixture({ admin: false, permissions: ['org:read', 'org:roles:read'] });
+    const response = await f.request('GET', '/_pb/grants');
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain('@');
+    expect(f.grantRepo.listOrganization).not.toHaveBeenCalled();
+  });
+
+  it('denies a session of another organization before reading grants', async () => {
+    const f = await fixture({ org: 'org-2' });
+    for (const auth of [undefined, 'token'] as const) {
+      const response = await f.request('GET', '/_pb/grants', auth === undefined ? {} : { auth });
+      expect(response.status).toBe(401);
+      expect(await response.text()).not.toContain('@');
+    }
+    expect(f.grantRepo.listOrganization).not.toHaveBeenCalled();
+  });
+
+  it('stops returning values on the request after org:grants:read is removed', async () => {
+    const f = await fixture({ admin: false, permissions: ['org:grants:read'] });
+    const first = await listedGrants(await f.request('GET', '/_pb/grants'));
+    expect(first.get(GRANT_FIRST)?.subject).toMatchObject({ visibility: 'visible' });
+    f.setPermissions(['org:read']);
+    const second = await f.request('GET', '/_pb/grants');
+    expect(second.status).toBe(403);
+    expect(await second.text()).not.toContain('@');
+    expect(f.grantRepo.listOrganization).toHaveBeenCalledOnce();
+  });
 
   it('keeps list responses out of logs and makes no audit-producing write', async () => {
     const f = await fixture();
@@ -766,18 +853,84 @@ describe('grant listing e-mail visibility', () => {
     noWrites(f);
   });
 
-  it('declares the optional e-mail subject value in the list schema', () => {
-    const spec = ACCESS_SPECS.listGrants;
-    const emailSubject = {
-      id: GRANT_FIRST,
-      subject: { type: 'email', value: EMAIL },
-      roleId: ROLE_CUSTOM,
-      createdAt: '2026-10-01T00:00:00.000Z',
-      revision: 2,
-    };
-    expect(spec.api.responses[200].safeParse({ items: [emailSubject], next: null }).success).toBe(
-      true,
+  it('declares a value exactly when the subject is visible', () => {
+    const parse = (subject: unknown) =>
+      ACCESS_SPECS.listGrants.api.responses[200].safeParse({
+        items: [
+          {
+            id: GRANT_FIRST,
+            subject,
+            roleId: ROLE_CUSTOM,
+            role: null,
+            createdAt: '2026-10-01T00:00:00.000Z',
+            revision: 2,
+          },
+        ],
+        next: null,
+      }).success;
+    expect(parse({ type: 'email', value: EMAIL, visibility: 'visible' })).toBe(true);
+    expect(parse({ type: 'email', visibility: 'redacted' })).toBe(true);
+    expect(parse({ type: 'email', value: EMAIL, visibility: 'redacted' })).toBe(false);
+    expect(parse({ type: 'email', visibility: 'visible' })).toBe(false);
+    expect(parse({ type: 'email', value: EMAIL })).toBe(false);
+    expect(parse({ type: 'group', provider: 'okta', value: 'ops', visibility: 'redacted' })).toBe(
+      false,
     );
+  });
+});
+
+describe('grant listing role summary', () => {
+  it('resolves system and custom roles of the organization under org:grants:read alone', async () => {
+    const f = await fixture({
+      admin: false,
+      permissions: ['org:grants:read'],
+      distinctRoles: true,
+    });
+    const grants = await listedGrants(await f.request('GET', '/_pb/grants'));
+    expect(grants.get(GRANT_ADMIN)?.role).toEqual({
+      id: ROLE_ADMIN,
+      name: 'Organization Admin',
+      permissions: ['org:grants:read', 'org:read'],
+    });
+    expect(grants.get(GRANT_FIRST)?.role).toEqual({
+      id: ROLE_CUSTOM,
+      name: 'Auditor',
+      permissions: ['org:audit:read'],
+    });
+    expect(grants.get('01JA0000000000000000000026')?.role?.id).toBe(ROLE_INUSE);
+  });
+
+  it('returns a null role for a missing role or one outside the organization or scope', async () => {
+    const f = await fixture({
+      extraGrants: [
+        grant('01JA000000000000000000002A', ROLE_ABSENT),
+        grant('01JA000000000000000000002B', ROLE_FOREIGN),
+        grant('01JA000000000000000000002C', ROLE_PROJECT),
+      ],
+    });
+    const grants = await listedGrants(await f.request('GET', '/_pb/grants'));
+    expect(grants.get('01JA000000000000000000002A')).toMatchObject({
+      roleId: ROLE_ABSENT,
+      role: null,
+    });
+    expect(grants.get('01JA000000000000000000002B')).toMatchObject({
+      roleId: ROLE_FOREIGN,
+      role: null,
+    });
+    expect(grants.get('01JA000000000000000000002C')).toMatchObject({
+      roleId: ROLE_PROJECT,
+      role: null,
+    });
+  });
+
+  it('returns the role summary to tokens as well', async () => {
+    const f = await fixture({ tokenScope: 'read' });
+    const grants = await listedGrants(await f.request('GET', '/_pb/grants', { auth: 'token' }));
+    expect(grants.get(GRANT_FIRST)?.role).toEqual({
+      id: ROLE_CUSTOM,
+      name: 'Role',
+      permissions: ['org:read'],
+    });
   });
 });
 
@@ -874,6 +1027,7 @@ describe('listing', () => {
           id: string;
           subject: unknown;
           roleId: string;
+          role: unknown;
           createdAt: string;
           revision: number;
         }[];
@@ -885,6 +1039,7 @@ describe('listing', () => {
           'createdAt',
           'id',
           'revision',
+          'role',
           'roleId',
           'subject',
         ]);

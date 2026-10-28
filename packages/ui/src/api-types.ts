@@ -2145,18 +2145,40 @@ export interface operations {
               createdAt: string;
               id: string;
               revision: number;
+              role: {
+                id: string;
+                name: string;
+                permissions: string[];
+              } | null;
               roleId: string;
               subject:
                 | {
                     /** @constant */
                     type: 'email';
-                    value?: string;
+                    value: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    /** @constant */
+                    type: 'email';
+                    /** @constant */
+                    visibility: 'redacted';
                   }
                 | {
                     provider: string;
                     /** @constant */
                     type: 'group';
-                    value?: string;
+                    value: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    provider: string;
+                    /** @constant */
+                    type: 'group';
+                    /** @constant */
+                    visibility: 'redacted';
                   };
             }[];
             next: string | null;
@@ -4560,10 +4582,13 @@ export interface operations {
               principal: {
                 displayName: string;
                 email?: string;
+                groupValue?: string;
                 id: string;
                 /** @enum {string} */
                 kind: 'user' | 'email' | 'group';
                 provider?: string;
+                /** @enum {string} */
+                visibility: 'visible' | 'redacted';
               };
               revision: number;
               role: {

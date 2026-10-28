@@ -45,7 +45,8 @@ export interface SafeLogRecord {
   readonly seq?: number;
   readonly rows?: number;
   readonly head_hash?: string;
-  readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
+  readonly reason?:
+    'seq_gap' | 'head_mismatch' | 'boundary_mismatch' | 'prev_hash' | 'hash' | 'org_mismatch';
   readonly package_key?: string;
   readonly source_id?: string;
   readonly upstream_trace_id?: string;
@@ -376,7 +377,13 @@ const FIELD_CHECKS: Readonly<
   seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   rows: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   head_hash: matches(/^[0-9a-f]{64}$/),
-  reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
+  reason: (v) =>
+    v === 'seq_gap' ||
+    v === 'head_mismatch' ||
+    v === 'boundary_mismatch' ||
+    v === 'prev_hash' ||
+    v === 'hash' ||
+    v === 'org_mismatch',
   package_key: packageKey,
   source_id: matches(ENTITY_ID),
   upstream_trace_id: matches(TRACE_ID),

@@ -1,7 +1,14 @@
 import type { OrgContext } from '../db/port.js';
 import { JobError, type JobDefinition, type Jobs } from '../platform/jobs.js';
 
-export type SealOutcome =
+export class AuditIntegrityError extends Error {
+  constructor(readonly reason: 'seq_gap' | 'head_mismatch' | 'boundary_mismatch') {
+    super('audit chain integrity failure');
+    this.name = 'AuditIntegrityError';
+  }
+}
+
+export type SealOutcome = { readonly repaired?: true } & (
   | {
       readonly outcome: 'sealed';
       readonly sealed: number;
@@ -9,10 +16,12 @@ export type SealOutcome =
       readonly headHash: string;
     }
   | { readonly outcome: 'empty' }
-  | { readonly outcome: 'contended' };
+  | { readonly outcome: 'contended' }
+);
 
 export interface AuditSealPort {
   seal(ctx: OrgContext, limit?: number): Promise<SealOutcome>;
+  pendingOldestAgeSeconds(ctx: OrgContext): Promise<number>;
 }
 
 const JOB_TYPE = 'core:audit-seal:v1';
@@ -45,8 +54,22 @@ export function auditSealJob(
       let sealed = 0;
       let rounds = 0;
       try {
+        if (!ctx.signal.aborted) {
+          try {
+            ctx.observability.histogram(
+              'pb.audit.pending_oldest_age',
+              await port.pendingOldestAgeSeconds(ctx.org),
+            );
+          } catch {
+            ctx.observability.counter('pb.audit.pending_age_error');
+          }
+        }
         for (let round = 0; round < MAX_ROUNDS && !ctx.signal.aborted; round += 1) {
           const result = await port.seal(ctx.org);
+          if (result.repaired) {
+            ctx.observability.log({ level: 'warn', event: 'audit.seal_repaired' });
+            ctx.observability.counter('pb.audit.seal_repaired');
+          }
           if (result.outcome === 'contended') {
             ctx.observability.counter('audit_seal_contended_total');
             const consecutive = Math.min(
@@ -64,6 +87,16 @@ export function auditSealJob(
           sealed += result.sealed;
           rounds += 1;
         }
+      } catch (error) {
+        if (error instanceof AuditIntegrityError) {
+          ctx.observability.log({
+            level: 'error',
+            event: 'audit.chain_integrity',
+            reason: error.reason,
+          });
+          ctx.observability.counter('pb.audit.chain_integrity');
+        }
+        throw error;
       } finally {
         ctx.observability.counter('audit_sealed_total', undefined, sealed);
         ctx.observability.counter('audit_seal_rounds_total', undefined, rounds);

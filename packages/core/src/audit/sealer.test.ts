@@ -4,7 +4,7 @@ import { AUDIT_EVENTS, KERNEL_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-
 import { registerCoreJob } from '../runtime/core-jobs.js';
 import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
 import { createObservability, type ObsRecord } from '../platform/observability.js';
-import { auditSealJob, requestAuditSeal, type SealOutcome } from './sealer.js';
+import { AuditIntegrityError, auditSealJob, requestAuditSeal, type SealOutcome } from './sealer.js';
 
 const org = orgContext('org-a');
 const sealed: SealOutcome = { outcome: 'sealed', sealed: 4, headSeq: 9, headHash: 'private-hash' };
@@ -31,7 +31,7 @@ function jobs() {
 
 describe('auditSealJob', () => {
   it('registers the scheduled core job with three attempts', () => {
-    const job = auditSealJob({ seal: vi.fn() });
+    const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal: vi.fn() });
     expect(registerCoreJob(job).qualifiedName).toBe('core:audit-seal:v1');
     expect(job).toMatchObject({
       name: 'audit-seal',
@@ -55,7 +55,7 @@ describe('auditSealJob', () => {
     ['symbol field', { [Symbol('x')]: 1 }],
     ['non-enumerable field', Object.defineProperty({}, 'x', { value: 1 })],
   ])('rejects payload with %s', (_name, input) => {
-    const job = auditSealJob({ seal: vi.fn() });
+    const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal: vi.fn() });
     expect(() => job.validate(input)).toThrowError(new JobError('invalid_payload'));
   });
 
@@ -66,7 +66,7 @@ describe('auditSealJob', () => {
       .mockResolvedValueOnce(sealed)
       .mockResolvedValue({ outcome: 'empty' });
     const ctx = context();
-    await auditSealJob({ seal }).handler({}, ctx);
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, ctx);
     expect(seal.mock.calls).toEqual([[ctx.org], [ctx.org], [ctx.org]]);
     expect(ctx.observability.log).toHaveBeenCalledExactlyOnceWith({
       level: 'info',
@@ -76,9 +76,50 @@ describe('auditSealJob', () => {
     expect(ctx.observability.counter).toHaveBeenCalledWith('audit_seal_rounds_total', undefined, 2);
   });
 
+  it('reports pending age through the real observability port without row data', async () => {
+    const records: ObsRecord[] = [];
+    const ctx = context();
+    const observed = createObservability(
+      { emit: (record) => void records.push(record) },
+      { deploymentId: 'test', runtime: 'node', requestId: null, jobId: 'job-a' },
+      {
+        events: new Set(AUDIT_EVENTS),
+        reasonCodes: KERNEL_REASON_CODES,
+        routeTemplates: new Set(),
+      },
+    );
+    const age = vi.fn().mockResolvedValue(601);
+    await auditSealJob({
+      seal: vi.fn().mockResolvedValue({ outcome: 'contended' }),
+      pendingOldestAgeSeconds: age,
+    }).handler({}, { ...ctx, observability: observed });
+    expect(age).toHaveBeenCalledExactlyOnceWith(ctx.org);
+    expect(records).toContainEqual({
+      kind: 'histogram',
+      name: 'pb.audit.pending_oldest_age',
+      value: 601,
+      labels: {},
+    });
+    expect(records).not.toContainEqual(expect.objectContaining({ name: 'pb.obs.dropped' }));
+  });
+
+  it('continues sealing when the pending age query fails', async () => {
+    const seal = vi.fn().mockResolvedValue({ outcome: 'empty' });
+    const ctx = context();
+    await auditSealJob({
+      seal,
+      pendingOldestAgeSeconds: vi.fn().mockRejectedValue(new Error('private')),
+    }).handler({}, ctx);
+    expect(seal).toHaveBeenCalledExactlyOnceWith(ctx.org);
+    expect(ctx.observability.counter).toHaveBeenCalledWith('pb.audit.pending_age_error');
+    expect(ctx.observability.log).not.toHaveBeenCalled();
+  });
+
   it('returns after the first contended answer without failing', async () => {
     const seal = vi.fn().mockResolvedValue({ outcome: 'contended' });
-    await expect(auditSealJob({ seal }).handler({}, context())).resolves.toBeUndefined();
+    await expect(
+      auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, context()),
+    ).resolves.toBeUndefined();
     expect(seal).toHaveBeenCalledTimes(1);
   });
 
@@ -87,7 +128,7 @@ describe('auditSealJob', () => {
       if (seal.mock.calls.length > 11) throw new Error('unbounded seal');
       return Promise.resolve(sealed);
     });
-    await auditSealJob({ seal }).handler({}, context());
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, context());
     expect(seal).toHaveBeenCalledTimes(10);
   });
 
@@ -95,7 +136,10 @@ describe('auditSealJob', () => {
     const seal = vi.fn();
     const controller = new AbortController();
     controller.abort();
-    await auditSealJob({ seal }).handler({}, context(controller.signal));
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler(
+      {},
+      context(controller.signal),
+    );
     expect(seal).not.toHaveBeenCalled();
   });
 
@@ -105,14 +149,19 @@ describe('auditSealJob', () => {
       controller.abort();
       return Promise.resolve(sealed);
     });
-    await auditSealJob({ seal }).handler({}, context(controller.signal));
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler(
+      {},
+      context(controller.signal),
+    );
     expect(seal).toHaveBeenCalledTimes(1);
   });
 
   it('propagates seal failures for job retries', async () => {
     const error = new Error('seal failed');
     const seal = vi.fn().mockRejectedValue(error);
-    await expect(auditSealJob({ seal }).handler({}, context())).rejects.toBe(error);
+    await expect(
+      auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, context()),
+    ).rejects.toBe(error);
   });
 
   it('reports committed counts when the second batch fails and propagates the error', async () => {
@@ -120,7 +169,9 @@ describe('auditSealJob', () => {
     const seal = vi.fn().mockResolvedValueOnce(sealed).mockRejectedValueOnce(error);
     const ctx = context();
 
-    await expect(auditSealJob({ seal }).handler({}, ctx)).rejects.toBe(error);
+    await expect(
+      auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, ctx),
+    ).rejects.toBe(error);
 
     expect(seal.mock.calls).toEqual([[ctx.org], [ctx.org]]);
     expect(ctx.observability.counter).toHaveBeenCalledTimes(2);
@@ -130,7 +181,7 @@ describe('auditSealJob', () => {
 
   it('reports persistent contention on the third run and retries only on a new run', async () => {
     const seal = vi.fn().mockResolvedValue({ outcome: 'contended' });
-    const job = auditSealJob({ seal });
+    const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal });
     const ctx = context();
     await job.handler({}, ctx);
     await job.handler({}, ctx);
@@ -154,7 +205,7 @@ describe('auditSealJob', () => {
 
   it('counts contention independently by organization across distinct contexts', async () => {
     const seal = vi.fn().mockResolvedValue({ outcome: 'contended' });
-    const job = auditSealJob({ seal });
+    const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal });
     await job.handler({}, context());
     await job.handler({}, context());
     const other = context(undefined, 'org-b');
@@ -169,7 +220,7 @@ describe('auditSealJob', () => {
     'resets consecutive contention after %s',
     async (outcome) => {
       const seal = vi.fn().mockResolvedValue({ outcome: 'contended' });
-      const job = auditSealJob({ seal });
+      const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal });
       const ctx = context();
       await job.handler({}, ctx);
       await job.handler({}, ctx);
@@ -202,10 +253,60 @@ describe('auditSealJob through the real observability port', () => {
     return { ctx, records };
   }
 
+  it.each(['seq_gap', 'head_mismatch', 'boundary_mismatch'] as const)(
+    'reports integrity reason %s and stops the run',
+    async (reason) => {
+      const error = new AuditIntegrityError(reason);
+      const seal = vi.fn().mockRejectedValue(error);
+      const { ctx, records } = observedContext();
+      await expect(
+        auditSealJob({ seal, pendingOldestAgeSeconds: async () => 0 }).handler({}, ctx),
+      ).rejects.toBe(error);
+      expect(seal).toHaveBeenCalledTimes(1);
+      expect(records.filter((record) => record.kind === 'log')).toEqual([
+        {
+          kind: 'log',
+          record: expect.objectContaining({
+            level: 'error',
+            event: 'audit.chain_integrity',
+            reason,
+          }),
+        },
+      ]);
+      expect(records).toContainEqual({
+        kind: 'counter',
+        name: 'pb.audit.chain_integrity',
+        labels: {},
+        value: 1,
+      });
+      expect(records).not.toContainEqual(expect.objectContaining({ name: 'pb.obs.dropped' }));
+      expect(JSON.stringify(records)).not.toContain('private');
+    },
+  );
+
+  it('reports counter-only repair even when no pending rows remain', async () => {
+    const { ctx, records } = observedContext();
+    await auditSealJob({
+      seal: vi.fn().mockResolvedValue({ outcome: 'empty', repaired: true }),
+      pendingOldestAgeSeconds: async () => 0,
+    }).handler({}, ctx);
+    expect(records).toContainEqual({
+      kind: 'log',
+      record: expect.objectContaining({ level: 'warn', event: 'audit.seal_repaired' }),
+    });
+    expect(records).toContainEqual({
+      kind: 'counter',
+      name: 'pb.audit.seal_repaired',
+      labels: {},
+      value: 1,
+    });
+    expect(records).not.toContainEqual(expect.objectContaining({ name: 'pb.obs.dropped' }));
+  });
+
   it('emits the registered sealed event', async () => {
     const seal = vi.fn().mockResolvedValueOnce(sealed).mockResolvedValue({ outcome: 'empty' });
     const { ctx, records } = observedContext();
-    await auditSealJob({ seal }).handler({}, ctx);
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, ctx);
     expect(records.filter((record) => record.kind === 'log')).toEqual([
       {
         kind: 'log',
@@ -217,7 +318,7 @@ describe('auditSealJob through the real observability port', () => {
 
   it('emits a registered warning only after three consecutive contended runs', async () => {
     const seal = vi.fn().mockResolvedValue({ outcome: 'contended' });
-    const job = auditSealJob({ seal });
+    const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal });
     const { ctx, records } = observedContext();
     await job.handler({}, ctx);
     await job.handler({}, ctx);
@@ -247,7 +348,7 @@ describe('auditSealJob through the real observability port', () => {
       .mockResolvedValueOnce(sealed)
       .mockResolvedValueOnce(sealed)
       .mockResolvedValue({ outcome: 'empty' });
-    const job = auditSealJob({ seal });
+    const job = auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal });
     const { ctx, records } = observedContext();
     await job.handler({}, ctx);
     await job.handler({}, ctx);

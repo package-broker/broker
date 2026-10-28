@@ -8,6 +8,21 @@ What this change does and why.
 
 -
 
+## Screenshots
+
+<!-- Required when the change touches the UI: one Before and one After screenshot per changed screen, inside this section. Otherwise tick "No visible UI change". -->
+
+<details>
+<summary>Before | After</summary>
+
+| Before | After |
+| ------ | ----- |
+|        |       |
+
+</details>
+
+- [ ] No visible UI change
+
 ## Test plan
 
 How you verified the change, for example the commands you ran and the cases you covered.

@@ -4,8 +4,6 @@ import type { ApiResult } from '../api.js';
 import { useServices, type ShellServices, type ReplayResult } from '../auth.js';
 import { buildListFilterHash } from '../page-hash.js';
 import { Button } from '../components/ui/button.js';
-import { Label } from '../components/ui/label.js';
-import { Select } from '../components/ui/select.js';
 import { DataTable } from '../components/ui/table.js';
 import { StatusBadge } from '../components/ui/status-badge.js';
 import { IdText } from '../components/ui/id-text.js';
@@ -14,8 +12,6 @@ import { ConfirmAction } from '../components/ui/confirm-action.js';
 import {
   createManagementStore,
   failureNotice,
-  Field,
-  formValues,
   ManagementFilters,
   ManagementNotice,
   parseManagementHash,
@@ -23,6 +19,8 @@ import {
   useManagementHash,
   type ManagementQuery,
 } from './management.js';
+
+import { ProjectForm } from './projects/project-form.js';
 
 type Project = operations['getProject']['responses'][200]['content']['application/json'];
 type ProjectItem =
@@ -250,7 +248,12 @@ export function createProjectsController(services: ShellServices) {
           : notice,
     });
   }
-  async function write(run: () => Promise<ApiResult<unknown>>, archivedSlug?: string) {
+  async function write(
+    run: () => Promise<ApiResult<unknown>>,
+    archivedSlug?: string,
+    successNotice = 'Project updated.',
+    conflictNotice = 'Changed elsewhere. Reload before trying again.',
+  ) {
     const state = store.snapshot();
     if (state.busy || state.loading || state.stale) return;
     const current = generation;
@@ -265,12 +268,16 @@ export function createProjectsController(services: ShellServices) {
         notice: 'Complete reauthentication and confirm the pending action.',
       });
     } else if (!result.ok) {
-      store.set({ stale: result.status === 412, notice: failureNotice(result) });
+      store.set({
+        stale: result.status === 412,
+        notice: result.status === 412 ? conflictNotice : failureNotice(result),
+      });
     } else
       await load(
         archivedSlug ? { ...state.query, project: archivedSlug } : state.query,
-        archivedSlug ? ARCHIVED_NOTICE : 'Project updated.',
+        archivedSlug ? ARCHIVED_NOTICE : successNotice,
       );
+    return result;
   }
   return {
     snapshot: store.snapshot,
@@ -278,19 +285,26 @@ export function createProjectsController(services: ShellServices) {
     load,
     async create(body: Create) {
       if (projectsViewModel(store.snapshot()).create)
-        await write(() =>
-          client.request('post', '/_pb/projects', { body, idempotencyKey: crypto.randomUUID() }),
+        return write(
+          () =>
+            client.request('post', '/_pb/projects', { body, idempotencyKey: crypto.randomUUID() }),
+          undefined,
+          'Project created.',
         );
     },
     async update(body: Changes) {
       const state = store.snapshot();
       if (projectsViewModel(state).settings)
-        await write(() =>
-          client.request('patch', '/_pb/projects/{project}', {
-            params: { project: state.selected!.slug },
-            headers: { 'If-Match': state.etag! },
-            body,
-          }),
+        return write(
+          () =>
+            client.request('patch', '/_pb/projects/{project}', {
+              params: { project: state.selected!.slug },
+              headers: { 'If-Match': state.etag! },
+              body,
+            }),
+          undefined,
+          'Access policy saved. Existing tokens now use this limit.',
+          'This project changed while you were editing. Reload the latest settings before saving.',
         );
     },
     async transition() {
@@ -351,9 +365,22 @@ export function createProjectsController(services: ShellServices) {
           archivedSlug
             ? { ...store.snapshot().query, project: archivedSlug }
             : store.snapshot().query,
-          archivedSlug ? ARCHIVED_NOTICE : 'Project updated.',
+          archivedSlug
+            ? ARCHIVED_NOTICE
+            : result.path === '/_pb/projects'
+              ? 'Project created.'
+              : result.path === path
+                ? 'Access policy saved. Existing tokens now use this limit.'
+                : 'Project updated.',
         );
-      } else store.set({ stale: true, notice: failureNotice(result) });
+      } else
+        store.set({
+          stale: true,
+          notice:
+            result.path === path && result.status === 412
+              ? 'This project changed while you were editing. Reload the latest settings before saving.'
+              : failureNotice(result),
+        });
     },
     dispose() {
       ++generation;
@@ -361,32 +388,6 @@ export function createProjectsController(services: ShellServices) {
   };
 }
 type ProjectsController = ReturnType<typeof createProjectsController>;
-function TokenPolicy(props: { project?: Project }) {
-  return (
-    <>
-      <Label className="grid gap-1">
-        Maximum token scope
-        <Select name="tokenMaxScope" defaultValue={props.project?.tokenMaxScope ?? 'read'}>
-          {['read', 'write', 'full'].map((scope) => (
-            <option key={scope} value={scope}>
-              {scope}
-            </option>
-          ))}
-        </Select>
-      </Label>
-      <Label className="grid gap-1">
-        Publish approval
-        <Select
-          name="requirePublishApproval"
-          defaultValue={String(props.project?.requirePublishApproval ?? false)}
-        >
-          <option value="false">Not required</option>
-          <option value="true">Required</option>
-        </Select>
-      </Label>
-    </>
-  );
-}
 export function ProjectsView({
   state,
   controller,
@@ -397,6 +398,9 @@ export function ProjectsView({
   const model = projectsViewModel(state);
   return (
     <>
+      <p role="status" className="sr-only">
+        {state.notice}
+      </p>
       <ManagementNotice {...state} reload={() => void controller.load(state.query)} />
       {state.query.q ? <p>Filtering loaded projects on this page.</p> : null}
       {!state.loading && !state.listError ? (
@@ -496,64 +500,30 @@ export function ProjectsView({
           Next projects
         </a>
       ) : null}
-      {model.create ? (
+      {state.organization.includes('org:projects:create') && !state.loading ? (
         <details className="detail-group my-6">
           <summary className="cursor-pointer font-semibold">New project</summary>
-          <p className="mt-3 text-neutral-600">
-            The slug is the API and CLI name; it cannot change after creation.
-          </p>
-          <form
-            className="my-6 grid gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (state.busy) return;
-              const values = formValues(event);
-              void controller.create({
-                name: values['name'] ?? '',
-                slug: values['slug'] ?? '',
-                tokenMaxScope: values['tokenMaxScope'] as Project['tokenMaxScope'],
-                requirePublishApproval: values['requirePublishApproval'] === 'true',
-              });
-            }}
-          >
-            <h2 className="text-lg font-semibold">New project</h2>
-            <Field name="name" label="Project name" />
-            <Field name="slug" label="Slug" />
-            <TokenPolicy />
-            <Button type="submit" disabled={state.busy}>
-              Create project
-            </Button>
-          </form>
+          <ProjectForm
+            disabled={!model.create || state.busy}
+            submit={(body) => controller.create({ ...body, slug: body.slug ?? '' })}
+          />
         </details>
       ) : null}
       {state.selected ? (
         <section className="detail-group my-6 grid gap-3" aria-label="Project settings">
           <h2 className="text-lg font-semibold">Settings: {state.selected.name}</h2>
-          <p>
-            Maximum token scope: {state.selected.tokenMaxScope}. Publish approval:{' '}
-            {state.selected.requirePublishApproval ? 'required' : 'not required'}.
-          </p>
-          {model.settings ? (
-            <form
+          {state.permissions.includes('project:settings:write') &&
+          state.selected.status === 'active' ? (
+            <ProjectForm
               key={`${state.selected.id}-${state.etag}`}
-              className="grid gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (state.busy) return;
-                const values = formValues(event);
-                void controller.update({
-                  name: values['name'] ?? '',
-                  tokenMaxScope: values['tokenMaxScope'] as Project['tokenMaxScope'],
-                  requirePublishApproval: values['requirePublishApproval'] === 'true',
-                });
-              }}
-            >
-              <Field name="name" label="Project name" value={state.selected.name} />
-              <TokenPolicy project={state.selected} />
-              <Button type="submit" disabled={state.busy}>
-                Save settings
-              </Button>
-            </form>
+              project={state.selected}
+              disabled={!model.settings || state.busy}
+              submit={controller.update}
+            />
+          ) : state.selected.requirePublishApproval ? (
+            <p className="text-sm text-neutral-600">
+              Publish approval is saved as required, but approval is not enforced in this version.
+            </p>
           ) : null}
           {model.transition ? (
             state.selected.status === 'active' ? (

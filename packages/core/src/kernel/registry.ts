@@ -17,6 +17,7 @@ import {
 import type { IdentityProviderFactory } from '../identity/port.js';
 import { canonicalAnchor } from '../identity/providers.js';
 import { readLength } from '../identity/provider-fields.js';
+import { isValidDomain } from '../identity/policy.js';
 import type { SourceProvider } from '../sources/provider.js';
 import {
   JobError,
@@ -450,11 +451,56 @@ export function collectRegistrations(
   };
 }
 
-function fields(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+function fields(
+  value: unknown,
+  keys: readonly string[],
+  optional: readonly string[] = [],
+): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   if (keys.some((key) => !Object.hasOwn(value, key))) return null;
-  if (Reflect.ownKeys(value).length !== keys.length) return null;
-  return Object.fromEntries(keys.map((key) => [key, (value as Record<string, unknown>)[key]]));
+  if (optional.some((key) => key in value && !Object.hasOwn(value, key))) return null;
+  const present = [...keys, ...optional.filter((key) => Object.hasOwn(value, key))];
+  if (Reflect.ownKeys(value).length !== present.length) return null;
+  return Object.fromEntries(present.map((key) => [key, (value as Record<string, unknown>)[key]]));
+}
+
+function snapshotDescriptorDomains(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value)) return null;
+  const length = readLength(value as unknown[]);
+  if (length === null || length > 100) return null;
+  const domains = new Set<string>();
+  for (let index = 0; index < length; index++) {
+    if (!Object.hasOwn(value, index)) return null;
+    const domain: unknown = value[index];
+    if (
+      typeof domain !== 'string' ||
+      domain.length > 253 ||
+      !isValidDomain(domain) ||
+      domains.has(domain)
+    )
+      return null;
+    domains.add(domain);
+  }
+  return Object.freeze([...domains]);
+}
+
+function snapshotDescriptorPolicy(
+  value: unknown,
+): IdentityDescriptor['compiled'][number]['policy'] | null {
+  const source = fields(value, ['verifiedDomains'], ['emailAuthoritativeDomains']);
+  if (source === null) return null;
+  const verifiedDomains = snapshotDescriptorDomains(source.verifiedDomains);
+  if (verifiedDomains === null || verifiedDomains.length === 0) return null;
+  if (!Object.hasOwn(source, 'emailAuthoritativeDomains')) {
+    return Object.freeze({ verifiedDomains });
+  }
+  const emailAuthoritativeDomains = snapshotDescriptorDomains(source.emailAuthoritativeDomains);
+  if (
+    emailAuthoritativeDomains === null ||
+    emailAuthoritativeDomains.some((domain) => !verifiedDomains.includes(domain))
+  )
+    return null;
+  return Object.freeze({ verifiedDomains, emailAuthoritativeDomains });
 }
 
 export function snapshotIdentityDescriptor(value: unknown): IdentityDescriptor | null {
@@ -467,8 +513,8 @@ export function snapshotIdentityDescriptor(value: unknown): IdentityDescriptor |
   const entries: IdentityDescriptor['compiled'][number][] = [];
   for (let index = 0; index < length; index++) {
     if (!Object.hasOwn(compiled, index)) return null;
-    const { id, kind, anchor } =
-      fields((compiled as unknown[])[index], ['id', 'kind', 'anchor']) ?? {};
+    const source = fields((compiled as unknown[])[index], ['id', 'kind', 'anchor'], ['policy']);
+    const { id, kind, anchor } = source ?? {};
     if (
       typeof id !== 'string' ||
       !isValidProviderId(id) ||
@@ -483,7 +529,12 @@ export function snapshotIdentityDescriptor(value: unknown): IdentityDescriptor |
     if (ids.has(id) || anchors.has(canonical)) return null;
     ids.add(id);
     anchors.add(canonical);
-    entries.push(Object.freeze({ id, kind, anchor }));
+    const policy =
+      source !== null && Object.hasOwn(source, 'policy')
+        ? snapshotDescriptorPolicy(source.policy)
+        : undefined;
+    if (policy === null) return null;
+    entries.push(Object.freeze({ id, kind, anchor, ...(policy === undefined ? {} : { policy }) }));
   }
   return Object.freeze({ runtimeProviders, compiled: Object.freeze(entries) });
 }

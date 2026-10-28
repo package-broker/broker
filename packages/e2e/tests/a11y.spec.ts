@@ -157,14 +157,16 @@ for (const width of [1440, 390]) {
         await confirmIdentity(page, admin);
         await go(page, 'tokens');
         await page.getByLabel('Token list', { exact: true }).selectOption('personal');
-        await openDetails(page, 'Issue token');
-        await page.getByLabel('Name', { exact: true }).fill('Accessibility list token');
+        await page.getByRole('button', { name: 'New token', exact: true }).click();
+        await page.getByRole('radio', { name: 'Me', exact: true }).check();
+        await page.getByRole('radio', { name: 'All projects I can access', exact: true }).check();
+        await page.getByLabel('Token name', { exact: true }).fill('Accessibility list token');
         const issued = page.waitForResponse(
           (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/me/tokens',
         );
-        await page.getByRole('button', { name: 'Issue token', exact: true }).click();
+        await page.getByRole('button', { name: /^Create token$/, exact: true }).click();
         expect((await issued).status()).toBe(201);
-        await page.getByRole('button', { name: 'Close secret panel', exact: true }).click();
+        await page.getByRole('button', { name: 'Done', exact: true }).click();
         await go(page, 'projects');
       }
       await go(page, route);
@@ -280,24 +282,28 @@ for (const width of [1440, 390]) {
     await confirmIdentity(page, admin);
     await go(page, 'tokens');
     await page.getByLabel('Token list', { exact: true }).selectOption('personal');
-    await openDetails(page, 'Issue token');
-    const issue = page.getByRole('button', { name: 'Issue token', exact: true });
+    await page.getByRole('button', { name: 'New token', exact: true }).click();
+    await page.getByRole('radio', { name: 'Me', exact: true }).check();
+    await page.getByRole('radio', { name: 'All projects I can access', exact: true }).check();
+    const issue = page.getByRole('button', { name: /^Create token$/, exact: true });
     await expect(issue).toBeEnabled();
     await scan(page, 'Issue personal token form');
-    await page.getByLabel('Name', { exact: true }).fill('Accessibility token');
+    await page.getByLabel('Token name', { exact: true }).fill('Accessibility token');
     await issue.click();
     await expect(page.getByRole('region', { name: 'Token secret', exact: true })).toBeVisible();
     await scan(page, 'Token secret shown once');
-    await page.getByRole('button', { name: 'Close secret panel', exact: true }).click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
     await page.getByRole('button', { name: 'Reload tokens', exact: true }).click();
     await expect(page.locator('tbody tr').first()).toBeVisible();
     await page.getByRole('button', { name: 'Revoke', exact: true }).first().click();
     await scanDialog(page, 'Revoke?');
     await page.getByLabel('Token list', { exact: true }).selectOption('organization');
-    await openDetails(page, 'Issue token');
-    await expect(page.getByRole('button', { name: 'Issue token', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'New token', exact: true }).click();
+    await page.getByRole('radio', { name: 'A CI pipeline or service', exact: true }).check();
+    await expect(page.getByRole('button', { name: /^Create token$/, exact: true })).toBeEnabled();
     await scan(page, 'Issue service token form');
     await openDetails(page, 'Service principals');
+    await page.getByRole('button', { name: 'New service principal', exact: true }).click();
     await scan(page, 'Service principal form');
   });
 }

@@ -44,7 +44,8 @@ beforeAll(async () => {
         const model = createSourcesModel({ client, requireReauth: () => {} }, globalThis.fixtureProject);
         createRoot(document.getElementById('root')).render(<SourcesView model={model} />);
         void model.load();
-        void model.loadAvailable();`,
+        void model.loadAvailable();
+        void model.loadMutationPermissions();`,
       loader: 'tsx',
       resolveDir: fileURLToPath(new URL('.', import.meta.url)),
     },
@@ -63,6 +64,8 @@ beforeAll(async () => {
       requests.push({ path, method: request.method, body });
       if (path === '/_pb/me/permissions')
         return Response.json({ organization: ['org:sources:write'] });
+      if (path.endsWith('/permissions'))
+        return Response.json({ project: ['project:sources:write'] });
       if (request.method === 'GET') {
         const failed = path.startsWith('/_pb/projects/') ? projectFails : organizationFails;
         return failed
@@ -280,9 +283,10 @@ describe('Sources browser workflows', () => {
       await dialog.getByRole('button', { name: 'Add package', exact: true }).click();
       await browserExpect(dialog).not.toBeVisible();
       await browserExpect(
-        page
-          .getByRole('status')
-          .filter({ hasText: 'Queued: @acme/widget will appear in Packages shortly' }),
+        page.getByRole('status').filter({
+          hasText:
+            '@acme/widget: Sync requested. Waiting for a worker. Sync continues in the background.',
+        }),
       ).toBeVisible();
       await browserExpect(
         page.getByRole('button', { name: `More actions for ${source.name}`, exact: true }),
@@ -292,7 +296,9 @@ describe('Sources browser workflows', () => {
       await name.fill('@acme/widget');
       await dialog.getByRole('button', { name: 'Add package', exact: true }).click();
       await browserExpect(
-        page.getByRole('status').filter({ hasText: 'Already available' }),
+        page
+          .getByRole('status')
+          .filter({ hasText: '@acme/widget is already available from Private npm.' }),
       ).toBeVisible();
       expect(requests.filter((request) => request.path.endsWith('/packages'))).toEqual(
         Array.from({ length: 5 }, () => ({

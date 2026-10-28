@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { DefaultRoleKey } from '@package-broker/core/authz/permissions';
+import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type {
   OrgContext,
   ScalarSqlExecutor,
@@ -15,7 +15,9 @@ import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated
 import {
   bootstrapAdmin,
   bootstrapAdminWithTopUp,
+  bootstrapSsoAdmin,
   resetLocalLogin,
+  SuspendedSsoAdminError,
   type BootstrapAdminInput,
 } from './admin-bootstrap.js';
 import { createLocalLoginReader } from './local-login.js';
@@ -502,6 +504,40 @@ describe('bootstrapAdmin', () => {
   });
 });
 
+describe('local admin grant cache invalidation', () => {
+  for (const operation of ['bootstrap', 'reset'] as const) {
+    for (const change of ['insert', 'promote'] as const) {
+      it(`${operation}: replaces the epoch on grant ${change} and preserves it on an admin rerun`, async () => {
+        await bootstrapAdmin(executor, a, input());
+        if (change === 'insert') {
+          await run('DELETE FROM access_grant WHERE org_id = ?', a.orgId);
+        } else {
+          await run(
+            'UPDATE access_grant SET role_id = ? WHERE org_id = ?',
+            ROLE_IDS.organization_auditor,
+            a.orgId,
+          );
+        }
+        const epoch = () => rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+        const before = await epoch();
+        const foreignBefore = await rows('SELECT * FROM cache_epoch WHERE org_id = ?', b.orgId);
+        const invoke = () =>
+          operation === 'bootstrap'
+            ? bootstrapAdmin(executor, a, input())
+            : resetLocalLogin(executor, a, resetInput());
+        await invoke();
+        const changed = await epoch();
+        expect(changed).not.toEqual(before);
+        await invoke();
+        expect(await epoch()).toEqual(changed);
+        expect(await rows('SELECT * FROM cache_epoch WHERE org_id = ?', b.orgId)).toEqual(
+          foreignBefore,
+        );
+      });
+    }
+  }
+});
+
 describe('bootstrapAdmin organization_admin top-up', () => {
   const TOPPED = ['org:projects:archive', 'project:service-principals:write'];
 
@@ -560,14 +596,14 @@ describe('bootstrapAdmin organization_admin top-up', () => {
       now: LATER,
     });
 
-  it('a fresh organization reports no top-up and keeps its cache epoch', async () => {
+  it('a fresh organization reports no top-up and replaces its epoch for the new grant', async () => {
     const epoch = await epochOf(a);
     expect(await bootstrapAdminWithTopUp(executor, a, input())).toEqual({
       result: 'created',
       toppedUp: 0,
     });
     expect((await adminRole(a))?.revision).toBe(1);
-    expect(await epochOf(a)).toBe(epoch);
+    expect(await epochOf(a)).not.toBe(epoch);
   });
 
   it('two missing permissions: toppedUp 2, revision +1, updated_at the batch time, cache epoch replaced', async () => {
@@ -1114,4 +1150,359 @@ describe('import and package default grants', () => {
       expect(granted.map((row) => row.permission)).not.toContain(permission);
     }
   });
+});
+
+describe('bootstrapSsoAdmin', () => {
+  const emailInput = () => ({
+    subject: { type: 'email' as const, value: '  Admin@Example.TEST ' },
+    userId: input().userId,
+    grantId: input().grantId,
+    roleIds: ROLE_IDS,
+    now: NOW,
+  });
+  const groupInput = () => ({
+    subject: { type: 'group' as const, provider: 'dex', value: 'DevOps@example.test' },
+    grantId: input().grantId,
+    roleIds: ROLE_IDS,
+    now: NOW,
+  });
+  const tables = [
+    'user_account',
+    'local_login',
+    'identity',
+    'session',
+    'credential',
+    'access_grant',
+    'role',
+    'role_permission',
+    'cache_epoch',
+  ] as const;
+  async function snapshot(ctx: OrgContext) {
+    return Promise.all(
+      tables.map((table) =>
+        rows(`SELECT * FROM ${table} WHERE org_id = ? ORDER BY 1, 2`, ctx.orgId),
+      ),
+    );
+  }
+
+  for (const [variant, makeInput] of [
+    ['email', emailInput],
+    ['group', groupInput],
+  ] as const) {
+    it(`${variant}: seeds default permissions and exactly one admin grant without local state; reruns preserve both organizations`, async () => {
+      await bootstrapAdmin(
+        executor,
+        b,
+        input({
+          userId: 'foreign-user',
+          grantId: 'foreign-grant',
+          roleIds: ROLE_IDS_B,
+        }),
+      );
+      if (variant === 'group') {
+        await bootstrapSsoAdmin(executor, b, {
+          ...groupInput(),
+          grantId: 'foreign-group',
+          roleIds: ROLE_IDS_B,
+        });
+      }
+      const foreignBefore = await snapshot(b);
+      const epochBefore = await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+      const record = recording(executor);
+      expect(await bootstrapSsoAdmin(record.executor, a, makeInput())).toEqual({
+        result: 'created',
+        toppedUp: 0,
+      });
+      expect(record.calls).toEqual({ all: 0, batch: 1 });
+      expect(await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId)).not.toEqual(
+        epochBefore,
+      );
+      expect(
+        await rows('SELECT email, status FROM user_account WHERE org_id = ?', a.orgId),
+      ).toEqual(variant === 'email' ? [{ email: EMAIL, status: 'active' }] : []);
+      expect(
+        await rows(
+          'SELECT subject_type, subject_value, subject_provider, scope, role_id FROM access_grant WHERE org_id = ?',
+          a.orgId,
+        ),
+      ).toEqual([
+        {
+          subject_type: variant,
+          subject_value: variant === 'email' ? EMAIL : 'DevOps@example.test',
+          subject_provider: variant === 'email' ? null : 'dex',
+          scope: 'organization',
+          role_id: ROLE_IDS.organization_admin,
+        },
+      ]);
+      for (const table of ['local_login', 'session', 'credential', 'identity']) {
+        expect(await rows(`SELECT * FROM ${table} WHERE org_id = ?`, a.orgId)).toEqual([]);
+      }
+      for (const role of DEFAULT_ROLES) {
+        expect(
+          await rows(
+            'SELECT permission FROM role_permission WHERE org_id = ? AND role_id = ? ORDER BY permission',
+            a.orgId,
+            ROLE_IDS[role.key],
+          ),
+        ).toEqual([...role.permissions].sort().map((permission) => ({ permission })));
+      }
+      const ownBefore = await snapshot(a);
+      expect(
+        await bootstrapSsoAdmin(executor, a, {
+          ...makeInput(),
+          now: LATER,
+          grantId: 'unused-grant',
+          roleIds: ROLE_IDS_B,
+        }),
+      ).toEqual({ result: 'already_admin', toppedUp: 0 });
+      expect(await snapshot(a)).toEqual(ownBefore);
+      expect(await snapshot(b)).toEqual(foreignBefore);
+    });
+
+    it(`${variant}: reports promotion and advances the existing grant revision`, async () => {
+      await bootstrapSsoAdmin(executor, a, makeInput());
+      await run(
+        'UPDATE access_grant SET role_id = ?, last_op_id = ? WHERE org_id = ?',
+        ROLE_IDS.organization_auditor,
+        'previous-operation',
+        a.orgId,
+      );
+      const accounts = await rows('SELECT * FROM user_account WHERE org_id = ?', a.orgId);
+      const epochBefore = await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+      expect(await bootstrapSsoAdmin(executor, a, { ...makeInput(), now: LATER })).toEqual({
+        result: 'promoted',
+        toppedUp: 0,
+      });
+      expect(await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId)).not.toEqual(
+        epochBefore,
+      );
+      expect(
+        await rows(
+          'SELECT id, role_id, revision, last_op_id FROM access_grant WHERE org_id = ?',
+          a.orgId,
+        ),
+      ).toEqual([
+        {
+          id: input().grantId,
+          role_id: ROLE_IDS.organization_admin,
+          revision: 2,
+          last_op_id: expect.any(String),
+        },
+      ]);
+      expect(
+        await rows(
+          'SELECT last_op_id FROM access_grant WHERE org_id = ? AND last_op_id = ?',
+          a.orgId,
+          'previous-operation',
+        ),
+      ).toEqual([]);
+      expect(await rows('SELECT * FROM user_account WHERE org_id = ?', a.orgId)).toEqual(accounts);
+    });
+
+    it.each(['insert', 'promote'] as const)(
+      `${variant}: missing epoch rolls back grant %s`,
+      async (change) => {
+        await bootstrapSsoAdmin(executor, a, makeInput());
+        if (change === 'insert') {
+          await run('DELETE FROM access_grant WHERE org_id = ?', a.orgId);
+        } else {
+          await run(
+            'UPDATE access_grant SET role_id = ? WHERE org_id = ?',
+            ROLE_IDS.organization_auditor,
+            a.orgId,
+          );
+        }
+        await run('DELETE FROM cache_epoch WHERE org_id = ?', a.orgId);
+        const before = await snapshot(a);
+        await expect(bootstrapSsoAdmin(executor, a, makeInput())).rejects.toMatchObject({
+          name: 'DbError',
+          kind: 'unique',
+          constraint: 'access_mutation_guard.key',
+        });
+        expect(await snapshot(a)).toEqual(before);
+      },
+    );
+
+    it(`${variant}: rolls back all provisioning when the final grant insert fails`, async () => {
+      await bootstrapAdmin(
+        executor,
+        b,
+        input({
+          userId: 'foreign-user',
+          roleIds: ROLE_IDS_B,
+        }),
+      );
+      const before = await snapshot(a);
+      const foreignBefore = await snapshot(b);
+      await expect(bootstrapSsoAdmin(executor, a, makeInput())).rejects.toThrow();
+      expect(await snapshot(a)).toEqual(before);
+      expect(await snapshot(b)).toEqual(foreignBefore);
+    });
+
+    it(`${variant}: tops up protected permissions once, bumping revision and epoch atomically`, async () => {
+      await bootstrapSsoAdmin(executor, a, makeInput());
+      const permission = 'org:projects:archive';
+      await run(
+        'DELETE FROM role_permission WHERE org_id = ? AND role_id = ? AND permission = ?',
+        a.orgId,
+        ROLE_IDS.organization_admin,
+        permission,
+      );
+      const before = await rows<{ revision: number }>(
+        'SELECT revision FROM role WHERE id = ?',
+        ROLE_IDS.organization_admin,
+      );
+      const epoch = await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId);
+      expect(await bootstrapSsoAdmin(executor, a, { ...makeInput(), now: LATER })).toEqual({
+        result: 'already_admin',
+        toppedUp: 1,
+      });
+      expect(
+        await rows('SELECT revision FROM role WHERE id = ?', ROLE_IDS.organization_admin),
+      ).toEqual([{ revision: (before[0]?.revision ?? -1) + 1 }]);
+      expect(await rows('SELECT version FROM cache_epoch WHERE org_id = ?', a.orgId)).not.toEqual(
+        epoch,
+      );
+      expect(
+        await rows(
+          'SELECT permission FROM role_permission WHERE org_id = ? AND role_id = ? AND permission = ?',
+          a.orgId,
+          ROLE_IDS.organization_admin,
+          permission,
+        ),
+      ).toEqual([{ permission }]);
+      const topped = await snapshot(a);
+      expect(await bootstrapSsoAdmin(executor, a, { ...makeInput(), now: LATER })).toEqual({
+        result: 'already_admin',
+        toppedUp: 0,
+      });
+      expect(await snapshot(a)).toEqual(topped);
+    });
+  }
+
+  it('preserves an existing configured admin, linked identity and session', async () => {
+    await bootstrapAdmin(executor, a, input());
+    await run(
+      "INSERT INTO credential (id, org_id, kind, ciphertext, nonce, key_version, aad) VALUES (?, ?, 'totp', x'00', x'000000000000000000000000', 1, 'aad')",
+      'totp',
+      a.orgId,
+    );
+    await run(
+      'UPDATE local_login SET totp_credential_id = ?, totp_enabled_at = ?, totp_last_step = 57, credential_rev = 4 WHERE user_id = ?',
+      'totp',
+      NOW,
+      input().userId,
+    );
+
+    await run(
+      'UPDATE local_login SET password_hash = ?, failed_count = 3, locked_until = ? WHERE user_id = ?',
+      PASSWORD_HASH,
+      LATER,
+      input().userId,
+    );
+    await run(
+      'INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified) VALUES (?, ?, ?, ?, ?, ?, 1)',
+      'linked',
+      a.orgId,
+      input().userId,
+      'dex',
+      'subject',
+      EMAIL,
+    );
+    await run(
+      'INSERT INTO session (id, org_id, user_id, identity_id, secret_hash, csrf_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'session',
+      a.orgId,
+      input().userId,
+      'linked',
+      HASH_2,
+      HASH_3,
+      LATER,
+    );
+    const before = await snapshot(a);
+    await bootstrapSsoAdmin(executor, a, { ...emailInput(), now: LATER, userId: 'unused-user' });
+    expect(await snapshot(a)).toEqual(before);
+  });
+
+  it('refuses a suspended email conflict without role top-up or account changes', async () => {
+    await bootstrapAdmin(executor, a, input());
+    await run("UPDATE user_account SET status = 'suspended' WHERE org_id = ?", a.orgId);
+    await run(
+      'DELETE FROM role_permission WHERE org_id = ? AND permission = ?',
+      a.orgId,
+      'org:projects:archive',
+    );
+    const before = await snapshot(a);
+    await expect(bootstrapSsoAdmin(executor, a, emailInput())).rejects.toThrow(
+      SuspendedSsoAdminError,
+    );
+    expect(await snapshot(a)).toEqual(before);
+  });
+
+  it('accepts a 256-code-point group without Unicode normalization', async () => {
+    const value = '🦊'.repeat(256);
+    await bootstrapSsoAdmin(executor, a, {
+      ...groupInput(),
+      subject: { type: 'group', provider: 'dex', value },
+    });
+    expect(await rows('SELECT subject_value FROM access_grant WHERE org_id = ?', a.orgId)).toEqual([
+      { subject_value: value },
+    ]);
+  });
+
+  it.each([
+    { ...emailInput(), subject: { type: 'email' as const, value: 'private-invalid-email' } },
+    { ...emailInput(), userId: 'private invalid id' },
+    { ...groupInput(), now: 'private-invalid-time' },
+    { ...groupInput(), grantId: '' },
+    { ...groupInput(), roleIds: { ...ROLE_IDS, organization_admin: '' } },
+  ])('validates all provisioning inputs before database access (%#)', async (invalid) => {
+    const record = recording(executor);
+    await expect(bootstrapSsoAdmin(record.executor, a, invalid)).rejects.toThrow(TypeError);
+    expect(record.calls).toEqual({ all: 0, batch: 0 });
+  });
+
+  it('keeps provider and group case significant and never creates a group user', async () => {
+    await bootstrapSsoAdmin(executor, a, groupInput());
+    await bootstrapSsoAdmin(executor, a, {
+      ...groupInput(),
+      grantId: 'different-provider',
+      subject: { type: 'group', provider: 'other', value: 'DevOps@example.test' },
+    });
+    await bootstrapSsoAdmin(executor, a, {
+      ...groupInput(),
+      grantId: 'different-case',
+      subject: { type: 'group', provider: 'dex', value: 'devops@example.test' },
+    });
+    expect(await rows('SELECT id FROM access_grant WHERE org_id = ?', a.orgId)).toHaveLength(3);
+    expect(await rows('SELECT * FROM user_account WHERE org_id = ?', a.orgId)).toEqual([]);
+  });
+
+  it.each(['', ' group', 'group ', 'x\n', 'x\u200b', 'x'.repeat(257)])(
+    'rejects an invalid exact group without writes (%j)',
+    async (value) => {
+      const before = await snapshot(a);
+      await expect(
+        bootstrapSsoAdmin(executor, a, {
+          ...groupInput(),
+          subject: { type: 'group', provider: 'dex', value },
+        }),
+      ).rejects.toThrow('grant group must be 1 to 256 printable characters');
+      expect(await snapshot(a)).toEqual(before);
+    },
+  );
+
+  it.each(['', 'bad provider', undefined])(
+    'requires a valid named provider (%j)',
+    async (provider) => {
+      const before = await snapshot(a);
+      await expect(
+        bootstrapSsoAdmin(executor, a, {
+          ...groupInput(),
+          subject: { type: 'group', provider: provider as string, value: 'private-group' },
+        }),
+      ).rejects.toThrow('grant provider must be a valid provider id');
+      expect(await snapshot(a)).toEqual(before);
+    },
+  );
 });

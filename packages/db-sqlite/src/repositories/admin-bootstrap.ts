@@ -1,8 +1,20 @@
 import { sql, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
+import type { GrantSubject } from '@package-broker/core/db/grants';
+import { isValidProviderId } from '@package-broker/core/identity/port';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
-import { compile, db, existsGuard, newOpId, type Database, type Guard } from '../kysely.js';
+import {
+  assertCheck,
+  cacheEpochBumpStatements,
+  compile,
+  db,
+  existsGuard,
+  newOpId,
+  type Database,
+  type Guard,
+} from '../kysely.js';
 import { seedDefaultsStatements } from './role.js';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -31,6 +43,36 @@ export interface BootstrapAdminInput {
 export interface BootstrapAdminOutcome {
   readonly result: 'created' | 'refreshed' | 'already_set_up';
   readonly toppedUp: number;
+}
+
+export type BootstrapSsoAdminInput = {
+  readonly grantId: string;
+  readonly roleIds: Readonly<Record<DefaultRoleKey, string>>;
+  readonly now: string;
+} & (
+  | {
+      readonly subject: { readonly type: 'email'; readonly value: string };
+      readonly userId: string;
+    }
+  | {
+      readonly subject: {
+        readonly type: 'group';
+        readonly provider: string;
+        readonly value: string;
+      };
+    }
+);
+
+export interface BootstrapSsoAdminOutcome {
+  readonly result: 'created' | 'already_admin' | 'promoted';
+  readonly toppedUp: number;
+}
+
+export class SuspendedSsoAdminError extends Error {
+  constructor() {
+    super('SSO admin account is suspended');
+    this.name = 'SuspendedSsoAdminError';
+  }
 }
 
 export interface ResetLocalLoginInput {
@@ -133,22 +175,32 @@ function ownsOperation(ctx: OrgContext, email: string, opId: string): Guard {
 
 function adminGrantStatements(
   ctx: OrgContext,
-  input: { readonly email: string; readonly grantId: string; readonly now: string },
+  input: { readonly subject: GrantSubject; readonly grantId: string; readonly now: string },
   guard: Guard | null,
 ): ScalarStatement[] {
-  const organizationEmailGrant = (eb: ExpressionBuilder<Database, 'access_grant'>) =>
+  const { subject } = input;
+  const provider = subject.type === 'group' ? subject.provider : null;
+  const organizationGrant = (eb: ExpressionBuilder<Database, 'access_grant'>) =>
     eb.and([
       eb('access_grant.org_id', '=', ctx.orgId),
       eb('access_grant.scope', '=', 'organization'),
-      eb('access_grant.subject_type', '=', 'email'),
-      eb('access_grant.subject_value', '=', input.email),
+      eb('access_grant.subject_type', '=', subject.type),
+      eb('access_grant.subject_value', '=', subject.value),
+      eb('access_grant.subject_provider', provider === null ? 'is' : '=', provider),
     ]);
 
   let promote = db
     .updateTable('access_grant')
-    .set({ role_id: adminRoleIdOf(ctx), updated_at: input.now })
-    .where(organizationEmailGrant)
-    .where((eb) => eb.exists(adminRoleIdOf(ctx)));
+    .set({
+      role_id: adminRoleIdOf(ctx),
+      updated_at: input.now,
+      revision: sql`revision + 1`,
+      last_op_id: newOpId(),
+    })
+    .where(organizationGrant)
+    .where((eb) => eb.exists(adminRoleIdOf(ctx)))
+    .where('role_id', '!=', adminRoleIdOf(ctx))
+    .returning('id');
   if (guard !== null) promote = promote.where(guard);
 
   let source = db
@@ -156,8 +208,9 @@ function adminGrantStatements(
     .select((eb) => [
       eb.val(input.grantId).as('id'),
       eb.val(ctx.orgId).as('org_id'),
-      eb.val('email').as('subject_type'),
-      eb.val(input.email).as('subject_value'),
+      eb.val(subject.type).as('subject_type'),
+      eb.val(subject.value).as('subject_value'),
+      eb.val(provider).as('subject_provider'),
       eb.val('organization').as('scope'),
       'role.id as role_id',
       eb.val(input.now).as('created_at'),
@@ -168,7 +221,7 @@ function adminGrantStatements(
     .where((eb) =>
       eb.not(
         eb.exists(
-          eb.selectFrom('access_grant').select(sql.lit(1).as('one')).where(organizationEmailGrant),
+          eb.selectFrom('access_grant').select(sql.lit(1).as('one')).where(organizationGrant),
         ),
       ),
     );
@@ -181,14 +234,27 @@ function adminGrantStatements(
       'org_id',
       'subject_type',
       'subject_value',
+      'subject_provider',
       'scope',
       'role_id',
       'created_at',
       'updated_at',
     ])
-    .expression(source);
+    .expression(source)
+    .returning('id');
 
-  return [scalar(promote), scalar(insert)];
+  const changed = sql<SqlBool>`${adminRoleExists(ctx)} and not ${existsGuard(() =>
+    db
+      .selectFrom('access_grant')
+      .select(sql.lit(1).as('one'))
+      .where(organizationGrant)
+      .where('role_id', '=', adminRoleIdOf(ctx)),
+  )}${guard === null ? sql`` : sql` and ${guard}`}`;
+  return [
+    ...(cacheEpochBumpStatements(ctx, changed) as ScalarStatement[]),
+    scalar(promote),
+    scalar(insert),
+  ];
 }
 
 function protectedAdminRoles(ctx: OrgContext) {
@@ -391,7 +457,11 @@ export async function bootstrapAdminWithTopUp(
     ...topUp,
     ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
     user,
-    ...adminGrantStatements(ctx, { email, grantId: input.grantId, now: input.now }, pending),
+    ...adminGrantStatements(
+      ctx,
+      { subject: { type: 'email', value: email }, grantId: input.grantId, now: input.now },
+      pending,
+    ),
     login,
   ]);
 
@@ -399,6 +469,100 @@ export async function bootstrapAdminWithTopUp(
   if (rowsOf(results[results.length - 1]) === 0) return { result: 'already_set_up', toppedUp };
   const previous = results[0]?.rows[0] as { existed?: number } | undefined;
   return { result: Number(previous?.existed) === 1 ? 'refreshed' : 'created', toppedUp };
+}
+
+/**
+ * Reports whether the organization grant was created, promoted, or already admin in the same batch.
+ * Suspended email accounts throw SuspendedSsoAdminError; existing account state is preserved.
+ */
+export async function bootstrapSsoAdmin(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  input: BootstrapSsoAdminInput,
+): Promise<BootstrapSsoAdminOutcome> {
+  requireId('grantId', input.grantId);
+  requireTimestamp('now', input.now);
+  requireRoleIds(input.roleIds);
+  let subject: GrantSubject;
+  const userStatements: ScalarStatement[] = [];
+  const guards: ScalarStatement[] = [];
+  let suspended: Guard | null = null;
+  if (input.subject.type === 'email') {
+    const email = requireEmail(input.subject.value);
+    const userId = requireId('userId', 'userId' in input ? input.userId : '');
+    subject = { type: 'email', value: email };
+    suspended = existsGuard((database) =>
+      database
+        .selectFrom('user_account')
+        .select(sql.lit(1).as('one'))
+        .where('org_id', '=', ctx.orgId)
+        .where('email', '=', email)
+        .where('status', '!=', 'active'),
+    );
+    guards.push(...(assertCheck(sql<SqlBool>`not ${suspended}`) as ScalarStatement[]));
+    userStatements.push(
+      scalar(
+        db
+          .insertInto('user_account')
+          .values({
+            id: userId,
+            org_id: ctx.orgId,
+            email,
+            status: 'active',
+            created_at: input.now,
+            updated_at: input.now,
+          })
+          .onConflict((conflict) => conflict.columns(['org_id', 'email']).doNothing()),
+      ),
+    );
+  } else {
+    const { provider, value } = input.subject;
+    if (typeof provider !== 'string' || !isValidProviderId(provider)) {
+      throw new TypeError('grant provider must be a valid provider id');
+    }
+    if (
+      typeof value !== 'string' ||
+      [...value].length < 1 ||
+      [...value].length > 256 ||
+      value !== value.trim() ||
+      /[\p{Cc}\p{Cf}]/u.test(value)
+    ) {
+      throw new TypeError('grant group must be 1 to 256 printable characters');
+    }
+    subject = { type: 'group', provider, value };
+  }
+  const topUp = adminTopUpStatements(ctx, input.now);
+  const results = await executor
+    .batch([
+      ...guards,
+      ...topUp,
+      ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
+      ...userStatements,
+      ...adminGrantStatements(ctx, { subject, grantId: input.grantId, now: input.now }, null),
+    ])
+    .catch(async (error: unknown) => {
+      if (
+        suspended !== null &&
+        error instanceof DbError &&
+        error.kind === 'unique' &&
+        error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+      ) {
+        const [state] = await executor.all<{ suspended: number }>(
+          scalar(db.selectNoFrom(sql<SqlBool>`${suspended}`.as('suspended'))),
+        );
+        if (Number(state?.suspended) === 1) throw new SuspendedSsoAdminError();
+      }
+      throw error;
+    });
+  return {
+    result:
+      rowsOf(results[results.length - 1]) > 0
+        ? 'created'
+        : rowsOf(results[results.length - 2]) > 0
+          ? 'promoted'
+          : 'already_admin',
+    toppedUp: rowsOf(results[guards.length + topUp.length - 1]),
+  };
 }
 
 /**
@@ -511,7 +675,11 @@ export async function resetLocalLogin(
     clear,
     create,
     reactivate,
-    ...adminGrantStatements(ctx, { email, grantId: input.grantId, now: input.now }, owned),
+    ...adminGrantStatements(
+      ctx,
+      { subject: { type: 'email', value: email }, grantId: input.grantId, now: input.now },
+      owned,
+    ),
     revoke,
   ]);
 

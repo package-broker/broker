@@ -106,3 +106,56 @@ it('passes --workers-paid to cloudflare setup options', async () => {
   expect(await run(['cloudflare', 'setup', '--worker-name', 'broker', '--workers-paid'])).toBe(0);
   expect(setup).toHaveBeenCalledWith(expect.objectContaining({ workersPaid: true }));
 });
+
+it('documents sign-in and rejects invalid or misplaced sign-in flags without reflecting their value', async () => {
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    expect(await run(['--help'])).toBe(0);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('--sign-in local|sso'));
+    expect(
+      await run([
+        'admin',
+        'bootstrap',
+        '--sign-in',
+        'private-invalid-mode',
+        '--email',
+        'admin@example.test',
+        '--sqlite',
+        'missing',
+      ]),
+    ).toBe(2);
+    expect(error).toHaveBeenLastCalledWith('admin bootstrap: invalid_sign_in');
+    expect(
+      await run([
+        'admin',
+        'reset-local',
+        '--sign-in',
+        'sso',
+        '--email',
+        'admin@example.test',
+        '--sqlite',
+        'missing',
+      ]),
+    ).toBe(2);
+    expect(await run(['admin', 'bootstrap', '--sign-in'])).toBe(2);
+    expect(
+      await run([
+        'admin',
+        'bootstrap',
+        '--sign-in',
+        'sso',
+        '--email',
+        'admin@example.test',
+        '--sqlite',
+        'missing',
+        '--token-file',
+        'unused',
+      ]),
+    ).toBe(2);
+    expect(error.mock.calls.flat().join(' ')).not.toContain('private-invalid-mode');
+  } finally {
+    log.mockRestore();
+    error.mockRestore();
+  }
+});

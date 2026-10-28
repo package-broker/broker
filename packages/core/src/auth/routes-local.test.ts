@@ -79,6 +79,7 @@ interface Harness {
 }
 
 interface Options {
+  readonly localLoginAvailable?: boolean;
   readonly clientIp?: (request: Request) => string | null;
   readonly sink?: ObsRecordSink;
   readonly loginResult?: LocalResult;
@@ -143,6 +144,7 @@ async function harness(options: Options = {}): Promise<Harness> {
     log,
     coreRoutes: documented(
       createLocalRoutes({
+        localLoginAvailable: options.localLoginAvailable ?? true,
         local: { login, reauth } as unknown as LocalLoginService,
         setup: { start, finish } as unknown as LocalSetupService,
         sessions,
@@ -202,6 +204,81 @@ async function errorOf(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe('createLocalRoutes', () => {
+  describe('disabled local sign-in', () => {
+    const cases = [
+      [START, { token: SENTINEL.token }],
+      [FINISH, { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code }],
+      [LOGIN, loginBody],
+      [REAUTH, { password: SENTINEL.password, code: SENTINEL.code }],
+    ] as const;
+
+    it.each(cases)(
+      'refuses %s before body, origin, metadata or service work',
+      async (path, valid) => {
+        const authenticate = vi.fn();
+        const assertCsrf = vi.fn();
+        const clientIp = vi.fn(() => null);
+        const h = await harness({
+          localLoginAvailable: false,
+          sessions: { authenticate, assertCsrf } as unknown as SessionService,
+          clientIp,
+        });
+        const requests = [
+          post(path, valid),
+          post(path, valid, sessionHeaders),
+          post(path, {}),
+          post(path, { ...valid, password: null }),
+          post(path, '{malformed'),
+          post(path, valid, { origin: 'https://foreign.test', 'sec-fetch-site': 'cross-site' }),
+          post(path, '{malformed', { origin: 'https://foreign.test' }),
+          post(path, 'x'.repeat(9 * 1024)),
+          post(path, valid, { 'content-type': 'text/plain' }),
+        ];
+        for (const request of requests) {
+          const response = await h.fetch(request);
+          expect(response.status).toBe(403);
+          expect(response.headers.get('cache-control')).toBe('no-store');
+          expect(setCookies(response)).toEqual([]);
+          const requestId = response.headers.get('x-request-id');
+          expect(requestId).toEqual(expect.any(String));
+          expect(await response.json()).toEqual({
+            error: { code: 'local_auth_disabled', message: 'Local sign-in is disabled', requestId },
+          });
+          expect(request.bodyUsed).toBe(false);
+        }
+        expect(h.login).not.toHaveBeenCalled();
+        expect(h.reauth).not.toHaveBeenCalled();
+        expect(h.start).not.toHaveBeenCalled();
+        expect(h.finish).not.toHaveBeenCalled();
+        expect(authenticate).not.toHaveBeenCalled();
+        expect(assertCsrf).not.toHaveBeenCalled();
+        expect(h.findActive).not.toHaveBeenCalled();
+        expect(clientIp).not.toHaveBeenCalled();
+        expect(h.entries.filter((entry) => String(entry['event']).startsWith('auth.'))).toEqual(
+          requests.map(() => ({ level: 'info', event: 'auth.local.refused_disabled' })),
+        );
+      },
+    );
+
+    it.each(cases)('does not read the body stream for %s', async (path) => {
+      const h = await harness({ localLoginAvailable: false });
+      const pull = vi.fn();
+      const request = new Request(`${ORIGIN}${path}`, {
+        method: 'POST',
+        body: new ReadableStream<Uint8Array>({ pull }, { highWaterMark: 0 }),
+        duplex: 'half',
+      } as RequestInit);
+      expect((await h.fetch(request)).status).toBe(403);
+      expect(pull).not.toHaveBeenCalled();
+    });
+  });
+
+  it('preserves explicitly enabled login behavior', async () => {
+    const h = await harness({ localLoginAvailable: true });
+    expect((await h.fetch(post(LOGIN, loginBody))).status).toBe(204);
+    expect(h.login).toHaveBeenCalledOnce();
+  });
+
   it.each([
     [LOGIN, loginBody, 'login'],
     [FINISH, { token: SENTINEL.token, password: SENTINEL.password, code: SENTINEL.code }, 'finish'],
@@ -245,6 +322,7 @@ describe('createLocalRoutes', () => {
 
   it('declares four public POST routes under /_pb/auth/local', () => {
     const routes = createLocalRoutes({
+      localLoginAvailable: true,
       local: {} as LocalLoginService,
       setup: {} as LocalSetupService,
       sessions: {} as SessionService,
@@ -262,6 +340,7 @@ describe('createLocalRoutes', () => {
   it('rejects a non-canonical public origin at construction', () => {
     expect(() =>
       createLocalRoutes({
+        localLoginAvailable: true,
         local: {} as LocalLoginService,
         setup: {} as LocalSetupService,
         sessions: {} as SessionService,
@@ -657,6 +736,7 @@ describe('createLocalRoutes', () => {
 
     it('sets x-request-id on the setup responses it builds itself', async () => {
       const routes = createLocalRoutes({
+        localLoginAvailable: true,
         local: {} as LocalLoginService,
         setup: {
           start: () =>
@@ -978,6 +1058,7 @@ describe('createLocalRoutes', () => {
 
     it('survives a throwing log sink', async () => {
       const routes = createLocalRoutes({
+        localLoginAvailable: true,
         local: {
           login: () => Promise.resolve(GRANTED),
           reauth: () => Promise.resolve({ ok: true }),

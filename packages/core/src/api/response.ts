@@ -17,6 +17,7 @@ export const API_ERROR_CODES = {
   invalid_request: { status: 400, message: 'Invalid request' },
   unauthorized: { status: 401, message: 'Authentication required' },
   forbidden: { status: 403, message: 'Access denied' },
+  local_auth_disabled: { status: 403, message: 'Local sign-in is disabled' },
   reauth_required: { status: 403, message: 'Reauthentication required' },
   not_found: { status: 404, message: 'Not found' },
   conflict: { status: 409, message: 'Conflict' },

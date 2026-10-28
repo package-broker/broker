@@ -124,6 +124,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   const { repositories, keyring, clock, ids, publicOrigin, providers, hooks } = options;
   const localAuth = parseLocalAuthPolicy(options.localAuth);
   validateLocalAuthPolicy(localAuth, providers);
+  const localLoginAvailable = localAuth === 'enabled';
 
   const log: KernelLog = (entry) => {
     try {
@@ -326,10 +327,11 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     clock,
     publicOrigin,
     clientIp: options.clientIp,
-    localLoginAvailable: true,
+    localLoginAvailable,
     log,
   });
   const localRoutes = createLocalRoutes({
+    localLoginAvailable,
     local,
     setup,
     sessions,

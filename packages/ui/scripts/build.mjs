@@ -18,6 +18,7 @@ import {
 const run = promisify(execFile);
 const here = (target) => fileURLToPath(new URL(target, import.meta.url));
 const packageRoot = here('../');
+const { version } = JSON.parse(await readFile(here('../package.json'), 'utf8'));
 
 function flag(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -51,7 +52,7 @@ async function bundleScript(entry, split = false) {
     jsx: 'automatic',
     minify: true,
     legalComments: 'none',
-    define: { 'process.env.NODE_ENV': '"production"' },
+    define: { 'process.env.NODE_ENV': '"production"', __UI_VERSION__: JSON.stringify(version) },
     logLevel: 'warning',
   });
   const outputs = new Map(
@@ -147,7 +148,7 @@ function renderSetup(scriptName, styleName) {
     <script type="module" src="${SETUP_ASSET_PREFIX}${scriptName}"></script>
   </head>
   <body>
-    <main id="root" class="mx-auto max-w-xl p-6"></main>
+    <div id="root"></div>
   </body>
 </html>
 `;

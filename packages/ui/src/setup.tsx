@@ -1,3 +1,4 @@
+import { createProductFooter } from './components/product-footer-content.js';
 import { encodeQr, type QrMatrix } from './qr.js';
 
 export const SETUP_START_PATH = '/_pb/auth/local/setup/start';
@@ -552,7 +553,15 @@ export function mountSetup(root: HTMLElement, deps: SetupMountDeps): () => void 
               : buildUncertain();
       notice = el('div', { id: 'setup-notice', role: 'alert', class: 'mt-4 text-red-800' });
       status = el('p', { id: 'setup-status', role: 'status', class: 'mt-4 text-gray-700' });
-      root.append(content, notice, status);
+      const main = el(
+        'main',
+        { class: 'mx-auto w-full max-w-xl flex-1 p-6' },
+        content,
+        notice,
+        status,
+      );
+      root.className = 'flex min-h-screen flex-col';
+      root.append(main, createProductFooter());
       document.getElementById('setup-heading')?.focus();
       rendered = snapshot.stage;
     }

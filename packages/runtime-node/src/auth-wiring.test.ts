@@ -229,12 +229,32 @@ describe('node auth wiring', () => {
     };
   }
 
+  function stream(capture: unknown[]): { write: (chunk: unknown) => boolean; on: () => undefined } {
+    return {
+      write: (chunk) => {
+        capture.push(String(chunk));
+        return true;
+      },
+      on: () => undefined,
+    };
+  }
+
   async function start(
     overrides: Record<string, string | undefined> = {},
     plugins: readonly PluginDefinition[] = [],
+    capture?: unknown[],
   ): Promise<NodeBroker> {
     const broker = await startNode({
       plugins,
+      ...(capture === undefined
+        ? {}
+        : {
+            log: (entry) => {
+              capture.push(entry);
+            },
+            stdout: stream(capture),
+            stderr: stream(capture),
+          }),
       migrations: await migrationSources(),
       env: env(overrides),
     });
@@ -883,12 +903,17 @@ describe('node auth wiring', () => {
       async (mode) => {
         const listenSpy = vi.spyOn(Server.prototype, 'listen');
         try {
-          const failure = await rejection(start({ PB_AUTH_LOCAL: mode }));
+          const emitted: unknown[] = [];
+          const failure = await rejection(start({ PB_AUTH_LOCAL: mode }, [], emitted));
           expect(failure).toBeInstanceOf(KernelConfigError);
           expect((failure as KernelConfigError).problems).toEqual([
             mode === 'disabled' ? 'auth_no_sign_in_method' : 'auth_local_invalid',
           ]);
           expect(describeError(failure)).not.toContain('credential@example.test');
+          const output = JSON.stringify(emitted);
+          expect(output).not.toContain('credential@example.test');
+          expect(output).not.toContain(SENTINEL);
+          expect(output).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/);
           expect(listenSpy).not.toHaveBeenCalled();
           expect(recorded.closes).toEqual([path]);
         } finally {

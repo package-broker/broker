@@ -10,7 +10,7 @@ import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/p
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
-import type { PluginDefinition } from '@package-broker/core/plugin';
+import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
 import {
   loadMigrationSource,
   type MigrationSource,
@@ -495,13 +495,29 @@ describe('runtime SSO providers on the node runtime', () => {
     },
   );
 
-  it('local policy is captured until restart', async () => {
+  it('local policy is captured at start, not read again while the kernel is built', async () => {
     const live = environment([definition(issuerA)], { PB_AUTH_LOCAL: 'disabled' });
-    const first = await boot(live);
-    expect((await providerList(first.kernel)).local).toBe(false);
-    live['PB_AUTH_LOCAL'] = 'enabled';
-    expect((await providerList(first.kernel)).local).toBe(false);
-    await stop(first.broker);
+    const flip: PluginDefinition = {
+      id: 'flip',
+      package: '@test/flip',
+      apiVersion: SUPPORTED_PLUGIN_API[0],
+      platforms: ['node'],
+      register: () => {
+        live['PB_AUTH_LOCAL'] = 'enabled';
+      },
+    };
+    const broker = await startNode({
+      plugins: [ssoOidc({ runtimeProviders: true }), flip],
+      migrations: await migrationSources(),
+      env: live,
+      log: (entry) => {
+        logs.push(entry as Record<string, unknown>);
+      },
+    });
+    running.push(broker);
+    expect(live['PB_AUTH_LOCAL']).toBe('enabled');
+    expect((await providerList(await broker.ready())).local).toBe(false);
+    await stop(broker);
     expect((await providerList((await boot(live)).kernel)).local).toBe(true);
   });
 

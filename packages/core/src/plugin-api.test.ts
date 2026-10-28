@@ -61,7 +61,7 @@ describe('plugin contract', () => {
   });
 
   it('lists the ports a plugin may bind', () => {
-    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity', 'audit-trail']);
+    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity']);
   });
 
   it('accepts a plugin with binds, migrations, routes, an access hook and init', async () => {
@@ -186,9 +186,7 @@ describe('plugin contract', () => {
 
     // @ts-expect-error database is owned by the runtime
     expect(definePlugin(definition)).toBe(definition);
-    expectTypeOf<NonNullable<PluginDefinition['binds']>[number]>().toEqualTypeOf<
-      'source' | 'identity' | 'audit-trail'
-    >();
+    expectTypeOf<(typeof PLUGIN_BINDABLE_PORTS)[number]>().toEqualTypeOf<'source' | 'identity'>();
   });
 
   it('rejects misspelled plugin keys at compile time', () => {

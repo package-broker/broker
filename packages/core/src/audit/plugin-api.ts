@@ -1,98 +1,105 @@
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
+import type { AuditActorType } from './actions.js';
 
-/** The stored chain columns are verbatim; sourceIp is optional and is not hashed. */
+/** Core exposes the stored payload only after an equal sanitizer comparison. */
 export interface AuditRecordV1 {
+  readonly kind: 'event';
   readonly chainId: string;
   readonly epoch: number;
   readonly id: string;
-  readonly org_id: string;
+  readonly orgId: string;
   readonly seq: number;
-  readonly prev_hash: string;
+  readonly prevHash: string;
   readonly hash: string;
-  readonly created_at: string;
-  readonly actor_type: 'user' | 'service_principal' | 'customer' | 'system';
-  readonly actor_id: string | null;
-  readonly token_selector: string | null;
+  readonly createdAt: string;
+  readonly actorType: AuditActorType;
+  readonly actorId: string | null;
+  readonly tokenSelector: string | null;
   readonly action: string;
-  readonly target_type: string;
-  readonly target_id: string | null;
-  readonly project_id: string | null;
-  readonly payload_json: string;
-  readonly sourceIp?: string;
+  readonly targetType: string;
+  readonly targetId: string | null;
+  readonly projectId: string | null;
+  readonly payloadJson: string;
+  readonly sourceIp?: string | null;
 }
 
 interface AuditMarkerIdentityV1 {
-  readonly v: 1;
-  readonly chain_id: string;
+  readonly chainId: string;
   readonly epoch: number;
-  readonly org_id: string;
   /** A marker's own ULID, never the original event id. */
-  readonly marker_id: string;
+  readonly markerId: string;
 }
 
 export type AuditMarkerV1 = AuditMarkerIdentityV1 &
   (
     | {
         readonly kind: 'boundary';
-        readonly boundary_seq: number;
-        readonly boundary_prev_hash: string;
+        readonly boundarySeq: number;
+        readonly boundaryPrevHash: string;
         readonly provenance: string;
-        readonly prior_archive_hint?: string;
+        readonly priorArchiveHint?: string;
       }
     | {
         readonly kind: 'gap';
-        readonly from_seq: number;
-        readonly to_seq: number;
+        readonly fromSeq: number;
+        readonly toSeq: number;
         readonly count: number;
-        readonly prev_hash: string;
+        readonly prevHash: string;
         readonly hash: string;
         readonly reason: 'capacity';
-        readonly policy_generation: number;
+        readonly policyGeneration: number;
       }
     | {
         readonly kind: 'tombstone';
         readonly seq: number;
-        readonly prev_hash: string;
+        readonly prevHash: string;
         readonly hash: string;
-        readonly reason_code: AuditSinkErrorCode;
+        readonly reasonCode: string;
       }
     | {
         readonly kind: 'delivery_uncertain';
-        readonly from_seq: number;
-        readonly to_seq: number;
-        readonly reason_code: 'partial_rejected';
+        readonly fromSeq: number;
+        readonly toSeq: number;
+        readonly hash: string;
+        readonly reasonCode: string;
       }
-    | ({
-        readonly kind: 'withheld';
-        readonly reason: 'content unavailable; hash link asserted, not recomputable';
-      } & Pick<
-        AuditRecordV1,
-        | 'id'
-        | 'seq'
-        | 'prev_hash'
-        | 'hash'
-        | 'created_at'
-        | 'actor_type'
-        | 'actor_id'
-        | 'action'
-        | 'target_type'
-        | 'target_id'
-        | 'project_id'
-      >)
-    | { readonly kind: 'fork'; readonly last_common_seq: number; readonly last_common_hash: string }
+    | AuditWithheldMarkerV1
+    | { readonly kind: 'fork'; readonly lastCommonSeq: number; readonly lastCommonHash: string }
     | {
         readonly kind: 'receiver_changed';
-        readonly old_fingerprint: string;
-        readonly new_fingerprint: string;
+        readonly oldFingerprint: string;
+        readonly newFingerprint: string;
       }
     | {
         readonly kind: 'head';
         readonly seq: number;
         readonly hash: string;
-        readonly boundary_seq: number;
+        readonly boundarySeq: number;
       }
   );
+
+/** Withheld bodies cannot be recomputed; these fields assert only the chain link. */
+export type AuditWithheldMarkerV1 = AuditMarkerIdentityV1 & {
+  readonly kind: 'withheld';
+  readonly reasonCode: string;
+} & Pick<
+    AuditRecordV1,
+    | 'id'
+    | 'orgId'
+    | 'seq'
+    | 'prevHash'
+    | 'hash'
+    | 'createdAt'
+    | 'actorType'
+    | 'actorId'
+    | 'action'
+    | 'targetType'
+    | 'targetId'
+    | 'projectId'
+  >;
+
+export type AuditJournalItemV1 = AuditRecordV1 | AuditWithheldMarkerV1;
 
 export interface AuditVerificationScopeV1 {
   readonly fromSeq: number;
@@ -113,6 +120,7 @@ export interface AuditHeadV1 {
   readonly verification: AuditVerificationScopeV1 | null;
 }
 
+/** Core checks stored payloads against the sanitizer before returning records or withheld markers. */
 export interface AuditJournalReader {
   list(
     org: OrgContext,
@@ -123,25 +131,24 @@ export interface AuditJournalReader {
       readonly afterSeq?: number;
       readonly limit: number;
     },
-  ): Promise<{ readonly items: readonly AuditRecordV1[]; readonly next: number | null }>;
+  ): Promise<{ readonly items: readonly AuditJournalItemV1[]; readonly next: number | null }>;
   head(org: OrgContext): Promise<AuditHeadV1>;
-  page(org: OrgContext, afterSeq: number, limit: number): Promise<readonly AuditRecordV1[]>;
-  markVerified(org: OrgContext, scope: AuditVerificationScopeV1): Promise<void>;
+}
+
+export interface AuditTrailDefinition {
+  readonly toggleEnv?: string;
+  readonly create: (ctx: AuditTrailContext) => AuditTrail;
 }
 
 export interface AuditTrailContext {
+  readonly active: boolean;
   readonly journal: AuditJournalReader;
-  /** Only declared environment names are readable. */
-  readonly env: (name: string) => string | undefined;
+  readonly requestVerification: (org: OrgContext) => Promise<void>;
 }
 
-export interface AuditTrail {
-  readonly envNames: readonly string[];
-  /** Boot-time; accepts exactly on/off, and the required policy ignores the toggle. */
-  active(): boolean;
-}
-
-export type AuditTrailFactory = (ctx: AuditTrailContext) => AuditTrail;
+// Reserved by the public contract for later additive members.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface AuditTrail {}
 
 export type AuditSinkErrorCode =
   'network' | 'timeout' | 'refused' | 'too_large' | 'http_status' | 'bad_response';
@@ -166,56 +173,64 @@ export class AuditSinkConfigError extends Error {
   }
 }
 
-/** Core enforces destination policy, credentials, no redirects and response/deadline caps. */
-export type AuditFetch = (request: {
-  readonly url: string;
-  readonly headers: Readonly<Record<string, string>>;
+export interface AuditSinkDefinition {
+  readonly id: string;
+  readonly kind: string;
+  readonly destination: AuditDestinationSpec;
+  readonly envNames?: readonly string[];
+  readonly activation: 'build' | 'env';
+  readonly custody: 'delivery' | 'durable';
+  readonly sourceIp: 'include' | 'omit';
+  readonly maxBatchEvents?: number;
+  readonly skipAfter?: number;
+  readonly create: (ctx: AuditSinkContext) => AuditSink;
+}
+
+export type AuditDestinationSpec =
+  | {
+      readonly protocol: 'otlp-http-json';
+      readonly endpointEnv?: string;
+      readonly headersEnv?: string;
+    }
+  | {
+      readonly protocol: 'https-json';
+      readonly urlEnv: string;
+      readonly headersEnv?: string;
+    };
+
+/** Core resolves the destination and adds credentials before calling this transport. */
+export type AuditBoundFetch = (request: {
+  /** At most 512 KiB. */
   readonly body: string;
+  readonly contentType: 'application/json';
   readonly signal: AbortSignal;
-  /** Default 1500 ms; core caps this at 10000 ms. */
-  readonly timeoutMs?: number;
-  /** Node only, for loopback and link-local destinations. */
-  readonly allowPrivate?: boolean;
 }) => Promise<{
   readonly status: number;
-  readonly headers: Readonly<Record<string, string>>;
-  /** Core reads at most 64 KiB. */
+  readonly contentType: string | null;
+  readonly retryAfterMs: number | null;
+  /** At most 64 KiB. */
   readonly body: string;
 }>;
 
 export interface AuditSinkContext {
   readonly runtime: 'docker' | 'cloudflare';
-  /** Only declared environment names are readable. */
+  readonly fetch: AuditBoundFetch;
+  /** Only declared non-destination envNames are readable. */
   readonly env: (name: string) => string | undefined;
-  readonly fetch: AuditFetch;
   readonly clock: Clock;
 }
 
 export interface AuditSink {
-  /** [a-z0-9-]{1,32}; unique cursor key across the composition. */
-  readonly id: string;
-  /** [a-z0-9-]{1,32}. */
-  readonly kind: string;
-  readonly envNames: readonly string[];
-  /** Durable custody requires the operator's durableAck assertion; default delivery. */
-  readonly custody: 'delivery' | 'durable';
-  /** Defaults to include; source IP is not hashed. */
-  readonly sourceIp: 'include' | 'omit';
-  /** 1–100; default 100. */
-  readonly maxBatchEvents?: number;
-  /** 1–10; default 3. Only rejections allowed to retry by the protocol count. */
-  readonly skipAfter?: number;
-  activate(): { readonly receiverFingerprint: string; readonly activationSource: string } | null;
   deliver(batch: AuditBatchV1, signal: AbortSignal): Promise<AuditDelivery>;
-  frontier?(signal: AbortSignal): Promise<{
-    readonly chainId: string;
-    readonly epoch: number;
-    readonly seq: number;
-    readonly hash: string;
-  } | null>;
+  frontier?(signal: AbortSignal): Promise<AuditPositionV1 | null>;
 }
 
-export type AuditSinkFactory = (ctx: AuditSinkContext) => readonly AuditSink[];
+export interface AuditPositionV1 {
+  readonly chainId: string;
+  readonly epoch: number;
+  readonly seq: number;
+  readonly hash: string;
+}
 
 export interface AuditBatchV1 {
   readonly v: 1;
@@ -223,15 +238,25 @@ export interface AuditBatchV1 {
   readonly epoch: number;
   readonly orgId: string;
   readonly records: readonly (AuditRecordV1 | AuditMarkerV1)[];
+  /** Last covered seq, or unchanged progress for a batch of non-advancing markers only. */
   readonly throughSeq: number;
+  /** Hash at throughSeq, including the unchanged progress hash for non-advancing markers. */
   readonly throughHash: string;
 }
 
 /** ACKs echo the batch frontier. Throws become retry/network; codes never carry response text. */
 export type AuditDelivery =
-  | { readonly outcome: 'accepted'; readonly throughSeq: number; readonly throughHash: string }
+  | {
+      readonly outcome: 'accepted';
+      readonly chainId: string;
+      readonly epoch: number;
+      readonly throughSeq: number;
+      readonly throughHash: string;
+    }
   | {
       readonly outcome: 'accepted_with_warning';
+      readonly chainId: string;
+      readonly epoch: number;
       readonly throughSeq: number;
       readonly throughHash: string;
       readonly code: AuditSinkWarningCode;

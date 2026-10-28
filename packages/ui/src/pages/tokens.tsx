@@ -1243,7 +1243,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           open={renewal !== null}
           className="detail-group"
         >
-          <summary className="cursor-pointer font-semibold">
+          <summary className="min-h-11 cursor-pointer font-semibold">
             {renewal === null ? 'Issue token' : 'Renew token'}
           </summary>
           <form
@@ -1381,7 +1381,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
       </details>
       <TokenList key={`${s.target}:${s.project}`} state={s} controller={c} />
       <details className="detail-group">
-        <summary className="cursor-pointer font-semibold">Service principals</summary>
+        <summary className="min-h-11 cursor-pointer font-semibold">Service principals</summary>
         <PrincipalForm state={s} controller={c} />
         <Button
           type="button"

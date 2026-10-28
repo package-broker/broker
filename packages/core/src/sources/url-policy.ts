@@ -1,3 +1,4 @@
+import { hasHostSuffix, isPrivateIpv4 } from '../platform/private-host.js';
 export type OutboundRuntime = 'node' | 'cloudflare';
 
 export interface OutboundPolicy {
@@ -44,13 +45,10 @@ function isBlockedIpv4([a, b, c]: readonly number[]): boolean {
   if (a === undefined || b === undefined || c === undefined) return true;
   return (
     a === 0 ||
-    a === 10 ||
+    isPrivateIpv4([a, b]) ||
     a === 127 ||
     a >= 224 ||
     (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
     (a === 192 && b === 0 && (c === 0 || c === 2)) ||
     (a === 192 && b === 88 && c === 99) ||
     (a === 198 && (b === 18 || b === 19)) ||
@@ -124,7 +122,7 @@ export function classifyAddress(ip: string): AddressVerdict {
 function isBlockedName(name: string): boolean {
   if (!name.includes('.')) return true;
   if (name === 'metadata.google.internal') return true;
-  return BLOCKED_SUFFIXES.some((suffix) => name.endsWith(suffix));
+  return hasHostSuffix(name, BLOCKED_SUFFIXES);
 }
 
 function cleanHost(hostname: string): string | null {

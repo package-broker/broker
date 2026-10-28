@@ -1,3 +1,4 @@
+import { isPrivateHost, isCloudMetadataHost } from '../../platform/private-host.js';
 import { classifyAddress } from '../../sources/url-policy.js';
 import { AuditSinkConfigError } from '../plugin-api.js';
 import type { AuditBoundFetch, AuditDestinationSpec, AuditSinkErrorCode } from '../plugin-api.js';
@@ -9,6 +10,8 @@ const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const DENIED_HEADERS = new Set([
   'host',
   'content-length',
+  'content-encoding',
+  'expect',
   'connection',
   'keep-alive',
   'proxy-authenticate',
@@ -33,7 +36,7 @@ export class AuditTransportError extends Error {
 
 function timeoutMs(value: number | undefined): number {
   if (value === undefined) return DEFAULT_TIMEOUT_MS;
-  if (!Number.isSafeInteger(value) || value <= 0) {
+  if (Number.isNaN(value) || value <= 0 || (value < MAX_TIMEOUT_MS && !Number.isInteger(value))) {
     throw new AuditSinkConfigError('invalid_timeout');
   }
   return Math.min(value, MAX_TIMEOUT_MS);
@@ -48,6 +51,7 @@ function headersOf(input: Readonly<Record<string, string>>): Record<string, stri
       typeof value !== 'string' ||
       !/^[\x20-\x7e]*$/.test(value) ||
       DENIED_HEADERS.has(key) ||
+      key.startsWith('x-forwarded-') ||
       Object.hasOwn(headers, key)
     )
       throw new AuditSinkConfigError('invalid_headers');
@@ -73,34 +77,14 @@ function endpoint(raw: string, runtime: 'docker' | 'cloudflare', allowPrivate = 
     throw new AuditSinkConfigError('invalid_endpoint');
   }
   const host = url.hostname.replace(/\.$/, '');
-  const octets = host.split('.').map(Number);
-  const ipv4 =
-    octets.length === 4 && octets.every((n) => Number.isInteger(n) && n >= 0 && n <= 255);
-  const a = octets[0];
-  const b = octets[1] ?? -1;
-  // URL normalizes IPv4 aliases and IPv6 spelling before these checks.
-  const local =
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host === '[::1]' ||
-    (ipv4 && (a === 127 || (a === 169 && b === 254))) ||
-    /^\[fe[89ab][0-9a-f]:/.test(host);
+  const ipv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host);
   if (
-    !host.startsWith('[') &&
-    (host.startsWith('.') || host.endsWith('.') || host.includes('..'))
+    isCloudMetadataHost(host) ||
+    (!host.startsWith('[') && (host.startsWith('.') || host.endsWith('.') || host.includes('..')))
   ) {
     throw new AuditSinkConfigError('invalid_endpoint');
   }
-  const privateHost =
-    local ||
-    (ipv4 && (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) ||
-    /^\[f[cd][0-9a-f]{2}:/.test(host) ||
-    (!ipv4 &&
-      !host.startsWith('[') &&
-      (!host.includes('.') ||
-        ['.internal', '.local', '.svc', '.cluster.local', '.home.arpa'].some((suffix) =>
-          host.endsWith(suffix),
-        )));
+  const privateHost = isPrivateHost(host, true);
   const optedIn = privateHost && runtime === 'docker' && allowPrivate;
   if (
     (privateHost && !optedIn) ||
@@ -131,17 +115,22 @@ export function createAuditBoundFetch(
   const headers = headersOf(options.headers);
   const duration = timeoutMs(options.timeoutMs);
   if (
-    !Object.entries(headers).some(
-      ([key, value]) =>
-        (key === 'authorization' || /(?:^|-)(?:api-key|token)$/.test(key)) && value.trim() !== '',
-    )
+    !options.audit?.egress?.allowPrivate?.includes(options.id) &&
+    Object.keys(headers).length === 0
   ) {
     throw new AuditSinkConfigError('missing_credential');
   }
   headers['content-type'] = 'application/json';
   return async (request) => {
-    if (request.contentType !== 'application/json') throw new AuditTransportError('refused');
-    if (new TextEncoder().encode(request.body).byteLength > 512 * 1024) {
+    const { body, contentType } = request;
+    if (
+      typeof body !== 'string' ||
+      typeof contentType !== 'string' ||
+      contentType !== 'application/json'
+    ) {
+      throw new AuditTransportError('refused');
+    }
+    if (new TextEncoder().encode(body).byteLength > 512 * 1024) {
       throw new AuditTransportError('too_large');
     }
     const controller = new AbortController();
@@ -161,7 +150,7 @@ export function createAuditBoundFetch(
       const response = await fetchImpl(url, {
         method: 'POST',
         headers,
-        body: request.body,
+        body,
         redirect: 'manual',
         signal: controller.signal,
       });
@@ -242,31 +231,45 @@ export function parseAuditOtelEnvironment(
     protocol: 'otlp-http-json',
   },
 ): AuditOtelEnvironment | null {
-  for (const prefix of ['OTEL_EXPORTER_OTLP_', 'OTEL_EXPORTER_OTLP_LOGS_']) {
-    for (const suffix of ['CERTIFICATE', 'CLIENT_CERTIFICATE', 'CLIENT_KEY']) {
-      if (env(prefix + suffix) !== undefined) throw new AuditSinkConfigError('unsupported_tls');
-    }
-    if (env(prefix + 'COMPRESSION') !== undefined) {
-      throw new AuditSinkConfigError('unsupported_compression');
-    }
+  const value = (name: string): string | undefined => env(name) || undefined;
+  const endpointName = destination.endpointEnv ?? 'PB_AUDIT_OTLP_ENDPOINT';
+  const headersName =
+    destination.headersEnv ??
+    (endpointName === 'PB_AUDIT_OTLP_ENDPOINT' ? 'PB_AUDIT_OTLP_HEADERS' : undefined);
+  if (!value(endpointName) && headersName !== undefined && value(headersName)) {
+    throw new AuditSinkConfigError('invalid_endpoint');
   }
-  const protocol = env('OTEL_EXPORTER_OTLP_LOGS_PROTOCOL') ?? env('OTEL_EXPORTER_OTLP_PROTOCOL');
-  if (protocol !== undefined && protocol !== 'http/json') {
-    throw new AuditSinkConfigError('unsupported_protocol');
-  }
-  const rawTimeout = env('OTEL_EXPORTER_OTLP_LOGS_TIMEOUT') ?? env('OTEL_EXPORTER_OTLP_TIMEOUT');
-  if (rawTimeout !== undefined && !/^\d+$/.test(rawTimeout)) {
-    throw new AuditSinkConfigError('invalid_timeout');
-  }
-  const duration = timeoutMs(rawTimeout === undefined ? undefined : Number(rawTimeout));
   for (const name of [
-    destination.endpointEnv ?? 'PB_AUDIT_OTLP_ENDPOINT',
+    endpointName,
     'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
     'OTEL_EXPORTER_OTLP_ENDPOINT',
   ]) {
-    const raw = env(name);
+    const raw = value(name);
     if (raw === undefined) continue;
-    // Destination policy is enforced before core binds the transport.
+    const otel = name !== endpointName;
+    if (otel) {
+      for (const prefix of ['OTEL_EXPORTER_OTLP_', 'OTEL_EXPORTER_OTLP_LOGS_']) {
+        for (const suffix of ['CERTIFICATE', 'CLIENT_CERTIFICATE', 'CLIENT_KEY']) {
+          if (value(prefix + suffix) !== undefined)
+            throw new AuditSinkConfigError('unsupported_tls');
+        }
+        const compression = value(prefix + 'COMPRESSION');
+        if (compression !== undefined && compression !== 'none') {
+          throw new AuditSinkConfigError('unsupported_compression');
+        }
+      }
+      const protocol =
+        value('OTEL_EXPORTER_OTLP_LOGS_PROTOCOL') ?? value('OTEL_EXPORTER_OTLP_PROTOCOL');
+      if (protocol !== undefined && protocol !== 'http/json') {
+        throw new AuditSinkConfigError('unsupported_protocol');
+      }
+    }
+    const rawTimeout =
+      value('OTEL_EXPORTER_OTLP_LOGS_TIMEOUT') ?? value('OTEL_EXPORTER_OTLP_TIMEOUT');
+    if (rawTimeout !== undefined && !/^\d+$/.test(rawTimeout)) {
+      throw new AuditSinkConfigError('invalid_timeout');
+    }
+    const duration = timeoutMs(rawTimeout === undefined ? undefined : Number(rawTimeout));
     let url: URL;
     try {
       url = new URL(raw);
@@ -277,14 +280,13 @@ export function parseAuditOtelEnvironment(
       throw new AuditSinkConfigError('invalid_endpoint');
     }
     if (name === 'OTEL_EXPORTER_OTLP_ENDPOINT') {
-      url.pathname = url.pathname.replace(/\/+$/, '').replace(/(?:\/v1\/logs)+$/, '') + '/v1/logs';
+      url.pathname = url.pathname.replace(/\/+$/, '') + '/v1/logs';
     }
-    const rawHeaders =
-      name === (destination.endpointEnv ?? 'PB_AUDIT_OTLP_ENDPOINT')
-        ? env(destination.headersEnv ?? 'PB_AUDIT_OTLP_HEADERS')
-        : destination.headersEnv === undefined
-          ? (env('OTEL_EXPORTER_OTLP_LOGS_HEADERS') ?? env('OTEL_EXPORTER_OTLP_HEADERS'))
-          : env(destination.headersEnv);
+    const rawHeaders = otel
+      ? (value('OTEL_EXPORTER_OTLP_LOGS_HEADERS') ?? value('OTEL_EXPORTER_OTLP_HEADERS'))
+      : headersName === undefined
+        ? undefined
+        : value(headersName);
     return {
       endpoint: url.href,
       activationSource: name,
@@ -293,11 +295,7 @@ export function parseAuditOtelEnvironment(
     };
   }
   if (
-    [
-      destination.headersEnv ?? 'PB_AUDIT_OTLP_HEADERS',
-      'OTEL_EXPORTER_OTLP_LOGS_HEADERS',
-      'OTEL_EXPORTER_OTLP_HEADERS',
-    ].some((name) => env(name) !== undefined)
+    ['OTEL_EXPORTER_OTLP_LOGS_HEADERS', 'OTEL_EXPORTER_OTLP_HEADERS'].some((name) => value(name))
   ) {
     throw new AuditSinkConfigError('invalid_endpoint');
   }
@@ -330,8 +328,11 @@ export async function resolveAuditDestination(
   if (destination.protocol === 'otlp-http-json') {
     resolved = parseAuditOtelEnvironment(env, destination);
   } else {
-    const raw = env(destination.urlEnv);
-    const rawHeaders = env(destination.headersEnv ?? 'PB_AUDIT_WEBHOOK_HEADERS');
+    const raw = env(destination.urlEnv) || undefined;
+    const headersName =
+      destination.headersEnv ??
+      (destination.urlEnv === 'PB_AUDIT_WEBHOOK_URL' ? 'PB_AUDIT_WEBHOOK_HEADERS' : undefined);
+    const rawHeaders = headersName === undefined ? undefined : env(headersName) || undefined;
     if (raw === undefined && rawHeaders !== undefined) {
       throw new AuditSinkConfigError('invalid_endpoint');
     }

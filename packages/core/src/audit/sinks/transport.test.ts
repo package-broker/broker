@@ -55,7 +55,7 @@ describe('audit OTEL environment', () => {
     });
     expect(
       parse({ OTEL_EXPORTER_OTLP_ENDPOINT: 'https://generic.example/v1/logs/' })?.endpoint,
-    ).toBe('https://generic.example/v1/logs');
+    ).toBe('https://generic.example/v1/logs/v1/logs');
     expect(parse({})).toBeNull();
   });
 
@@ -73,26 +73,34 @@ describe('audit OTEL environment', () => {
     ).toMatchObject({ headers: { 'x-api-key': 'a=b,c' }, timeoutMs: 10000 });
   });
 
-  it.each(['grpc', 'http/protobuf', ''])('refuses unsupported protocol %s', (protocol) => {
-    expect(() => parse({ OTEL_EXPORTER_OTLP_PROTOCOL: protocol })).toThrow(
-      expect.objectContaining({ code: 'unsupported_protocol' }),
-    );
+  it.each(['grpc', 'http/protobuf'])('refuses unsupported protocol %s', (protocol) => {
+    expect(() =>
+      parse({
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+        OTEL_EXPORTER_OTLP_PROTOCOL: protocol,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'unsupported_protocol' }));
   });
 
-  it.each(['0', '-1', '1.5', 'NaN', 'Infinity', '', '9007199254740992'])(
-    'refuses timeout %s',
-    (value) => {
-      expect(() => parse({ OTEL_EXPORTER_OTLP_TIMEOUT: value })).toThrow(
-        expect.objectContaining({ code: 'invalid_timeout' }),
-      );
-    },
-  );
+  it.each(['0', '-1', '1.5', 'NaN', 'Infinity'])('refuses timeout %s', (value) => {
+    expect(() =>
+      parse({
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+        OTEL_EXPORTER_OTLP_TIMEOUT: value,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'invalid_timeout' }));
+  });
 
   it.each(['OTEL_EXPORTER_OTLP_', 'OTEL_EXPORTER_OTLP_LOGS_'])(
     'refuses unsupported settings under %s',
     (prefix) => {
       for (const suffix of ['CERTIFICATE', 'CLIENT_CERTIFICATE', 'CLIENT_KEY', 'COMPRESSION']) {
-        expect(() => parse({ [prefix + suffix]: '' })).toThrow(
+        expect(() =>
+          parse({
+            OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+            [prefix + suffix]: 'unsupported',
+          }),
+        ).toThrow(
           expect.objectContaining({
             code: suffix === 'COMPRESSION' ? 'unsupported_compression' : 'unsupported_tls',
           }),
@@ -114,6 +122,9 @@ describe('audit OTEL environment', () => {
     'bad name=x',
     'host=secret',
     'cookie=secret',
+    'content-encoding=gzip',
+    'expect=100-continue',
+    'X-Forwarded-For=127.0.0.1',
     'authorization=x,Authorization=y',
     'x',
     'x=a,',
@@ -165,6 +176,11 @@ describe('AuditBoundFetch', () => {
     'invalid',
     'http://collector.example',
     'https://localhost..',
+    'https://169.254.169.254',
+    'https://2852039166',
+    'https://[fd00:ec2:0:0:0:0:0:254]',
+    'https://100.100.100.200',
+    'https://metadata.google.internal',
     'https://224.0.0.1',
     'https://[ff00::1]',
     'https://0.0.0.0',
@@ -220,14 +236,15 @@ describe('AuditBoundFetch', () => {
 
   it('requires a credential and refuses header injection', async () => {
     const fetchImpl = vi.fn<typeof fetch>();
+    expect(() => transport({ fetchImpl, headers: {} })).toThrow(
+      expect.objectContaining({ code: 'missing_credential' }),
+    );
     for (const headers of [
       { 'content-type': 'application/json' },
       { 'accept-language': 'en' },
       { 'x-request-id': '1' },
     ]) {
-      expect(() => transport({ fetchImpl, headers })).toThrow(
-        expect.objectContaining({ code: 'missing_credential' }),
-      );
+      expect(() => transport({ fetchImpl, headers })).not.toThrow();
     }
     expect(() =>
       transport({ fetchImpl, headers: { authorization: 'secret\r\nx: injected' } }),
@@ -521,5 +538,230 @@ describe('bound request and response limits', () => {
     await expect(transport({ fetchImpl })(request())).resolves.toMatchObject({
       retryAfterMs: expected,
     });
+  });
+});
+
+describe('round 3 isolation and input regressions', () => {
+  const resolve = (
+    values: Record<string, string>,
+    destination: Parameters<typeof resolveAuditDestination>[0]['destination'],
+    fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}')),
+  ) =>
+    resolveAuditDestination({
+      id: 'audit',
+      runtime: 'docker',
+      activation: 'env',
+      destination,
+      env: (name) => values[name],
+      fetchImpl,
+    });
+
+  it.each(['otlp-http-json', 'https-json'] as const)(
+    'isolates default and custom %s sinks',
+    async (protocol) => {
+      const otlp = protocol === 'otlp-http-json';
+      const values = {
+        [otlp ? 'PB_AUDIT_OTLP_ENDPOINT' : 'PB_AUDIT_WEBHOOK_URL']: 'https://default.example',
+        [otlp ? 'PB_AUDIT_OTLP_HEADERS' : 'PB_AUDIT_WEBHOOK_HEADERS']: 'x-client=default',
+        CUSTOM_URL: 'https://custom.example',
+        CUSTOM_HEADERS: 'x-client=custom',
+      };
+      const defaultSpec = otlp ? { protocol } : { protocol, urlEnv: 'PB_AUDIT_WEBHOOK_URL' };
+      const customSpec = otlp
+        ? { protocol, endpointEnv: 'CUSTOM_URL' }
+        : { protocol, urlEnv: 'CUSTOM_URL' };
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'));
+      await (await resolve(values, defaultSpec, fetchImpl))!.fetch(request());
+      await expect(resolve(values, customSpec)).rejects.toMatchObject({
+        code: 'missing_credential',
+      });
+      await (await resolve(
+        values,
+        { ...customSpec, headersEnv: 'CUSTOM_HEADERS' },
+        fetchImpl,
+      ))!.fetch(request());
+      expect(fetchImpl.mock.calls.map((call) => call[1]?.headers)).toEqual([
+        { 'x-client': 'default', 'content-type': 'application/json' },
+        { 'x-client': 'custom', 'content-type': 'application/json' },
+      ]);
+    },
+  );
+
+  it.each(['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'])(
+    'uses only OTEL headers when %s wins',
+    async (name) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'));
+      const result = await resolve(
+        {
+          [name]: 'https://otel.example',
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: 'x-client=logs',
+          OTEL_EXPORTER_OTLP_HEADERS: 'x-client=generic',
+        },
+        { protocol: 'otlp-http-json', endpointEnv: 'CUSTOM_URL', headersEnv: 'CUSTOM_HEADERS' },
+        fetchImpl,
+      );
+      await result!.fetch(request());
+      expect(fetchImpl.mock.calls[0]?.[1]?.headers).toEqual({
+        'x-client': 'logs',
+        'content-type': 'application/json',
+      });
+    },
+  );
+
+  it.each(['otlp-http-json', 'https-json'] as const)(
+    'rejects orphaned %s headers even with OTEL fallback',
+    async (protocol) => {
+      const otlp = protocol === 'otlp-http-json';
+      for (const custom of [false, true]) {
+        const headersEnv = custom
+          ? 'CUSTOM_HEADERS'
+          : otlp
+            ? 'PB_AUDIT_OTLP_HEADERS'
+            : 'PB_AUDIT_WEBHOOK_HEADERS';
+        const destination = otlp
+          ? { protocol, ...(custom ? { endpointEnv: 'CUSTOM_URL', headersEnv } : {}) }
+          : {
+              protocol,
+              urlEnv: custom ? 'CUSTOM_URL' : 'PB_AUDIT_WEBHOOK_URL',
+              ...(custom ? { headersEnv } : {}),
+            };
+        await expect(
+          resolve(
+            {
+              [headersEnv]: 'x-client=orphan',
+              OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+              OTEL_EXPORTER_OTLP_HEADERS: 'x-client=telemetry',
+            },
+            destination,
+          ),
+        ).rejects.toMatchObject({ code: 'invalid_endpoint' });
+      }
+    },
+  );
+
+  it('uses generic OTEL headers when signal headers are empty', () => {
+    expect(
+      parseAuditOtelEnvironment(
+        (name) =>
+          ({
+            OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+            OTEL_EXPORTER_OTLP_LOGS_HEADERS: '',
+            OTEL_EXPORTER_OTLP_HEADERS: 'x-client=generic',
+          })[name],
+        { protocol: 'otlp-http-json', headersEnv: 'CUSTOM_HEADERS' },
+      )?.headers,
+    ).toEqual({ 'x-client': 'generic' });
+  });
+
+  it('rejects query strings in signal endpoints', () => {
+    expect(() =>
+      parse({ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://otel.example/v1/logs?key=value' }),
+    ).toThrow(expect.objectContaining({ code: 'invalid_endpoint' }));
+  });
+
+  it('ignores inactive OTEL settings and treats empty values as unset', () => {
+    const settings = {
+      OTEL_EXPORTER_OTLP_PROTOCOL: 'grpc',
+      OTEL_EXPORTER_OTLP_CERTIFICATE: 'unused',
+      OTEL_EXPORTER_OTLP_COMPRESSION: 'gzip',
+    };
+    expect(parse(settings)).toBeNull();
+    expect(parse({ ...settings, PB_AUDIT_OTLP_ENDPOINT: 'https://pb.example' })).toMatchObject({
+      timeoutMs: 1500,
+    });
+    expect(
+      parse({
+        PB_AUDIT_OTLP_ENDPOINT: '',
+        PB_AUDIT_OTLP_HEADERS: '',
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: '',
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+        OTEL_EXPORTER_OTLP_LOGS_HEADERS: '',
+        OTEL_EXPORTER_OTLP_HEADERS: 'x-client=generic',
+        OTEL_EXPORTER_OTLP_PROTOCOL: '',
+        OTEL_EXPORTER_OTLP_TIMEOUT: '',
+        OTEL_EXPORTER_OTLP_CERTIFICATE: '',
+        OTEL_EXPORTER_OTLP_COMPRESSION: 'none',
+      }),
+    ).toMatchObject({ headers: { 'x-client': 'generic' }, timeoutMs: 1500 });
+  });
+
+  it.each(['9007199254740992', '9'.repeat(400)])('caps oversized OTEL timeout %s', (value) => {
+    expect(
+      parse({
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example',
+        OTEL_EXPORTER_OTLP_TIMEOUT: value,
+      })?.timeoutMs,
+    ).toBe(10000);
+  });
+
+  it('allows opted-in private sinks without headers', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
+    await expect(
+      transport({
+        endpoint: 'http://localhost',
+        headers: {},
+        audit: { egress: { allowPrivate: ['audit'] } },
+        fetchImpl,
+      })(request()),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
+  it.each([undefined, null, 1, {}, new Uint8Array(1)])(
+    'rejects non-string body %s before fetching',
+    async (body) => {
+      const fetchImpl = vi.fn<typeof fetch>();
+      // @ts-expect-error untrusted plugin runtime input
+      await expect(transport({ fetchImpl })({ ...request(), body })).rejects.toMatchObject({
+        code: 'refused',
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, null, 1, {}, Object('application/json') as unknown])(
+    'rejects non-string contentType %s before fetching',
+    async (contentType) => {
+      const fetchImpl = vi.fn<typeof fetch>();
+      // @ts-expect-error untrusted plugin runtime input
+      await expect(transport({ fetchImpl })({ ...request(), contentType })).rejects.toMatchObject({
+        code: 'refused',
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([10001, 9007199254740992, Number.MAX_VALUE, Infinity])(
+    'caps direct timeout %s',
+    async (timeoutMs) => {
+      vi.useFakeTimers();
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockImplementation(() => new Promise(() => undefined));
+      const result = expect(transport({ timeoutMs, fetchImpl })(request())).rejects.toMatchObject({
+        code: 'timeout',
+      });
+      await vi.advanceTimersByTimeAsync(9999);
+      expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await result;
+    },
+  );
+
+  it('reads body and contentType once and sends the checked body', async () => {
+    const body = vi.fn().mockReturnValueOnce('{}').mockReturnValue('x'.repeat(600000));
+    const contentType = vi.fn().mockReturnValue('application/json');
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
+    await transport({ fetchImpl })({
+      get body() {
+        return body() as string;
+      },
+      get contentType() {
+        return contentType() as 'application/json';
+      },
+      signal: request().signal,
+    });
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(contentType).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]?.[1]?.body).toBe('{}');
   });
 });

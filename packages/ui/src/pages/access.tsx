@@ -1,3 +1,5 @@
+import { GrantForm, ChangeRoleForm, grantSummary } from './access/grant-form.js';
+import { loadRoleCatalogue, type Catalogue, type Provider } from './access/role-catalogue.js';
 import { useMemo, useSyncExternalStore } from 'react';
 import type { operations } from '../api-types.js';
 import type { ApiResult } from '../api.js';
@@ -49,6 +51,10 @@ export const buildAccessHash = (query: AccessQuery) =>
 interface AccessState {
   query: AccessQuery;
   roles: Role[];
+  catalogue: Catalogue;
+  providers: Provider[];
+  providerStatus: 'ready' | 'loading' | 'error';
+  organizationName: string;
   grants: Grant[];
   next: string | null;
   organization: string[];
@@ -84,6 +90,10 @@ export function createAccessController(services: ShellServices) {
   const store = createManagementStore<AccessState>({
     query: { project: null },
     roles: [],
+    catalogue: { roles: [], status: 'loading' },
+    providers: [],
+    providerStatus: 'loading',
+    organizationName: 'this organization',
     grants: [],
     next: null,
     organization: [],
@@ -96,6 +106,24 @@ export function createAccessController(services: ShellServices) {
   });
   const { client } = services;
   let generation = 0;
+  let optionsGeneration = 0;
+  async function loadFormOptions() {
+    const current = ++optionsGeneration;
+    const scopeGeneration = generation;
+    store.set({ catalogue: { roles: [], status: 'loading' }, providerStatus: 'loading' });
+    const [catalogue, providers, organization] = await Promise.all([
+      loadRoleCatalogue(client),
+      client.request('get', '/_pb/auth/providers'),
+      client.request('get', '/_pb/organization'),
+    ]);
+    if (current !== optionsGeneration || scopeGeneration !== generation) return;
+    store.set({
+      catalogue,
+      providers: providers.ok ? providers.data.providers : [],
+      providerStatus: providers.ok ? 'ready' : 'error',
+      organizationName: organization.ok ? organization.data.name : 'this organization',
+    });
+  }
   async function load(query: AccessQuery, notice: string | null = null): Promise<void> {
     const current = ++generation;
     store.set({
@@ -124,6 +152,12 @@ export function createAccessController(services: ShellServices) {
     const permissions = project?.ok ? project.data.project : [];
     store.set({ organization: orgPermissions, permissions });
     const roles = rolesView(store.snapshot());
+    const canWriteGrants =
+      query.project === null
+        ? orgPermissions.includes('org:grants:write')
+        : permissions.includes('project:grants:write');
+    if (!roles && canWriteGrants) await loadFormOptions();
+    if (current !== generation) return;
     const canRead =
       query.project === null
         ? orgPermissions.includes(roles ? 'org:roles:read' : 'org:grants:read')
@@ -194,7 +228,11 @@ export function createAccessController(services: ShellServices) {
       });
     }
   }
-  async function write(run: () => Promise<ApiResult<unknown>>) {
+  async function write(
+    run: () => Promise<ApiResult<unknown>>,
+    success = 'Access updated.',
+    grantMutation = false,
+  ) {
     const state = store.snapshot();
     if (state.busy || state.loading || state.stale) return;
     const current = generation;
@@ -207,8 +245,15 @@ export function createAccessController(services: ShellServices) {
         stale: true,
         notice: 'Complete reauthentication and confirm the pending action.',
       });
-    else if (!result.ok) store.set({ stale: result.status === 412, notice: failureNotice(result) });
-    else await load(state.query, 'Access updated.');
+    else if (!result.ok)
+      store.set({
+        stale: result.status === 412,
+        notice:
+          grantMutation && result.status === 412
+            ? 'This grant changed. Reload it before saving.'
+            : failureNotice(result),
+      });
+    else await load(state.query, success);
   }
   const mutableRole = (id: string) => {
     const state = store.snapshot();
@@ -228,17 +273,38 @@ export function createAccessController(services: ShellServices) {
     snapshot: store.snapshot,
     subscribe: store.subscribe,
     load,
+    loadFormOptions,
     async createGrant(body: GrantInput) {
       const state = store.snapshot();
       if (!accessViewModel(state).writeGrants) return;
-      await write(() =>
-        state.query.project === null
-          ? client.request('post', '/_pb/grants', { body, idempotencyKey: crypto.randomUUID() })
-          : client.request('post', '/_pb/projects/{project}/grants', {
-              params: { project: state.query.project },
-              body,
-              idempotencyKey: crypto.randomUUID(),
-            }),
+      const confirmation = grantSummary(
+        {
+          type: body.subject.type,
+          email: body.subject.type === 'email' ? body.subject.value : '',
+          group: body.subject.type === 'group' ? body.subject.value : '',
+          provider: body.subject.type === 'group' ? body.subject.provider : '',
+          roleId: body.roleId,
+        },
+        state.catalogue.roles.find((role) => role.id === body.roleId),
+        body.subject.type === 'group'
+          ? state.providers.find(
+              (provider) => body.subject.type === 'group' && provider.id === body.subject.provider,
+            )
+          : undefined,
+        state.query.project,
+        state.organizationName,
+      );
+      await write(
+        () =>
+          state.query.project === null
+            ? client.request('post', '/_pb/grants', { body, idempotencyKey: crypto.randomUUID() })
+            : client.request('post', '/_pb/projects/{project}/grants', {
+                params: { project: state.query.project },
+                body,
+                idempotencyKey: crypto.randomUUID(),
+              }),
+        `Grant created. Access depends on the person's email or the groups their provider reports at sign-in. ${confirmation}`,
+        true,
       );
     },
     async changeGrant(id: string, roleId: string) {
@@ -246,18 +312,21 @@ export function createAccessController(services: ShellServices) {
       if (!grant) return;
       const project = store.snapshot().query.project;
       const headers = { 'If-Match': revisionTag(grant.revision)! };
-      await write(() =>
-        project === null
-          ? client.request('patch', '/_pb/grants/{grant}', {
-              params: { grant: id },
-              headers,
-              body: { roleId },
-            })
-          : client.request('patch', '/_pb/projects/{project}/grants/{grant}', {
-              params: { project, grant: id },
-              headers,
-              body: { roleId },
-            }),
+      await write(
+        () =>
+          project === null
+            ? client.request('patch', '/_pb/grants/{grant}', {
+                params: { grant: id },
+                headers,
+                body: { roleId },
+              })
+            : client.request('patch', '/_pb/projects/{project}/grants/{grant}', {
+                params: { project, grant: id },
+                headers,
+                body: { roleId },
+              }),
+        undefined,
+        true,
       );
     },
     async revoke(id: string) {
@@ -265,13 +334,16 @@ export function createAccessController(services: ShellServices) {
       if (!grant) return;
       const project = store.snapshot().query.project;
       const headers = { 'If-Match': revisionTag(grant.revision)! };
-      await write(() =>
-        project === null
-          ? client.request('delete', '/_pb/grants/{grant}', { params: { grant: id }, headers })
-          : client.request('delete', '/_pb/projects/{project}/grants/{grant}', {
-              params: { project, grant: id },
-              headers,
-            }),
+      await write(
+        () =>
+          project === null
+            ? client.request('delete', '/_pb/grants/{grant}', { params: { grant: id }, headers })
+            : client.request('delete', '/_pb/projects/{project}/grants/{grant}', {
+                params: { project, grant: id },
+                headers,
+              }),
+        undefined,
+        true,
       );
     },
     async createRole(body: RoleInput) {
@@ -311,7 +383,14 @@ export function createAccessController(services: ShellServices) {
           : `/_pb/projects/${encodeURIComponent(project)}/grants`;
       if (result.path !== prefix && !result.path.startsWith(`${prefix}/`)) return;
       if (result.ok) await load(store.snapshot().query, 'Access updated.');
-      else store.set({ stale: true, notice: failureNotice(result) });
+      else
+        store.set({
+          stale: true,
+          notice:
+            result.status === 412 && !rolesView(store.snapshot())
+              ? 'This grant changed. Reload it before saving.'
+              : failureNotice(result),
+        });
     },
     dispose() {
       ++generation;
@@ -328,6 +407,11 @@ export function AccessView({
   controller: AccessController;
 }) {
   const model = accessViewModel(state);
+  const showGrantForms =
+    !state.loading &&
+    (state.query.project === null
+      ? state.organization.includes('org:grants:write')
+      : state.permissions.includes('project:grants:write'));
   return (
     <>
       <ManagementNotice {...state} reload={() => void controller.load(state.query)} />
@@ -517,35 +601,29 @@ export function AccessView({
                   value: () => '',
                   sortable: false,
                   render: (grant) =>
-                    model.writeGrants && revisionTag(grant.revision) ? (
+                    showGrantForms && revisionTag(grant.revision) ? (
                       <details>
-                        <summary className="cursor-pointer underline">Edit grants</summary>
+                        <summary className="cursor-pointer underline">Change role</summary>
                         <div className="mt-3 grid gap-2">
-                          <form
-                            className="grid gap-2"
-                            onSubmit={(event) => {
-                              event.preventDefault();
-                              if (state.busy) return;
-                              const values = formValues(event);
-                              void controller.changeGrant(grant.id, values['roleId'] ?? '');
-                            }}
-                          >
-                            <Field name="roleId" label="Role ID" value={grant.roleId} />
-                            <Button type="submit" disabled={state.busy}>
-                              Change role
-                            </Button>
-                          </form>
+                          <ChangeRoleForm
+                            catalogue={state.catalogue}
+                            project={state.query.project}
+                            currentRole={grant.roleId}
+                            busy={state.busy || state.stale}
+                            retry={() => void controller.loadFormOptions()}
+                            submit={(roleId) => controller.changeGrant(grant.id, roleId)}
+                          />
                           <ConfirmAction
                             key={`${grant.id}:${grant.revision}`}
-                            action="Revoke"
-                            target={grant.principalName ?? grant.principalId ?? grant.id}
+                            action="Revoke grant"
+                            target={`${grant.principalName ?? grant.principalId ?? grant.id} · ${state.catalogue.roles.find((role) => role.id === grant.roleId)?.name ?? grant.roleName}`}
                             scope={
                               state.query.project === null
                                 ? 'Organization'
                                 : `Project: ${state.query.project}`
                             }
-                            description="Revoking this grant removes the access it provides. Other grants still apply. To give this access again, create a new grant."
-                            disabled={state.busy}
+                            description="This removes the access provided by this grant. Other grants still apply. To restore this access, create a new grant."
+                            disabled={state.busy || state.stale}
                             onConfirm={() => void controller.revoke(grant.id)}
                           />
                         </div>
@@ -555,43 +633,20 @@ export function AccessView({
               ]}
             />
           ) : null}
-          {model.writeGrants ? (
+          {showGrantForms ? (
             <details className="detail-group my-6">
               <summary className="cursor-pointer font-semibold">New grant</summary>
-              <form
-                className="my-6 grid gap-3"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (state.busy) return;
-                  const values = formValues(event);
-                  void controller.createGrant({
-                    roleId: values['roleId'] ?? '',
-                    subject:
-                      values['type'] === 'group'
-                        ? {
-                            type: 'group',
-                            provider: values['provider'] ?? '',
-                            value: values['subject'] ?? '',
-                          }
-                        : { type: 'email', value: values['subject'] ?? '' },
-                  });
-                }}
-              >
-                <h2 className="text-lg font-semibold">New grant</h2>
-                <Field name="roleId" label="Role ID" />
-                <Label className="grid gap-1">
-                  Subject type
-                  <Select name="type">
-                    <option value="email">Email</option>
-                    <option value="group">Group</option>
-                  </Select>
-                </Label>
-                <Field name="subject" label="Subject value" />
-                <Field name="provider" label="Provider (groups only)" required={false} />
-                <Button type="submit" disabled={state.busy}>
-                  Create grant
-                </Button>
-              </form>
+              <GrantForm
+                key={state.query.project ?? 'organization'}
+                catalogue={state.catalogue}
+                providers={state.providers}
+                providerStatus={state.providerStatus}
+                project={state.query.project}
+                organization={state.organizationName}
+                busy={state.busy || state.stale}
+                retry={() => void controller.loadFormOptions()}
+                submit={(body) => controller.createGrant(body)}
+              />
             </details>
           ) : null}
         </>

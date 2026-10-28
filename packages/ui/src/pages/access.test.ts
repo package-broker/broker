@@ -58,6 +58,8 @@ function fixture(
             { status: options.status },
           )
         : new Response(null, { status: 204 });
+    if (url === '/_pb/auth/providers') return Response.json({ providers: [], local: true });
+    if (url === '/_pb/organization') return Response.json({ name: 'Fast White Cat' });
     if (url === '/_pb/me/permissions')
       return Response.json({
         organization:
@@ -216,7 +218,10 @@ describe('access', () => {
     await controller.revoke('g_1');
     await controller.revoke('g_1');
     expect(fetch.mock.calls.filter(([, init]) => init.method === 'DELETE')).toHaveLength(1);
-    expect(markup(controller)).toContain('Changed elsewhere. Reload');
+    expect(markup(controller)).toContain('This grant changed. Reload it before saving.');
+    expect(markup(controller)).toContain('>Create grant<');
+    expect(markup(controller)).toContain('>Save role<');
+    expect(markup(controller)).toMatch(/<button[^>]*disabled=""[^>]*>Create grant<\/button>/);
   });
   it('does not render response details', async () => {
     const { controller } = fixture({ status: 400 });
@@ -233,7 +238,7 @@ describe('access', () => {
   it('does not offer or execute writes without permissions', async () => {
     const { controller, fetch } = fixture({ permissions: false });
     await controller.load({ project: null });
-    expect(markup(controller)).not.toContain('>Revoke<');
+    expect(markup(controller)).not.toContain('>Revoke grant<');
     expect(markup(controller)).not.toContain('>Create grant<');
     await controller.revoke('g_1');
     await controller.createGrant({

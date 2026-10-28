@@ -7,6 +7,7 @@ import {
   ReauthConfirmContent,
   ReauthConfirm,
   SetupView,
+  SetupAvailabilityView,
   createLoginController,
   createReauthFlow,
   createSetupController,
@@ -775,5 +776,100 @@ describe('sign-in availability copy', () => {
     );
     expect(html).toContain('Contact your administrator for help signing in.');
     expect(html).not.toContain('<form');
+  });
+});
+
+describe('local policy changes after availability loads', () => {
+  it('switches login to disabled without an invalid-credentials error', async () => {
+    const { client, request } = fakeClient(fail(403, 'local_auth_disabled'));
+    const onSignedIn = vi.fn();
+    const login = createLoginController({ client, onSignedIn });
+    await login.submit({ email: 'a@example.test', password: SENTINEL, code: CODE });
+    expect(login.snapshot()).toMatchObject({ error: 'disabled' });
+    const html = renderToString(
+      createElement(LoginView, {
+        state: login.snapshot(),
+        local: true,
+        providers: [],
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('Sign-in failed');
+    expect(html).toContain('Contact your administrator');
+    expect(onSignedIn).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('distinguishes disabled reauth from invalid credentials', async () => {
+    const { client } = fakeClient(fail(403, 'local_auth_disabled'));
+    const flow = createReauthFlow({
+      client,
+      storage: memoryStorage().storage,
+      now: Date.now,
+      navigate: vi.fn(),
+    });
+    expect(await flow.submitLocal({ password: SENTINEL, code: CODE })).toBe('disabled');
+    expect(everything(flow)).not.toContain(SENTINEL);
+  });
+
+  it.each(['start', 'finish'] as const)('closes React setup when %s is disabled', async (step) => {
+    const { client, request } = fakeClient(
+      ...(step === 'finish'
+        ? [ok(200, { provisioningUri: 'otpauth://totp/test?secret=ABC', secret: 'ABC' })]
+        : []),
+      fail(403, 'local_auth_disabled'),
+    );
+    const onSignedIn = vi.fn();
+    const setup = createSetupController({ client, onSignedIn });
+    await setup.submitToken('T'.repeat(43));
+    if (step === 'finish')
+      await setup.finish({ password: SENTINEL, confirmation: SENTINEL, code: CODE });
+    expect(setup.snapshot()).toMatchObject({
+      stage: 'disabled',
+      busy: false,
+      notice: null,
+      enrollment: null,
+    });
+    const calls = request.mock.calls.length;
+    await setup.submitToken('T'.repeat(43));
+    await setup.finish({ password: SENTINEL, confirmation: SENTINEL, code: CODE });
+    expect(request).toHaveBeenCalledTimes(calls);
+    expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ready', "Sign in with your organization's account"],
+    ['error', 'Setup is unavailable'],
+  ] as const)('uses the standalone setup heading for %s', (availability, title) => {
+    const html = renderToString(
+      createElement(SetupAvailabilityView, { availability, local: false, providers: [] }),
+    );
+    expect(html.replace(/&#x27;/g, "'")).toContain(title);
+    expect(html).toContain('/_pb/ui/#/login');
+    expect(html).not.toContain('<form');
+  });
+
+  it('renders one password-session hint naming both eligible providers', () => {
+    const html = renderToString(
+      createElement(ReauthView, {
+        error: false,
+        busy: false,
+        local: false,
+        providers: ['Dex', 'Okta'].map((displayName) => ({
+          id: displayName,
+          displayName,
+          kind: 'oidc',
+          supportsReauth: true,
+        })),
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    ).replace(/<!-- -->/g, '');
+    expect(html.match(/Signed in with a password\?/g)).toHaveLength(1);
+    expect(html).toContain(
+      'Signed in with a password? Sign out and sign in with Dex or Okta to continue.',
+    );
   });
 });

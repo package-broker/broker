@@ -566,3 +566,50 @@ describe('standalone setup availability rendering', () => {
     });
   });
 });
+
+describe('setup policy changes while open', () => {
+  it.each(['start', 'finish'] as const)(
+    'disables setup on a %s policy refusal and clears secrets',
+    async (step) => {
+      const refused = { status: 403, json: { error: { code: 'local_auth_disabled' } } };
+      const { transport, post } = transportOf(
+        ...(step === 'finish' ? [STARTED, refused] : [refused]),
+      );
+      const controller = createSetupController({ transport });
+      await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
+      await controller.submitToken(TOKEN);
+      if (step === 'finish')
+        await controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
+      expect(controller.snapshot()).toMatchObject({
+        stage: 'disabled',
+        busy: false,
+        notice: null,
+        enrollment: null,
+        problems: [],
+      });
+      const calls = post.mock.calls.length;
+      await controller.submitToken(TOKEN);
+      await controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
+      expect(post).toHaveBeenCalledTimes(calls);
+      for (const secret of [TOKEN, PASSWORD, SECRET])
+        expect(JSON.stringify(controller.snapshot())).not.toContain(secret);
+    },
+  );
+});
+
+it('does not report a listener exception as unavailable setup', async () => {
+  const availability = Promise.resolve({ status: 200, json: { local: true } });
+  const then = vi.spyOn(availability, 'then');
+  const controller = createSetupController({
+    transport: { get: () => availability, post: vi.fn() },
+  });
+  const error = new Error('render failed');
+  const listener = vi.fn(() => {
+    throw error;
+  });
+  controller.subscribe(listener);
+  await expect(then.mock.results[0]!.value).rejects.toBe(error);
+  expect(controller.snapshot().stage).toBe('token');
+  expect(listener).toHaveBeenCalledTimes(1);
+  controller.dispose();
+});

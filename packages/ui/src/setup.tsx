@@ -127,9 +127,8 @@ export function createSetupController(deps: {
     }
   };
 
-  void transport
-    .get('/_pb/auth/providers')
-    .then((response) => {
+  void transport.get('/_pb/auth/providers').then(
+    (response) => {
       if (disposed) return;
       const body = response.json;
       publish({
@@ -140,8 +139,9 @@ export function createSetupController(deps: {
               : 'disabled'
             : 'unavailable',
       });
-    })
-    .catch(() => publish({ stage: 'unavailable' }));
+    },
+    () => publish({ stage: 'unavailable' }),
+  );
 
   return {
     snapshot: () => view,
@@ -164,6 +164,11 @@ export function createSetupController(deps: {
       const response = await send(SETUP_START_PATH, { token: candidate });
       if (response === null) {
         publish({ busy: false, notice: 'unavailable' });
+        return;
+      }
+      if (localAuthDisabled(response)) {
+        clearSecrets();
+        publish({ busy: false, stage: 'disabled', notice: null, enrollment: null, problems: [] });
         return;
       }
       if (response.status === 200) {
@@ -213,6 +218,11 @@ export function createSetupController(deps: {
         publish({ busy: false, stage: 'uncertain', notice: null, enrollment: null });
         return;
       }
+      if (localAuthDisabled(response)) {
+        clearSecrets();
+        publish({ busy: false, stage: 'disabled', notice: null, enrollment: null, problems: [] });
+        return;
+      }
       if (response.status === 204) {
         clearSecrets();
         publish({ busy: false, stage: 'done', notice: null, enrollment: null });
@@ -241,6 +251,16 @@ export function createSetupController(deps: {
       listeners.clear();
     },
   };
+}
+
+function localAuthDisabled(response: SetupResponse): boolean {
+  const body = response.json;
+  return (
+    response.status === 403 &&
+    isRecord(body) &&
+    isRecord(body['error']) &&
+    body['error']['code'] === 'local_auth_disabled'
+  );
 }
 
 function noticeForStart(status: number): SetupNotice {

@@ -6,6 +6,7 @@ const API_ERROR_CODES = [
   'invalid_request',
   'unauthorized',
   'forbidden',
+  'local_auth_disabled',
   'reauth_required',
   'not_found',
   'conflict',

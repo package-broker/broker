@@ -29,12 +29,12 @@ beforeAll(async () => {
     import React from 'react';
     import { createRoot } from 'react-dom/client';
     import { createApiClient } from './api';
-    import { LoginScreen, ReauthScreen, SetupScreen } from './auth';
+    import { LoginScreen, ReauthScreen, SetupScreen, createReauthFlow } from './auth';
     const client = createApiClient({ fetch: window.fetch.bind(window), readCookie: () => undefined });
     const screen = globalThis.fixtureScreen;
     const props = { client, onSignedIn: () => {} };
     createRoot(document.getElementById('root')).render(screen === 'reauth'
-      ? <ReauthScreen client={client} flow={{}} onDone={() => {}} />
+      ? <ReauthScreen client={client} flow={createReauthFlow({ client, storage: sessionStorage, now: Date.now, navigate: () => {} })} onDone={() => {}} />
       : screen === 'setup' ? <SetupScreen {...props} /> : <LoginScreen {...props} />);
   `);
   setupScript = await bundle("import './setup';");
@@ -97,6 +97,9 @@ describe('sign-in and setup availability in the browser', () => {
               '/_pb/ui/#/login',
             );
             await browserExpect(page.getByText(/Password setup is unavailable/)).toBeVisible();
+            await browserExpect(
+              page.getByRole('heading', { name: "Sign in with your organization's account" }),
+            ).toBeVisible();
           }
           await browserExpect(page.locator('input')).toHaveCount(0);
         }
@@ -121,6 +124,10 @@ describe('sign-in and setup availability in the browser', () => {
         page.getByText('Sign-in options could not be loaded. Reload the page to try again.'),
       ).toBeVisible();
       await browserExpect(page.locator('input')).toHaveCount(0);
+      if (screen === 'setup' || screen === 'standalone')
+        await browserExpect(
+          page.getByRole('heading', { name: 'Setup is unavailable' }),
+        ).toBeVisible();
       await browserExpect(page.locator('body')).not.toContainText('private-request-data');
       await page.unroute('**/_pb/auth/providers');
     });
@@ -140,3 +147,88 @@ describe('sign-in and setup availability in the browser', () => {
     await page.unroute('**/_pb/auth/providers');
   });
 });
+
+for (const screen of ['login', 'reauth', 'setup', 'standalone'] as const) {
+  for (const step of screen === 'setup' || screen === 'standalone'
+    ? ['start', 'finish']
+    : ['submit']) {
+    it(`${screen} switches to disabled when ${step} reports a policy change`, async (context) => {
+      if (!fixture) context.skip('Chromium cannot start in this environment');
+      const { page, browserExpect } = fixture!;
+      await page.route('**/_pb/auth/providers', (route: BrowserRoute) =>
+        route.fulfill({
+          json: {
+            local: true,
+            providers: ['Dex', 'Okta'].map((displayName) => ({
+              ...provider,
+              id: displayName,
+              displayName,
+            })),
+          },
+        }),
+      );
+      await page.route(
+        '**/_pb/auth/local/**',
+        (route: BrowserRoute & { request(): { url(): string } }) => {
+          if (step === 'finish' && route.request().url().endsWith('/start'))
+            return route.fulfill({
+              json: { provisioningUri: 'otpauth://totp/test?secret=ABC', secret: 'ABC' },
+            });
+          return route.fulfill({ status: 403, json: { error: { code: 'local_auth_disabled' } } });
+        },
+      );
+      try {
+        await fixture!.mount(screen === 'standalone' ? setupScript : authScript, {
+          fixtureScreen: screen,
+        });
+        if (screen === 'setup' || screen === 'standalone') {
+          await page.getByLabel('Setup token', { exact: true }).fill('T'.repeat(43));
+          await page.locator('button[type="submit"]').click();
+          if (step === 'finish') {
+            await page.getByLabel('Password', { exact: true }).fill('correct horse battery staple');
+            await page
+              .getByLabel('Confirm password', { exact: true })
+              .fill('correct horse battery staple');
+            await page
+              .getByLabel(
+                screen === 'standalone'
+                  ? 'Six digit code from your authenticator'
+                  : 'Authenticator code',
+                { exact: true },
+              )
+              .fill('123456');
+            await page.locator('button[type="submit"]').click();
+          }
+          await browserExpect(
+            page.getByRole('heading', { name: "Sign in with your organization's account" }),
+          ).toBeVisible();
+          await browserExpect(page.getByText(/Password setup is unavailable/)).toBeVisible();
+        } else {
+          if (screen === 'login')
+            await page.getByLabel('E-mail', { exact: true }).fill('a@example.test');
+          await page.getByLabel('Password', { exact: true }).fill('correct horse battery staple');
+          await page.getByLabel('Authenticator code', { exact: true }).fill('123456');
+          await page.locator('button[type="submit"]').click();
+          await browserExpect(
+            page.getByRole('button', {
+              name: screen === 'login' ? 'Sign in with Dex' : 'Confirm with Dex',
+            }),
+          ).toBeVisible();
+          if (screen === 'reauth') {
+            const hint = page.getByText(
+              'Signed in with a password? Sign out and sign in with Dex or Okta to continue.',
+              { exact: true },
+            );
+            await browserExpect(hint).toHaveCount(1);
+          }
+        }
+        await browserExpect(page.locator('input')).toHaveCount(0);
+        await browserExpect(page.locator('body')).not.toContainText('Check your details');
+        await browserExpect(page.locator('body')).not.toContainText('different address');
+      } finally {
+        await page.unroute('**/_pb/auth/providers');
+        await page.unroute('**/_pb/auth/local/**');
+      }
+    });
+  }
+}

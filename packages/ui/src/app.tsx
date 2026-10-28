@@ -33,24 +33,19 @@ import { Label } from './components/ui/label.js';
 import { Select } from './components/ui/select.js';
 import { cn } from './lib/utils.js';
 import { buildListFilterHash } from './page-hash.js';
-import { AccessPage } from './pages/access.js';
-import { AuditPage } from './pages/audit.js';
-import { ImportPage } from './pages/import.js';
-import { PackagesPage } from './pages/packages.js';
-import { ProjectsPage } from './pages/projects.js';
-import { SourcesPage } from './pages/sources.js';
-import { clearPendingTokenIssue, TokensPage } from './pages/tokens.js';
+import { clearPendingTokenIssue } from './token-pending.js';
 import type { PendingStorage } from './pending.js';
+import { PageLoader } from './page-loader.js';
 
 export const PAGES = {
-  projects: ProjectsPage,
-  access: AccessPage,
-  sources: SourcesPage,
-  packages: PackagesPage,
-  tokens: TokensPage,
-  audit: AuditPage,
-  import: ImportPage,
-} as const satisfies Record<string, ComponentType>;
+  projects: () => import('./pages/projects.js').then((page) => page.ProjectsPage),
+  access: () => import('./pages/access.js').then((page) => page.AccessPage),
+  sources: () => import('./pages/sources.js').then((page) => page.SourcesPage),
+  packages: () => import('./pages/packages.js').then((page) => page.PackagesPage),
+  tokens: () => import('./pages/tokens.js').then((page) => page.TokensPage),
+  audit: () => import('./pages/audit.js').then((page) => page.AuditPage),
+  import: () => import('./pages/import.js').then((page) => page.ImportPage),
+} as const satisfies Record<string, () => Promise<ComponentType>>;
 
 export type PageRoute = keyof typeof PAGES;
 export type Route = PageRoute | 'login' | 'setup' | 'reauth';
@@ -464,7 +459,7 @@ function AppContent(props: { client?: AuthClient }) {
         {Page === null ? (
           <ReauthScreen client={client} flow={flow} onDone={() => go(returnHash)} />
         ) : (
-          <Page />
+          <PageLoader key={resolved.route} load={Page} />
         )}
       </Shell>
       <ReauthConfirm flow={flow} />

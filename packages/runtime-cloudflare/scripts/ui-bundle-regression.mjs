@@ -52,9 +52,12 @@ export async function checkUiBundle({ request, assetsDir, https }) {
   );
   assert.ok(references.some((name) => name.endsWith('.js')));
   assert.ok(references.some((name) => name.endsWith('.css')));
+  for (const name of references) assert.ok(Object.hasOwn(manifest.files, name));
   for (const [path, name] of [
     ['/_pb/ui/', manifest.entry],
-    ...references.map((name) => [`/_pb/ui/${name}`, name]),
+    ...Object.keys(manifest.files)
+      .filter((name) => name !== manifest.entry)
+      .map((name) => [`/_pb/ui/${name}`, name]),
   ]) {
     assert.ok(Object.hasOwn(manifest.files, name));
     const response = await request(path, {});
@@ -67,7 +70,7 @@ export async function checkUiBundle({ request, assetsDir, https }) {
     );
     assert.equal(
       response.headers.get('cache-control'),
-      name === manifest.entry ? 'no-cache' : 'public, max-age=31536000, immutable',
+      name.endsWith('.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
     );
     const body = await readFile(join(assetsDir, name));
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), body);

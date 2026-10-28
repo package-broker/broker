@@ -22,7 +22,7 @@ const draft: ProjectDraft = { name: '', slug: '', manualSlug: false, tokenMaxSco
 
 describe('project draft', () => {
   it.each([
-    ['FastWhiteCat', 'fastwhitecat'],
+    ['AcmeCompany', 'acmecompany'],
     ['  Fast & white / cat! ', 'fast-white-cat'],
     ['a'.repeat(65), 'a'.repeat(64)],
     ['a'.repeat(63) + ' cat', 'a'.repeat(63)],
@@ -31,8 +31,8 @@ describe('project draft', () => {
     expect(suggestedSlug(name)).toBe(expected);
   });
   it('stops suggesting after manual edits and resumes on request', () => {
-    const automatic = changeName(draft, 'FastWhiteCat');
-    expect(automatic.slug).toBe('fastwhitecat');
+    const automatic = changeName(draft, 'AcmeCompany');
+    expect(automatic.slug).toBe('acmecompany');
     const manual = changeSlug(automatic, 'custom');
     const renamed = changeName(manual, 'Other name');
     expect(renamed.slug).toBe('custom');
@@ -74,13 +74,13 @@ describe('project draft', () => {
     );
   });
   it('sends an explicit read cap and omits approval on create and update', () => {
-    const filled = changeName(draft, 'FastWhiteCat');
+    const filled = changeName(draft, 'AcmeCompany');
     expect(projectBody(filled, false)).toEqual({
-      name: 'FastWhiteCat',
-      slug: 'fastwhitecat',
+      name: 'AcmeCompany',
+      slug: 'acmecompany',
       tokenMaxScope: 'read',
     });
-    expect(projectBody(filled, true)).toEqual({ name: 'FastWhiteCat', tokenMaxScope: 'read' });
+    expect(projectBody(filled, true)).toEqual({ name: 'AcmeCompany', tokenMaxScope: 'read' });
   });
   it('explains lowering, raising and unchanged caps', () => {
     expect(capNotice('full', 'read')).toBe(LOWER_CAP_NOTICE);

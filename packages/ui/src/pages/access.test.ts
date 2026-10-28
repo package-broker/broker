@@ -59,7 +59,7 @@ function fixture(
           )
         : new Response(null, { status: 204 });
     if (url === '/_pb/auth/providers') return Response.json({ providers: [], local: true });
-    if (url === '/_pb/organization') return Response.json({ name: 'Fast White Cat' });
+    if (url === '/_pb/organization') return Response.json({ name: 'Acme Company' });
     if (url === '/_pb/me/permissions')
       return Response.json({
         organization:

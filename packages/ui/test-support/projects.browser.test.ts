@@ -158,17 +158,17 @@ describe('project form browser interactions', () => {
     const form = page.getByRole('form', { name: 'New project', exact: true });
     const name = form.getByLabel('Project name', { exact: true });
     const slug = form.getByLabel('Project slug', { exact: true });
-    await name.fill('FastWhiteCat');
-    await browserExpect(slug).toHaveValue('fastwhitecat');
+    await name.fill('AcmeCompany');
+    await browserExpect(slug).toHaveValue('acmecompany');
     await browserExpect(
-      form.getByText(`${fixture!.origin}/fastwhitecat`, { exact: true }),
+      form.getByText(`${fixture!.origin}/acmecompany`, { exact: true }),
     ).toBeVisible();
     await slug.fill('chosen');
     await name.fill('New name');
     await browserExpect(slug).toHaveValue('chosen');
     await form.getByRole('button', { name: 'Use suggested slug' }).click();
     await browserExpect(slug).toHaveValue('new-name');
-    await name.fill('FastWhiteCat');
+    await name.fill('AcmeCompany');
     await form.getByRole('button', { name: /^Create project$/ }).click();
     await browserExpect(slug).toBeFocused();
     await browserExpect(slug).toHaveAttribute('aria-invalid', 'true');
@@ -178,11 +178,11 @@ describe('project form browser interactions', () => {
     expect(requests).toEqual([
       {
         method: 'POST',
-        body: { name: 'FastWhiteCat', slug: 'fastwhitecat', tokenMaxScope: 'read' },
+        body: { name: 'AcmeCompany', slug: 'acmecompany', tokenMaxScope: 'read' },
       },
     ]);
-    await browserExpect(name).toHaveValue('FastWhiteCat');
-    await browserExpect(slug).toHaveValue('fastwhitecat');
+    await browserExpect(name).toHaveValue('AcmeCompany');
+    await browserExpect(slug).toHaveValue('acmecompany');
     await browserExpect(page.getByText('private-server-message')).toHaveCount(0);
     await slug.fill('invalid!');
     await browserExpect(

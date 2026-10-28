@@ -371,7 +371,7 @@ export function GrantForm(props: GrantFormProps) {
             type="email"
             name="email"
             autoComplete="email"
-            placeholder="alex@fastwhitecat.com"
+            placeholder="alex@acme-company.example"
             value={draft.email}
             onChange={(event) => update({ email: event.target.value })}
           />

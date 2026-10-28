@@ -75,6 +75,7 @@ describe('uncertain finish recovery', () => {
     const navigate = vi.fn();
     const dispose = mountSetup(root as unknown as HTMLElement, { transport, navigate });
     try {
+      await vi.waitFor(() => expect(byId('setup-token')).toBeDefined());
       byId('setup-token').value = TOKEN;
       byId('token-form').listeners['submit']!();
       await vi.waitFor(() => expect(byId('finish-form')).toBeDefined());
@@ -132,17 +133,21 @@ describe('curl setup credential handling', () => {
 });
 
 function transportOf(...responses: (SetupResponse | Error)[]) {
+  const get = vi
+    .fn<SetupTransport['get']>()
+    .mockResolvedValue({ status: 200, json: { local: true } });
   const post = vi.fn<SetupTransport['post']>();
   for (const response of responses) {
     if (response instanceof Error) post.mockRejectedValueOnce(response);
     else post.mockResolvedValueOnce(response);
   }
-  return { transport: { post } satisfies SetupTransport, post };
+  return { transport: { get, post } satisfies SetupTransport, get, post };
 }
 
 async function enrolled(...rest: (SetupResponse | Error)[]) {
   const harness = transportOf(STARTED, ...rest);
   const controller = createSetupController({ transport: harness.transport });
+  await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
   await controller.submitToken(TOKEN);
   return { ...harness, controller };
 }
@@ -172,7 +177,7 @@ describe('setup request mapping', () => {
     expect(controller.snapshot().stage).toBe('done');
   });
 
-  it('only ever calls the two existing setup endpoints', async () => {
+  it('posts only to the two existing setup endpoints', async () => {
     const { controller, post } = await enrolled(
       { status: 400, json: null },
       { status: 204, json: null },
@@ -183,9 +188,10 @@ describe('setup request mapping', () => {
     expect([...paths].sort()).toEqual([SETUP_FINISH_PATH, SETUP_START_PATH].sort());
   });
 
-  it('rejects a malformed token without any request', async () => {
+  it('rejects a malformed token without a setup POST', async () => {
     const { transport, post } = transportOf();
     const controller = createSetupController({ transport });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     await controller.submitToken('short');
     await controller.submitToken(`${'a'.repeat(42)}!`);
     expect(post).not.toHaveBeenCalled();
@@ -214,6 +220,7 @@ describe('setup responses', () => {
   ] as const)('maps start status %i to %s and stays on the token step', async (status, notice) => {
     const { transport } = transportOf({ status, json: null });
     const controller = createSetupController({ transport });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     await controller.submitToken(TOKEN);
     expect(controller.snapshot()).toMatchObject({ stage: 'token', notice, busy: false });
     expect(controller.snapshot().enrollment).toBeNull();
@@ -228,6 +235,7 @@ describe('setup responses', () => {
   it('treats a network failure on start as unavailable', async () => {
     const { transport } = transportOf(new Error('offline'));
     const controller = createSetupController({ transport });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     await controller.submitToken(TOKEN);
     expect(controller.snapshot().notice).toBe('unavailable');
   });
@@ -235,6 +243,7 @@ describe('setup responses', () => {
   it('treats a start response without the expected fields as unavailable', async () => {
     const { transport } = transportOf({ status: 200, json: { secret: SECRET } });
     const controller = createSetupController({ transport });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     await controller.submitToken(TOKEN);
     expect(controller.snapshot()).toMatchObject({ stage: 'token', notice: 'unavailable' });
   });
@@ -246,6 +255,7 @@ describe('setup responses', () => {
       json: { provisioningUri: long, secret: SECRET },
     });
     const controller = createSetupController({ transport });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     await controller.submitToken(TOKEN);
     expect(controller.snapshot()).toMatchObject({ stage: 'enroll', notice: 'qr_unavailable' });
     expect(controller.snapshot().enrollment?.qr).toBeNull();
@@ -303,7 +313,8 @@ describe('setup responses', () => {
             release = resolve;
           }),
       );
-    const controller = createSetupController({ transport: { post } });
+    const controller = createSetupController({ transport: { post, get: transportOf().get } });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     await controller.submitToken(TOKEN);
     const first = controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
     await controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
@@ -316,6 +327,7 @@ describe('setup responses', () => {
   it('notifies subscribers and stops after dispose', async () => {
     const { transport } = transportOf(STARTED);
     const controller = createSetupController({ transport });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
     const listener = vi.fn();
     const unsubscribe = controller.subscribe(listener);
     await controller.submitToken(TOKEN);
@@ -429,4 +441,175 @@ describe('fetch transport', () => {
       json: null,
     });
   });
+});
+
+describe('setup availability', () => {
+  it('ignores tokens and finishes while checking, then keeps disabled setup closed', async () => {
+    let resolve!: (response: SetupResponse) => void;
+    const get = vi.fn<SetupTransport['get']>(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const post = vi.fn<SetupTransport['post']>();
+    const controller = createSetupController({ transport: { get, post } });
+    expect(controller.snapshot().stage).toBe('checking');
+    await controller.submitToken(TOKEN);
+    await controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
+    expect(post).not.toHaveBeenCalled();
+    resolve({ status: 200, json: { local: false } });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('disabled'));
+    await controller.submitToken(TOKEN);
+    expect(post).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledExactlyOnceWith('/_pb/auth/providers');
+    expect(JSON.stringify(controller.snapshot())).not.toContain(TOKEN);
+  });
+
+  it.each([
+    { status: 503, json: { local: true } },
+    { status: 200, json: {} },
+    { status: 200, json: { local: 'true' } },
+    new Error('private-request-data'),
+  ])('fails closed when availability cannot be confirmed', async (response) => {
+    const get = vi.fn<SetupTransport['get']>();
+    if (response instanceof Error) get.mockRejectedValue(response);
+    else get.mockResolvedValue(response);
+    const post = vi.fn<SetupTransport['post']>();
+    const controller = createSetupController({ transport: { get, post } });
+    await vi.waitFor(() => expect(controller.snapshot().stage).toBe('unavailable'));
+    await controller.submitToken(TOKEN);
+    expect(post).not.toHaveBeenCalled();
+    expect(JSON.stringify(controller.snapshot())).not.toContain('private-request-data');
+  });
+
+  it('ignores availability responses after disposal', async () => {
+    let resolve!: (response: SetupResponse) => void;
+    const controller = createSetupController({
+      transport: {
+        get: () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+        post: vi.fn(),
+      },
+    });
+    const listener = vi.fn();
+    controller.subscribe(listener);
+    controller.dispose();
+    const readJson = vi.fn(() => ({ local: true }));
+    resolve({
+      status: 200,
+      get json() {
+        return readJson();
+      },
+    });
+    await Promise.resolve();
+    expect(readJson).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    expect(controller.snapshot().stage).toBe('checking');
+  });
+});
+
+describe('standalone setup availability rendering', () => {
+  it.each([
+    [
+      { status: 200, json: { local: false } },
+      "Sign in with your organization's account",
+      'Password setup is unavailable',
+    ],
+    [{ status: 503, json: null }, 'Setup is unavailable', 'Sign-in options could not be loaded'],
+  ])('shows the availability heading and login link for %j', async (response, title, body) => {
+    const root = new TestElement('main');
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => new TestElement(tag),
+      getElementById: (id: string) => root.all().find((node) => node.attributes['id'] === id),
+    });
+    const post = vi.fn<SetupTransport['post']>();
+    const dispose = mountSetup(root as unknown as HTMLElement, {
+      transport: { get: async () => response, post },
+      navigate: vi.fn(),
+    });
+    try {
+      expect(root.text()).toContain('Checking sign-in options');
+      expect(root.all().filter((node) => node.tag === 'input')).toHaveLength(0);
+      await vi.waitFor(() => expect(root.text()).toContain(body));
+      expect(
+        root
+          .all()
+          .find((node) => node.tag === 'h1')
+          ?.text(),
+      ).toBe(title);
+      expect(root.all().filter((node) => node.tag === 'input')).toHaveLength(0);
+      expect(root.all().find((node) => node.tag === 'a')?.attributes['href']).toBe(
+        '/_pb/ui/#/login',
+      );
+      expect(post).not.toHaveBeenCalled();
+    } finally {
+      dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('fetches availability without credentials in URLs, bodies, referrers or cache', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ local: false, providers: [] }));
+    const transport = createFetchTransport(fetchImpl as unknown as typeof fetch);
+    expect(await transport.get('/_pb/auth/providers')).toEqual({
+      status: 200,
+      json: { local: false, providers: [] },
+    });
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith('/_pb/auth/providers', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    });
+  });
+});
+
+describe('setup policy changes while open', () => {
+  it.each(['start', 'finish'] as const)(
+    'disables setup on a %s policy refusal and clears secrets',
+    async (step) => {
+      const refused = { status: 403, json: { error: { code: 'local_auth_disabled' } } };
+      const { transport, post } = transportOf(
+        ...(step === 'finish' ? [STARTED, refused] : [refused]),
+      );
+      const controller = createSetupController({ transport });
+      await vi.waitFor(() => expect(controller.snapshot().stage).toBe('token'));
+      await controller.submitToken(TOKEN);
+      if (step === 'finish')
+        await controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
+      expect(controller.snapshot()).toMatchObject({
+        stage: 'disabled',
+        busy: false,
+        notice: null,
+        enrollment: null,
+        problems: [],
+      });
+      const calls = post.mock.calls.length;
+      await controller.submitToken(TOKEN);
+      await controller.finish({ password: PASSWORD, confirmation: PASSWORD, code: '123456' });
+      expect(post).toHaveBeenCalledTimes(calls);
+      for (const secret of [TOKEN, PASSWORD, SECRET])
+        expect(JSON.stringify(controller.snapshot())).not.toContain(secret);
+    },
+  );
+});
+
+it('does not report a listener exception as unavailable setup', async () => {
+  const availability = Promise.resolve({ status: 200, json: { local: true } });
+  const then = vi.spyOn(availability, 'then');
+  const controller = createSetupController({
+    transport: { get: () => availability, post: vi.fn() },
+  });
+  const error = new Error('render failed');
+  const listener = vi.fn(() => {
+    throw error;
+  });
+  controller.subscribe(listener);
+  await expect(then.mock.results[0]!.value).rejects.toBe(error);
+  expect(controller.snapshot().stage).toBe('token');
+  expect(listener).toHaveBeenCalledTimes(1);
+  controller.dispose();
 });

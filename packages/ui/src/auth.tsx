@@ -19,6 +19,7 @@ import {
   type PendingDisplay,
 } from './pending.js';
 import { encodeQr, type QrMatrix } from './qr.js';
+import { APP_PATH } from './app-path.js';
 import { buildListFilterHash, type HashRoute } from './page-hash.js';
 import { Alert, AlertDescription } from './components/ui/alert.js';
 import { Button } from './components/ui/button.js';
@@ -147,9 +148,13 @@ export async function startSso(
   return 'navigated';
 }
 
+function localAuthDisabled(result: ApiResult<unknown>): boolean {
+  return !result.ok && result.status === 403 && result.code === 'local_auth_disabled';
+}
+
 export interface LoginState {
   readonly status: 'idle' | 'busy' | 'signed-in' | 'error';
-  readonly error: 'invalid' | 'unavailable' | null;
+  readonly error: 'invalid' | 'unavailable' | 'disabled' | null;
 }
 
 export interface LoginInput {
@@ -174,7 +179,14 @@ export function createLoginController(deps: { client: AuthClient; onSignedIn: ()
         deps.onSignedIn();
         return;
       }
-      store.set({ status: 'error', error: result.status === 0 ? 'unavailable' : 'invalid' });
+      store.set({
+        status: 'error',
+        error: localAuthDisabled(result)
+          ? 'disabled'
+          : result.status === 0
+            ? 'unavailable'
+            : 'invalid',
+      });
     },
   };
 }
@@ -303,11 +315,14 @@ export function createReauthFlow(deps: {
       for (const listener of replayListeners) listener(outcome);
     },
 
-    async submitLocal(input: { password: string; code: string }): Promise<'done' | 'refused'> {
+    async submitLocal(input: {
+      password: string;
+      code: string;
+    }): Promise<'done' | 'refused' | 'disabled'> {
       const result = await deps.client.request('post', '/_pb/auth/local/reauth', {
         body: { password: input.password, code: input.code },
       });
-      return result.ok ? 'done' : 'refused';
+      return result.ok ? 'done' : localAuthDisabled(result) ? 'disabled' : 'refused';
     },
   };
 }
@@ -335,7 +350,7 @@ export const SETUP_NOTICE_TEXT: Readonly<Record<SetupNotice, string>> = {
 };
 
 export interface SetupState {
-  readonly stage: 'token' | 'enroll' | 'done' | 'uncertain';
+  readonly stage: 'token' | 'enroll' | 'done' | 'uncertain' | 'disabled';
   readonly busy: boolean;
   readonly notice: SetupNotice | null;
   readonly enrollment: { readonly secret: string; readonly qr: QrMatrix | null } | null;
@@ -383,6 +398,11 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
       const result = await deps.client.request('post', '/_pb/auth/local/setup/start', {
         body: { token: candidate },
       });
+      if (localAuthDisabled(result)) {
+        token = null;
+        store.set({ busy: false, stage: 'disabled', notice: null, enrollment: null });
+        return;
+      }
       if (!result.ok) {
         store.set({ busy: false, notice: startNotice(result.status) });
         return;
@@ -429,6 +449,11 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
         token = null;
         store.set({ busy: false, stage: 'done', enrollment: null });
         deps.onSignedIn?.();
+        return;
+      }
+      if (localAuthDisabled(result)) {
+        token = null;
+        store.set({ busy: false, stage: 'disabled', notice: null, enrollment: null });
         return;
       }
       if (result.status === 0 || result.status >= 500) {
@@ -534,15 +559,30 @@ function SsoButtons(props: {
   );
 }
 
+function AvailabilityMessage(props: {
+  status: 'loading' | 'ready' | 'error';
+  local: boolean;
+  providers: readonly AuthProvider[];
+}) {
+  if (props.status === 'loading') return <p role="status">Loading sign-in options…</p>;
+  if (props.status === 'error')
+    return <p role="alert">Sign-in options could not be loaded. Reload the page to try again.</p>;
+  if (!props.local && props.providers.length === 0)
+    return <p>Contact your administrator for help signing in.</p>;
+  return null;
+}
+
 export function LoginView(props: {
   state: LoginState;
   providers: readonly AuthProvider[];
   local: boolean;
+  availability?: 'loading' | 'ready' | 'error';
   ssoError?: 'refused' | 'failed' | null;
   onSubmit: (input: LoginInput) => void;
   onSso: (provider: string) => void;
 }) {
   const busy = props.state.status === 'busy';
+  const local = props.local && props.state.error !== 'disabled';
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
@@ -552,7 +592,12 @@ export function LoginView(props: {
         <CardDescription>Package Broker</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {props.state.error === null ? null : (
+        <AvailabilityMessage
+          status={props.availability ?? 'ready'}
+          local={local}
+          providers={props.providers}
+        />
+        {props.state.error === null || props.state.error === 'disabled' ? null : (
           <Alert variant="destructive">
             <AlertDescription>
               {props.state.error === 'unavailable'
@@ -566,7 +611,7 @@ export function LoginView(props: {
             <AlertDescription>{SSO_TEXT[props.ssoError]}</AlertDescription>
           </Alert>
         ) : null}
-        {props.local ? (
+        {local && (props.availability ?? 'ready') === 'ready' ? (
           <form
             className="grid gap-4"
             onSubmit={(event) => {
@@ -612,11 +657,13 @@ export function LoginView(props: {
 export function ReauthView(props: {
   providers: readonly AuthProvider[];
   local: boolean;
+  availability?: 'loading' | 'ready' | 'error';
   error: boolean;
   busy: boolean;
   onSubmit: (input: { password: string; code: string }) => void;
   onSso: (provider: string) => void;
 }) {
+  const providers = props.providers.filter((provider) => provider.supportsReauth);
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
@@ -626,6 +673,11 @@ export function ReauthView(props: {
         <CardDescription>This action needs a fresh sign-in.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
+        <AvailabilityMessage
+          status={props.availability ?? 'ready'}
+          local={props.local}
+          providers={providers}
+        />
         {props.error ? (
           <Alert variant="destructive">
             <AlertDescription>
@@ -633,7 +685,7 @@ export function ReauthView(props: {
             </AlertDescription>
           </Alert>
         ) : null}
-        {props.local ? (
+        {props.local && (props.availability ?? 'ready') === 'ready' ? (
           <form
             className="grid gap-4"
             onSubmit={(event) => {
@@ -664,11 +716,17 @@ export function ReauthView(props: {
           </form>
         ) : null}
         <SsoButtons
-          providers={props.providers.filter((provider) => provider.supportsReauth)}
+          providers={providers}
           busy={props.busy}
           onSso={props.onSso}
           verb="Confirm with"
         />
+        {!props.local && (props.availability ?? 'ready') === 'ready' && providers.length > 0 ? (
+          <p>
+            Signed in with a password? Sign out and sign in with{' '}
+            {providers.map((provider) => provider.displayName).join(' or ')} to continue.
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -941,22 +999,44 @@ export function SetupView(props: {
 }
 
 export function useProviders(client: AuthClient) {
-  const [state, setState] = useState<{ providers: AuthProvider[]; local: boolean }>({
-    providers: [],
-    local: true,
-  });
+  const [state, setState] = useState<{
+    client: AuthClient;
+    providers: AuthProvider[];
+    local: boolean;
+    availability: 'loading' | 'ready' | 'error';
+  }>({ client, providers: [], local: false, availability: 'loading' });
   useEffect(() => {
     let live = true;
-    void client.request('get', '/_pb/auth/providers').then((result) => {
-      if (live && result.ok && result.data) {
-        setState({ providers: result.data.providers, local: result.data.local });
-      }
-    });
+    void client
+      .request('get', '/_pb/auth/providers')
+      .then((result) => {
+        if (!live) return;
+        if (
+          result.ok &&
+          result.data &&
+          typeof result.data.local === 'boolean' &&
+          Array.isArray(result.data.providers)
+        ) {
+          setState({
+            client,
+            providers: result.data.providers,
+            local: result.data.local,
+            availability: 'ready',
+          });
+        } else {
+          setState({ client, providers: [], local: false, availability: 'error' });
+        }
+      })
+      .catch(() => {
+        if (live) setState({ client, providers: [], local: false, availability: 'error' });
+      });
     return () => {
       live = false;
     };
   }, [client]);
-  return state;
+  return state.client === client
+    ? state
+    : { providers: [], local: false, availability: 'loading' as const };
 }
 
 const assignLocation = (location: string): void => {
@@ -970,13 +1050,14 @@ export function LoginScreen(props: { client: AuthClient; onSignedIn: () => void 
     [client, onSignedIn],
   );
   const state = useStore(controller);
-  const { providers, local } = useProviders(client);
+  const { providers, local, availability } = useProviders(client);
   const [ssoError, setSsoError] = useState<'refused' | 'failed' | null>(null);
   return (
     <LoginView
       state={state}
       providers={providers}
       local={local}
+      availability={availability}
       ssoError={ssoError}
       onSubmit={(input) => void controller.submit(input)}
       onSso={(provider) => {
@@ -991,6 +1072,33 @@ export function LoginScreen(props: { client: AuthClient; onSignedIn: () => void 
   );
 }
 
+export function SetupAvailabilityView(props: {
+  availability: 'loading' | 'ready' | 'error';
+  local: boolean;
+  providers: readonly AuthProvider[];
+}) {
+  return (
+    <div className="mx-auto mt-12 max-w-md grid gap-4">
+      <h1 id="page-heading" tabIndex={-1} className="font-semibold">
+        {props.availability === 'error'
+          ? 'Setup is unavailable'
+          : props.availability === 'ready'
+            ? "Sign in with your organization's account"
+            : 'First-run setup'}
+      </h1>
+      <AvailabilityMessage
+        status={props.availability}
+        local={props.local}
+        providers={props.providers}
+      />
+      {props.availability === 'ready' ? (
+        <p>Password setup is unavailable. Sign in to continue.</p>
+      ) : null}
+      <a href={`${APP_PATH}#/login`}>Go to sign in</a>
+    </div>
+  );
+}
+
 export function SetupScreen(props: { client: AuthClient; onSignedIn: () => void }) {
   const { client, onSignedIn } = props;
   const controller = useMemo(
@@ -998,6 +1106,11 @@ export function SetupScreen(props: { client: AuthClient; onSignedIn: () => void 
     [client, onSignedIn],
   );
   const state = useStore(controller);
+  const { providers, local, availability } = useProviders(client);
+  if (availability !== 'ready' || !local || state.stage === 'disabled')
+    return (
+      <SetupAvailabilityView availability={availability} local={false} providers={providers} />
+    );
   return (
     <SetupView
       state={state}
@@ -1013,13 +1126,15 @@ export function ReauthScreen(props: {
   onDone: () => void;
 }) {
   const { client, flow, onDone } = props;
-  const { providers, local } = useProviders(client);
+  const { providers, local, availability } = useProviders(client);
   const [error, setError] = useState(false);
+  const [disabled, setDisabled] = useState(false);
   const [busy, setBusy] = useState(false);
   return (
     <ReauthView
       providers={providers}
-      local={local}
+      local={local && !disabled}
+      availability={availability}
       error={error}
       busy={busy}
       onSubmit={(input) => {
@@ -1030,6 +1145,8 @@ export function ReauthScreen(props: {
           if (outcome === 'done') {
             flow.restore();
             onDone();
+          } else if (outcome === 'disabled') {
+            setDisabled(true);
           } else {
             setError(true);
           }

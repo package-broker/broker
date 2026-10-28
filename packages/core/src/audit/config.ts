@@ -170,10 +170,10 @@ export function brokerAuditProblems(config: BrokerConfig, target: Platform): str
     const section = value[name];
     if (section === undefined) continue;
     if (!object(section)) {
-      problems.push(`audit.${name}: must be an object`);
+      problems.push('audit.' + name + ': must be an object');
       continue;
     }
-    problems.push(...unknownKeys(section, keys, `audit.${name}`));
+    problems.push(...unknownKeys(section, keys, 'audit.' + name));
     if (name === 'capacity' && section.maxJournalBytes !== undefined) {
       const budget = section.maxJournalBytes;
       if (

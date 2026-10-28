@@ -243,13 +243,14 @@ async function fixture(): Promise<Fixture> {
   return { db, orgId, token };
 }
 
-function env(db: D1DatabaseLike, definitions: readonly unknown[], secrets = true): Env {
+function env(db: D1DatabaseLike, definitions: readonly unknown[]): Env {
   return {
     DB: db,
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
     PB_IDP_PROVIDERS: JSON.stringify(definitions),
-    ...(secrets ? { PB_IDP_CORP_CLIENT_SECRET: SECRET, PB_IDP_OTHER_CLIENT_SECRET: SECRET } : {}),
+    PB_IDP_CORP_CLIENT_SECRET: SECRET,
+    PB_IDP_OTHER_CLIENT_SECRET: SECRET,
   } as unknown as Env;
 }
 
@@ -389,6 +390,99 @@ const ISSUER = 'https://idp-a.example.test/dex';
 const OTHER_ISSUER = 'https://idp-b.example.test/dex';
 
 describe('runtime SSO providers on Miniflare D1', () => {
+  it('keeps local policy immutable per env and rebuilds for enabled and disabled bindings', async () => {
+    const { db } = await fixture();
+    installIssuers(mockIssuer(ISSUER));
+    const h = harness();
+    const base = env(db, [oidc(ISSUER)]);
+    for (const environment of [base, { ...base, PB_AUTH_LOCAL: 'enabled' }]) {
+      const response = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ local: true, providers: [{ id: 'corp' }] });
+    }
+    const disabled = { ...base, PB_AUTH_LOCAL: 'disabled' };
+    const response = await h.worker.fetch(get('/_pb/auth/providers'), disabled);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ local: false, providers: [{ id: 'corp' }] });
+    expect(h.builds()).toBe(3);
+    for (const route of ['login', 'reauth', 'setup/start', 'setup/finish']) {
+      const refused = await h.worker.fetch(post(`/_pb/auth/local/${route}`, {}), disabled);
+      expect(refused.status).toBe(403);
+      expect(refused.headers.get('cache-control')).toBe('no-store');
+      expect(await refused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+    }
+    expect(await ssoStartClient(h, disabled)).toBe('broker-client');
+
+    disabled.PB_AUTH_LOCAL = 'enabled';
+    const unchanged = await h.worker.fetch(get('/_pb/auth/providers'), disabled);
+    expect(await unchanged.json()).toMatchObject({ local: false });
+    expect(h.builds()).toBe(3);
+    const refreshed = await h.worker.fetch(get('/_pb/auth/providers'), { ...disabled });
+    expect(await refreshed.json()).toMatchObject({ local: true });
+    expect(h.builds()).toBe(3);
+  });
+
+  it('allows disabled with a compiled-only provider', async () => {
+    const { db } = await fixture();
+    installIssuers(mockIssuer(ISSUER));
+    const h = harness([oidc(ISSUER)]);
+    const environment = { ...env(db, []), PB_AUTH_LOCAL: 'disabled' };
+    const response = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ local: false, providers: [{ id: 'corp' }] });
+    expect(await ssoStartClient(h, environment)).toBe('broker-client');
+  });
+
+  it('fails closed when disabled providers are empty or rejected', async () => {
+    const { db } = await fixture();
+    const h = harness();
+    const environments = [
+      env(db, []),
+      env(db, [oidc(ISSUER, { issuer: 'http://invalid.example.test' })]),
+    ];
+    for (const base of environments) {
+      const environment = { ...base, PB_AUTH_LOCAL: 'disabled' };
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await h.worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          environment,
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+      }
+    }
+    expect(h.log).toContainEqual(
+      expect.objectContaining({
+        event: 'startup.misconfigured',
+        problems: ['auth_no_sign_in_method'],
+      }),
+    );
+    expect(JSON.stringify(h.log)).not.toContain(SECRET);
+  });
+
+  it('fails closed when the factory constructs no providers or throws despite compiled metadata', async () => {
+    const { db } = await fixture();
+    const environment = { ...env(db, []), PB_AUTH_LOCAL: 'disabled' };
+    for (const fails of [false, true]) {
+      const factory = vi.fn(() => {
+        if (fails) throw new TypeError('provider construction failed');
+        return [];
+      });
+      const worker = createWorker([
+        { ...ssoOidc({ providers: [oidc(ISSUER)] }), identityProviders: factory },
+      ]);
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          environment,
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+      }
+      expect(factory).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('lists an env-only provider and completes a login that binds the anchor', async () => {
     const { db } = await fixture();
     const mock = mockIssuer(ISSUER);
@@ -616,7 +710,7 @@ async function ssoStartClient(h: Harness, environment: Env): Promise<string | nu
     post('/_pb/auth/sso/corp/start', { purpose: 'login' }, { accept: 'application/json' }),
     environment,
   );
-  if (start.status !== 200) return null;
+  expect(start.status).toBe(200);
   const { location } = (await start.json()) as { location: string };
   return new URL(location).searchParams.get('client_id');
 }

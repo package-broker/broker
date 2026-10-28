@@ -1,8 +1,9 @@
 import type { Administration, AdminResult } from '../../authz/administration.js';
 import type { GrantRepository, OrganizationGrant } from '../../db/grants.js';
+import type { Role } from '../../db/roles.js';
 import type { RouteDefinition } from '../../plugin.js';
 import { apiRoute } from '../route.js';
-import { callContext, hasOrganizationAdminAuthority, type ApiRouteDeps } from './context.js';
+import { callContext, revealsOrganizationGrantSubjects, type ApiRouteDeps } from './context.js';
 import { ACCESS_SPECS } from './access-schemas.js';
 
 export interface AccessRouteDeps extends ApiRouteDeps {
@@ -24,11 +25,26 @@ function paged<T extends { readonly id: string }>(
   return { items, next: ordered.length > limit ? items[limit - 1]!.id : null };
 }
 
-function listedSubject(subject: OrganizationGrant['subject'], includeEmail: boolean) {
-  if (subject.type === 'email') return includeEmail ? subject : ({ type: 'email' } as const);
-  return subject.value.includes('@')
-    ? ({ type: 'group', provider: subject.provider } as const)
-    : subject;
+function listedSubject(subject: OrganizationGrant['subject'], reveal: boolean) {
+  if (subject.type === 'email') {
+    return reveal
+      ? ({ type: 'email', value: subject.value, visibility: 'visible' } as const)
+      : ({ type: 'email', visibility: 'redacted' } as const);
+  }
+  return reveal
+    ? ({
+        type: 'group',
+        provider: subject.provider,
+        value: subject.value,
+        visibility: 'visible',
+      } as const)
+    : ({ type: 'group', provider: subject.provider, visibility: 'redacted' } as const);
+}
+
+function roleSummary(role: Role | undefined) {
+  return role === undefined
+    ? null
+    : { id: role.id, name: role.name, permissions: [...role.permissions] };
 }
 
 function outcomeOf(result: AdminResult<unknown>) {
@@ -73,14 +89,20 @@ export function accessRoutes(deps: AccessRouteDeps): readonly RouteDefinition[] 
       if (ctx.org === null) return { error: 'unavailable' };
       const grants = await deps.grants.listOrganization(ctx.org);
       const { items, next } = paged(grants, query);
-      const includeEmail = hasOrganizationAdminAuthority(ctx);
+      const reveal = revealsOrganizationGrantSubjects(ctx);
+      const roles = new Map(
+        (await administration.listRoles(ctx.org))
+          .filter((role) => role.scope === 'organization')
+          .map((role) => [role.id, role]),
+      );
       return {
         status: 200,
         body: {
           items: items.map(({ id, subject, roleId, createdAt, revision }) => ({
             id,
-            subject: listedSubject(subject, includeEmail),
+            subject: listedSubject(subject, reveal),
             roleId,
+            role: roleSummary(roles.get(roleId)),
             createdAt,
             revision,
           })),

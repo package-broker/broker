@@ -386,8 +386,12 @@ export function SourceForm({
   onSubmit,
   onClose,
   vcsProviders = DEFAULT_VCS_PROVIDERS,
+  initialType,
+  initialProvider,
 }: {
   source: Source | null;
+  initialType?: CreateSource['type'] | undefined;
+  initialProvider?: VcsProvider | undefined;
   busy: boolean;
   errors: Record<string, string>;
   alert: string | null;
@@ -398,11 +402,15 @@ export function SourceForm({
   const [ecosystem, setEcosystem] = useState<CreateSource['ecosystem']>(
     source?.ecosystem ?? 'composer',
   );
-  const [type, setType] = useState<CreateSource['type']>(source?.type ?? 'packagist_proxy');
+  const [type, setType] = useState<CreateSource['type']>(
+    source?.type ?? initialType ?? 'packagist_proxy',
+  );
   const providerOptions = vcsProviderOptions(vcsProviders);
   const firstProvider = providerOptions[0]?.[0] ?? 'github';
   const [provider, setProvider] = useState<VcsProvider>(
-    (sourceConfigValue(source, 'provider') as VcsProvider | undefined) ?? firstProvider,
+    (sourceConfigValue(source, 'provider') as VcsProvider | undefined) ??
+      initialProvider ??
+      firstProvider,
   );
   const providerOffered = providerOptions.some(([value]) => value === provider);
   const vcsUnserved = type === 'vcs' && (providerOptions.length === 0 || !providerOffered);
@@ -770,6 +778,11 @@ export function SourceForm({
                                 ? 'https://git.example.com/acme/payments.git'
                                 : 'git@git.example.com:acme/payments.git',
                         })}
+                        {provider === 'github' ? (
+                          <p className="mt-1 text-sm text-neutral-600">
+                            Use owner/repository for GitHub, such as acme/payments.
+                          </p>
+                        ) : null}
                       </div>
                       {provider === 'github' ? (
                         <>

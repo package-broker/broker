@@ -1,3 +1,4 @@
+import { pendingStorage } from '../token-pending.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
@@ -16,6 +17,8 @@ import { Badge } from '../components/ui/badge.js';
 import { LoadedListFilters } from '../components/ui/toolbar.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
+import { IssueTokenForm, accessLabels } from './tokens/issue-token-form.js';
+import { PrincipalForm } from './tokens/principal-form.js';
 import { tokenClientConfig } from './tokens/client-config.js';
 
 type Token =
@@ -24,8 +27,16 @@ type Lifetime =
   operations['listMyTokens']['responses'][200]['content']['application/json']['lifetime'];
 type Principal =
   operations['listServicePrincipals']['responses'][200]['content']['application/json']['items'][number];
+export interface IssueProject {
+  id: string;
+  slug: string;
+  name: string;
+  cap: 'read' | 'write' | 'full' | null;
+  permissions: string[] | null;
+  policyState?: 'idle' | 'loading' | 'loaded' | 'error';
+}
 type Target = 'personal' | 'project' | 'organization';
-interface Draft {
+export interface Draft {
   name: string;
   scope: 'read' | 'write' | 'full';
   lifetimeDays: number;
@@ -41,17 +52,30 @@ interface Issue {
   key: string;
   rotate?: string;
   replace?: string;
+  refresh?: boolean;
+  listTarget?: Target;
+  listProject?: string | null;
 }
-interface State {
+export interface State {
   target: Target;
   project: string | null;
+  issuanceProject: string | null;
   items: Token[];
   next: string | null;
   principals: Principal[];
   principalsNext: string | null;
   principalsRestricted: boolean;
+  principalsLoading: boolean;
+  principalsError: boolean;
+  organizationPermissions: string[];
+  issuanceDraft: Issue | null;
+  issuancePrincipal: string | null;
+  issuanceNonce: number;
   names: Record<string, string>;
   projectSlugs: Record<string, string>;
+  projects: IssueProject[];
+  projectsError: boolean;
+  result: Issue | null;
   lifetime: Lifetime | null;
   userId: string | null;
   secret: string | null;
@@ -74,6 +98,7 @@ interface Deps {
   now: () => number;
   clearAfterCopy?: boolean;
 }
+export const dayLabel = (days: number) => `${days} ${days === 1 ? 'day' : 'days'}`;
 export function lifetimeChoices(policy: { maxDays: number; defaultDays: number }) {
   return [...new Set([30, 90, 180, 365, policy.maxDays, policy.defaultDays])]
     .filter((days) => days > 0 && days <= policy.maxDays)
@@ -85,6 +110,7 @@ export function tokensReducer(state: State, action: { type: 'navigate' }): State
       ...state,
       secret: null,
       secretProject: null,
+      result: null,
       issuedId: null,
       oldPersonalId: null,
       pending: null,
@@ -93,16 +119,6 @@ export function tokensReducer(state: State, action: { type: 'navigate' }): State
       notice: null,
     };
   return state;
-}
-function pendingStorage(storage: PendingStorage): PendingStorage {
-  return {
-    getItem: (key) => storage.getItem(`tokens:${key}`),
-    setItem: (key, value) => storage.setItem(`tokens:${key}`, value),
-    removeItem: (key) => storage.removeItem(`tokens:${key}`),
-  };
-}
-export function clearPendingTokenIssue(storage: PendingStorage): void {
-  loadPending(pendingStorage(storage), Date.now());
 }
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -131,6 +147,13 @@ function restoredIssue(value: unknown): Issue | null {
     target: value.target as Target,
     project: value.project,
     key: value.key,
+    ...(value.refresh === true ? { refresh: true } : {}),
+    ...(['personal', 'project', 'organization'].includes(String(value.listTarget))
+      ? {
+          listTarget: value.listTarget as Target,
+          listProject: typeof value.listProject === 'string' ? value.listProject : null,
+        }
+      : {}),
     ...(typeof value.rotate === 'string' ? { rotate: value.rotate } : {}),
     ...(typeof value.replace === 'string' ? { replace: value.replace } : {}),
     draft: {
@@ -164,17 +187,48 @@ function publicToken(t: Token): Token {
     revokedAt: t.revokedAt,
   };
 }
+export function inResultScope(result: Issue | null, project: IssueProject) {
+  if (!result) return true;
+  if (result.target === 'project') return project.slug === result.project;
+  if (result.target === 'personal')
+    return result.draft.projectMode !== 'selected' || result.draft.projectIds.includes(project.id);
+  return true;
+}
+export function hasSetupAccess(state: State, project: IssueProject) {
+  const result = state.result;
+  if (!result) return false;
+  const permissions =
+    result.target === 'personal'
+      ? project.permissions
+      : state.principals.find((p) => p.id === result.draft.servicePrincipalId)?.permissions;
+  return (
+    permissions?.includes('project:packages:read') === true ||
+    (result.draft.scope !== 'read' &&
+      project.cap !== 'read' &&
+      permissions?.includes('project:packages:write') === true)
+  );
+}
 export function createTokensController(services: ShellServices, deps: Deps) {
   let state: State = {
     target: 'personal',
     project: null,
+    issuanceProject: null,
     items: [],
     next: null,
     principals: [],
     principalsNext: null,
     principalsRestricted: false,
+    principalsLoading: true,
+    principalsError: false,
+    organizationPermissions: [],
+    issuanceDraft: null,
+    issuancePrincipal: null,
+    issuanceNonce: 0,
     names: {},
     projectSlugs: {},
+    projects: [],
+    projectsError: false,
+    result: null,
     lifetime: null,
     userId: null,
     secret: null,
@@ -191,6 +245,8 @@ export function createTokensController(services: ShellServices, deps: Deps) {
   let epoch = 0;
   let listing = 0;
   let navigation = 0;
+  const policyQueue: string[] = [];
+  let policyWorkers = 0;
   const listeners = new Set<() => void>();
   const set = (next: Partial<State>) => {
     state = { ...state, ...next };
@@ -215,6 +271,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       busy: true,
       secret: null,
       secretProject: null,
+      result: null,
       issuedId: null,
       oldPersonalId: null,
       pending: null,
@@ -261,10 +318,16 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     if (result.ok) {
       set({
         secret: result.data.token,
-        secretProject: target === 'project' ? project : null,
+        secretProject:
+          target === 'project'
+            ? project
+            : d.projectMode === 'selected' && d.projectIds.length === 1
+              ? (state.projectSlugs[d.projectIds[0]!] ?? null)
+              : null,
+        result: action,
         oldPersonalId: action.replace ?? null,
         issuedId: result.data.id,
-        notice: 'Save this token now; it is shown once.',
+        notice: 'Token created.',
       });
     } else if (result.code === 'reauth_required') {
       const saved = savePending(storage, {
@@ -291,6 +354,9 @@ export function createTokensController(services: ShellServices, deps: Deps) {
   }
   const controller = {
     snapshot: () => state,
+    announce(notice: string) {
+      set({ notice });
+    },
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => {
@@ -301,7 +367,14 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       epoch++;
       navigation++;
       listing++;
-      set(tokensReducer(state, { type: 'navigate' }));
+      policyQueue.length = 0;
+      set({
+        ...tokensReducer(state, { type: 'navigate' }),
+        principalsLoading: false,
+        projects: state.projects.map((p) =>
+          p.policyState === 'loading' ? { ...p, policyState: 'idle' } : p,
+        ),
+      });
     },
     dispose() {
       controller.navigate();
@@ -310,23 +383,35 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     closeSecret() {
       if (state.busy) return;
       epoch++;
-      set({ secret: null, issuedId: null, oldPersonalId: null, notice: null, renewal: null });
+      set({
+        secret: null,
+        secretProject: null,
+        result: null,
+        issuedId: null,
+        oldPersonalId: null,
+        notice: null,
+        renewal: null,
+        issuanceDraft: state.pending === null ? null : state.issuanceDraft,
+      });
     },
     restore() {
       const loaded = loadPending(storage, deps.now());
       const action = loaded.ok ? restoredIssue(loaded.action?.body) : null;
       if (action !== null)
-        set({ target: action.target, project: action.project, pending: action, secret: null });
+        set({ pending: action, issuanceDraft: action.refresh ? action : null, secret: null });
     },
     async start(target: Target, project: string | null) {
+      set({ issuanceProject: project });
       controller.restore();
       const action = state.pending;
-      await controller.load(action?.target ?? target, action === null ? project : action.project);
+      await controller.load(
+        action?.listTarget ?? action?.target ?? target,
+        action ? (action.listTarget ? (action.listProject ?? null) : action.project) : project,
+      );
     },
     async selectTarget(target: Target, project: string | null) {
       if (state.busy) return;
-      epoch++;
-      set(tokensReducer(state, { type: 'navigate' }));
+      set({ pending: null, renewal: null });
       await controller.load(target, project);
     },
     decline() {
@@ -336,10 +421,39 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       const action = state.pending;
       if (action === null || state.busy || state.loading) return;
       if (state.lifetime === null) {
-        await controller.load(action.target, action.project);
+        await controller.load();
         if (state.pending !== action || state.lifetime === null || state.loading) return;
       }
       await send(action);
+      if (action.refresh && state.secret !== null) await controller.load();
+    },
+    async issueFor(target: Target, project: string | null, draft: Draft) {
+      const action = {
+        target,
+        project,
+        draft,
+        key: deps.newKey(),
+        refresh: true,
+        listTarget: state.target,
+        listProject: state.project,
+      };
+      set({ issuanceDraft: action });
+      await send(action);
+      if (state.secret !== null) await controller.load();
+    },
+    configureProject(slug: string) {
+      const result = state.result;
+      const project = state.projects.find((p) => p.slug === slug);
+      if (
+        !project ||
+        !result ||
+        (result.target === 'project' && result.project !== slug) ||
+        (result.target === 'personal' &&
+          result.draft.projectMode === 'selected' &&
+          !result.draft.projectIds.includes(project.id))
+      )
+        return;
+      set({ secretProject: slug });
     },
     async issue(draft: Draft) {
       await send({
@@ -372,13 +486,16 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       }
       set({ renewal: token, secret: null, issuedId: null, oldPersonalId: null, notice: null });
     },
+    invalidProjects() {
+      set({ notice: 'Choose between 1 and 200 projects.' });
+    },
     registryOrigin: () => new URL(deps.origin).origin,
     clientConfig() {
       return state.secret === null || state.secretProject === null
         ? null
         : tokenClientConfig(deps.origin, state.secretProject, state.secret);
     },
-    async copy(kind?: 'composer' | 'npm') {
+    async copy(kind?: keyof ReturnType<typeof tokenClientConfig>) {
       if (state.secret === null) return;
       const text = kind === undefined ? state.secret : controller.clientConfig()?.[kind];
       if (text === undefined) return;
@@ -391,7 +508,10 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       } catch {
         if (version === epoch)
           set({
-            notice: kind === undefined ? 'Unable to copy token.' : 'Unable to copy configuration.',
+            notice:
+              kind === undefined
+                ? 'Could not copy. Select and copy the token manually.'
+                : 'Could not copy. Select and copy the configuration manually.',
           });
       }
     },
@@ -406,7 +526,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
         project,
         loading: true,
         listError: false,
-        notice: null,
+        notice: state.secret === null ? null : state.notice,
         items: [],
         next: null,
         lifetime: null,
@@ -434,13 +554,26 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     },
     async loadPrincipals(after?: string) {
       const version = navigation;
-      const result = await services.client.request('get', '/_pb/service-principals', {
-        query: { after },
-      });
-      if (version !== navigation) return;
-      if (result.ok)
-        set({
-          principals: result.data.items.map((p) => ({
+      set({ principalsLoading: true, principalsError: false });
+      const principals: Principal[] = [];
+      let cursor = after;
+      do {
+        const result = await services.client.request('get', '/_pb/service-principals', {
+          query: { after: cursor },
+        });
+        if (version !== navigation) return;
+        if (!result.ok) {
+          set({
+            principalsLoading: false,
+            principalsError: result.status !== 403,
+            principalsRestricted: result.status === 403,
+            principals: [],
+            principalsNext: null,
+          });
+          return;
+        }
+        principals.push(
+          ...result.data.items.map((p) => ({
             id: p.id,
             name: p.name,
             projectId: p.projectId,
@@ -449,31 +582,117 @@ export function createTokensController(services: ShellServices, deps: Deps) {
             createdByUserId: p.createdByUserId,
             permissions: p.permissions,
           })),
-          principalsNext: result.data.next,
-          principalsRestricted: false,
+        );
+        cursor = result.data.next ?? undefined;
+      } while (cursor !== undefined);
+      set({
+        principals,
+        principalsNext: null,
+        principalsRestricted: false,
+        principalsLoading: false,
+      });
+    },
+    loadProjectPolicies(ids: string[], retry = false) {
+      const marked = new Set<string>();
+      for (const id of ids) {
+        const project = state.projects.find((p) => p.id === id);
+        if (
+          !project ||
+          project.policyState === 'loading' ||
+          project.policyState === 'loaded' ||
+          (!retry && project.policyState === 'error')
+        )
+          continue;
+        marked.add(id);
+        policyQueue.push(id);
+      }
+      if (marked.size)
+        set({
+          projects: state.projects.map((p) =>
+            marked.has(p.id) ? { ...p, policyState: 'loading' } : p,
+          ),
         });
-      else if (result.status === 403)
-        set({ principals: [], principalsNext: null, principalsRestricted: true });
+      async function work() {
+        policyWorkers++;
+        try {
+          while (policyQueue.length) {
+            const id = policyQueue.shift()!;
+            const project = state.projects.find((p) => p.id === id);
+            if (!project) continue;
+            const version = navigation;
+            const detail = await services.client.request('get', '/_pb/projects/{project}', {
+              params: { project: project.slug },
+            });
+            const authority = await services.client.request(
+              'get',
+              '/_pb/projects/{project}/permissions',
+              { params: { project: project.slug } },
+            );
+            if (version !== navigation) continue;
+            set({
+              projects: state.projects.map((p) =>
+                p.id === id
+                  ? {
+                      ...p,
+                      cap: detail.ok ? detail.data.tokenMaxScope : null,
+                      permissions: authority.ok ? authority.data.project : null,
+                      policyState: detail.ok && authority.ok ? 'loaded' : 'error',
+                    }
+                  : p,
+              ),
+            });
+          }
+        } finally {
+          policyWorkers--;
+        }
+      }
+      while (policyQueue.length && policyWorkers < 4) void work();
+    },
+    choosePrincipal(id: string, project: string | null, organization = project === null) {
+      set({
+        issuancePrincipal: id,
+        issuanceProject: organization ? '__organization' : (project ?? ''),
+        issuanceNonce: state.issuanceNonce + 1,
+      });
     },
     async identity() {
       const version = navigation;
-      const result = await services.client.request('get', '/_pb/session');
-      if (version !== navigation) return;
-      if (result.ok) set({ userId: result.data.user.id });
+      const session = services.client.request('get', '/_pb/session');
       const projectSlugs: Record<string, string> = {};
+      const catalogue: IssueProject[] = [];
+      let projectsError = false;
       let projectAfter: string | undefined;
       do {
         const projects = await services.client.request('get', '/_pb/projects', {
           query: { after: projectAfter },
         });
         if (version !== navigation) return;
-        if (!projects.ok) break;
-        for (const project of projects.data.items) projectSlugs[project.id] = project.slug;
+        if (!projects.ok) {
+          projectsError = true;
+          break;
+        }
+        for (const project of projects.data.items) {
+          projectSlugs[project.id] = project.slug;
+          if (project.status === 'archived') continue;
+          catalogue.push({
+            id: project.id,
+            slug: project.slug,
+            name: project.name ?? project.slug,
+            cap: null,
+            permissions: null,
+            policyState: 'idle',
+          });
+        }
         projectAfter = projects.data.next ?? undefined;
+        set({ projectSlugs: { ...projectSlugs }, projects: [...catalogue], projectsError });
       } while (projectAfter !== undefined);
-      set({ projectSlugs });
+      set({ projectSlugs, projects: catalogue, projectsError });
+      const result = await session;
+      if (version !== navigation) return;
+      if (result.ok) set({ userId: result.data.user.id });
       const permissions = await services.client.request('get', '/_pb/me/permissions');
       if (version !== navigation) return;
+      set({ organizationPermissions: permissions.ok ? permissions.data.organization : [] });
       if (!permissions.ok || !permissions.data.organization.includes('org:users:read')) {
         set({ names: {} });
         return;
@@ -534,7 +753,8 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       if (!result.ok) failure(result);
       else {
         await controller.loadPrincipals();
-        set({ notice: 'Service principal created.' });
+        set({ notice: 'Service principal created. Create a token to use it.' });
+        return result.data;
       }
     },
     async suspendPrincipal(principal: Principal) {
@@ -564,7 +784,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
   };
   return controller;
 }
-type Controller = ReturnType<typeof createTokensController>;
+export type Controller = ReturnType<typeof createTokensController>;
 
 export interface TokenFilters {
   q: string;
@@ -575,7 +795,9 @@ export function filterTokens(items: Token[], filters: TokenFilters) {
   return items.filter(
     (item) =>
       item.name.toLowerCase().includes(filters.q.toLowerCase()) &&
-      (!filters.scope || item.scope === filters.scope) &&
+      (!filters.scope ||
+        item.scope === filters.scope ||
+        accessLabels[item.scope] === filters.scope) &&
       (!filters.status || item.status === filters.status),
   );
 }
@@ -595,7 +817,7 @@ export function TokenList({ state: s, controller: c }: { state: State; controlle
         values={filters}
         fields={[
           { key: 'q', label: 'Name (this page)' },
-          { key: 'scope', label: 'Scope', options: ['read', 'write', 'full'] },
+          { key: 'scope', label: 'Scope', options: Object.values(accessLabels) },
           { key: 'status', label: 'Status', options: ['active', 'expired', 'revoked'] },
         ]}
         onChange={setFilters}
@@ -651,7 +873,7 @@ export function TokenList({ state: s, controller: c }: { state: State; controlle
               key: 'scope',
               label: 'Scope',
               value: (token) => token.scope,
-              render: (token) => <Badge variant="outline">{token.scope}</Badge>,
+              render: (token) => <Badge variant="outline">{accessLabels[token.scope]}</Badge>,
             },
             {
               key: 'project',
@@ -754,8 +976,62 @@ export function TokenList({ state: s, controller: c }: { state: State; controlle
   );
 }
 
+function focusResult(node: HTMLHeadingElement | null) {
+  node?.focus();
+}
+
+function SetupProjectAccess({ state: s, controller: c }: { state: State; controller: Controller }) {
+  const [setupCandidate, setSetupCandidate] = useState('');
+  const candidate = s.projects.find((p) => p.id === setupCandidate);
+  useEffect(() => {
+    if (s.secret && candidate?.policyState === 'loaded' && hasSetupAccess(s, candidate))
+      c.configureProject(candidate.slug);
+  }, [c, s.secret, candidate]);
+
+  return (
+    <>
+      {' '}
+      {s.projects.some((p) => p.permissions === null) && (
+        <details>
+          <summary className="min-h-11 cursor-pointer">
+            Check another project's package access
+          </summary>
+          <Label htmlFor="setup-candidate">Project to configure</Label>
+          <Select
+            id="setup-candidate"
+            className="min-h-11"
+            value={setupCandidate}
+            onChange={(event) => {
+              setSetupCandidate(event.target.value);
+              c.loadProjectPolicies([event.target.value]);
+            }}
+          >
+            <option value="">Choose a project</option>
+            {s.projects
+              .filter((p) => inResultScope(s.result, p))
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+          </Select>
+          {candidate?.policyState === 'loading' && <p>Loading project access…</p>}
+          {candidate?.policyState === 'error' && (
+            <Button type="button" onClick={() => c.loadProjectPolicies([candidate.id], true)}>
+              Try again loading project access
+            </Button>
+          )}
+          {candidate?.policyState === 'loaded' && !hasSetupAccess(s, candidate) && (
+            <p>This token does not have package access to this project.</p>
+          )}
+        </details>
+      )}
+    </>
+  );
+}
+
 export function TokensView({ state: s, controller: c }: { state: State; controller: Controller }) {
-  const personal = s.renewal?.kind === 'pat' || s.target === 'personal';
+  const personal = s.renewal !== null ? s.renewal.kind === 'pat' : s.target === 'personal';
   const policy = s.lifetime?.[personal ? 'personal' : 'service'];
   const renewal = s.renewal;
   const clientConfig = c.clientConfig();
@@ -765,29 +1041,21 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
       : s.target === 'project'
         ? Object.keys(s.projectSlugs).find((id) => s.projectSlugs[id] === s.project)
         : null;
-  const principalChoices = s.principalsRestricted
-    ? [
-        ...new Map(
-          s.items
-            .filter(
-              (t) => t.kind === 'svc' && t.status === 'active' && t.servicePrincipalId !== null,
-            )
-            .map((t) => [
-              t.servicePrincipalId!,
-              {
-                id: t.servicePrincipalId!,
-                name: t.servicePrincipalId!,
-                projectId: t.projectId,
-              },
-            ]),
-        ).values(),
-      ]
-    : s.principals.filter((p) => p.status === 'active');
+  const principalChoices = s.principals.filter((p) => p.status === 'active');
   function issue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (s.busy) return;
     const form = event.currentTarget;
     const data = new FormData(form);
+    const selectedIds = data.getAll('projectIds').map(String);
+    if (
+      personal &&
+      data.get('projectMode') === 'selected' &&
+      (selectedIds.length < 1 || selectedIds.length > 200)
+    ) {
+      c.invalidProjects();
+      return;
+    }
     const scope =
       renewal?.kind === 'svc' ? renewal.scope : (String(data.get('scope')) as Draft['scope']);
     void c.issue({
@@ -796,54 +1064,18 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
       lifetimeDays: Number(data.get('lifetimeDays')),
       servicePrincipalId: String(data.get('principal') ?? ''),
       projectMode: data.get('projectMode') === 'selected' ? 'selected' : 'all',
-      projectIds: String(data.get('projectIds') ?? '')
-        .split(/\s+/)
-        .filter(Boolean),
+      projectIds: data.getAll('projectIds').map(String),
       overlapDays: Number(data.get('overlap') ?? 0) as 0 | 1 | 7,
     });
-    form.reset();
   }
   return (
     <section aria-labelledby="page-heading" className="space-y-4">
       <h1 tabIndex={-1} id="page-heading" className="text-xl font-semibold">
         Tokens
       </h1>
-      <p className="text-neutral-600">
-        Credentials for Composer and npm clients. Management writes use your signed-in session.
-        Secrets are shown once.
-      </p>
-      <Label htmlFor="token-list">Token list</Label>
-      <Select
-        id="token-list"
-        value={s.target}
-        disabled={s.busy}
-        onChange={(e) => {
-          void c.selectTarget(e.target.value as Target, s.project);
-        }}
-      >
-        <option value="personal">My personal tokens</option>
-        {s.project === null ? null : <option value="project">Project tokens</option>}
-        <option value="organization">Organization tokens</option>
-      </Select>
-      <details className="detail-group">
-        <summary className="cursor-pointer font-medium">Token lifetimes and access</summary>
-        <p className="mt-3">
-          Your personal tokens are revoked when you leave the organization or your account is
-          suspended. Access stops at once; the tokens are marked revoked shortly after.
-        </p>
-        <p>
-          Service tokens keep working when the person who created them leaves. Project owners can
-          see, renew and revoke every service token of their project.
-        </p>
-        <dl className="detail-list mt-3">
-          <dt>Personal maximum lifetime</dt>
-          <dd>1 year (the operator can set less)</dd>
-          <dt>Service maximum lifetime</dt>
-          <dd>1 year for every scope (the operator can change it)</dd>
-        </dl>
-      </details>
+      <p className="text-neutral-600">Connect your tools and CI pipelines to your packages.</p>
       {s.notice === null || s.listError ? null : (
-        <Alert>
+        <Alert role="status" aria-live="polite">
           <AlertDescription>{s.notice}</AlertDescription>
         </Alert>
       )}
@@ -865,42 +1097,120 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
       )}
       {s.secret === null ? null : (
         <section aria-label="Token secret" className="detail-group space-y-3 border-emerald-200">
-          <h2>Token secret — shown once</h2>
-          <p>
-            Copy it now. This value will not be shown again. Closing this panel keeps the token
-            active.
-          </p>
+          <h2 tabIndex={-1} ref={focusResult}>
+            Token created
+          </h2>
+          {s.result && (
+            <p className="break-words">
+              {s.result.draft.name} ·{' '}
+              {s.result.target === 'project'
+                ? (s.projects.find((p) => p.slug === s.result?.project)?.name ??
+                  'Project name unavailable')
+                : s.result.target === 'organization'
+                  ? 'Organization-wide'
+                  : s.result.draft.projectMode === 'all'
+                    ? 'All accessible projects'
+                    : s.result.draft.projectIds.length === 1
+                      ? (s.projects.find((p) => p.id === s.result?.draft.projectIds[0])?.name ??
+                        '1 selected project')
+                      : `${s.result.draft.projectIds.length} selected projects`}{' '}
+              · {accessLabels[s.result.draft.scope]} · Expires after{' '}
+              {dayLabel(s.result.draft.lifetimeDays)}
+            </p>
+          )}
+          <p>Copy this token now. You cannot view it again. Closing this panel keeps it active.</p>
           <pre className="rounded-md border bg-neutral-50 p-3 overflow-x-auto whitespace-pre-wrap break-all">
-            <code>{s.secret}</code>
+            <code role="region" aria-label="Created token">
+              {s.secret}
+            </code>
           </pre>
-          <Button type="button" onClick={() => void c.copy()}>
+          <Button className="min-h-11" type="button" onClick={() => void c.copy()}>
             Copy token
           </Button>
-          <Button type="button" variant="outline" onClick={() => c.closeSecret()}>
-            Close secret panel
+          <Button
+            type="button"
+            variant="outline"
+            className="min-h-11"
+            onClick={() => {
+              c.closeSecret();
+              requestAnimationFrame(() => document.getElementById('new-token')?.focus());
+            }}
+          >
+            Done
           </Button>
+          <SetupProjectAccess state={s} controller={c} />
+          <Label htmlFor="configure-project">Configure for project</Label>
+          <Select
+            className="min-h-11"
+            id="configure-project"
+            value={s.secretProject ?? ''}
+            onChange={(event) => c.configureProject(event.target.value)}
+          >
+            <option value="">Choose a project</option>
+            {s.projects
+              .filter((p) => hasSetupAccess(s, p))
+              .filter((p) => inResultScope(s.result, p))
+              .map((p) => (
+                <option key={p.id} value={p.slug}>
+                  {p.name}
+                </option>
+              ))}
+          </Select>
           {clientConfig === null ? (
-            <p>
-              Choose a project this token can access to configure Composer or npm. Open that
-              project’s registry at {c.registryOrigin()}/&lt;project&gt; for Composer or{' '}
-              {c.registryOrigin()}/&lt;project&gt;/npm/ for npm.
-            </p>
+            <p>Choose a project this token can access to configure Composer or npm.</p>
           ) : (
             <>
-              <h3>Composer</h3>
-              <pre className="overflow-x-auto rounded-md border bg-neutral-50 p-3">
-                <code>{clientConfig.composer}</code>
-              </pre>
-              <Button type="button" variant="outline" onClick={() => void c.copy('composer')}>
-                Copy Composer configuration
-              </Button>
-              <h3>npm (.npmrc)</h3>
-              <pre className="overflow-x-auto rounded-md border bg-neutral-50 p-3">
-                <code>{clientConfig.npm}</code>
-              </pre>
-              <Button type="button" variant="outline" onClick={() => void c.copy('npm')}>
-                Copy npm configuration
-              </Button>
+              <p>
+                Composer sends this credential to this registry host. The token still limits which
+                projects it can access.
+              </p>
+              {(
+                [
+                  ['Composer', ['composer', 'composerAuth']],
+                  ['npm', ['npm']],
+                  ['CI environment', ['ciComposer', 'ciNpm']],
+                ] as const
+              ).map(([title, kinds], index) => (
+                <details key={title} open={index === 0} className="min-w-0">
+                  <summary className="min-h-11 cursor-pointer">{title}</summary>
+                  {kinds.map((kind) => (
+                    <div key={kind}>
+                      <p>
+                        {
+                          {
+                            composer: 'Composer repository command',
+                            composerAuth:
+                              'Merge this into your local auth.json. Do not commit credentials.',
+                            npm: 'Use this on your computer. For CI, use the environment-variable version below.',
+                            ciComposer:
+                              'Save PACKAGE_BROKER_TOKEN as a secret in your CI settings. These examples install packages; they do not publish them.',
+                            ciNpm: 'Save this as .npmrc, then run npm ci.',
+                          }[kind]
+                        }
+                      </p>
+                      <pre className="whitespace-pre-wrap break-all rounded-md border bg-neutral-50 p-3">
+                        <code>{clientConfig[kind]}</code>
+                      </pre>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="min-h-11"
+                        onClick={() => void c.copy(kind)}
+                      >
+                        {
+                          {
+                            composer: 'Copy Composer configuration',
+                            composerAuth: 'Copy auth.json',
+                            npm: 'Copy npm configuration',
+                            ciComposer: 'Copy CI Composer',
+                            ciNpm: 'Copy CI npm',
+                          }[kind]
+                        }
+                      </Button>
+                    </div>
+                  ))}
+                </details>
+              ))}
             </>
           )}
           {s.oldPersonalId !== null ? (
@@ -915,13 +1225,16 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           ) : null}
         </section>
       )}
-      {s.pending !== null || s.secret !== null ? null : (
+      <div hidden={s.pending !== null || s.secret !== null || renewal !== null}>
+        <IssueTokenForm state={s} controller={c} />
+      </div>
+      {s.pending !== null || s.secret !== null || renewal === null ? null : (
         <details
           key={`${s.target}:${renewal?.id ?? ''}`}
           open={renewal !== null}
           className="detail-group"
         >
-          <summary className="cursor-pointer font-semibold">
+          <summary className="min-h-11 cursor-pointer font-semibold">
             {renewal === null ? 'Issue token' : 'Renew token'}
           </summary>
           <form
@@ -929,7 +1242,6 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
             onSubmit={issue}
             className="grid gap-2"
           >
-            <h2>{renewal === null ? 'Issue token' : 'Renew token'}</h2>
             <Label htmlFor="token-name">Name</Label>
             <Input id="token-name" name="name" defaultValue={renewal?.name ?? ''} required />
             <Label htmlFor="token-scope">Scope</Label>
@@ -939,9 +1251,9 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
               defaultValue={renewal?.scope ?? 'read'}
               disabled={renewal?.kind === 'svc'}
             >
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-              <option value="full">Full</option>
+              <option value="read">Install and download</option>
+              <option value="write">Include publish permission</option>
+              <option value="full">Include grants, sources and audit access</option>
             </Select>
             <Label htmlFor="token-lifetime">Lifetime</Label>
             <Select
@@ -954,7 +1266,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
                 ? null
                 : lifetimeChoices(policy).map((days) => (
                     <option key={days} value={days}>
-                      {days} days
+                      {dayLabel(days)}
                     </option>
                   ))}
             </Select>
@@ -969,14 +1281,15 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
                   <option value="all">All accessible projects</option>
                   <option value="selected">Selected projects</option>
                 </Select>
-                <Label htmlFor="token-project-ids">
-                  Selected project IDs (space separated; re-enter when renewing)
-                </Label>
-                <Input
-                  id="token-project-ids"
-                  name="projectIds"
-                  required={renewal?.projectMode === 'selected'}
-                />
+                <fieldset>
+                  <legend>Choose projects again when renewing a selected token</legend>
+                  {s.projects.map((p) => (
+                    <label key={p.id} className="flex min-h-11 items-center gap-2">
+                      <input type="checkbox" name="projectIds" value={p.id} />
+                      {p.name}
+                    </label>
+                  ))}
+                </fieldset>
               </>
             ) : (
               <>
@@ -1001,8 +1314,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
                 </Select>
                 {s.principalsRestricted ? (
                   <p>
-                    Principal discovery is limited to principals referenced by the tokens you can
-                    see.
+                    Ask an organization administrator to create a service identity for this project.
                   </p>
                 ) : null}
               </>
@@ -1037,35 +1349,31 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           </form>
         </details>
       )}
+      <Label htmlFor="token-list">Token list</Label>
+      <Select
+        id="token-list"
+        value={s.target}
+        disabled={s.busy}
+        onChange={(e) => {
+          void c.selectTarget(e.target.value as Target, s.project);
+        }}
+      >
+        <option value="personal">My personal tokens</option>
+        {s.project === null ? null : <option value="project">Project tokens</option>}
+        <option value="organization">Organization tokens</option>
+      </Select>
+      <details className="detail-group">
+        <summary>How token access works</summary>
+        <p>
+          Personal tokens use your access and stop working if you leave or your account is
+          suspended. Service tokens use a service identity and keep working when their creator
+          leaves. Each project's access policy can limit a token further.
+        </p>
+      </details>
       <TokenList key={`${s.target}:${s.project}`} state={s} controller={c} />
       <details className="detail-group">
-        <summary className="cursor-pointer font-semibold">Service principals</summary>
-        <h2>Service principals</h2>
-        <form
-          className="grid gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (s.busy) return;
-            const form = event.currentTarget;
-            const data = new FormData(form);
-            void c.createPrincipal(
-              String(data.get('name')),
-              String(data.get('project')),
-              String(data.get('permissions')).split(/\s+/).filter(Boolean),
-            );
-            form.reset();
-          }}
-        >
-          <Label htmlFor="principal-name">Principal name</Label>
-          <Input id="principal-name" name="name" required />
-          <Label htmlFor="principal-project">Project ID (empty for organization)</Label>
-          <Input id="principal-project" name="project" />
-          <Label htmlFor="principal-permissions">Permissions (space separated)</Label>
-          <Input id="principal-permissions" name="permissions" />
-          <Button type="submit" disabled={s.busy}>
-            Create service principal
-          </Button>
-        </form>
+        <summary className="min-h-11 cursor-pointer font-semibold">Service principals</summary>
+        <PrincipalForm state={s} controller={c} />
         <Button
           type="button"
           variant="outline"
@@ -1075,7 +1383,9 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
           Reload service principals
         </Button>
         {s.principalsRestricted ? (
-          <ListState kind="placeholder" title="Service principal discovery is restricted." />
+          <ListState kind="placeholder" title="You cannot browse service principals here." />
+        ) : s.principalsLoading ? (
+          <ListState kind="loading" title="Loading service principals…" />
         ) : s.principals.length === 0 ? (
           <ListState kind="empty" title="No service principals loaded." />
         ) : (
@@ -1147,13 +1457,17 @@ export function bindTokensLifecycle(
     onNavigate();
   };
   const clear = () => controller.navigate();
+  const show = (event: Event) => {
+    clear();
+    if ((event as Partial<PageTransitionEvent>).persisted === true) onNavigate();
+  };
   events.addEventListener('hashchange', change);
   events.addEventListener('pagehide', clear);
-  events.addEventListener('pageshow', clear);
+  events.addEventListener('pageshow', show);
   return () => {
     events.removeEventListener('hashchange', change);
     events.removeEventListener('pagehide', clear);
-    events.removeEventListener('pageshow', clear);
+    events.removeEventListener('pageshow', show);
     controller.dispose();
   };
 }
@@ -1202,10 +1516,18 @@ export function TokensPage() {
       if (window.location.hash.startsWith('#/tokens'))
         void controller.start(project === null ? 'personal' : 'project', project);
     }
+    function reload() {
+      if (!window.location.hash.startsWith('#/tokens')) return;
+      void controller.identity();
+      void controller.loadPrincipals();
+    }
     change();
     void controller.identity();
     void controller.loadPrincipals();
-    return bindTokensLifecycle(controller, window, change);
+    return bindTokensLifecycle(controller, window, () => {
+      change();
+      reload();
+    });
   }, [controller]);
   useEffect(() => bindTokensReplay(controller, services), [controller, services]);
   return <TokensView state={state} controller={controller} />;

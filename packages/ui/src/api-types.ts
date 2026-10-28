@@ -2145,18 +2145,40 @@ export interface operations {
               createdAt: string;
               id: string;
               revision: number;
+              role: {
+                id: string;
+                name: string;
+                permissions: string[];
+              } | null;
               roleId: string;
               subject:
                 | {
                     /** @constant */
                     type: 'email';
-                    value?: string;
+                    value: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    /** @constant */
+                    type: 'email';
+                    /** @constant */
+                    visibility: 'redacted';
                   }
                 | {
                     provider: string;
                     /** @constant */
                     type: 'group';
-                    value?: string;
+                    value: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    provider: string;
+                    /** @constant */
+                    type: 'group';
+                    /** @constant */
+                    visibility: 'redacted';
                   };
             }[];
             next: string | null;
@@ -4557,14 +4579,43 @@ export interface operations {
             items: {
               createdAt: string;
               id: string;
-              principal: {
-                displayName: string;
-                email?: string;
-                id: string;
-                /** @enum {string} */
-                kind: 'user' | 'email' | 'group';
-                provider?: string;
-              };
+              principal:
+                | {
+                    displayName: string;
+                    email: string;
+                    id: string;
+                    /** @enum {string} */
+                    kind: 'user' | 'email';
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    displayName: string;
+                    id: string;
+                    /** @enum {string} */
+                    kind: 'user' | 'email';
+                    /** @constant */
+                    visibility: 'redacted';
+                  }
+                | {
+                    displayName: string;
+                    groupValue: string;
+                    id: string;
+                    /** @constant */
+                    kind: 'group';
+                    provider: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    displayName: string;
+                    id: string;
+                    /** @constant */
+                    kind: 'group';
+                    provider: string;
+                    /** @constant */
+                    visibility: 'redacted';
+                  };
               revision: number;
               role: {
                 id: string;

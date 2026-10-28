@@ -1,3 +1,5 @@
 {
-  "gzipBytes": 219017
+  "initialGzipBytes": 173011,
+  "chunkGzipBytes": 22000,
+  "totalGzipBytes": 240358
 }

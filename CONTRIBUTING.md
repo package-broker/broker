@@ -53,7 +53,7 @@ Contributions are accepted under the repository licence (AGPL-3.0-only). Every c
 
 ## Branches and pull requests
 
-Branch from `main` and open the pull request against `main`. Keep a pull request to one logical change. Pull requests are squash-merged, and the pull request title becomes the commit message, so it must follow [Conventional Commits](https://www.conventionalcommits.org/) with the package directory as scope, for example `feat(core): add plugin hook` or `fix(runtime-node)!: change health route`. Fill in the pull request template, describe the problem and the approach, and add or update tests for the behaviour you change.
+Branch from `main` and open the pull request against `main`. Keep a pull request to one logical change. Pull requests are squash-merged, and the pull request title becomes the commit message, so it must follow [Conventional Commits](https://www.conventionalcommits.org/) with the package directory as scope, for example `feat(core): add plugin hook` or `fix(runtime-node)!: change health route`. Fill in the pull request template, describe the problem and the approach, and add or update tests for the behaviour you change. A pull request that changes the admin UI (`packages/ui/src`) shows one Before and one After screenshot per changed screen in the collapsed Screenshots section of the template; the `ui screenshots` check fails without them unless the description ticks "No visible UI change".
 
 Read the [UI guidelines](docs/contributing/ui-guidelines.md) before changing the admin UI.
 

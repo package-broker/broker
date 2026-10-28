@@ -375,12 +375,14 @@ test.describe('Node management UI', () => {
     await confirmIdentity(page, admin);
     await go(page, 'tokens');
     await page.getByRole('combobox', { name: 'Token list', exact: true }).selectOption('personal');
-    await openDetails(page, 'Issue token');
-    await page.getByLabel('Name', { exact: true }).fill('Browser show once');
+    await page.getByRole('button', { name: 'New token', exact: true }).click();
+    await page.getByRole('radio', { name: 'Me', exact: true }).check();
+    await page.getByRole('radio', { name: 'All projects I can access', exact: true }).check();
+    await page.getByLabel('Token name', { exact: true }).fill('Browser show once');
     const issued = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/me/tokens',
     );
-    await page.getByRole('button', { name: 'Issue token', exact: true }).click();
+    await page.getByRole('button', { name: /^Create token$/, exact: true }).click();
     const response = await issued;
     expect(response.status()).toBe(201);
     const tokenSecret = await readSecret(response, 'token');
@@ -391,7 +393,9 @@ test.describe('Node management UI', () => {
     const displayed = page.getByRole('region', { name: 'Token secret', exact: true });
     await expect(displayed).toBeVisible();
     expect(
-      (await displayed.locator('code').textContent()) === tokenSecret,
+      (await displayed
+        .getByRole('region', { name: 'Created token', exact: true })
+        .textContent()) === tokenSecret,
       'UI shows the issued secret',
     ).toBe(true);
     return tokenSecret;

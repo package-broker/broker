@@ -1,6 +1,6 @@
 import { sha256Hex } from '../../auth/primitives.js';
 import type { ProjectGrantReader } from '../../db/grants.js';
-import { accessContextOf, projectActorOf } from '../../authz/access-context.js';
+import { projectActorOf } from '../../authz/access-context.js';
 import type { MutationFence } from '../../authz/fence.js';
 import { accessGrantFenceKey, roleFenceKey, type ProjectActor } from '../../authz/project-actor.js';
 import type { ProjectAdministration } from '../../authz/project-administration.js';
@@ -9,7 +9,11 @@ import type { RoleRepository } from '../../db/roles.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
 import type { ApiCall } from '../idempotency.js';
 import { apiRoute } from '../route.js';
-import { projectSessionCallContext, type ApiRouteDeps } from './context.js';
+import {
+  projectSessionCallContext,
+  revealsProjectGrantSubjects,
+  type ApiRouteDeps,
+} from './context.js';
 import {
   PROJECT_ACCESS_API_SPECS,
   PROJECT_GRANTS_LIST_API_SPEC,
@@ -53,7 +57,7 @@ export function projectAccessRoutes(deps: ProjectAccessRouteDeps): readonly Rout
         projectId: ctx.projectId,
         limit: query.limit === undefined ? 50 : Number(query.limit),
         ...(query.after === undefined ? {} : { after: query.after }),
-        includeEmail: accessContextOf(ctx)?.actor?.protectedHolder === true,
+        revealSubjects: revealsProjectGrantSubjects(ctx),
       });
       const digest = await sha256Hex(JSON.stringify([ctx.org.orgId, ctx.projectId, body]));
       return { status: 200, body, etag: Number.parseInt(digest.slice(0, 12), 16) + 1 };

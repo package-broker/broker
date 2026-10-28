@@ -1427,6 +1427,15 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'SSO bootstrap selects grant insert/promotion and permission top-up results; rowsOf counts RETURNING rows, excluding trigger and FK-action writes.',
+      sites: [
+        'db-sqlite/src/repositories/admin-bootstrap.ts:unresolved computed access: results[results.length - 1] #2',
+        'db-sqlite/src/repositories/admin-bootstrap.ts:unresolved computed access: results[results.length - 2] #1',
+        'db-sqlite/src/repositories/admin-bootstrap.ts:unresolved computed access: results[guards.length + topUp.length - 1] #1',
+      ],
+    },
+    {
+      reason:
         'SQL in audit-pending; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
         'db-sqlite/src/repositories/audit-pending.ts:SQL text: `INSERT INTO audit_pending\n  (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip,\n   action, target_type, target_id, project_id, payload_json)` #1',

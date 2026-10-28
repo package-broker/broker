@@ -1080,12 +1080,15 @@ export function SetupAvailabilityView(props: {
   return (
     <div className="mx-auto mt-12 max-w-md grid gap-4">
       <h1 id="page-heading" tabIndex={-1} className="font-semibold">
-        {props.availability === 'error'
-          ? 'Setup is unavailable'
-          : props.availability === 'ready'
-            ? "Sign in with your organization's account"
-            : 'First-run setup'}
+        First-run setup
       </h1>
+      {props.availability !== 'loading' ? (
+        <h2 className="font-semibold">
+          {props.availability === 'error'
+            ? 'Setup is unavailable'
+            : "Sign in with your organization's account"}
+        </h2>
+      ) : null}
       <AvailabilityMessage
         status={props.availability}
         local={props.local}

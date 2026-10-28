@@ -842,11 +842,12 @@ describe('local policy changes after availability loads', () => {
   it.each([
     ['ready', "Sign in with your organization's account"],
     ['error', 'Setup is unavailable'],
-  ] as const)('uses the standalone setup heading for %s', (availability, title) => {
+  ] as const)('keeps the setup title and availability heading for %s', (availability, title) => {
     const html = renderToString(
       createElement(SetupAvailabilityView, { availability, local: false, providers: [] }),
     );
     expect(html.replace(/&#x27;/g, "'")).toContain(title);
+    expect(html).toMatch(/<h1[^>]*>First-run setup<\/h1>/);
     expect(html).toContain('/_pb/ui/#/login');
     expect(html).not.toContain('<form');
   });

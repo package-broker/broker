@@ -381,7 +381,14 @@ describe('build with platformPorts', () => {
     const result = await build({ configPath, target: 'cloudflare', cwd: project, runtimeEntry });
     expect((await readManifest(result.outDir)).identity).toEqual({
       runtimeProviders: true,
-      compiled: [{ id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' }],
+      compiled: [
+        {
+          id: 'corp',
+          kind: 'oidc',
+          anchor: 'oidc:https://idp.example.com',
+          policy: { verifiedDomains: ['example.com'] },
+        },
+      ],
     });
   });
 

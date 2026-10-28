@@ -168,3 +168,38 @@ it('copies identity metadata from the registration snapshot without rereading th
   expect(manifest.identity?.compiled[0]).not.toBe(registration.identityDescriptor?.compiled[0]);
   expect(renderManifestJson([identityPlugin], new Map(), 'node')).not.toHaveProperty('identity');
 });
+
+it.each([
+  { verifiedDomains: ['example.com'] },
+  { verifiedDomains: ['example.com'], emailAuthoritativeDomains: [] },
+  { verifiedDomains: ['example.com'], emailAuthoritativeDomains: ['example.com'] },
+])('preserves declared domain policy in JSON with independent copies: %j', (policy) => {
+  const identityPlugin = definePlugin({
+    id: 'identity-fixture',
+    package: '@example/identity',
+    apiVersion: 3,
+    platforms: ['node'],
+    binds: ['identity'],
+    identityProviders: () => [],
+    identityDescriptor: {
+      runtimeProviders: true,
+      compiled: [{ id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com', policy }],
+    },
+  });
+  const expected = JSON.parse(JSON.stringify(policy)) as unknown;
+  const registration = collectRegistrations([identityPlugin]);
+  policy.verifiedDomains.push('changed.example.com');
+  policy.emailAuthoritativeDomains?.push('changed.example.com');
+  const manifest = renderManifestJson([identityPlugin], new Map(), 'node', { registration });
+  const emitted = manifest.identity!.compiled[0]!.policy!;
+  expect(JSON.parse(JSON.stringify(manifest)).identity.compiled[0].policy).toEqual(expected);
+  const snapshot = registration.identityDescriptor!.compiled[0]!.policy!;
+  expect(emitted).not.toBe(snapshot);
+  expect(emitted.verifiedDomains).not.toBe(snapshot.verifiedDomains);
+  if (emitted.emailAuthoritativeDomains !== undefined) {
+    expect(emitted.emailAuthoritativeDomains).not.toBe(snapshot.emailAuthoritativeDomains);
+  }
+  (emitted.verifiedDomains as string[]).push('output.example.com');
+  (emitted.emailAuthoritativeDomains as string[] | undefined)?.push('output.example.com');
+  expect(snapshot).toEqual(expected);
+});

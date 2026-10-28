@@ -1,6 +1,7 @@
 import { afterAll } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import {
+  describeAuditBackfillBench,
   describeMigrationContract,
   describeSchemaEquivalenceContract,
   describeVulnerabilityMigrationContract,
@@ -9,7 +10,7 @@ import { describeMigrationLockContract } from '@package-broker/db-sqlite/contrac
 import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
-const bindings = Array.from({ length: 64 }, (_, index) => `MDB${index}`);
+const bindings = Array.from({ length: 65 }, (_, index) => `MDB${index}`);
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -44,6 +45,7 @@ async function firstCoreMigration() {
 }
 
 describeMigrationContract('d1', openPair, firstCoreMigration);
+describeAuditBackfillBench('d1', openPair);
 describeMigrationLockContract('d1', openPair, firstCoreMigration);
 
 describeVulnerabilityMigrationContract('d1', openPair);

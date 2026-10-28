@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadMigrationSource } from '../migrations/source.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
-import { describeMigrationContract, type OpenedPair } from './migration-contract.js';
+import {
+  describeAuditBackfillBench,
+  describeMigrationContract,
+  type OpenedPair,
+} from './migration-contract.js';
 
 async function openPair(): Promise<OpenedPair> {
   const directory = await mkdtemp(join(tmpdir(), 'pb-migration-contract-'));
@@ -32,3 +36,4 @@ describeMigrationContract('node:sqlite', openPair, async () =>
     await readFile(new URL('../../migrations/0001_init.sql', import.meta.url), 'utf8'),
   ),
 );
+describeAuditBackfillBench('node:sqlite', openPair);

@@ -1,13 +1,13 @@
 CREATE TABLE audit_chain (
   org_id                TEXT NOT NULL PRIMARY KEY REFERENCES organization (id),
-  chain_id              TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+  chain_id              TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))) CHECK (length(chain_id) = 32 AND chain_id NOT GLOB '*[^0-9a-f]*'),
   epoch                 INTEGER NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 9007199254740991),
   incarnation           INTEGER NOT NULL DEFAULT 0 CHECK (incarnation BETWEEN 0 AND 9007199254740991),
   head_seq              INTEGER NOT NULL DEFAULT 0 CHECK (head_seq BETWEEN 0 AND 9007199254740991),
   head_hash             TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' CHECK (length(head_hash) = 64),
   boundary_seq          INTEGER NOT NULL DEFAULT 1 CHECK (boundary_seq BETWEEN 1 AND 9007199254740991),
   boundary_prev_hash    TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' CHECK (length(boundary_prev_hash) = 64),
-  boundary_reason       TEXT,
+  boundary_reason       TEXT CHECK (boundary_reason IN ('backfill', 'prune', 'capacity', 'chain_reset', 'epoch_bump')),
   mode                  TEXT NOT NULL DEFAULT 'trail' CHECK (mode IN ('trail', 'export', 'none')),
   mode_generation       INTEGER NOT NULL DEFAULT 0 CHECK (mode_generation BETWEEN 0 AND 9007199254740991),
   policy                TEXT NOT NULL DEFAULT 'availability' CHECK (policy IN ('availability', 'required')),
@@ -25,7 +25,7 @@ CREATE TABLE audit_chain (
 ) STRICT;
 
 CREATE TABLE audit_sink (
-  org_id                TEXT NOT NULL REFERENCES organization (id),
+  org_id                TEXT NOT NULL,
   sink_id               TEXT NOT NULL CHECK (length(sink_id) BETWEEN 1 AND 32 AND sink_id NOT GLOB '*[^a-z0-9-]*'),
   plugin_id             TEXT NOT NULL,
   kind                  TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 32 AND kind NOT GLOB '*[^a-z0-9-]*'),
@@ -36,8 +36,8 @@ CREATE TABLE audit_sink (
   state                 TEXT NOT NULL CHECK (state IN ('active', 'inactive', 'blocked', 'disabled', 'retired')),
   progress_seq          INTEGER NOT NULL CHECK (progress_seq BETWEEN 0 AND 9007199254740991),
   progress_hash         TEXT NOT NULL CHECK (length(progress_hash) = 64),
-  custody_seq           INTEGER NOT NULL CHECK (custody_seq BETWEEN 0 AND progress_seq),
-  inflight_from         INTEGER CHECK (inflight_from BETWEEN 0 AND 9007199254740991),
+  custody_seq           INTEGER NOT NULL CHECK (custody_seq BETWEEN 0 AND 9007199254740991),
+  inflight_from         INTEGER CHECK (inflight_from BETWEEN 1 AND 9007199254740991),
   inflight_to           INTEGER CHECK (inflight_to BETWEEN COALESCE(inflight_from, 0) AND 9007199254740991),
   inflight_body         TEXT CHECK (json_valid(inflight_body) AND length(CAST(inflight_body AS BLOB)) <= 524288),
   inflight_repr         TEXT CHECK (json_valid(inflight_repr)),
@@ -48,38 +48,56 @@ CREATE TABLE audit_sink (
   last_error_code       TEXT,
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  PRIMARY KEY (org_id, sink_id)
+  PRIMARY KEY (org_id, sink_id),
+  FOREIGN KEY (org_id) REFERENCES audit_chain (org_id),
+  CHECK ((inflight_from IS NULL) = (inflight_to IS NULL)),
+  CHECK (inflight_body IS NULL OR inflight_from IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE audit_ledger (
-  org_id           TEXT NOT NULL REFERENCES organization (id),
+  org_id           TEXT NOT NULL,
   id               TEXT NOT NULL,
-  kind             TEXT NOT NULL CHECK (kind IN ('skipped', 'uncertain', 'gap', 'withheld', 'mode_change', 'policy_change', 'cutover', 'rebind', 'retire', 'unblock', 'restore_confirmed', 'export')),
-  chain_id         TEXT NOT NULL,
+  kind             TEXT NOT NULL CHECK (kind IN ('skipped', 'uncertain', 'gap', 'withheld', 'mode_change', 'policy_change', 'cutover', 'rebind', 'retire', 'unblock', 'restore_confirmed', 'export', 'replay', 'chain_reset', 'epoch_bump')),
+  chain_id         TEXT NOT NULL CHECK (length(chain_id) = 32 AND chain_id NOT GLOB '*[^0-9a-f]*'),
   epoch            INTEGER NOT NULL CHECK (epoch BETWEEN 0 AND 9007199254740991),
-  from_seq         INTEGER NOT NULL CHECK (from_seq BETWEEN 0 AND 9007199254740991),
+  from_seq         INTEGER NOT NULL CHECK (from_seq BETWEEN 1 AND 9007199254740991),
   to_seq           INTEGER NOT NULL CHECK (to_seq BETWEEN from_seq AND 9007199254740991),
   count            INTEGER NOT NULL CHECK (count >= 0),
-  sink_id          TEXT,
-  reason_code      TEXT NOT NULL,
+  sink_id          TEXT CHECK (sink_id IS NULL OR (length(sink_id) BETWEEN 1 AND 32 AND sink_id NOT GLOB '*[^a-z0-9-]*')),
+  reason_code      TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 32 AND substr(reason_code, 1, 1) GLOB '[a-z]' AND reason_code NOT GLOB '*[^a-z_]*'),
   policy           TEXT NOT NULL CHECK (policy IN ('availability', 'required')),
   mode_generation  INTEGER NOT NULL CHECK (mode_generation BETWEEN 0 AND 9007199254740991),
   actor_type       TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),
   actor_id         TEXT,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  PRIMARY KEY (org_id, id)
+  PRIMARY KEY (org_id, id),
+  FOREIGN KEY (org_id) REFERENCES organization (id),
+  FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id)
 ) STRICT;
+
+CREATE TRIGGER audit_ledger_append_only_update
+BEFORE UPDATE ON audit_ledger
+BEGIN
+  SELECT RAISE(ABORT, 'audit ledger is append-only');
+END;
+
+CREATE TRIGGER audit_ledger_append_only_delete
+BEFORE DELETE ON audit_ledger
+BEGIN
+  SELECT RAISE(ABORT, 'audit ledger is append-only');
+END;
 
 CREATE INDEX audit_sink_state ON audit_sink (org_id, state);
 CREATE INDEX audit_ledger_range ON audit_ledger (org_id, from_seq, to_seq);
 CREATE INDEX audit_ledger_sink ON audit_ledger (org_id, sink_id, from_seq);
 
-INSERT INTO audit_chain (org_id, head_seq, head_hash, boundary_seq, boundary_prev_hash, journal_rows, journal_bytes)
+INSERT INTO audit_chain (org_id, head_seq, head_hash, boundary_seq, boundary_prev_hash, boundary_reason, journal_rows, journal_bytes)
 SELECT o.id,
   COALESCE((SELECT e.seq FROM audit_event e WHERE e.org_id = o.id ORDER BY e.seq DESC LIMIT 1), 0),
   COALESCE((SELECT e.hash FROM audit_event e WHERE e.org_id = o.id ORDER BY e.seq DESC LIMIT 1), '0000000000000000000000000000000000000000000000000000000000000000'),
   COALESCE((SELECT e.seq FROM audit_event e WHERE e.org_id = o.id ORDER BY e.seq LIMIT 1), 1),
   COALESCE((SELECT e.prev_hash FROM audit_event e WHERE e.org_id = o.id ORDER BY e.seq LIMIT 1), '0000000000000000000000000000000000000000000000000000000000000000'),
+  CASE WHEN COALESCE((SELECT e.seq FROM audit_event e WHERE e.org_id = o.id ORDER BY e.seq LIMIT 1), 1) > 1 THEN 'backfill' END,
   (SELECT count(*) FROM audit_event e WHERE e.org_id = o.id),
   COALESCE((SELECT sum(length(CAST(json_object(
     'id', e.id, 'org_id', e.org_id, 'seq', e.seq, 'prev_hash', e.prev_hash, 'hash', e.hash,
@@ -89,3 +107,9 @@ SELECT o.id,
     'payload_json', e.payload_json
   ) AS BLOB))) FROM audit_event e WHERE e.org_id = o.id), 0)
 FROM organization o;
+
+CREATE TRIGGER organization_audit_chain
+AFTER INSERT ON organization
+BEGIN
+  INSERT INTO audit_chain (org_id) VALUES (NEW.id);
+END;

@@ -34,7 +34,7 @@ const STATIC_REQUIRED_FILES = {
     'dist/api/openapi-route.js',
     'dist/api/openapi-route.d.ts',
   ],
-  'db-sqlite': ['migrations/0001_init.sql'],
+  'db-sqlite': ['migrations/0001_init.sql', 'migrations/0002_audit.sql'],
 };
 const MIGRATION_PACKAGES = ['db-sqlite'];
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };

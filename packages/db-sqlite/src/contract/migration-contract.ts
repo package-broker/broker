@@ -502,6 +502,29 @@ export function describeMigrationContract(
           { id: 'core:0002_audit' },
         ]);
         expect(await rows(executor, 'SELECT * FROM audit_chain')).toEqual([]);
+        await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+          ORG,
+          'one',
+          'Organization',
+        ]);
+        const chains = await rows<Record<string, ScalarSqlValue>>(
+          executor,
+          'SELECT * FROM audit_chain',
+        );
+        expect(chains).toHaveLength(1);
+        expect(chains[0]).toMatchObject({
+          org_id: ORG,
+          head_seq: 0,
+          head_hash: '0'.repeat(64),
+          boundary_seq: 1,
+          boundary_prev_hash: '0'.repeat(64),
+          boundary_reason: null,
+          journal_rows: 0,
+          journal_bytes: 0,
+          mode: 'trail',
+          policy: 'availability',
+        });
+        expect(chains[0]?.chain_id).toMatch(/^[0-9a-f]{32}$/);
       });
     });
 
@@ -597,6 +620,7 @@ export function describeMigrationContract(
             head_seq: state === 'populated' ? 8 : 0,
             head_hash: (state === 'populated' ? 'c' : '0').repeat(64),
             boundary_seq: state === 'populated' ? 7 : 1,
+            boundary_reason: state === 'populated' ? 'backfill' : null,
             boundary_prev_hash: (state === 'populated' ? 'b' : '0').repeat(64),
             journal_rows: state === 'populated' ? 2 : 0,
             mode: 'trail',
@@ -620,6 +644,7 @@ export function describeMigrationContract(
             head_hash: (state === 'populated' ? 'd' : '0').repeat(64),
             boundary_seq: 1,
             boundary_prev_hash: '0'.repeat(64),
+            boundary_reason: null,
             journal_rows: state === 'populated' ? 1 : 0,
           });
           for (const chain of chains) {
@@ -649,6 +674,47 @@ export function describeMigrationContract(
       },
     );
 
+    it('audit back-fill takes head and counters from a journal with an internal sequence gap', async () => {
+      await withPair(open, async ({ executor }) => {
+        const legacy = await core0001();
+        const audit = (await discoveredMigrations())[1]!;
+        await migrate(executor, [legacy], { holder: 'audit-legacy' });
+        await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+          ORG,
+          'one',
+          'Organization',
+        ]);
+        for (const [seq, hash, prevHash] of [
+          [1, 'a'.repeat(64), '0'.repeat(64)],
+          [2, 'b'.repeat(64), 'a'.repeat(64)],
+          [5, 'c'.repeat(64), 'b'.repeat(64)],
+        ] as const) {
+          await run(
+            executor,
+            `INSERT INTO audit_event
+            (id, org_id, seq, hash, prev_hash, created_at, actor_type, action, target_type, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, 'system', 'session.logout', 'session', ?)`,
+            [`event-${seq}`, ORG, seq, hash, prevHash, NOW, '{}'],
+          );
+        }
+        await migrate(executor, [legacy, audit], { holder: 'audit-gap' });
+        const chains = await rows<Record<string, ScalarSqlValue>>(
+          executor,
+          'SELECT * FROM audit_chain',
+        );
+        expect(chains).toHaveLength(1);
+        expect(chains[0]).toMatchObject({
+          org_id: ORG,
+          head_seq: 5,
+          head_hash: 'c'.repeat(64),
+          boundary_seq: 1,
+          boundary_prev_hash: '0'.repeat(64),
+          boundary_reason: null,
+          journal_rows: 3,
+        });
+      });
+    });
+
     it('audit tables enforce org keys, state, watermarks and UTF-8 in-flight byte limits', async () => {
       await withPair(open, async ({ executor }) => {
         await migrate(executor, await discoveredMigrations(), { holder: 'audit-constraints' });
@@ -659,7 +725,6 @@ export function describeMigrationContract(
             org === ORG ? 'one' : 'two',
             'Organization',
           ]);
-          await run(executor, 'INSERT INTO audit_chain (org_id) VALUES (?)', [org]);
           await run(
             executor,
             `INSERT INTO audit_sink
@@ -679,7 +744,6 @@ export function describeMigrationContract(
         for (const [table, column, value] of [
           ['audit_chain', 'org_id', 'missing'],
           ['audit_sink', 'org_id', 'missing'],
-          ['audit_ledger', 'org_id', 'missing'],
           ['audit_chain', 'mode', 'invalid'],
           ['audit_chain', 'policy', 'invalid'],
           ['audit_chain', 'capacity_state', 'invalid'],
@@ -695,12 +759,9 @@ export function describeMigrationContract(
           ['audit_sink', 'sink_id', 'BAD'],
           ['audit_sink', 'kind', 'BAD'],
           ['audit_sink', 'progress_seq', -1],
-          ['audit_sink', 'custody_seq', 1],
+          ['audit_sink', 'custody_seq', -1],
           ['audit_sink', 'inflight_body', '{bad'],
           ['audit_sink', 'inflight_repr', '{bad'],
-          ['audit_ledger', 'kind', 'invalid'],
-          ['audit_ledger', 'count', -1],
-          ['audit_ledger', 'to_seq', 0],
         ] as const) {
           const error = await rejection(
             run(executor, `UPDATE ${table} SET ${column} = ? WHERE org_id = ?`, [value, ORG]),
@@ -708,6 +769,190 @@ export function describeMigrationContract(
           expect(String((error as Error).message), `${table}.${column}`).toMatch(
             /CHECK|FOREIGN KEY/i,
           );
+        }
+        const ledgerRow = (overrides: Record<string, ScalarSqlValue>) => {
+          const values: Record<string, ScalarSqlValue> = {
+            org_id: ORG,
+            id: 'candidate',
+            kind: 'gap',
+            chain_id: 'a'.repeat(32),
+            epoch: 0,
+            from_seq: 1,
+            to_seq: 2,
+            count: 2,
+            sink_id: null,
+            reason_code: 'capacity',
+            policy: 'availability',
+            mode_generation: 0,
+            actor_type: 'system',
+            ...overrides,
+          };
+          return run(
+            executor,
+            `INSERT INTO audit_ledger (${Object.keys(values).join(', ')}) VALUES (${Object.keys(
+              values,
+            )
+              .map(() => '?')
+              .join(', ')})`,
+            Object.values(values),
+          );
+        };
+        for (const kind of [
+          'skipped',
+          'uncertain',
+          'gap',
+          'withheld',
+          'mode_change',
+          'policy_change',
+          'cutover',
+          'rebind',
+          'retire',
+          'unblock',
+          'restore_confirmed',
+          'export',
+          'replay',
+          'chain_reset',
+          'epoch_bump',
+        ]) {
+          await ledgerRow({ id: `kind-${kind}`, kind });
+        }
+        await ledgerRow({ id: 'with-sink', sink_id: 'archive' });
+        for (const [column, value] of [
+          ['org_id', 'missing'],
+          ['kind', 'invalid'],
+          ['count', -1],
+          ['from_seq', 0],
+          ['to_seq', 0],
+          ['chain_id', 'A'.repeat(32)],
+          ['chain_id', 'a'.repeat(31)],
+          ['chain_id', 'g'.repeat(32)],
+          ['sink_id', 'BAD'],
+          ['sink_id', 'x'.repeat(33)],
+          ['sink_id', 'missing'],
+          ['reason_code', '1bad'],
+          ['reason_code', 'Bad'],
+          ['reason_code', 'bad-code'],
+          ['reason_code', ''],
+          ['reason_code', 'a'.repeat(33)],
+          ['policy', 'invalid'],
+          ['actor_type', 'invalid'],
+        ] as const) {
+          const error = await rejection(ledgerRow({ id: 'rejected', [column]: value }));
+          expect(String((error as Error).message), `audit_ledger.${column}=${value}`).toMatch(
+            /CHECK|FOREIGN KEY/i,
+          );
+        }
+        await ledgerRow({ id: 'edge', reason_code: 'a' + '_'.repeat(31) });
+        for (const sql of [
+          "UPDATE audit_ledger SET count = 5 WHERE id = 'kind-gap'",
+          "DELETE FROM audit_ledger WHERE id = 'kind-gap'",
+        ]) {
+          const error = await rejection(run(executor, sql));
+          expect(String((error as Error).message)).toMatch(/append-only/i);
+        }
+        for (const [column, value] of [
+          ['inflight_from', 3],
+          ['inflight_to', 3],
+        ] as const) {
+          const error = await rejection(
+            run(executor, `UPDATE audit_sink SET ${column} = ? WHERE org_id = ?`, [value, ORG]),
+          );
+          expect(String((error as Error).message), `audit_sink.${column}`).toMatch(/CHECK/i);
+        }
+        await run(
+          executor,
+          'UPDATE audit_sink SET inflight_from = 3, inflight_to = 4 WHERE org_id = ?',
+          [ORG],
+        );
+        await run(
+          executor,
+          'UPDATE audit_sink SET inflight_from = NULL, inflight_to = NULL WHERE org_id = ?',
+          [ORG],
+        );
+        await run(
+          executor,
+          'UPDATE audit_sink SET progress_seq = 1, custody_seq = 5 WHERE org_id = ?',
+          [ORG],
+        );
+        const orphanSink = await rejection(
+          run(
+            executor,
+            `INSERT INTO audit_sink
+            (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq)
+            VALUES ('missing', 'archive', 'audit-webhook', 'webhook', 0, 'fingerprint', 1, 'build', 'active', 0, ?, 0)`,
+            ['0'.repeat(64)],
+          ),
+        );
+        expect(String((orphanSink as Error).message)).toMatch(/FOREIGN KEY/i);
+        const sinkInsert = (org: string, sink: string) =>
+          run(
+            executor,
+            `INSERT INTO audit_sink
+            (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq)
+            VALUES (?, ?, 'audit-webhook', 'webhook', 0, 'fingerprint', 1, 'build', 'active', 0, ?, 0)`,
+            [org, sink, '0'.repeat(64)],
+          );
+        await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+          'THIRD',
+          'three',
+          'Organization',
+        ]);
+        await run(executor, 'DELETE FROM audit_chain WHERE org_id = ?', ['THIRD']);
+        const chainlessSink = await rejection(sinkInsert('THIRD', 'archive'));
+        expect(String((chainlessSink as Error).message)).toMatch(/FOREIGN KEY/i);
+        await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+          'FOURTH',
+          'four',
+          'Organization',
+        ]);
+        await sinkInsert('FOURTH', 'other-only');
+        const foreignSink = await rejection(ledgerRow({ id: 'foreign', sink_id: 'other-only' }));
+        expect(String((foreignSink as Error).message)).toMatch(/FOREIGN KEY/i);
+        const longSink = 'x'.repeat(32);
+        await sinkInsert(ORG, longSink);
+        await ledgerRow({ id: 'long-sink', sink_id: longSink });
+        for (const reason of ['backfill', 'prune', 'capacity', 'chain_reset', 'epoch_bump']) {
+          await run(executor, 'UPDATE audit_chain SET boundary_reason = ? WHERE org_id = ?', [
+            reason,
+            ORG,
+          ]);
+        }
+        await run(executor, 'UPDATE audit_chain SET boundary_reason = NULL WHERE org_id = ?', [
+          ORG,
+        ]);
+        await run(executor, 'UPDATE audit_chain SET chain_id = ? WHERE org_id = ?', [
+          'f0'.repeat(16),
+          ORG,
+        ]);
+        await run(
+          executor,
+          'UPDATE audit_sink SET custody_seq = 9007199254740991 WHERE org_id = ?',
+          [OTHER_ORG],
+        );
+        await run(
+          executor,
+          'UPDATE audit_sink SET inflight_from = 1, inflight_to = 9007199254740991 WHERE org_id = ?',
+          [OTHER_ORG],
+        );
+        for (const [sql, params] of [
+          ['UPDATE audit_chain SET chain_id = ? WHERE org_id = ?', ['A'.repeat(32), ORG]],
+          ['UPDATE audit_chain SET chain_id = ? WHERE org_id = ?', ['a'.repeat(31), ORG]],
+          ['UPDATE audit_chain SET chain_id = ? WHERE org_id = ?', ['g'.repeat(32), ORG]],
+          ['UPDATE audit_chain SET chain_id = ? WHERE org_id = ?', ['a'.repeat(33), ORG]],
+          ['UPDATE audit_chain SET boundary_reason = ? WHERE org_id = ?', ['invalid', ORG]],
+          ['UPDATE audit_chain SET boundary_reason = ? WHERE org_id = ?', ['', ORG]],
+          ['UPDATE audit_sink SET custody_seq = 9007199254740992 WHERE org_id = ?', [OTHER_ORG]],
+          [
+            'UPDATE audit_sink SET inflight_from = ?, inflight_to = 5 WHERE org_id = ?',
+            [0, OTHER_ORG],
+          ],
+          [
+            'UPDATE audit_sink SET inflight_from = 9007199254740992, inflight_to = 9007199254740992 WHERE org_id = ?',
+            [OTHER_ORG],
+          ],
+        ] as const) {
+          const error = await rejection(run(executor, sql, params));
+          expect(String((error as Error).message), `${sql} ${params.join(',')}`).toMatch(/CHECK/i);
         }
         const unsafeSeq = await rejection(
           run(executor, 'UPDATE audit_chain SET head_seq = 9007199254740992 WHERE org_id = ?', [
@@ -717,10 +962,15 @@ export function describeMigrationContract(
         expect(String((unsafeSeq as Error).message)).toMatch(/CHECK/i);
         const body = JSON.stringify('é'.repeat(262143));
         expect(new TextEncoder().encode(body).byteLength).toBe(524288);
-        await run(executor, 'UPDATE audit_sink SET inflight_body = ? WHERE org_id = ?', [
-          body,
-          ORG,
-        ]);
+        const bodyWithoutRange = await rejection(
+          run(executor, 'UPDATE audit_sink SET inflight_body = ? WHERE org_id = ?', [body, ORG]),
+        );
+        expect(String((bodyWithoutRange as Error).message)).toMatch(/CHECK/i);
+        await run(
+          executor,
+          'UPDATE audit_sink SET inflight_from = 1, inflight_to = 2, inflight_body = ? WHERE org_id = ?',
+          [body, ORG],
+        );
         const error = await rejection(
           run(executor, 'UPDATE audit_sink SET inflight_body = ? WHERE org_id = ?', [
             JSON.stringify('é'.repeat(262144)),
@@ -1421,7 +1671,7 @@ export function describeSchemaEquivalenceContract(
   open: () => Promise<OpenedExecutor>,
 ): void {
   describe(`baseline schema equivalence: ${name}`, () => {
-    it('matches the recorded 0001–0024 schema with session and token identity bindings and per-table index order', async () => {
+    it('matches the recorded 0001–0002 schema with session and token identity bindings and per-table index order', async () => {
       const oldChain = JSON.parse(
         readFileSync(new URL('../migrations/old-chain-schema.json', import.meta.url), 'utf8'),
       ) as SchemaDump;
@@ -1454,4 +1704,44 @@ export function describeSchemaEquivalenceContract(
       }
     });
   });
+}
+
+export function describeAuditBackfillBench(name: string, open: () => Promise<OpenedPair>): void {
+  describe.skipIf(!process.env.PB_BENCH_AUDIT_BACKFILL)(
+    `audit back-fill benchmark: ${name}`,
+    () => {
+      it('times the 0002 back-fill over 100,000 journal rows in one organization', async () => {
+        await withPair(open, async ({ executor }) => {
+          const sources = await discoveredMigrations();
+          await migrate(executor, [sources[0]!], { holder: 'bench-0001' });
+          await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
+            ORG,
+            'one',
+            'Organization',
+          ]);
+          await run(
+            executor,
+            `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
+          INSERT INTO audit_event
+            (id, org_id, seq, prev_hash, hash, created_at, actor_type, action, target_type, payload_json)
+          SELECT 'event-' || i, ?, i, lower(hex(randomblob(32))), lower(hex(randomblob(32))), ?,
+            'system', 'session.logout', 'session', '{"detail":"' || hex(randomblob(40)) || '"}'
+          FROM n`,
+            [ORG, NOW],
+          );
+          const started = performance.now();
+          await migrate(executor, sources, { holder: 'bench-0002' });
+          const elapsed = Math.round(performance.now() - started);
+          const [chain] = await rows<Record<string, ScalarSqlValue>>(
+            executor,
+            'SELECT journal_rows, journal_bytes FROM audit_chain',
+          );
+          // eslint-disable-next-line no-console
+          console.log(
+            `AUDIT_BACKFILL_BENCH ${name} 0002 over ${String(chain?.journal_rows)} rows (${String(chain?.journal_bytes)} bytes): ${elapsed} ms`,
+          );
+        });
+      });
+    },
+  );
 }

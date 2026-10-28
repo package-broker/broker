@@ -1,9 +1,10 @@
+import { DatabaseSync } from 'node:sqlite';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import type { JobContext } from '../platform/jobs.js';
 import { createObservability, type ObsRecord } from '../platform/observability.js';
 import { AUDIT_GENESIS_HASH, hashRow, type AuditRow } from './chain.js';
-import { auditVerifyJob } from './verify.js';
+import { auditVerifyJob, requestVerification, type AuditVerifySnapshot } from './verify.js';
 
 const SENTINEL = 'PRIVATE-AUDIT-SENTINEL';
 const org = orgContext('org-1');
@@ -56,17 +57,47 @@ function setup(rows: readonly AuditRow[] = chain) {
     },
   );
   const now = vi.fn(() => new Date('2026-10-22T12:00:00.000Z'));
-  const markVerified = vi.fn<(ctx: typeof org, completedAt: string) => Promise<void>>(
-    async () => undefined,
-  );
+  const markVerified = vi.fn<
+    (
+      ctx: typeof org,
+      completedAt: string,
+      scope: import('./verify.js').AuditVerificationScope,
+      snapshot: AuditVerifySnapshot,
+    ) => Promise<boolean>
+  >(async () => true);
   const context = {
     org,
     signal: abort.signal,
     observability,
-    ports: { clock: { now } },
+    jobId: 'verify-run',
+    ports: {
+      clock: { now },
+      platform: { jobs: { enqueue: vi.fn(async () => ({ id: 'continuation', created: true })) } },
+    },
   } as unknown as JobContext;
-  const job = auditVerifyJob({ page, markVerified });
+  const snapshot: AuditVerifySnapshot = {
+    chain_id: 'a'.repeat(32),
+    epoch: 0,
+    incarnation: 0,
+    mode_generation: 0,
+    boundary_seq: 1,
+    boundary_prev_hash: AUDIT_GENESIS_HASH,
+    stored_seq: 0,
+    stored_hash: AUDIT_GENESIS_HASH,
+    head_seq: rows.at(-1)?.seq ?? 0,
+    head_hash: rows.at(-1)?.hash ?? AUDIT_GENESIS_HASH,
+  };
+  const readSnapshot = vi.fn(async () => ({ ...snapshot }));
+  const job = auditVerifyJob({
+    page,
+    markVerified,
+    snapshot: readSnapshot,
+    clearVerification: vi.fn(),
+  });
   return {
+    snapshot,
+    readSnapshot,
+    context,
     records,
     now,
     markVerified,
@@ -89,6 +120,269 @@ function expectBroken(s: ReturnType<typeof setup>, seq: number, reason: string) 
 }
 
 describe('auditVerifyJob', () => {
+  it('records bodies and withheld payloads separately without exporting stored bytes', async () => {
+    const first = {
+      ...chain[0]!,
+      source_ip: null,
+      payload_json:
+        '{"op_id":"01J0QPAD000000000000000000","request_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7"}',
+    };
+    first.hash = await hashRow(first.prev_hash, first);
+    const second = { ...chain[1]!, prev_hash: first.hash };
+    second.hash = await hashRow(second.prev_hash, second);
+    const s = setup([first, second]);
+    await s.run();
+    expect(s.markVerified).toHaveBeenCalledWith(
+      org,
+      expect.any(String),
+      {
+        fromSeq: 1,
+        throughSeq: 2,
+        bodies: 1,
+        withheld: 1,
+      },
+      s.snapshot,
+    );
+    expect(JSON.stringify(s.records)).not.toContain(SENTINEL);
+    expect(JSON.stringify(s.records)).not.toContain('7c9e6679');
+    expect(s.logs()).toEqual([expect.objectContaining({ from_seq: 1, bodies: 1, withheld: 1 })]);
+  });
+
+  it('counts key-reordered json_set payloads as bodies', async () => {
+    const row = {
+      ...chain[0]!,
+      source_ip: null,
+      payload_json:
+        '{"request_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7","op_id":"01J0QPAD000000000000000000"}',
+    };
+    row.hash = await hashRow(row.prev_hash, row);
+    const s = setup([row]);
+    await s.run();
+    expect(s.markVerified.mock.calls[0]?.[2]).toMatchObject({ bodies: 1, withheld: 0 });
+  });
+
+  it('counts a stored token json_set patch as a body', async () => {
+    const database = new DatabaseSync(':memory:');
+    try {
+      const row = {
+        ...chain[0]!,
+        action: 'token.rotate',
+        source_ip: null,
+        payload_json: JSON.stringify({
+          op_id: '01J0QPAD000000000000000000',
+          request_id: '01J0QPAD000000000000000000',
+          changes: {
+            replacement_id: { new: '01J0QPAD000000000000000000' },
+            overlap_days: { new: 7 },
+          },
+        }),
+      };
+      row.payload_json = (
+        database
+          .prepare("SELECT json_set(?, '$.changes.expires_at', json_object('new', ?)) AS payload")
+          .get(row.payload_json, '2026-10-28T00:00:00.000Z') as { payload: string }
+      ).payload;
+      row.hash = await hashRow(row.prev_hash, row);
+      const s = setup([row]);
+      await s.run();
+      expect(s.markVerified.mock.calls[0]?.[2]).toMatchObject({ bodies: 1, withheld: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([1, 2])('detects a consistent rewrite at or below stored head %s', async (storedSeq) => {
+    let prev = AUDIT_GENESIS_HASH;
+    const rewritten = [];
+    for (const original of chain.slice(0, 3)) {
+      const row = { ...original, prev_hash: prev, payload_json: 'rewritten' };
+      row.hash = await hashRow(prev, row);
+      rewritten.push(row);
+      prev = row.hash;
+    }
+    const s = setup(rewritten);
+    s.snapshot.stored_seq = storedSeq;
+    s.snapshot.stored_hash = chain[storedSeq - 1]!.hash;
+    await s.run();
+    expectBroken(s, storedSeq, 'hash');
+  });
+
+  it('detects newest rows deleted down to the stored head during verification', async () => {
+    const s = setup();
+    s.snapshot.stored_seq = 500;
+    s.snapshot.stored_hash = chain[499]!.hash;
+    s.page.mockImplementation(async (_ctx, after) => (after === 0 ? chain.slice(0, 500) : []));
+    await s.run();
+    expectBroken(s, 500, 'seq_gap');
+  });
+
+  it('detects a missing retained prefix above sequence one', async () => {
+    const s = setup(chain.slice(501));
+    s.snapshot.boundary_seq = 501;
+    s.snapshot.boundary_prev_hash = chain[499]!.hash;
+    await s.run();
+    expectBroken(s, 502, 'seq_gap');
+  });
+
+  it('detects a boundary previous hash mismatch', async () => {
+    const s = setup(chain.slice(500));
+    s.snapshot.boundary_seq = 501;
+    s.snapshot.boundary_prev_hash = AUDIT_GENESIS_HASH;
+    await s.run();
+    expectBroken(s, 501, 'prev_hash');
+  });
+
+  it('checks the stored head immediately before the retained boundary', async () => {
+    const s = setup(chain.slice(500));
+    Object.assign(s.snapshot, {
+      boundary_seq: 501,
+      boundary_prev_hash: chain[499]!.hash,
+      stored_seq: 500,
+      stored_hash: 'a'.repeat(64),
+    });
+    await s.run();
+    expectBroken(s, 500, 'hash');
+  });
+
+  it('detects a head hash mismatch at equal sequence', async () => {
+    const s = setup(chain.slice(0, 1));
+    s.snapshot.head_hash = 'a'.repeat(64);
+    await s.run();
+    expectBroken(s, 1, 'hash');
+  });
+
+  it('throws on an invalid snapshot', async () => {
+    const s = setup([]);
+    s.snapshot.boundary_seq = 0;
+    await expect(s.run()).rejects.toThrow('audit verification snapshot invalid');
+    expect(s.page).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'chain_id',
+    'epoch',
+    'incarnation',
+    'mode_generation',
+    'boundary_seq',
+    'boundary_prev_hash',
+  ] as const)('reports partial instead of broken after concurrent %s change', async (field) => {
+    const s = setup(chain.slice(1));
+    s.readSnapshot.mockResolvedValueOnce({ ...s.snapshot });
+    if (typeof s.snapshot[field] === 'number') Object.assign(s.snapshot, { [field]: 2 });
+    else Object.assign(s.snapshot, { [field]: 'b'.repeat(64) });
+    await s.run();
+    expect(s.logs()).toEqual([expect.objectContaining({ event: 'audit.verify_partial' })]);
+    expect(s.records.filter((r) => r.kind === 'counter')).toEqual([]);
+    expect(s.markVerified).not.toHaveBeenCalled();
+  });
+
+  it('caps pages, enqueues an idempotent cursor, and completes only in the continuation', async () => {
+    const s = setup();
+    for (const row of chain.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+    await s.run();
+    expect(s.page).toHaveBeenCalledTimes(20);
+    expect(s.markVerified).not.toHaveBeenCalled();
+    const enqueue = vi.mocked(s.context.ports.platform!.jobs.enqueue);
+    const [, , payload, options] = enqueue.mock.calls[0]!;
+    expect(options).toMatchObject({
+      resourceKey: 'audit-verify',
+      idempotencyKey: expect.stringMatching(/^audit-verify:continue:[a-f0-9]{64}$/),
+    });
+    expect(payload).toMatchObject({
+      cursor: {
+        nextSeq: 21,
+        prevHash: chain[19]!.hash,
+        bodies: 0,
+        withheld: 20,
+        snapshot: s.snapshot,
+      },
+    });
+    // A retried first job produces the same continuation and idempotency key.
+    for (const row of chain.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+    await s.run();
+    expect(enqueue.mock.calls[1]).toEqual(enqueue.mock.calls[0]);
+    await s.job.handler(s.job.validate(JSON.parse(JSON.stringify(payload))), s.context);
+    expect(s.markVerified.mock.calls[0]?.[2]).toEqual({
+      fromSeq: 1,
+      throughSeq: 1200,
+      bodies: 0,
+      withheld: 1200,
+    });
+  });
+
+  it.each(['mode_generation', 'head_seq'] as const)(
+    'reports partial when %s changes between continuations',
+    async (field) => {
+      const s = setup();
+      for (const row of chain.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+      await s.run();
+      const payload = vi.mocked(s.context.ports.platform!.jobs.enqueue).mock.calls[0]![2];
+      s.snapshot[field] += 1;
+      await s.job.handler(s.job.validate(payload), s.context);
+      expect(s.page).toHaveBeenCalledTimes(20);
+      expect(s.logs()).toEqual([expect.objectContaining({ event: 'audit.verify_partial' })]);
+      expect(s.records.filter((r) => r.kind === 'counter')).toEqual([]);
+      expect(s.markVerified).not.toHaveBeenCalled();
+    },
+  );
+
+  it('verifies a retained suffix from its trusted boundary', async () => {
+    const s = setup(chain.slice(500));
+    s.snapshot.boundary_seq = 501;
+    s.snapshot.boundary_prev_hash = chain[499]!.hash;
+    await s.run();
+    expect(s.markVerified).toHaveBeenCalledWith(
+      org,
+      expect.any(String),
+      {
+        fromSeq: 501,
+        throughSeq: 1200,
+        bodies: 0,
+        withheld: 700,
+      },
+      s.snapshot,
+    );
+    expect(s.page.mock.calls[0]).toEqual([org, 500, 500]);
+  });
+
+  it('detects a missing newest suffix against the snapshotted head', async () => {
+    const s = setup(chain.slice(0, 500));
+    s.snapshot.head_seq = 1200;
+    s.snapshot.head_hash = chain[1199]!.hash;
+    await s.run();
+    expectBroken(s, 500, 'seq_gap');
+  });
+
+  it('does not report success after a concurrent chain change', async () => {
+    const s = setup([]);
+    s.markVerified.mockResolvedValueOnce(false);
+    await s.run();
+    expect(s.logs()).toEqual([expect.objectContaining({ event: 'audit.verify_partial' })]);
+  });
+
+  it('requests verification with an organization-scoped idempotency key and lease', async () => {
+    const enqueue = vi.fn(async () => ({ id: 'job', created: false }));
+    const jobs = { enqueue, get: vi.fn() };
+    const now = new Date('2026-10-22T12:00:01.000Z');
+    await requestVerification(jobs, org, now);
+    await requestVerification(jobs, org, now);
+    expect(enqueue.mock.calls).toEqual(
+      Array(2).fill([
+        org,
+        'core:audit-verify:v1',
+        {},
+        {
+          idempotencyKey: 'audit-verify:2026-10-22T12:00',
+          resourceKey: 'audit-verify',
+        },
+      ]),
+    );
+  });
+
+  it.each([null, [], { extra: 'private' }, 'private'])('rejects invalid payloads', (payload) => {
+    expect(() => setup([]).job.validate(payload)).toThrow('invalid_payload');
+  });
+
   it('defines the daily job and accepts an empty payload', () => {
     const { job } = setup([]);
     expect(job).toMatchObject({
@@ -127,9 +421,22 @@ describe('auditVerifyJob', () => {
     });
     s.markVerified.mockImplementation(async () => {
       expect(s.logs()).toEqual([]);
+      return true;
     });
     await s.run();
-    expect(s.markVerified.mock.calls).toEqual([[org, completedAt]]);
+    expect(s.markVerified.mock.calls).toEqual([
+      [
+        org,
+        completedAt,
+        {
+          fromSeq: 1,
+          throughSeq: count,
+          bodies: 0,
+          withheld: count,
+        },
+        s.snapshot,
+      ],
+    ]);
   });
 
   it('does not record completion when a page read fails', async () => {
@@ -172,6 +479,7 @@ describe('auditVerifyJob', () => {
     'reports an unsafe interior sequence %s using the last good sequence',
     async (seq) => {
       const s = setup([]);
+      s.snapshot.head_seq = 1200;
       s.page.mockResolvedValueOnce([chain[0]!, { ...chain[1]!, seq: seq as number }]);
       await s.run();
       expectBroken(s, 1, 'seq_gap');
@@ -183,6 +491,7 @@ describe('auditVerifyJob', () => {
     'reports the previous head when the next page starts unsafe after %s rows',
     async (head) => {
       const s = setup([]);
+      s.snapshot.head_seq = 1200;
       if (head > 0) s.page.mockResolvedValueOnce(chain.slice(0, head));
       s.page.mockResolvedValueOnce([
         { ...chain[head]!, seq: 9007199254740992n as unknown as number },
@@ -195,6 +504,7 @@ describe('auditVerifyJob', () => {
 
   it('reports an earlier hash break before an unsafe sequence', async () => {
     const s = setup([]);
+    s.snapshot.head_seq = 1200;
     s.page.mockResolvedValueOnce([
       { ...chain[0]!, payload_json: 'tampered' },
       { ...chain[1]!, seq: Number.MAX_SAFE_INTEGER + 1 },

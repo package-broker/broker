@@ -41,6 +41,9 @@ export interface SafeLogRecord {
   readonly attempt?: number;
   readonly error_name?: ErrorName;
   readonly reason_code?: string;
+  readonly from_seq?: number;
+  readonly bodies?: number;
+  readonly withheld?: number;
   readonly head_seq?: number;
   readonly seq?: number;
   readonly rows?: number;
@@ -86,6 +89,9 @@ export const LOG_FIELDS = [
   'attempt',
   'error_name',
   'reason_code',
+  'from_seq',
+  'bodies',
+  'withheld',
   'head_seq',
   'seq',
   'rows',
@@ -372,6 +378,9 @@ const FIELD_CHECKS: Readonly<
   job_id: matches(ENTITY_ID),
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),
+  from_seq: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
+  bodies: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  withheld: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   head_seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   rows: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),

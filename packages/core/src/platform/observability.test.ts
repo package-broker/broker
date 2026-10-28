@@ -699,7 +699,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(42);
+    expect(missing).toHaveLength(45);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 
@@ -775,6 +775,9 @@ describe('dropped signal vocabulary', () => {
 describe('audit verifier fields', () => {
   it('preserves valid verifier fields', () => {
     const fields = {
+      from_seq: 501,
+      bodies: 1000,
+      withheld: 200,
       head_seq: 0,
       seq: Number.MAX_SAFE_INTEGER,
       rows: 1200,
@@ -794,23 +797,26 @@ describe('audit verifier fields', () => {
     }
   });
 
-  it.each(['head_seq', 'seq', 'rows'])('drops invalid %s', (field) => {
-    for (const value of [
-      '1',
-      -1,
-      0.5,
-      Number.NaN,
-      Infinity,
-      Number.MAX_SAFE_INTEGER + 1,
-      null,
-      {},
-    ]) {
-      expect(safeRecord({ level: 'info', event: 'audit.verified', [field]: value })).toEqual({
-        level: 'info',
-        event: 'audit.verified',
-      });
-    }
-  });
+  it.each(['head_seq', 'seq', 'rows', 'from_seq', 'bodies', 'withheld'])(
+    'drops invalid %s',
+    (field) => {
+      for (const value of [
+        '1',
+        -1,
+        0.5,
+        Number.NaN,
+        Infinity,
+        Number.MAX_SAFE_INTEGER + 1,
+        null,
+        {},
+      ]) {
+        expect(safeRecord({ level: 'info', event: 'audit.verified', [field]: value })).toEqual({
+          level: 'info',
+          event: 'audit.verified',
+        });
+      }
+    },
+  );
 
   it('drops invalid head_hash', () => {
     for (const head_hash of [

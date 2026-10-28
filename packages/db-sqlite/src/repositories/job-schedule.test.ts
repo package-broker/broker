@@ -144,6 +144,22 @@ describe('job schedule repository', () => {
     expect(await jobs(database.executor)).toHaveLength(1);
   });
 
+  it('assigns scheduled verification the same resource lease as requested runs', async () => {
+    const repo = createJobScheduleRepository(database.executor);
+    for (const name of ['core:audit-verify:v1', NAME])
+      await repo.upsert(ctx, { name, everySeconds: EVERY, nextRunAt: iso(-60) });
+    await repo.tick(ctx);
+    expect(
+      await database.executor.all({
+        sql: 'SELECT type, resource_key FROM job WHERE org_id = ? ORDER BY type',
+        params: [ctx.orgId],
+      }),
+    ).toEqual([
+      { type: 'core:audit-verify:v1', resource_key: 'audit-verify' },
+      { type: NAME, resource_key: null },
+    ]);
+  });
+
   it('two concurrent ticks for the same due slot create exactly one job', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'job-schedule-'));
     const shared = await openMigratedDatabase({

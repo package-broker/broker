@@ -236,8 +236,9 @@ export function createJobScheduleRepository(executor: SqlExecutor): JobScheduleR
         }
         const insertAt = statements.length;
         statements.push(
-          statement(sql`INSERT INTO job (id, org_id, type, payload_json, idempotency_key, max_attempts)
-            SELECT ${jobId}, s.org_id, s.name, '{}', ${prefix} || ${slot}, ${maxAttempts}
+          statement(sql`INSERT INTO job (id, org_id, type, payload_json, idempotency_key, max_attempts, resource_key)
+            SELECT ${jobId}, s.org_id, s.name, '{}', ${prefix} || ${slot}, ${maxAttempts},
+              CASE WHEN s.name = 'core:audit-verify:v1' THEN 'audit-verify' ELSE NULL END
             FROM job_schedule s
             WHERE s.org_id = ${ctx.orgId} AND s.name = ${name} AND s.enabled = 1
               AND s.every_seconds IS NOT NULL AND s.next_run_at <= ${NOW}

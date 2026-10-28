@@ -29,7 +29,7 @@ async function productionHeaders() {
 
 export function safeRequestHeaders(input: IncomingHttpHeaders): Headers {
   const headers = new Headers();
-  for (const name of ['accept', 'content-type', 'if-none-match']) {
+  for (const name of ['accept', 'content-type', 'if-match', 'if-none-match']) {
     const value = input[name];
     if (typeof value === 'string') headers.set(name, value);
   }

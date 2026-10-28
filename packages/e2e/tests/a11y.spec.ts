@@ -251,10 +251,10 @@ for (const width of [1440, 390]) {
     await go(page, 'access');
     await openDetails(page, 'New grant');
     await scan(page, 'New grant form');
-    await openDetails(page, 'Edit grants');
-    await scan(page, 'Edit grant form');
-    await page.getByRole('button', { name: 'Revoke', exact: true }).click();
-    await scanDialog(page, 'Revoke?');
+    await openDetails(page, 'Change role');
+    await scan(page, 'Change role form');
+    await page.getByRole('button', { name: 'Revoke grant', exact: true }).click();
+    await scanDialog(page, 'Revoke grant?');
     await go(page, 'access', 'status=roles');
     await openDetails(page, 'New role');
     await scan(page, 'New role form');

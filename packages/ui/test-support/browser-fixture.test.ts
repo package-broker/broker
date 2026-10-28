@@ -172,6 +172,7 @@ it('passes only safe request headers to mocked APIs', () => {
   const headers = safeRequestHeaders({
     accept: 'application/json',
     'content-type': 'application/json',
+    'if-match': '"r4"',
     'if-none-match': '"fixture"',
     authorization: 'Bearer fixture-only',
     cookie: 'fixture-only=true',
@@ -182,6 +183,7 @@ it('passes only safe request headers to mocked APIs', () => {
   expect([...headers]).toEqual([
     ['accept', 'application/json'],
     ['content-type', 'application/json'],
+    ['if-match', '"r4"'],
     ['if-none-match', '"fixture"'],
   ]);
 });

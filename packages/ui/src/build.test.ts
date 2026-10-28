@@ -217,6 +217,35 @@ describe('ui build output', () => {
   );
 });
 
+describe('split output budgets', () => {
+  it(
+    'rejects an oversized deferred chunk independently of the initial budget',
+    async () => {
+      const page = await writeEntry(
+        'console.log(' +
+          JSON.stringify(Array.from({ length: 1000 }, (_, index) => `value-${index}`).join(',')) +
+          ');',
+      );
+      const entry = await writeEntry(
+        `globalThis.loadPage = () => import(${JSON.stringify(page)});`,
+      );
+      const out = path.join(scratch, `out-${counter++}`);
+      const budget = path.join(scratch, `split-budget-${counter++}.json`);
+      await writeFile(budget, JSON.stringify({ initialGzipBytes: 1_000_000, chunkGzipBytes: 1 }));
+      await expect(runBuild(entry, out, budget)).rejects.toThrow(/exceeds budget/);
+      await expect(readdir(out)).rejects.toThrow();
+      await writeFile(
+        budget,
+        JSON.stringify({ initialGzipBytes: 1_000_000, chunkGzipBytes: 10_000 }),
+      );
+      await expect(runBuild(entry, out, budget)).resolves.toBeUndefined();
+      const files = await readOutput(out);
+      expect([...files.keys()].filter((name) => name.endsWith('.js'))).toHaveLength(3);
+    },
+    BUILD_TIMEOUT_MS * 2,
+  );
+});
+
 describe('ui setup build output', () => {
   it(
     'reports setup dependencies and outputs in the isolation graph',

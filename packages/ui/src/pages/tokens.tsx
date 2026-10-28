@@ -1,3 +1,5 @@
+import { pendingStorage } from '../token-pending.js';
+export { clearPendingTokenIssue } from '../token-pending.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';
@@ -93,16 +95,6 @@ export function tokensReducer(state: State, action: { type: 'navigate' }): State
       notice: null,
     };
   return state;
-}
-function pendingStorage(storage: PendingStorage): PendingStorage {
-  return {
-    getItem: (key) => storage.getItem(`tokens:${key}`),
-    setItem: (key, value) => storage.setItem(`tokens:${key}`, value),
-    removeItem: (key) => storage.removeItem(`tokens:${key}`),
-  };
-}
-export function clearPendingTokenIssue(storage: PendingStorage): void {
-  loadPending(pendingStorage(storage), Date.now());
 }
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

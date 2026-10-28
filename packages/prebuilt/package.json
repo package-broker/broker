@@ -1,6 +1,6 @@
 {
   "name": "@package-broker/dist",
-  "version": "2.0.0-rc.1",
+  "version": "2.0.0-rc.2",
   "description": "Prebuilt Package Broker node distribution",
   "license": "AGPL-3.0-only",
   "type": "module",

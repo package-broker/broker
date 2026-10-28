@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/runtime-node-v2.0.0-rc.1...runtime-node-v2.0.0-rc.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* read SSO providers at runtime and check the trust anchor before contacting the IdP ([#926](https://github.com/package-broker/broker/issues/926)) ([ee91a10](https://github.com/package-broker/broker/commit/ee91a1073b4af36c9429c75720676b5fc72d0f93)), closes [#918](https://github.com/package-broker/broker/issues/918)
+* **runtime-node:** PB_TRUSTED_PROXY names the proxy type it trusts ([#939](https://github.com/package-broker/broker/issues/939)) ([6f2ac52](https://github.com/package-broker/broker/commit/6f2ac520d4fca20d0e53da89f9fd0b9e745dbcb2))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.2
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.2
+
 ## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/runtime-node-v2.0.0-rc.0...runtime-node-v2.0.0-rc.1) (2026-10-27)
 
 

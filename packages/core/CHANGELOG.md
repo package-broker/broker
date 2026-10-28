@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.1...core-v2.0.0-rc.2) (2026-10-28)
+
+
+### Features
+
+* **cli:** deploy SSO providers at runtime for the prebuilt distribution ([#936](https://github.com/package-broker/broker/issues/936)) ([4fb21c3](https://github.com/package-broker/broker/commit/4fb21c351f106e16f91afaf334772f673f760544))
+
+
+### Bug Fixes
+
+* **core:** request-a-package writes the job and its audit atomically ([#940](https://github.com/package-broker/broker/issues/940)) ([7d9060b](https://github.com/package-broker/broker/commit/7d9060ba2888638b90ab41de8148210fd1be2055))
+* read SSO providers at runtime and check the trust anchor before contacting the IdP ([#926](https://github.com/package-broker/broker/issues/926)) ([ee91a10](https://github.com/package-broker/broker/commit/ee91a1073b4af36c9429c75720676b5fc72d0f93)), closes [#918](https://github.com/package-broker/broker/issues/918)
+
 ## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.0...core-v2.0.0-rc.1) (2026-10-27)
 
 

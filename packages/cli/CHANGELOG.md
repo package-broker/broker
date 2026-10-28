@@ -1,5 +1,38 @@
 # Changelog
 
+## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.1...cli-v2.0.0-rc.2) (2026-10-28)
+
+
+### Features
+
+* **cli:** deploy SSO providers at runtime for the prebuilt distribution ([#936](https://github.com/package-broker/broker/issues/936)) ([4fb21c3](https://github.com/package-broker/broker/commit/4fb21c351f106e16f91afaf334772f673f760544))
+
+
+### Bug Fixes
+
+* **cli:** accept the unpaginated Workers routes response and name the cause of route conflicts ([#932](https://github.com/package-broker/broker/issues/932)) ([710c994](https://github.com/package-broker/broker/commit/710c9942aff3fbb314920ecca709a7a1e2d5100b))
+* **cli:** refuse domain and rollout problems before writes with specific errors ([#923](https://github.com/package-broker/broker/issues/923)) ([9418ac3](https://github.com/package-broker/broker/commit/9418ac3437424a8ff618be6c0d936851698a31b0)), closes [#917](https://github.com/package-broker/broker/issues/917)
+* **cli:** resolve the custom domain zone in the production deploy contract ([#921](https://github.com/package-broker/broker/issues/921)) ([9f0668f](https://github.com/package-broker/broker/commit/9f0668fa92759d912fc7b7b432b23b53763bfd4b)), closes [#917](https://github.com/package-broker/broker/issues/917)
+* **cli:** setup records and teardown accepts the real R2 bucket responses ([#941](https://github.com/package-broker/broker/issues/941)) ([1c6531a](https://github.com/package-broker/broker/commit/1c6531a40639051a0de05190e0e773e22bee431e)), closes [#929](https://github.com/package-broker/broker/issues/929)
+* **cli:** teardown accepts an R2 bucket without CORS rules ([#934](https://github.com/package-broker/broker/issues/934)) ([75eec92](https://github.com/package-broker/broker/commit/75eec929fe8faeaa7b914e3fa856dd13ef87d91a)), closes [#933](https://github.com/package-broker/broker/issues/933)
+* **cli:** teardown handles R2 buckets without notifications and accounts without FedRAMP ([#930](https://github.com/package-broker/broker/issues/930)) ([cea4bf4](https://github.com/package-broker/broker/commit/cea4bf4f4ad678d157daf980a83294aa3c0eba6a))
+* **cli:** version preview in the production deploy contract ([#922](https://github.com/package-broker/broker/issues/922)) ([f69852e](https://github.com/package-broker/broker/commit/f69852e039dbf86c620540ed0bc3c20ffea82d9c)), closes [#917](https://github.com/package-broker/broker/issues/917)
+* operator messages without internal ids and with the real migration lock expiry ([#938](https://github.com/package-broker/broker/issues/938)) ([a015d46](https://github.com/package-broker/broker/commit/a015d465dd9d4b671c89b208de6e82e32b76dd91))
+* read SSO providers at runtime and check the trust anchor before contacting the IdP ([#926](https://github.com/package-broker/broker/issues/926)) ([ee91a10](https://github.com/package-broker/broker/commit/ee91a1073b4af36c9429c75720676b5fc72d0f93)), closes [#918](https://github.com/package-broker/broker/issues/918)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.2
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.2
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.2
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.2
+    * @package-broker/runtime-node bumped to 2.0.0-rc.2
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.2
+
 ## [2.0.0-rc.1](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.0...cli-v2.0.0-rc.1) (2026-10-27)
 
 

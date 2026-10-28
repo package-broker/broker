@@ -17,7 +17,7 @@ If you are changing something in the first column, read its role in the second f
 | `packages/cli`                 | The `pb` command: build composition, migrations, bootstrap and admin tooling     |
 | `packages/prebuilt`            | Node prebuilt distribution shell: package metadata and README, no source         |
 | `packages/prebuilt-cloudflare` | Cloudflare prebuilt distribution shell: package metadata and README, no source   |
-| `packages/ui`                  | Static UI assets                                                                 |
+| `packages/ui`                  | Static UI assets; read [UI guidelines](docs/contributing/ui-guidelines.md) first |
 | `packages/ui-assets`           | Build-time bridge that hands the UI assets to `pb build`                         |
 | `packages/plugin-github`       | GitHub source plugin (stub)                                                      |
 | `packages/plugin-sso-oidc`     | Generic OIDC single sign-on plugin (stub)                                        |

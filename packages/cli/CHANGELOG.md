@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.2...cli-v2.0.0-rc.3) (2026-10-28)
+
+
+### Miscellaneous Chores
+
+* **cli:** Synchronize product versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.3
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.3
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.3
+    * @package-broker/runtime-node bumped to 2.0.0-rc.3
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.1...cli-v2.0.0-rc.2) (2026-10-28)
 
 

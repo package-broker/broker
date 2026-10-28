@@ -1138,6 +1138,20 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Builds audit_ledger fixture INSERT parameters from scalar column values, never executor results or changes counts.',
+      sites: [
+        'db-sqlite/src/contract/migration-contract.ts:opaque object access: Object.values(values) #3',
+      ],
+    },
+    {
+      reason:
+        'Sets a literal audit_ledger constraint-test column in fixture input; neither the computed key nor ledgerRow reads executor counts.',
+      sites: [
+        "db-sqlite/src/contract/migration-contract.ts:unresolved computed key: const error = await rejection(ledgerRow({ id: 'rejected', [column]: value })); #1",
+      ],
+    },
+    {
+      reason:
         'Indexes fixture data in migration-contract; retained because the key cannot be proven to exclude changes.',
       sites: [
         'db-sqlite/src/contract/migration-contract.ts:unresolved computed access: ROLE_IDS[defaults.key] #1',

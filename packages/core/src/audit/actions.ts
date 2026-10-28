@@ -148,9 +148,24 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.credential_set': ['external_ref'],
   'purge.batch': ['count', 'kind'],
   'sync_session.finalize': ['source_id', 'added', 'updated', 'removed'],
-  'audit.export': ['from_seq', 'to_seq', 'count'],
-  'audit.mode_change': ['mode', 'policy', 'mode_generation', 'cutover_seq'],
-  'audit.sink_admin': ['sink_id', 'operation', 'from_seq', 'to_seq', 'reason_code', 'policy'],
+  'audit.export': ['from_seq', 'to_seq', 'count', 'format'],
+  'audit.mode_change': [
+    'from_mode',
+    'to_mode',
+    'policy',
+    'source',
+    'mode_generation',
+    'cutover_seq',
+  ],
+  'audit.sink_admin': [
+    'operation',
+    'sink_id',
+    'from_seq',
+    'to_seq',
+    'epoch',
+    'generation',
+    'reason_code',
+  ],
 };
 
 export type AuditValue = string | number | boolean | null | readonly string[];
@@ -247,6 +262,65 @@ function cleanProviderId(value: unknown): Cleaned {
   return typeof value === 'string' && isValidProviderId(value)
     ? { ok: true, value }
     : { ok: false, reason: 'bad_value' };
+}
+
+const AUDIT_CONTROL_ACTIONS: ReadonlySet<string> = new Set([
+  'audit.export',
+  'audit.mode_change',
+  'audit.sink_admin',
+]);
+const AUDIT_CONTROL_ENUMS: Record<string, readonly string[]> = {
+  format: ['api', 'jsonl'],
+  from_mode: ['trail', 'export', 'none'],
+  to_mode: ['trail', 'export', 'none'],
+  source: ['build', 'env', 'cli'],
+  policy: ['availability', 'required'],
+  operation: [
+    'rebind',
+    'retire',
+    'unblock',
+    'skip',
+    'replay',
+    'confirm_restore',
+    'policy_set',
+    'epoch_bump',
+    'chain_reset',
+  ],
+};
+const AUDIT_CONTROL_INTEGERS: ReadonlySet<string> = new Set([
+  'from_seq',
+  'to_seq',
+  'count',
+  'mode_generation',
+  'cutover_seq',
+  'epoch',
+  'generation',
+]);
+
+function cleanAuditControlValue(value: unknown, field: string): Cleaned {
+  const values = AUDIT_CONTROL_ENUMS[field];
+  if (values !== undefined) {
+    return typeof value === 'string' && values.includes(value)
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (field === 'sink_id') {
+    return value === null ||
+      (typeof value === 'string' && /^[a-z0-9-]{1,32}$/.exec(value)?.[0] === value)
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (field === 'reason_code') {
+    return typeof value === 'string' && /^[a-z][a-z_]{0,31}$/.exec(value)?.[0] === value
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (AUDIT_CONTROL_INTEGERS.has(field)) {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  return cleanValue(value, field);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -349,7 +423,9 @@ function cleanChanges(
       const cleaned =
         field === 'provider' && IDENTITY_ACTIONS.has(action)
           ? cleanProviderId(entry[key])
-          : cleanValue(entry[key], field);
+          : AUDIT_CONTROL_ACTIONS.has(action)
+            ? cleanAuditControlValue(entry[key], field)
+            : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
       cleanedEntry[key] = cleaned.value;
     }

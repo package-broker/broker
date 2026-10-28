@@ -69,14 +69,21 @@ describe('audit control action registration', () => {
   const cases = [
     {
       action: 'audit.export',
-      fields: ['from_seq', 'to_seq', 'count'],
-      changes: { from_seq: { new: 1 }, to_seq: { new: 10 }, count: { new: 10 } },
+      fields: ['from_seq', 'to_seq', 'count', 'format'],
+      changes: {
+        from_seq: { new: 1 },
+        to_seq: { new: 10 },
+        count: { new: 10 },
+        format: { new: 'jsonl' },
+      },
     },
     {
       action: 'audit.mode_change',
-      fields: ['mode', 'policy', 'mode_generation', 'cutover_seq'],
+      fields: ['from_mode', 'to_mode', 'policy', 'source', 'mode_generation', 'cutover_seq'],
       changes: {
-        mode: { old: 'trail', new: 'export-only' },
+        from_mode: { new: 'trail' },
+        to_mode: { new: 'export' },
+        source: { new: 'cli' },
         policy: { old: 'availability', new: 'required' },
         mode_generation: { old: 1, new: 2 },
         cutover_seq: { new: 10 },
@@ -84,14 +91,15 @@ describe('audit control action registration', () => {
     },
     {
       action: 'audit.sink_admin',
-      fields: ['sink_id', 'operation', 'from_seq', 'to_seq', 'reason_code', 'policy'],
+      fields: ['operation', 'sink_id', 'from_seq', 'to_seq', 'epoch', 'generation', 'reason_code'],
       changes: {
         sink_id: { new: 'archive' },
         operation: { new: 'retire' },
         from_seq: { new: 1 },
         to_seq: { new: 10 },
         reason_code: { new: 'operator_confirmed' },
-        policy: { old: 'required', new: 'availability' },
+        epoch: { new: 0 },
+        generation: { new: 1 },
       },
     },
   ] satisfies Array<{
@@ -122,14 +130,146 @@ describe('audit control action registration', () => {
       },
     );
 
-    it.each(fields)(`${action} sanitizes old and new values in %s`, (field) => {
+    it.each(fields)(`${action} refuses sensitive old and new values in %s`, (field) => {
       for (const value of ['person@example.test', FAKE.GITHUB_PAT_CLASSIC_4]) {
         for (const side of ['old', 'new']) {
           expect(build(action, { [field]: { [side]: value } })).toEqual({
             ok: false,
-            reason: 'credential_value',
+            reason: 'bad_value',
           });
         }
+      }
+    });
+  }
+
+  const stringFields = [
+    ['audit.export', 'format', ['api', 'jsonl']],
+    ['audit.mode_change', 'from_mode', ['trail', 'export', 'none']],
+    ['audit.mode_change', 'to_mode', ['trail', 'export', 'none']],
+    ['audit.mode_change', 'source', ['build', 'env', 'cli']],
+    ['audit.mode_change', 'policy', ['availability', 'required']],
+    [
+      'audit.sink_admin',
+      'operation',
+      [
+        'rebind',
+        'retire',
+        'unblock',
+        'skip',
+        'replay',
+        'confirm_restore',
+        'policy_set',
+        'epoch_bump',
+        'chain_reset',
+      ],
+    ],
+    ['audit.sink_admin', 'sink_id', ['a', '0', '-', 'archive-1', 'a'.repeat(32), null]],
+    ['audit.sink_admin', 'reason_code', ['a', 'operator_confirmed', 'a_', 'a'.repeat(32)]],
+  ] as const;
+
+  for (const [action, field, values] of stringFields) {
+    it.each(values)(`${action} preserves ${field} %s on both sides`, (value) => {
+      const changes = { [field]: { old: value, new: value } };
+      expect(JSON.parse(payloadOf(build(action, changes))).changes).toEqual(changes);
+    });
+
+    it.each(
+      [
+        'https://example.test/path',
+        'https://user:password@example.test/path?query=value#fragment',
+        'person@example.test',
+        '',
+        'invalid/value',
+        'TRAIL',
+        ' archive',
+        'archive\n',
+        'a'.repeat(33),
+        0,
+        true,
+        null,
+        ['trail'],
+        {},
+      ].filter((value) => field !== 'sink_id' || value !== null),
+    )(`${action} refuses invalid ${field} %j on both sides`, (value) => {
+      for (const side of ['old', 'new']) {
+        expect(build(action, { [field]: { [side]: value } })).toEqual({
+          ok: false,
+          reason: 'bad_value',
+        });
+      }
+    });
+  }
+
+  it.each([
+    ['audit.mode_change', 'from_mode', 'export-only'],
+    ['audit.mode_change', 'to_mode', 'export-only'],
+    ['audit.sink_admin', 'operation', 'list'],
+    ['audit.sink_admin', 'operation', 'confirm-restore'],
+    ['audit.sink_admin', 'operation', 'policy set'],
+    ['audit.sink_admin', 'sink_id', 'archive_id'],
+    ...[
+      '_reason',
+      'reason1',
+      'reason-code',
+      'reason code',
+      'a'.repeat(33),
+      'reason\n',
+      'reason\r\n',
+    ].map((value) => ['audit.sink_admin', 'reason_code', value]),
+  ])('%s refuses invalid %s %j on both sides', (action, field, value) => {
+    for (const side of ['old', 'new']) {
+      expect(build(action, { [field]: { [side]: value } })).toEqual({
+        ok: false,
+        reason: 'bad_value',
+      });
+    }
+  });
+
+  const integerFields = cases.flatMap(({ action, fields }) =>
+    fields
+      .filter((field) =>
+        [
+          'from_seq',
+          'to_seq',
+          'count',
+          'mode_generation',
+          'cutover_seq',
+          'epoch',
+          'generation',
+        ].includes(field),
+      )
+      .map((field) => ({ action, field })),
+  );
+
+  for (const { action, field } of integerFields) {
+    it.each([0, 1, Number.MAX_SAFE_INTEGER])(
+      `${action} preserves ${field} %j on both sides`,
+      (value) => {
+        const changes = { [field]: { old: value, new: value } };
+        expect(JSON.parse(payloadOf(build(action, changes))).changes).toEqual(changes);
+      },
+    );
+
+    it.each([
+      -1,
+      0.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      NaN,
+      Infinity,
+      -Infinity,
+      '1',
+      'https://example.test/path',
+      'person@example.test',
+      true,
+      null,
+      [],
+      {},
+    ])(`${action} refuses invalid ${field} %j on both sides`, (value) => {
+      for (const side of ['old', 'new']) {
+        expect(build(action, { [field]: { [side]: value } })).toEqual({
+          ok: false,
+          reason: 'bad_value',
+        });
       }
     });
   }
@@ -137,6 +277,8 @@ describe('audit control action registration', () => {
   it.each([
     ['audit.export', 'sink_id'],
     ['audit.mode_change', 'count'],
+    ['audit.mode_change', 'mode'],
+    ['audit.sink_admin', 'policy'],
     ['audit.sink_admin', 'mode'],
   ])('%s refuses another action’s field %s', (action, field) => {
     expect(build(action, { [field]: { new: 1 } })).toEqual({

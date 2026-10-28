@@ -12,6 +12,7 @@ import {
   type ScalarSqlValue,
 } from '@package-broker/core/db/port';
 import { bootstrapAdmin } from '../repositories/admin-bootstrap.js';
+import { createOrganizationBootstrap } from '../repositories/organization.js';
 import { migrate, MigrationApplyError, MigrationChecksumError } from '../migrations/runner.js';
 import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
 import { scanSql } from '../sql/scan.js';
@@ -502,11 +503,23 @@ export function describeMigrationContract(
           { id: 'core:0002_audit' },
         ]);
         expect(await rows(executor, 'SELECT * FROM audit_chain')).toEqual([]);
-        await run(executor, 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)', [
-          ORG,
-          'one',
-          'Organization',
-        ]);
+        const bootstrap = createOrganizationBootstrap(executor);
+        expect(
+          await bootstrap.bootstrap({
+            id: orgContext(ORG).orgId,
+            slug: 'one',
+            name: 'Organization',
+            now: NOW,
+          }),
+        ).toEqual({ created: true, id: ORG, slug: 'one', name: 'Organization' });
+        expect(
+          await bootstrap.bootstrap({
+            id: orgContext(OTHER_ORG).orgId,
+            slug: 'two',
+            name: 'Other',
+            now: NOW,
+          }),
+        ).toEqual({ created: false, id: ORG, slug: 'one', name: 'Organization' });
         const chains = await rows<Record<string, ScalarSqlValue>>(
           executor,
           'SELECT * FROM audit_chain',

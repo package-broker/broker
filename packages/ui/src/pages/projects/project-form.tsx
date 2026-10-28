@@ -183,13 +183,13 @@ export function ProjectForm(props: {
         <dl className="grid min-w-0 gap-2 text-sm">
           <div className="min-w-0">
             <dt>Composer</dt>
-            <dd className="overflow-x-auto whitespace-nowrap">
+            <dd className="overflow-x-auto whitespace-nowrap" tabIndex={0}>
               <code>{`${origin}/${previewSlug}`}</code>
             </dd>
           </div>
           <div className="min-w-0">
             <dt>npm</dt>
-            <dd className="overflow-x-auto whitespace-nowrap">
+            <dd className="overflow-x-auto whitespace-nowrap" tabIndex={0}>
               <code>{`${origin}/${previewSlug}/npm/`}</code>
             </dd>
           </div>

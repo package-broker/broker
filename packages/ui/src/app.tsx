@@ -155,12 +155,15 @@ export function bindProjectReplay(
   });
 }
 
-const NAV: readonly { route: PageRoute; label: string }[] = [
+const PRIMARY_NAV: readonly { route: PageRoute; label: string }[] = [
   { route: 'projects', label: 'Projects' },
   { route: 'access', label: 'Access' },
   { route: 'sources', label: 'Sources' },
   { route: 'packages', label: 'Packages' },
   { route: 'tokens', label: 'Tokens' },
+];
+
+const ADMINISTRATION_NAV: readonly { route: PageRoute; label: string }[] = [
   { route: 'audit', label: 'Audit' },
   { route: 'import', label: 'Import' },
 ];
@@ -201,28 +204,44 @@ export function Shell(props: {
   onScope: (project: string | null) => void;
   onSignOut: () => void;
   signOutError?: boolean;
+  visibleRoutes?: readonly PageRoute[];
   children?: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const isVisible = (item: { route: PageRoute }) =>
+    props.visibleRoutes === undefined || props.visibleRoutes.includes(item.route);
+  const primary = PRIMARY_NAV.filter(isVisible);
+  const administration = ADMINISTRATION_NAV.filter(isVisible);
+  const renderItem = (item: { route: PageRoute; label: string }, secondary = false) => (
+    <li key={item.route}>
+      <a
+        href={buildHash(item.route, props.project)}
+        onClick={() => setMenuOpen(false)}
+        aria-current={props.route === item.route ? 'page' : undefined}
+        className={cn(
+          'block rounded-md px-3 py-1.5 text-sm hover:bg-neutral-100',
+          secondary && props.route !== item.route && 'text-neutral-500',
+          props.route === item.route && 'bg-neutral-100 font-medium',
+        )}
+      >
+        {item.label}
+      </a>
+    </li>
+  );
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
       <header className="shell-header">
         <span className="shell-brand font-semibold">Package Broker</span>
         <nav aria-label="Main" id="main-nav" className={`shell-nav ${menuOpen ? 'is-open' : ''}`}>
-          {NAV.map((item) => (
-            <a
-              key={item.route}
-              href={buildHash(item.route, props.project)}
-              onClick={() => setMenuOpen(false)}
-              aria-current={props.route === item.route ? 'page' : undefined}
-              className={cn(
-                'rounded-md px-3 py-1.5 text-sm hover:bg-neutral-100',
-                props.route === item.route && 'bg-neutral-100 font-medium',
-              )}
-            >
-              {item.label}
-            </a>
-          ))}
+          <ul className="shell-nav-group">{primary.map((item) => renderItem(item))}</ul>
+          {administration.length > 0 && (
+            <>
+              <hr className="shell-nav-divider" />
+              <ul className="shell-nav-group shell-nav-administration" aria-label="Administration">
+                {administration.map((item) => renderItem(item, true))}
+              </ul>
+            </>
+          )}
         </nav>
         <div className="ml-auto flex min-w-0 items-center gap-2">
           <ScopeSwitcher

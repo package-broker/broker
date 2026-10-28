@@ -1,11 +1,6 @@
-import { isUlid, ulid } from '../ids.js';
-import {
-  AUDIT_ACTIONS,
-  auditEvent,
-  isIpLiteral,
-  type AuditAction,
-  type AuditEventInput,
-} from './actions.js';
+import { isUlid } from '../ids.js';
+import { sha256Hex } from '../auth/primitives.js';
+import { auditEvent, type AuditAction, type AuditEventInput } from './actions.js';
 import type { AuditRow } from './chain.js';
 import type { AuditJournalItemV1, AuditMarkerV1, AuditRecordV1 } from './plugin-api.js';
 import { redactValue } from './redact.js';
@@ -22,10 +17,7 @@ type MarkerFields<T> = T extends AuditMarkerV1
 export type AuditMarkerFields = MarkerFields<AuditMarkerV1>;
 
 const HASH = /^[0-9a-f]{64}$/;
-const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const SELECTOR = /^[a-z2-7]{12}$/;
-const ACTORS = ['user', 'service_principal', 'customer', 'system'];
-const ERROR_CODES = ['network', 'timeout', 'refused', 'too_large', 'http_status', 'bad_response'];
+const REASON_CODE = /^[a-z][a-z_]{0,31}$/;
 const WITHHELD_REASON = 'content_unavailable';
 
 function assert(value: boolean): asserts value {
@@ -34,10 +26,6 @@ function assert(value: boolean): asserts value {
 
 function id(value: unknown): boolean {
   return typeof value === 'string' && value.length === 26 && isUlid(value);
-}
-
-function nullableId(value: unknown): boolean {
-  return value === null || id(value);
 }
 
 function seq(value: unknown, minimum = 0): boolean {
@@ -54,44 +42,89 @@ function text(value: unknown): boolean {
   return cleaned.ok && cleaned.value === value;
 }
 
-function timestamp(value: unknown): boolean {
-  if (typeof value !== 'string' || !TIMESTAMP.test(value)) return false;
-  const date = new Date(value);
-  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
-}
-
 function identity(input: AuditWireIdentity): void {
   assert(id(input.chainId) && id(input.orgId) && seq(input.epoch));
 }
 
-function safeFields(row: Record<string, unknown>): void {
-  assert(id(row['id']) && seq(row['seq'], 1));
-  assert(hash(row['prevHash']) && hash(row['hash']) && timestamp(row['createdAt']));
-  assert(typeof row['actorType'] === 'string' && ACTORS.includes(row['actorType']));
-  assert(nullableId(row['actorId']) && nullableId(row['targetId']) && nullableId(row['projectId']));
-  assert(
-    typeof row['action'] === 'string' &&
-      (AUDIT_ACTIONS as readonly string[]).includes(row['action']),
-  );
-  assert(
-    typeof row['targetType'] === 'string' &&
-      /^[a-z][a-z0-9_]{0,63}$/.exec(row['targetType'])?.[0] === row['targetType'] &&
-      text(row['targetType']),
-  );
+function chainFields(row: Record<string, unknown>): void {
+  assert(seq(row['seq'], 1) && hash(row['prevHash']) && hash(row['hash']));
 }
 
-/** Creates an unsigned marker with a fresh identity and projects only its declared fields. */
-export function auditWireMarker(
+function validEnvelope(row: Record<string, unknown>): boolean {
+  return auditEvent({
+    id: row['id'] as string,
+    now: row['createdAt'] as string,
+    actor: {
+      type: row['actorType'] as AuditEventInput['actor']['type'],
+      id: row['actorId'] as string | null,
+    },
+    action: row['action'] as AuditAction,
+    target: { type: row['targetType'] as string, id: row['targetId'] as string | null },
+    projectId: row['projectId'] as string | null,
+    context: {
+      opId: '00000000000000000000000000',
+      requestId: '00000000000000000000000000',
+      tokenSelector: (Object.hasOwn(row, 'tokenSelector') ? row['tokenSelector'] : null) as
+        string | null,
+      sourceIp: (Object.hasOwn(row, 'sourceIp') ? row['sourceIp'] : null) as string | null,
+    },
+  }).ok;
+}
+
+function safeFields(row: Record<string, unknown>): void {
+  chainFields(row);
+  assert(validEnvelope(row));
+}
+
+async function markerId(scope: AuditWireIdentity, fields: AuditMarkerFields): Promise<string> {
+  let position: readonly unknown[];
+  switch (fields.kind) {
+    case 'boundary':
+      position = [fields.boundarySeq];
+      break;
+    case 'gap':
+    case 'delivery_uncertain':
+      position = [fields.fromSeq, fields.toSeq];
+      break;
+    case 'tombstone':
+    case 'withheld':
+    case 'head':
+      position = [fields.seq];
+      break;
+    case 'fork':
+      position = [fields.lastCommonSeq];
+      break;
+    case 'receiver_changed':
+      position = [fields.oldFingerprint, fields.newFingerprint];
+      break;
+    default:
+      throw new TypeError('Invalid audit wire data');
+  }
+  assert(position.every((value) => (typeof value === 'number' ? seq(value) : hash(value))));
+  const digest = await sha256Hex(
+    JSON.stringify([scope.chainId, scope.epoch, fields.kind, ...position]),
+  );
+  let bits = BigInt('0x' + digest.slice(0, 30));
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  let encoded = '';
+  for (let i = 0; i < 24; i++) {
+    encoded = alphabet[Number(bits & 31n)] + encoded;
+    bits >>= 5n;
+  }
+  return '00' + encoded;
+}
+
+/** Creates an unsigned marker with a stable identity and projects only its declared fields. */
+export async function auditWireMarker(
   scope: AuditWireIdentity,
   fields: AuditMarkerFields,
-): AuditMarkerV1 {
+): Promise<AuditMarkerV1> {
   identity(scope);
   const base = {
     chainId: scope.chainId,
     epoch: scope.epoch,
-    markerId: ulid(),
+    markerId: await markerId(scope, fields),
   };
-  if (fields.kind === 'withheld' && base.markerId === fields.id) base.markerId = ulid();
   switch (fields.kind) {
     case 'boundary':
       assert(
@@ -137,7 +170,8 @@ export function auditWireMarker(
         seq(fields.seq, 1) &&
           hash(fields.prevHash) &&
           hash(fields.hash) &&
-          ERROR_CODES.includes(fields.reasonCode),
+          typeof fields.reasonCode === 'string' &&
+          REASON_CODE.exec(fields.reasonCode)?.[0] === fields.reasonCode,
       );
       return Object.freeze({
         ...base,
@@ -221,11 +255,11 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// SQLite json_set preserves existing key order and appends new keys. Preserve that
-// order in the sanitized output without restoring any keys removed by the sanitizer.
+// Accept any key order of the sanitized object, including SQLite json_set patches,
+// without restoring keys removed by the sanitizer.
 function storedOrder(clean: unknown, stored: unknown): unknown {
   if (!object(clean) || !object(stored)) return clean;
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   for (const key of Object.keys(stored)) {
     if (Object.hasOwn(clean, key)) result[key] = storedOrder(clean[key], stored[key]);
   }
@@ -270,31 +304,20 @@ function payloadMatches(row: AuditRow): boolean {
   }
 }
 
-/** Invalid envelopes fail closed; changed or refused payloads become safe withheld markers. */
-export function auditWireRecord(
+/** Compares stored payloads with the writer sanitizer before projecting public fields. */
+export async function auditWireRecord(
   scope: AuditWireIdentity,
   row: AuditRow,
-  sourceIp: 'include' | 'omit' = 'include',
-): AuditJournalItemV1 {
+  sourceIp: 'include' | 'omit',
+): Promise<AuditJournalItemV1> {
   identity(scope);
   assert(row.org_id === scope.orgId);
   const record = recordFields(scope, row);
-  safeFields(record as unknown as Record<string, unknown>);
-  assert(
-    row.token_selector === null ||
-      (typeof row.token_selector === 'string' &&
-        row.token_selector.length === 12 &&
-        SELECTOR.test(row.token_selector)),
-  );
-  assert(
-    row.source_ip === null ||
-      (typeof row.source_ip === 'string' &&
-        /^[0-9a-fA-F:.]+$/.exec(row.source_ip)?.[0] === row.source_ip &&
-        isIpLiteral(row.source_ip)),
-  );
+  chainFields(record as unknown as Record<string, unknown>);
   assert(sourceIp === 'include' || sourceIp === 'omit');
+  assert(validEnvelope({ ...record, sourceIp: row.source_ip }));
   if (!payloadMatches(row)) {
-    const marker = auditWireMarker(scope, {
+    const marker = await auditWireMarker(scope, {
       ...record,
       kind: 'withheld',
       reasonCode: WITHHELD_REASON,

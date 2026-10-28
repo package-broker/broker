@@ -44,8 +44,8 @@ function row(
   };
 }
 
-function withheld(input: AuditRow): void {
-  const output = auditWireRecord(scope, input);
+async function withheld(input: AuditRow): Promise<void> {
+  const output = await auditWireRecord(scope, input, 'include');
   expect(output).toEqual({
     chainId: scope.chainId,
     epoch: 1,
@@ -80,9 +80,13 @@ function sqlPatch(payload: string, sql: string, value: string | number): string 
 }
 
 describe('audit wire records', () => {
-  it('projects every chain field verbatim and labels source IP outside the hash input', () => {
+  it('projects every chain field verbatim and labels source IP outside the hash input', async () => {
     const input = row('role.rename', { name: { old: 'Old name', new: 'New name' } });
-    const output = auditWireRecord(scope, { ...input, extra: 'hidden@example.test' } as AuditRow);
+    const output = await auditWireRecord(
+      scope,
+      { ...input, extra: 'hidden@example.test' } as AuditRow,
+      'include',
+    );
     const ip = input.source_ip;
     expect(output).toEqual({
       kind: 'event',
@@ -124,14 +128,16 @@ describe('audit wire records', () => {
       source_ip: record.sourceIp ?? null,
     });
     expect(canonicalRow(toRow(output))).toBe(canonicalRow(input));
-    const omitted = auditWireRecord(scope, input, 'omit');
+    const omitted = await auditWireRecord(scope, input, 'omit');
     expect(omitted).not.toHaveProperty('sourceIp');
     if (omitted.kind !== 'event') throw new Error('Expected a record');
     expect(canonicalRow(toRow(omitted))).toBe(canonicalRow(input));
-    expect(auditWireRecord(scope, { ...input, source_ip: null })).not.toHaveProperty('sourceIp');
+    expect(
+      await auditWireRecord(scope, { ...input, source_ip: null }, 'include'),
+    ).not.toHaveProperty('sourceIp');
   });
 
-  it('passes the actual token json_set patch, including its appended key order', () => {
+  it('passes the actual token json_set patch, including its appended key order', async () => {
     const input = row('token.rotate', { replacement_id: { new: ID }, overlap_days: { new: 7 } });
     const payload = JSON.parse(input.payload_json);
     payload.changes = { replacement_id: { new: ID }, overlap_days: { new: 7 } };
@@ -143,10 +149,35 @@ describe('audit wire records', () => {
     expect(input.payload_json.indexOf('replacement_id')).toBeLessThan(
       input.payload_json.indexOf('expires_at'),
     );
-    expect(auditWireRecord(scope, input)).toHaveProperty('payloadJson', input.payload_json);
+    expect(await auditWireRecord(scope, input, 'include')).toHaveProperty(
+      'payloadJson',
+      input.payload_json,
+    );
   });
 
-  it('passes the actual source-removal absent-count json_set patch', () => {
+  it('accepts any sanitized key order at every object level', async () => {
+    const input = row('role.rename', { name: { old: 'Old name', new: 'New name' } });
+    input.payload_json = JSON.stringify({
+      request_id: ID,
+      changes: { name: { old: 'Old name', new: 'New name' } },
+      op_id: ID,
+    });
+    expect(await auditWireRecord(scope, input, 'include')).toHaveProperty(
+      'payloadJson',
+      input.payload_json,
+    );
+    input.payload_json = JSON.stringify({
+      request_id: ID,
+      changes: { name: { new: 'New name', old: 'Old name' } },
+      op_id: ID,
+    });
+    expect(await auditWireRecord(scope, input, 'include')).toHaveProperty(
+      'payloadJson',
+      input.payload_json,
+    );
+  });
+
+  it('passes the actual source-removal absent-count json_set patch', async () => {
     const input = row('source.removal_applied', {
       source_id: { new: ID },
       absent: { new: 0 },
@@ -158,7 +189,10 @@ describe('audit wire records', () => {
       JSON.stringify(Array.from({ length: 8 }, () => null)),
     );
     expect(JSON.parse(input.payload_json).changes.absent.new).toBe(8);
-    expect(auditWireRecord(scope, input)).toHaveProperty('payloadJson', input.payload_json);
+    expect(await auditWireRecord(scope, input, 'include')).toHaveProperty(
+      'payloadJson',
+      input.payload_json,
+    );
   });
 
   it.each([
@@ -181,73 +215,115 @@ describe('audit wire records', () => {
         changes: { secret: { new: 'hidden@example.test' } },
       }),
     ],
-  ])('withholds %s without exposing payload, selector or IP', (_label, payload) => {
-    withheld({ ...row(), payload_json: payload });
+  ])('withholds %s without exposing payload, selector or IP', async (_label, payload) => {
+    await withheld({ ...row(), payload_json: payload });
   });
 
   it.each([
     'hidden@example.test',
     'ghp_abcdefghijklmnopqrstuvwxyz1234567890',
     'https://user:password@host.test/repo?token=secret',
-  ])('withholds refused or transformed content', (value) => {
+  ])('withholds refused or transformed content', async (value) => {
     const input = row('source.update', { url: { new: 'https://host.test/repo' } });
     const payload = JSON.parse(input.payload_json);
     payload.changes.url.new = value;
-    withheld({ ...input, payload_json: JSON.stringify(payload) });
+    await withheld({ ...input, payload_json: JSON.stringify(payload) });
   });
 
   it.each([
-    ['id', 'bad'],
     ['id', ID + '\n'],
-    ['hash', 'a'.repeat(64) + '\n'],
-    ['token_selector', 'abcdefghijkl\n'],
     ['target_type', 'session\n'],
+    ['id', 'legacy-event'],
+    ['actor_id', 'legacy-actor'],
+    ['target_id', 'legacy-target'],
+    ['project_id', 'legacy-project'],
+    ['target_type', 'Legacy target / type'],
+    ['created_at', '2026-10-28T00:00:00Z'],
+    ['created_at', '2026-10-28T00:00:00.1Z'],
+    ['created_at', '2026-10-28T00:00:00.123456789Z'],
+    ['created_at', '2026-02-30T00:00:00.000Z'],
+  ])('represents writer-accepted envelope %s verbatim', async (field, value) => {
+    const input = { ...row(), [field]: value };
+    expect(
+      auditEvent({
+        id: input.id,
+        now: input.created_at,
+        action: input.action as AuditAction,
+        actor: { type: input.actor_type, id: input.actor_id },
+        target: { type: input.target_type, id: input.target_id },
+        projectId: input.project_id,
+        context: {
+          opId: ID,
+          requestId: ID,
+          tokenSelector: input.token_selector,
+          sourceIp: input.source_ip,
+        },
+      }).ok,
+    ).toBe(true);
+    expect(await auditWireRecord(scope, input, 'include')).toMatchObject({
+      kind: 'event',
+      payloadJson: input.payload_json,
+    });
+  });
+
+  it.each([
+    ['hash', 'a'.repeat(64) + '\n'],
     ['org_id', ID],
     ['seq', 0],
     ['seq', 1.5],
     ['seq', Number.MAX_SAFE_INTEGER + 1],
     ['prev_hash', 'a'.repeat(63)],
     ['hash', 'A'.repeat(64)],
-    ['created_at', '2026-02-30T00:00:00.000Z'],
-    ['created_at', '2026-10-28T00:00:00Z'],
     ['actor_type', 'admin'],
     ['actor_id', 'hidden@example.test'],
-    ['target_id', 'bad'],
-    ['project_id', 'bad'],
     ['action', 'unknown.action'],
     ['target_type', 'hidden@example.test'],
+    ['token_selector', 'abcdefghijkl\n'],
+    ['source_ip', '127.0.0.1\n'],
     ['token_selector', 'abcdefghijklmnop'],
     ['source_ip', 'host.test'],
-    ['source_ip', '127.0.0.1\n'],
     ['source_ip', '::1\n'],
     ['source_ip', '127.0.0.1:80'],
-  ])('rejects invalid envelope field %s with a fixed error', (field, value) => {
-    expect(() => auditWireRecord(scope, { ...row(), [field]: value })).toThrow(
+  ])('rejects invalid envelope field %s with a fixed error', async (field, value) => {
+    await expect(auditWireRecord(scope, { ...row(), [field]: value }, 'include')).rejects.toThrow(
       new TypeError('Invalid audit wire data'),
     );
   });
 
-  it('validates envelope fields even when payloads are withheld or source IP omitted', () => {
-    expect(() =>
-      auditWireRecord(scope, { ...row(), payload_json: '{', actor_id: 'hidden@example.test' }),
-    ).toThrow('Invalid audit wire data');
-    expect(() =>
+  it('validates envelope fields even when payloads are withheld or source IP omitted', async () => {
+    await expect(
+      auditWireRecord(
+        scope,
+        { ...row(), payload_json: '{', actor_id: 'hidden@example.test' },
+        'include',
+      ),
+    ).rejects.toThrow('Invalid audit wire data');
+    await expect(
       auditWireRecord(scope, { ...row(), source_ip: 'hidden@example.test' }, 'omit'),
-    ).toThrow('Invalid audit wire data');
-    expect(auditWireRecord(scope, { ...row(), source_ip: '::1' })).toHaveProperty(
+    ).rejects.toThrow('Invalid audit wire data');
+    expect(await auditWireRecord(scope, { ...row(), source_ip: '::1' }, 'include')).toHaveProperty(
       'sourceIp',
       '::1',
     );
     expect(
-      auditWireRecord(scope, {
-        ...row(),
-        actor_type: 'system',
-        actor_id: null,
-        target_id: null,
-        project_id: null,
-        token_selector: null,
-      }),
+      await auditWireRecord(
+        scope,
+        {
+          ...row(),
+          actor_type: 'system',
+          actor_id: null,
+          target_id: null,
+          project_id: null,
+          token_selector: null,
+        },
+        'include',
+      ),
     ).toHaveProperty('actorId', null);
+  });
+
+  it('requires an explicit source IP mode', async () => {
+    // @ts-expect-error source IP policy must be explicit
+    await expect(auditWireRecord(scope, row())).rejects.toThrow('Invalid audit wire data');
   });
 
   it.each([
@@ -255,8 +331,10 @@ describe('audit wire records', () => {
     { ...scope, chainId: 'bad' },
     { ...scope, epoch: -1 },
     { ...scope, epoch: 1.5 },
-  ])('rejects invalid chain scope', (invalid) => {
-    expect(() => auditWireRecord(invalid, row())).toThrow('Invalid audit wire data');
+  ])('rejects invalid chain scope', async (invalid) => {
+    await expect(auditWireRecord(invalid, row(), 'include')).rejects.toThrow(
+      'Invalid audit wire data',
+    );
   });
 });
 
@@ -314,9 +392,9 @@ const markers: AuditMarkerFields[] = [
 
 describe('audit wire markers', () => {
   it.each(markers)(
-    'creates a distinct immutable $kind marker and strips undeclared fields',
-    (fields) => {
-      const output = auditWireMarker(scope, {
+    'creates a stable immutable $kind marker and strips undeclared fields',
+    async (fields) => {
+      const output = await auditWireMarker(scope, {
         ...fields,
         markerId: ID,
         payloadJson: 'hidden@example.test',
@@ -333,11 +411,60 @@ describe('audit wire markers', () => {
       });
       expect(isUlid(output.markerId)).toBe(true);
       expect(output.markerId).not.toBe(ID);
-      expect(output.markerId).not.toBe(auditWireMarker(scope, fields).markerId);
+      expect(output.markerId).toBe((await auditWireMarker(scope, fields)).markerId);
       expect(output).not.toHaveProperty('payloadJson');
       expect(output).not.toHaveProperty('sourceIp');
       expect(output).not.toHaveProperty('tokenSelector');
       expect(Object.isFrozen(output)).toBe(true);
+    },
+  );
+
+  it('separates identities by chain, epoch, position and kind', async () => {
+    const fields = {
+      kind: 'tombstone' as const,
+      seq: 1,
+      prevHash: '0'.repeat(64),
+      hash: 'a'.repeat(64),
+      reasonCode: 'record_rejected',
+    };
+    const variants = await Promise.all([
+      auditWireMarker(scope, fields),
+      auditWireMarker({ ...scope, chainId: ID }, fields),
+      auditWireMarker({ ...scope, epoch: 2 }, fields),
+      auditWireMarker(scope, { ...fields, seq: 2 }),
+      auditWireMarker(scope, { kind: 'head', seq: 1, hash: fields.hash, boundarySeq: 1 }),
+    ]);
+    expect(new Set(variants.map((item) => item.markerId)).size).toBe(variants.length);
+    const range = {
+      kind: 'gap' as const,
+      fromSeq: 1,
+      toSeq: 2,
+      count: 2,
+      prevHash: fields.prevHash,
+      hash: fields.hash,
+      reason: 'capacity' as const,
+      policyGeneration: 1,
+    };
+    expect((await auditWireMarker(scope, range)).markerId).not.toBe(
+      (await auditWireMarker(scope, { ...range, toSeq: 3, count: 3 })).markerId,
+    );
+  });
+
+  it.each(['record_rejected', 'a', 'a'.repeat(32)])(
+    'accepts tombstone reason code %s',
+    async (reasonCode) => {
+      expect(
+        await auditWireMarker(scope, { ...markers[2], reasonCode } as AuditMarkerFields),
+      ).toHaveProperty('reasonCode', reasonCode);
+    },
+  );
+
+  it.each(['', 'A', 'a1', '_a', 'a'.repeat(33), 'network\n'])(
+    'refuses malformed tombstone reason code',
+    async (reasonCode) => {
+      await expect(
+        auditWireMarker(scope, { ...markers[2], reasonCode } as AuditMarkerFields),
+      ).rejects.toThrow('Invalid audit wire data');
     },
   );
 
@@ -357,8 +484,8 @@ describe('audit wire markers', () => {
     { ...markers[6], newFingerprint: 'hidden@example.test' },
     { ...markers[7], boundarySeq: 2 },
     { kind: 'unknown' },
-  ])('rejects malformed markers without echoing data', (invalid) => {
-    expect(() => auditWireMarker(scope, invalid as AuditMarkerFields)).toThrow(
+  ])('rejects malformed markers without echoing data', async (invalid) => {
+    await expect(auditWireMarker(scope, invalid as AuditMarkerFields)).rejects.toThrow(
       new TypeError('Invalid audit wire data'),
     );
   });

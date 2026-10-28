@@ -599,13 +599,18 @@ export function mountSetup(root: HTMLElement, deps: SetupMountDeps): () => void 
           ? el(
               'section',
               {},
-              heading(
-                snapshot.stage === 'disabled'
-                  ? "Sign in with your organization's account"
-                  : snapshot.stage === 'unavailable'
-                    ? 'Setup is unavailable'
-                    : 'Set up the administrator account',
-              ),
+              heading('Set up the administrator account'),
+              ...(snapshot.stage === 'checking'
+                ? []
+                : [
+                    el(
+                      'h2',
+                      { class: 'mt-4 font-semibold' },
+                      snapshot.stage === 'disabled'
+                        ? "Sign in with your organization's account"
+                        : 'Setup is unavailable',
+                    ),
+                  ]),
               el(
                 'p',
                 {

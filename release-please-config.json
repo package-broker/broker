@@ -4,6 +4,7 @@
   "include-component-in-tag": true,
   "tag-separator": "-",
   "separate-pull-requests": false,
+  "signoff": "package-broker-release-bot[bot] <349232595+package-broker-release-bot[bot]@users.noreply.github.com>",
   "plugins": [
     {
       "type": "node-workspace",

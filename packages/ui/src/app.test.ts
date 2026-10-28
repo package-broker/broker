@@ -33,9 +33,11 @@ describe('hash routes', () => {
     for (const route of [...PAGE_ROUTES, 'login', 'setup']) expect(ROUTES).toContain(route);
   });
 
-  it('maps every page route to a component', () => {
+  it('loads every page route component on demand', async () => {
     for (const route of PAGE_ROUTES) {
-      expect(typeof PAGES[route as keyof typeof PAGES]).toBe('function');
+      const pending = PAGES[route as keyof typeof PAGES]();
+      expect(pending).toBeInstanceOf(Promise);
+      expect(typeof (await pending)).toBe('function');
       expect(resolveRoute(`#/${route}`, true).route).toBe(route);
     }
   });

@@ -119,7 +119,7 @@ export function ProjectForm(props: {
           name="name"
           required
           className="h-11"
-          placeholder="e.g. FastWhiteCat"
+          placeholder="e.g. Acme Company"
           value={draft.name}
           onChange={(event) => setDraft(changeName(draft, event.target.value))}
           aria-describedby={`${id}-name-help ${id}-name-error`}
@@ -146,7 +146,7 @@ export function ProjectForm(props: {
               name="slug"
               required
               className="h-11"
-              placeholder="e.g. fastwhitecat"
+              placeholder="e.g. acme-company"
               value={draft.slug}
               onChange={(event) => setDraft(changeSlug(draft, event.target.value))}
               aria-describedby={`${id}-slug-help ${id}-slug-rule ${id}-slug-error`}

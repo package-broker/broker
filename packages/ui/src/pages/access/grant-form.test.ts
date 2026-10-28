@@ -150,19 +150,19 @@ describe('grant input and review', () => {
     ).toEqual(['provider', 'group', 'roleId']);
   });
   it('reviews person and group grants at both scopes', () => {
-    expect(grantSummary(draft, developer, dex, 'storefront', 'Fast White Cat')).toBe(
+    expect(grantSummary(draft, developer, dex, 'storefront', 'Acme Company')).toBe(
       'alex@example.test will get Project Developer on project storefront.',
     );
     expect(
-      grantSummary({ ...draft, type: 'group' }, developer, dex, 'storefront', 'Fast White Cat'),
+      grantSummary({ ...draft, type: 'group' }, developer, dex, 'storefront', 'Acme Company'),
     ).toBe(
       'Members of Dev-All@Example.Test signing in with Dex will get Project Developer on project storefront.',
     );
-    expect(grantSummary(draft, auditor, dex, null, 'Fast White Cat')).toBe(
-      'alex@example.test will get Organization Auditor for Fast White Cat, including read access across projects.',
+    expect(grantSummary(draft, auditor, dex, null, 'Acme Company')).toBe(
+      'alex@example.test will get Organization Auditor for Acme Company, including read access across projects.',
     );
-    expect(grantSummary({ ...draft, type: 'group' }, auditor, dex, null, 'Fast White Cat')).toBe(
-      'Members of Dev-All@Example.Test signing in with Dex will get Organization Auditor for Fast White Cat, including read access across projects.',
+    expect(grantSummary({ ...draft, type: 'group' }, auditor, dex, null, 'Acme Company')).toBe(
+      'Members of Dev-All@Example.Test signing in with Dex will get Organization Auditor for Acme Company, including read access across projects.',
     );
   });
   it('reviews incomplete drafts with exact guidance', () => {
@@ -199,7 +199,7 @@ describe('grant input and review', () => {
       catalogue: { roles: [developer, auditor], status: 'ready' as const },
       providers: [dex],
       providerStatus: 'ready' as const,
-      organization: 'Fast White Cat',
+      organization: 'Acme Company',
       busy: false,
       retry: vi.fn(),
       submit: vi.fn(),

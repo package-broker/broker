@@ -793,16 +793,16 @@ describe('logout audit', () => {
     const h = await logoutFixture({ expiresAt: NOW });
     expect(await h.logout()).toEqual(h.service.clearCookies());
     expect(await pending()).toEqual([]);
-    expect((await row('s1'))?.revoked_at).toBeNull();
-    expect(h.counted.counts()).toEqual({ all: 1, batch: 0 });
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+    expect(h.counted.counts()).toEqual({ all: 2, batch: 0 });
   });
 
   it('stages nothing for an idle session', async () => {
     const h = await logoutFixture({ lastSeenAt: IDLE_SINCE });
     expect(await h.logout()).toEqual(h.service.clearCookies());
     expect(await pending()).toEqual([]);
-    expect((await row('s1'))?.revoked_at).toBeNull();
-    expect(h.counted.counts()).toEqual({ all: 1, batch: 0 });
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+    expect(h.counted.counts()).toEqual({ all: 2, batch: 0 });
   });
 
   it('stages nothing and clears cookies for an unknown cookie', async () => {

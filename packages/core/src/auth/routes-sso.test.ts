@@ -2053,7 +2053,7 @@ describe('POST /_pb/auth/logout', () => {
         expect(cookieValue(response, SESSION_COOKIE)).toBe('');
         expect(cookieValue(response, CSRF_COOKIE)).toBe('');
         expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
-        expect(log).not.toHaveBeenCalled();
+        expect(log).toHaveBeenCalledExactlyOnceWith('session.logout.audit_fallback');
         expect(JSON.stringify(app.logs)).not.toContain('private request data');
       } finally {
         audit.mockRestore();

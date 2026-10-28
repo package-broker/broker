@@ -51,7 +51,7 @@ export interface SessionService {
   isReauthFresh(session: AuthenticatedSession): boolean;
   setCookies(secrets: SessionSecrets, expiresAt: string): readonly string[];
   clearCookies(): readonly string[];
-  /** No active session: no write or audit event. Repository failures propagate; the route must still clear cookies. */
+  /** No active session: revoke without an audit event. Repository failures propagate; the route must still clear cookies. */
   logout(ctx: OrgContext, request: Request, meta: AuthCallMeta): Promise<readonly string[]>;
 }
 
@@ -114,19 +114,35 @@ function safeLogoutId(value: string): string | null {
 }
 
 function logoutFallback(session: ActiveSession, now: Date): AuditEvent {
+  const id = ulid(now.getTime());
+  const opId = ulid(now.getTime());
+  const requestId = ulid(now.getTime());
+  const occurredAt = now.toISOString();
+  const actor = { type: 'user', id: safeLogoutId(session.userId) } as const;
+  const target = { type: 'session', id: safeLogoutId(session.id) } as const;
+  try {
+    const audit = auditEvent({
+      id,
+      now: occurredAt,
+      action: 'session.logout',
+      actor,
+      target,
+      context: { opId, requestId, sourceIp: null, tokenSelector: null },
+    });
+    if (audit.ok) return audit.event;
+  } catch {
+    // A failing sanitizer must not prevent revocation.
+  }
   return {
-    id: ulid(now.getTime()),
-    occurredAt: now.toISOString(),
+    id,
+    occurredAt,
     action: 'session.logout',
-    actor: { type: 'user', id: safeLogoutId(session.userId) },
-    target: { type: 'session', id: safeLogoutId(session.id) },
+    actor,
+    target,
     tokenSelector: null,
     sourceIp: null,
     projectId: null,
-    payloadJson: JSON.stringify({
-      op_id: ulid(now.getTime()),
-      request_id: ulid(now.getTime()),
-    }),
+    payloadJson: JSON.stringify({ op_id: opId, request_id: requestId }),
   };
 }
 
@@ -225,8 +241,8 @@ export function createSessionService(deps: {
           now: now.toISOString(),
           idleSince: new Date(now.getTime() - SESSION_IDLE_MS).toISOString(),
         });
+        let event: AuditEvent | undefined;
         if (session !== null) {
-          let event: AuditEvent | undefined;
           try {
             const id = ulid(now.getTime());
             const audit = auditEvent({
@@ -246,13 +262,16 @@ export function createSessionService(deps: {
           } catch {
             // The fallback uses fresh correlation ids and only safe session fields.
           }
-          await sessions.revokeBySecretHash(
-            ctx,
-            secretHash,
-            now.toISOString(),
-            event ?? logoutFallback(session, now),
-          );
+          if (event === undefined) {
+            console.error('session.logout.audit_fallback');
+            try {
+              event = logoutFallback(session, now);
+            } catch {
+              // Even fallback construction failure must not prevent revocation.
+            }
+          }
         }
+        await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString(), event);
       }
       return clearCookies();
     },

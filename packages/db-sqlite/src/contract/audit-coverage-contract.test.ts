@@ -23,6 +23,7 @@ import {
   AUDIT_COVERAGE,
   AUDIT_INJECTED_STATEMENTS,
   AUDIT_SECURITY_ATTEMPTS,
+  AUDIT_SANITIZER_FALLBACKS,
   AUDIT_UNCAPTURED,
   describeAuditCoverageContract,
 } from './audit-coverage-contract.js';
@@ -165,13 +166,19 @@ describe('audit coverage inventory', () => {
   it('records logout fallback coverage separately from uncaptured failed security attempts', () => {
     expect(
       AUDIT_SECURITY_ATTEMPTS.filter(({ captured }) => captured).map(({ attempt }) => attempt),
-    ).toEqual(['logout sanitizer refusal']);
+    ).toEqual([]);
+    expect(AUDIT_SANITIZER_FALLBACKS).toEqual([
+      {
+        attempt: 'logout sanitizer refusal',
+        captured: true,
+        reason: 'A safe fallback session.logout is staged atomically with revocation.',
+      },
+    ]);
     expect(AUDIT_SECURITY_ATTEMPTS.map(({ attempt }) => attempt)).toEqual([
       'failed login',
       'authorization denial',
       'failed reauthentication',
       'logout without active session',
-      'logout sanitizer refusal',
     ]);
     for (const { action } of AUDIT_UNCAPTURED) {
       expect(AUDIT_ACTIONS).toContain(action);

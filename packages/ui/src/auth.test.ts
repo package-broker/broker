@@ -3,6 +3,7 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   LoginView,
+  ReauthView,
   ReauthConfirmContent,
   ReauthConfirm,
   SetupView,
@@ -684,4 +685,95 @@ describe('package reauth integration', () => {
 it('drops unknown package return filters and invalid project scopes', () => {
   const target = '/packages?project=%2F%2Foutside.invalid&redirect=https%3A%2F%2Foutside.invalid';
   expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(target)}`)).toBe('#/packages');
+});
+
+describe('sign-in availability copy', () => {
+  it.each(['loading', 'error'] as const)(
+    'hides unconfirmed login and reauth forms during %s',
+    (availability) => {
+      for (const view of [
+        createElement(LoginView, {
+          state: { status: 'idle', error: null },
+          providers: [],
+          local: true,
+          availability,
+          onSubmit: vi.fn(),
+          onSso: vi.fn(),
+        }),
+        createElement(ReauthView, {
+          error: false,
+          busy: false,
+          providers: [],
+          local: true,
+          availability,
+          onSubmit: vi.fn(),
+          onSso: vi.fn(),
+        }),
+      ]) {
+        const html = renderToString(view);
+        expect(html).not.toContain('<form');
+        expect(html).not.toContain('name="password"');
+        expect(html).toContain(
+          availability === 'loading' ? 'Loading sign-in options' : 'Reload the page',
+        );
+      }
+    },
+  );
+
+  it('offers help when none of the providers support reauthentication', () => {
+    const html = renderToString(
+      createElement(ReauthView, {
+        error: false,
+        busy: false,
+        providers: [{ id: 'corp', displayName: 'Corp SSO', kind: 'oidc', supportsReauth: false }],
+        local: false,
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).toContain('Contact your administrator for help signing in.');
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('Confirm with');
+    expect(html).not.toContain('Signed in with a password?');
+  });
+
+  it.each([false, true])(
+    'shows password-session guidance only with local disabled (%s)',
+    (local) => {
+      const html = renderToString(
+        createElement(ReauthView, {
+          error: false,
+          busy: false,
+          providers: [
+            { id: 'corp', displayName: 'Corp SSO', kind: 'oidc', supportsReauth: true },
+            { id: 'other', displayName: 'Other SSO', kind: 'oidc', supportsReauth: false },
+          ],
+          local,
+          onSubmit: vi.fn(),
+          onSso: vi.fn(),
+        }),
+      ).replace(/<!-- -->/g, '');
+      const copy = 'Signed in with a password? Sign out and sign in with Corp SSO to continue.';
+      if (local) expect(html).not.toContain(copy);
+      else {
+        expect(html).toContain(copy);
+        expect(html.indexOf(copy)).toBeGreaterThan(html.indexOf('Confirm with'));
+      }
+      expect(html).not.toContain('sign in with Other SSO');
+    },
+  );
+
+  it('offers plain help when no sign-in method is listed', () => {
+    const html = renderToString(
+      createElement(LoginView, {
+        state: { status: 'idle', error: null },
+        providers: [],
+        local: false,
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).toContain('Contact your administrator for help signing in.');
+    expect(html).not.toContain('<form');
+  });
 });

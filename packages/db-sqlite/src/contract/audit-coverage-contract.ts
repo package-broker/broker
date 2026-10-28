@@ -68,7 +68,7 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     batchGuard:
       'executor.batch; EXISTS eligible unrevoked session, reauth freshness/identity guard',
     cardinality:
-      '0 or 1; logout without an active session or with sanitizer refusal stages zero (G2)',
+      '0 or 1; no active session stages zero; active-session logout stages one, including sanitizer fallback',
     stagingCalls: 2,
   },
   {
@@ -411,8 +411,8 @@ export const AUDIT_SECURITY_ATTEMPTS = [
   },
   {
     attempt: 'logout sanitizer refusal',
-    captured: false,
-    reason: 'Current service revokes without an event; G2 supplies the fallback.',
+    captured: true,
+    reason: 'A safe fallback session.logout is staged atomically with revocation.',
   },
 ] as const;
 

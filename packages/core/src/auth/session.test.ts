@@ -551,7 +551,7 @@ describe('logout', () => {
     expect(cookies).toEqual(h.service.clearCookies());
   });
 
-  it('revokes without an event when the live-session read returns nothing', async () => {
+  it('performs no write when the live-session read returns nothing', async () => {
     const secret = randomToken(32);
     const h = harness(null);
     const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)), {
@@ -560,7 +560,7 @@ describe('logout', () => {
     });
     expect(h.findActive).toHaveBeenCalledTimes(1);
     expect(h.touch).not.toHaveBeenCalled();
-    expect(h.revokeBySecretHash).toHaveBeenCalledWith(ctx, await sha256Hex(secret), NOW);
+    expect(h.revokeBySecretHash).not.toHaveBeenCalled();
     expect(cookies).toEqual(h.service.clearCookies());
   });
 
@@ -589,7 +589,7 @@ describe('logout', () => {
   });
 
   it.each(['refuses', 'throws'] as const)(
-    'revokes without an event and logs a fixed message when audit construction %s',
+    'revokes with a safe fallback when audit construction %s',
     async (failure) => {
       const h = harness();
       const secret = randomToken(32);
@@ -602,21 +602,65 @@ describe('logout', () => {
       try {
         const cookies = await h.service.logout(ctx, requestWith(sessionCookie(secret)), {
           requestId: 'invalid-request-id',
-          ip: null,
+          ip: '203.0.113.7',
         });
         expect(h.revokeBySecretHash).toHaveBeenCalledExactlyOnceWith(
           ctx,
           await sha256Hex(secret),
           NOW,
-          undefined,
+          expect.objectContaining({
+            action: 'session.logout',
+            actor: { type: 'user', id: activeSession().userId },
+            target: { type: 'session', id: activeSession().id },
+            occurredAt: NOW,
+            sourceIp: null,
+            tokenSelector: null,
+            projectId: null,
+          }),
         );
+        const event = h.revokeBySecretHash.mock.calls[0]?.[3] as AuditEvent;
+        const payload = JSON.parse(event.payloadJson) as Record<string, string>;
+        expect(payload).toEqual({ op_id: expect.any(String), request_id: expect.any(String) });
+        expect(payload.op_id).not.toBe(payload.request_id);
+        expect(payload.op_id).not.toBe(event.id);
+        expect(payload.request_id).not.toBe('invalid-request-id');
+        expect(
+          auditActions.auditEvent({
+            id: event.id,
+            now: event.occurredAt,
+            action: event.action,
+            actor: event.actor,
+            target: event.target,
+            context: {
+              opId: payload.op_id!,
+              requestId: payload.request_id!,
+              sourceIp: null,
+              tokenSelector: null,
+            },
+          }),
+        ).toEqual({ ok: true, event });
         expect(h.touch).not.toHaveBeenCalled();
         expect(cookies).toEqual(h.service.clearCookies());
-        expect(log).toHaveBeenCalledExactlyOnceWith('Session logout audit event unavailable');
+        expect(log).not.toHaveBeenCalled();
       } finally {
         audit.mockRestore();
         log.mockRestore();
       }
+    },
+  );
+
+  it.each(['person@example.test', 'Bearer private-secret', 'https://user:secret@example.test'])(
+    'omits unsafe session identifiers from the fallback: %s',
+    async (unsafe) => {
+      const h = harness(activeSession({ id: unsafe, userId: unsafe }));
+      await h.service.logout(ctx, requestWith(sessionCookie(randomToken(32))), {
+        requestId: 'invalid-request-id',
+        ip: '203.0.113.7',
+      });
+      const event = h.revokeBySecretHash.mock.calls[0]?.[3] as AuditEvent;
+      expect(event.actor).toEqual({ type: 'user', id: null });
+      expect(event.target).toEqual({ type: 'session', id: null });
+      expect(JSON.stringify(event)).not.toContain(unsafe);
     },
   );
 

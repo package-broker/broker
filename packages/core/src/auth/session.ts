@@ -9,6 +9,7 @@ import {
 import { assertCsrfToken, assertSameOrigin } from './csrf.js';
 import { randomToken, sha256Hex } from './primitives.js';
 import { auditEvent, isIpLiteral, type AuditEvent } from '../audit/actions.js';
+import { redactValue } from '../audit/redact.js';
 import type { OrgContext } from '../db/port.js';
 import type { ActiveSession, SessionRepository } from '../db/sessions.js';
 import { ulid, type Clock } from '../ids.js';
@@ -50,7 +51,7 @@ export interface SessionService {
   isReauthFresh(session: AuthenticatedSession): boolean;
   setCookies(secrets: SessionSecrets, expiresAt: string): readonly string[];
   clearCookies(): readonly string[];
-  /** Repository failures propagate; the route must still send `clearCookies()` when it catches one. */
+  /** No active session: no write or audit event. Repository failures propagate; the route must still clear cookies. */
   logout(ctx: OrgContext, request: Request, meta: AuthCallMeta): Promise<readonly string[]>;
 }
 
@@ -103,6 +104,29 @@ export async function sessionMetaOf(
     ...authCallMetaOf(request, requestId, resolveClientIp),
     userAgent: nonEmpty(request.headers.get('user-agent')),
     previousSecretHash: secret === null ? null : await sha256Hex(secret),
+  };
+}
+
+function safeLogoutId(value: string): string | null {
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(value)) return null;
+  const cleaned = redactValue(value, 200, 'id');
+  return cleaned.ok && cleaned.value === value ? value : null;
+}
+
+function logoutFallback(session: ActiveSession, now: Date): AuditEvent {
+  return {
+    id: ulid(now.getTime()),
+    occurredAt: now.toISOString(),
+    action: 'session.logout',
+    actor: { type: 'user', id: safeLogoutId(session.userId) },
+    target: { type: 'session', id: safeLogoutId(session.id) },
+    tokenSelector: null,
+    sourceIp: null,
+    projectId: null,
+    payloadJson: JSON.stringify({
+      op_id: ulid(now.getTime()),
+      request_id: ulid(now.getTime()),
+    }),
   };
 }
 
@@ -201,9 +225,7 @@ export function createSessionService(deps: {
           now: now.toISOString(),
           idleSince: new Date(now.getTime() - SESSION_IDLE_MS).toISOString(),
         });
-        if (session === null) {
-          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString());
-        } else {
+        if (session !== null) {
           let event: AuditEvent | undefined;
           try {
             const id = ulid(now.getTime());
@@ -222,12 +244,14 @@ export function createSessionService(deps: {
             });
             if (audit.ok) event = audit.event;
           } catch {
-            // Audit construction must not prevent revocation.
+            // The fallback uses fresh correlation ids and only safe session fields.
           }
-          await sessions.revokeBySecretHash(ctx, secretHash, now.toISOString(), event);
-          if (event === undefined) {
-            console.error('Session logout audit event unavailable');
-          }
+          await sessions.revokeBySecretHash(
+            ctx,
+            secretHash,
+            now.toISOString(),
+            event ?? logoutFallback(session, now),
+          );
         }
       }
       return clearCookies();

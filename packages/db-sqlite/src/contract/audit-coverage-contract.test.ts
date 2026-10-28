@@ -162,8 +162,10 @@ describe('audit coverage inventory', () => {
     }
   });
 
-  it('records the current absence of failed security-attempt capture without claiming coverage', () => {
-    expect(AUDIT_SECURITY_ATTEMPTS.filter(({ captured }) => captured)).toEqual([]);
+  it('records logout fallback coverage separately from uncaptured failed security attempts', () => {
+    expect(
+      AUDIT_SECURITY_ATTEMPTS.filter(({ captured }) => captured).map(({ attempt }) => attempt),
+    ).toEqual(['logout sanitizer refusal']);
     expect(AUDIT_SECURITY_ATTEMPTS.map(({ attempt }) => attempt)).toEqual([
       'failed login',
       'authorization denial',

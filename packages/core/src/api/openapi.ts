@@ -6,7 +6,7 @@ import { routeApiProblems } from '../kernel/routes.js';
 import { IF_MATCH, type ApiRouteSpec } from './route.js';
 import { API_ERROR_CODES, SERVICE_ERROR_TABLE, type ApiErrorCode } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
-import { weakPasswordErrorResponse } from './auth-schemas.js';
+import { LOCAL_AUTH_API, weakPasswordErrorResponse } from './auth-schemas.js';
 
 export interface OpenApiDocument extends JsonObject {
   openapi: '3.1.0';
@@ -152,9 +152,13 @@ export function generateOpenApi(
         if (schema !== null) throw new TypeError(`${label}: error response ${status} must be null`);
         const messages = [
           ...new Set(
-            Object.values(API_ERROR_CODES)
-              .filter((entry) => entry.status === Number(status))
-              .map((entry) => entry.message),
+            Object.entries(API_ERROR_CODES)
+              .filter(
+                ([code, entry]) =>
+                  entry.status === Number(status) &&
+                  (code !== 'local_auth_disabled' || Object.hasOwn(LOCAL_AUTH_API, label)),
+              )
+              .map(([, entry]) => entry.message),
           ),
         ];
         error(Number(status), messages.length > 0 ? messages.join('; ') : 'Error');

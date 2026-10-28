@@ -160,6 +160,50 @@ describe('auth route api slots', () => {
       expect(operation?.['tags']).toEqual([tag]);
     });
 
+    it.each(['setup/start', 'setup/finish', 'login', 'reauth'])(
+      'documents local policy refusal for %s',
+      (route) => {
+        const operation = document.paths[`/_pb/auth/local/${route}`]?.['post'] as {
+          responses: Record<string, { description: string; content: unknown }>;
+        };
+        expect(operation.responses['403']?.description).toContain('Local sign-in is disabled');
+        expect(operation.responses['403']?.content).toEqual({
+          'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } },
+        });
+      },
+    );
+
+    it.each([
+      ['post', '/_pb/auth/logout'],
+      ['post', '/_pb/auth/sso/{provider}/start'],
+      ['get', '/_pb/auth/sso/{provider}/callback'],
+    ])('excludes local policy refusal from %s %s', (method, path) => {
+      expect(JSON.stringify(document.paths[path!]?.[method!])).not.toContain('Local sign-in');
+    });
+
+    it('excludes local policy refusal from a non-auth route declaring 403', () => {
+      const other = generateOpenApi(
+        [
+          {
+            method: 'GET',
+            path: '/_pb/status',
+            permission: null,
+            api: {
+              operationId: 'status',
+              summary: 'Status',
+              tags: ['public'],
+              responses: { 204: null, 403: null },
+            },
+          },
+        ],
+        { title: 'Other', version: '1' },
+      );
+      expect(other.paths['/_pb/status']?.['get']?.['responses']).toMatchObject({
+        '403': { description: 'Access denied; Reauthentication required' },
+      });
+      expect(JSON.stringify(other)).not.toContain('Local sign-in');
+    });
+
     it('documents both the JSON and the redirect answer of the SSO start', () => {
       const responses = (
         document.paths['/_pb/auth/sso/{provider}/start']?.['post'] as {

@@ -75,6 +75,71 @@ describe.each(['node', 'cloudflare'])('%s access services contract', () => {
     await database.close();
   });
 
+  it.each([undefined, 'enabled', 'disabled'] as const)(
+    'forwards %s local policy alongside constructed providers',
+    async (localAuth) => {
+      const built = createAccessServices({
+        ...options,
+        ...(localAuth === undefined ? {} : { localAuth }),
+      });
+      const route = built.module.coreRoutes.find((route) => route.path === '/_pb/auth/providers')!;
+      const response = await route.handler({
+        request: new Request(`${options.publicOrigin}${route.path}`),
+        requestId: 'providers',
+        org: null,
+        principal: null,
+        projectId: null,
+        params: {},
+        ports: {
+          organizations: built.repositories.organizations,
+          clock: options.clock,
+          ids: options.ids,
+        },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        local: localAuth !== 'disabled',
+        providers: [{ id: 'oidc', kind: 'oidc', displayName: 'Example', supportsReauth: true }],
+      });
+    },
+  );
+
+  it.each([undefined, 'enabled', 'disabled'] as const)(
+    'checks %s policy against the constructed empty map despite an identity registration',
+    (localAuth) => {
+      const suppressed: PluginDefinition = { ...plugin, identityProviders: () => [] };
+      const registration = collectRegistrations([suppressed]);
+      const providers = buildIdentityProviders(registration, [suppressed], {
+        fetch: (request) => fetch(request),
+        clock: options.clock,
+        env: () => undefined,
+      });
+      expect(registration.bindings.get('identity')).toBe(plugin.id);
+      expect(providers.size).toBe(0);
+      const build = () =>
+        createAccessServices({
+          ...options,
+          registration,
+          providers,
+          ...(localAuth === undefined ? {} : { localAuth }),
+        });
+      if (localAuth === 'disabled') expect(build).toThrow(/^auth_no_sign_in_method$/);
+      else expect(build).not.toThrow();
+    },
+  );
+
+  it.each(['', 'ENABLED', 'break-glass', null, false, {}])(
+    'rejects invalid local policy %j from an untyped caller',
+    (localAuth) => {
+      expect(() =>
+        createAccessServices({
+          ...options,
+          localAuth: localAuth as NonNullable<AccessServicesOptions['localAuth']>,
+        }),
+      ).toThrow(/^auth_local_invalid$/);
+    },
+  );
+
   it('builds the complete mounted service set over SQLite', async () => {
     const built = createAccessServices(options);
     expect(Object.keys(built.services).sort()).toEqual([

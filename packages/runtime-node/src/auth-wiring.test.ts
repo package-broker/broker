@@ -229,12 +229,32 @@ describe('node auth wiring', () => {
     };
   }
 
+  function stream(capture: unknown[]): { write: (chunk: unknown) => boolean; on: () => undefined } {
+    return {
+      write: (chunk) => {
+        capture.push(String(chunk));
+        return true;
+      },
+      on: () => undefined,
+    };
+  }
+
   async function start(
     overrides: Record<string, string | undefined> = {},
     plugins: readonly PluginDefinition[] = [],
+    capture?: unknown[],
   ): Promise<NodeBroker> {
     const broker = await startNode({
       plugins,
+      ...(capture === undefined
+        ? {}
+        : {
+            log: (entry) => {
+              capture.push(entry);
+            },
+            stdout: stream(capture),
+            stderr: stream(capture),
+          }),
       migrations: await migrationSources(),
       env: env(overrides),
     });
@@ -878,6 +898,40 @@ describe('node auth wiring', () => {
       }
     });
 
+    it.each(['', 'DISABLED', 'break-glass', 'credential@example.test', 'disabled'])(
+      'refuses local auth mode %j without providers before listening',
+      async (mode) => {
+        const listenSpy = vi.spyOn(Server.prototype, 'listen');
+        try {
+          const emitted: unknown[] = [];
+          const failure = await rejection(start({ PB_AUTH_LOCAL: mode }, [], emitted));
+          expect(failure).toBeInstanceOf(KernelConfigError);
+          expect((failure as KernelConfigError).problems).toEqual([
+            mode === 'disabled' ? 'auth_no_sign_in_method' : 'auth_local_invalid',
+          ]);
+          expect(describeError(failure)).not.toContain('credential@example.test');
+          const output = JSON.stringify(emitted);
+          expect(output).not.toContain('credential@example.test');
+          expect(output).not.toContain(SENTINEL);
+          expect(output).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+          expect(listenSpy).not.toHaveBeenCalled();
+          expect(recorded.closes).toEqual([path]);
+        } finally {
+          listenSpy.mockRestore();
+        }
+      },
+    );
+
+    it('captures local auth separately from the IDP filter in a frozen auth environment', async () => {
+      await start({ PB_AUTH_LOCAL: 'enabled', PB_IDP_EXAMPLE_CLIENT_ID: 'visible' });
+      const auth = created.options.at(-1)?.auth;
+      expect(auth?.env).toEqual({
+        PB_AUTH_LOCAL: 'enabled',
+        PB_IDP_EXAMPLE_CLIENT_ID: 'visible',
+      });
+      expect(Object.isFrozen(auth?.env)).toBe(true);
+    });
+
     it('passes only PB_IDP_ entries of the environment to the auth options', async () => {
       await start({ PB_IDP_EXAMPLE_CLIENT_ID: 'visible', PB_MASTER_KEY_PREVIOUS: undefined });
 
@@ -890,7 +944,11 @@ describe('node auth wiring', () => {
   it('6: providers see only PB_IDP_ variables, never the master key', async () => {
     const seen: Array<string | undefined> = [];
     const broker = await start(
-      { PB_IDP_EXAMPLE_CLIENT_ID: 'visible', PB_MASTER_KEY_PREVIOUS: undefined },
+      {
+        PB_AUTH_LOCAL: 'enabled',
+        PB_IDP_EXAMPLE_CLIENT_ID: 'visible',
+        PB_MASTER_KEY_PREVIOUS: undefined,
+      },
       [
         plugin({
           binds: ['identity'],
@@ -900,6 +958,7 @@ describe('node auth wiring', () => {
               ctx.env('PB_MASTER_KEY'),
               ctx.env('PB_PUBLIC_URL'),
               ctx.env('PB_SQLITE_PATH'),
+              ctx.env('PB_AUTH_LOCAL'),
             );
             return [];
           },
@@ -908,7 +967,7 @@ describe('node auth wiring', () => {
     );
     await broker.ready();
 
-    expect(seen).toEqual(['visible', undefined, undefined, undefined]);
+    expect(seen).toEqual(['visible', undefined, undefined, undefined, undefined]);
   });
 
   describe('createNodeServer', () => {
@@ -937,47 +996,78 @@ describe('node auth wiring', () => {
       expect(response.status).toBe(200);
     });
 
-    it('8a: the services carry the anchors of the providers the auth module uses', async () => {
-      const keyring = createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]);
-      const trustAnchor = `access:team.example.com/${'ab'.repeat(32)}`;
-      const broker = createNodeServer(
-        [
-          plugin({
-            binds: ['identity'],
-            identityProviders: () => [
-              {
-                id: 'access',
-                kind: 'cloudflare-access',
-                displayName: 'Access',
-                trustAnchor,
-                policy: {
-                  verifiedDomains: ['example.test', 'other.test'],
-                  emailAuthoritativeDomains: ['example.test'],
-                  autoJoin: false,
-                },
-                supportsReauth: false,
-                start: () => Promise.resolve({ kind: 'direct' }),
-                finish: () => Promise.resolve({ ok: false, reason: 'provider_error' }),
-              },
-            ],
-          }),
-        ],
-        { log: () => undefined, auth: { keyring, publicOrigin: 'http://127.0.0.1', env: {} } },
-      );
-      running.push(broker);
-      const services = await broker.services();
+    it.each(['disabled', 'invalid'])(
+      'direct creation enforces captured local mode %s',
+      async (mode) => {
+        const live = { PB_AUTH_LOCAL: mode };
+        const broker = bare({
+          auth: {
+            keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
+            publicOrigin: 'http://127.0.0.1',
+            env: live,
+          },
+        });
+        live.PB_AUTH_LOCAL = 'enabled';
+        const failure = await rejection(broker.ready());
+        expect(failure).toBeInstanceOf(KernelConfigError);
+        expect((failure as KernelConfigError).problems).toEqual([
+          mode === 'disabled' ? 'auth_no_sign_in_method' : 'auth_local_invalid',
+        ]);
+        expect(broker.server.listening).toBe(false);
+      },
+    );
 
-      expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([
-        {
-          provider: 'access',
-          anchor: trustAnchor,
-          emailAuthoritative: true,
-          emailAuthoritativeDomains: ['example.test'],
-        },
-      ]);
-      expect(services.dispatch).toBe(deferredDispatch);
-      expect(await broker.services()).toBe(services);
-    });
+    it.each([undefined, 'enabled', 'disabled'])(
+      '8a: direct creation with local auth %s retains provider anchors and policy',
+      async (mode) => {
+        const keyring = createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]);
+        const trustAnchor = `access:team.example.com/${'ab'.repeat(32)}`;
+        const live = { PB_AUTH_LOCAL: mode };
+        const broker = createNodeServer(
+          [
+            plugin({
+              binds: ['identity'],
+              identityProviders: () => [
+                {
+                  id: 'access',
+                  kind: 'cloudflare-access',
+                  displayName: 'Access',
+                  trustAnchor,
+                  policy: {
+                    verifiedDomains: ['example.test', 'other.test'],
+                    emailAuthoritativeDomains: ['example.test'],
+                    autoJoin: false,
+                  },
+                  supportsReauth: false,
+                  start: () => Promise.resolve({ kind: 'direct' }),
+                  finish: () => Promise.resolve({ ok: false, reason: 'provider_error' }),
+                },
+              ],
+            }),
+          ],
+          { log: () => undefined, auth: { keyring, publicOrigin: 'http://127.0.0.1', env: live } },
+        );
+        running.push(broker);
+        live.PB_AUTH_LOCAL = mode === 'disabled' ? 'enabled' : 'disabled';
+        const services = await broker.services();
+        const response = await (
+          await broker.ready()
+        ).fetch(new Request('http://127.0.0.1/_pb/auth/providers'));
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ local: mode !== 'disabled' });
+
+        expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([
+          {
+            provider: 'access',
+            anchor: trustAnchor,
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        ]);
+        expect(services.dispatch).toBe(deferredDispatch);
+        expect(await broker.services()).toBe(services);
+      },
+    );
 
     it('8b: without auth the services carry no provider anchors', async () => {
       const services = await bare().services();

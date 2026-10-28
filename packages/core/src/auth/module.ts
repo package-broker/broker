@@ -31,7 +31,7 @@ import { denyAllEngine } from '../kernel/authorize.js';
 import type { AuthorizationEngine } from '../kernel/authorize.js';
 import { reportableErrorName } from '../kernel/error-name.js';
 import type { KernelLog } from '../kernel/errors.js';
-import type { Registration } from '../kernel/registry.js';
+import { KernelConfigError, type Registration } from '../kernel/registry.js';
 import type { RouteDefinition } from '../plugin.js';
 import { createSecretCipher } from '../secrets/cipher.js';
 import { createCredentialStore } from '../secrets/credential-store.js';
@@ -49,6 +49,20 @@ export interface AuthRepositories {
   readonly credentials: CredentialRepository;
 }
 
+export type LocalAuthPolicy = 'enabled' | 'disabled';
+
+export function parseLocalAuthPolicy(value: unknown): LocalAuthPolicy {
+  if (value === undefined) return 'enabled';
+  if (value === 'enabled' || value === 'disabled') return value;
+  throw new KernelConfigError(['auth_local_invalid']);
+}
+
+export function validateLocalAuthPolicy(policy: LocalAuthPolicy, providers: ProviderMap): void {
+  if (policy === 'disabled' && providers.size === 0) {
+    throw new KernelConfigError(['auth_no_sign_in_method']);
+  }
+}
+
 export interface AuthModuleOptions {
   readonly repositories: AuthRepositories;
   readonly keyring: Keyring;
@@ -57,6 +71,7 @@ export interface AuthModuleOptions {
   readonly publicOrigin: string;
   readonly clientIp: (request: Request) => string | null;
   readonly providers: ProviderMap;
+  readonly localAuth?: LocalAuthPolicy;
   readonly hooks: Registration['hooks'];
   readonly log: KernelLog;
   readonly access?: Pick<AuthorizationEngineDeps, 'access' | 'providerAnchors'> & {
@@ -107,6 +122,9 @@ function withNeedsOrg(route: RouteDefinition): RouteDefinition {
 
 export function createAuthModule(options: AuthModuleOptions): AuthModule {
   const { repositories, keyring, clock, ids, publicOrigin, providers, hooks } = options;
+  const localAuth = parseLocalAuthPolicy(options.localAuth);
+  validateLocalAuthPolicy(localAuth, providers);
+  const localLoginAvailable = localAuth === 'enabled';
 
   const log: KernelLog = (entry) => {
     try {
@@ -309,10 +327,11 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     clock,
     publicOrigin,
     clientIp: options.clientIp,
-    localLoginAvailable: true,
+    localLoginAvailable,
     log,
   });
   const localRoutes = createLocalRoutes({
+    localLoginAvailable,
     local,
     setup,
     sessions,

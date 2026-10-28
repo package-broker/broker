@@ -1646,7 +1646,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1716,7 +1716,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1787,7 +1787,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1861,7 +1861,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required */
       403: {
         headers: {
           [name: string]: unknown;

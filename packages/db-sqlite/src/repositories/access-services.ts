@@ -1,4 +1,8 @@
-import { createAuthModule, type AuthModule } from '@package-broker/core/auth/module';
+import {
+  createAuthModule,
+  type AuthModule,
+  type LocalAuthPolicy,
+} from '@package-broker/core/auth/module';
 import type { SessionService } from '@package-broker/core/auth/session';
 import {
   createPersonalTokenService,
@@ -97,6 +101,7 @@ export interface AccessServicesOptions {
   readonly executor: SqlExecutor;
   readonly keyring: Keyring;
   readonly providers: ProviderMap;
+  readonly localAuth?: LocalAuthPolicy;
   readonly clock: Clock;
   readonly ids: { ulid(): string };
   readonly log: KernelLog;
@@ -144,6 +149,7 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     ids,
     publicOrigin,
     providers,
+    ...(options.localAuth === undefined ? {} : { localAuth: options.localAuth }),
     hooks: registration.hooks,
     log,
     access: {

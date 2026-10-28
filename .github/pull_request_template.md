@@ -16,8 +16,8 @@ What this change does and why.
 <summary>Before | After</summary>
 
 | Before | After |
-| --- | --- |
-|  |  |
+| ------ | ----- |
+|        |       |
 
 </details>
 

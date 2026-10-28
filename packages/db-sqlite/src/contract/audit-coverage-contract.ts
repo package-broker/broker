@@ -1,4 +1,8 @@
-import type { AuditAction, AuditEvent } from '@package-broker/core/audit/actions';
+import {
+  AUDIT_ACTIONS,
+  type AuditAction,
+  type AuditEvent,
+} from '@package-broker/core/audit/actions';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { describe, expect, it } from 'vitest';
 import { createRegisteredNameRepository } from '../repositories/registered-name.js';
@@ -11,7 +15,8 @@ import {
 } from '../testing/mutation-table/fixtures.js';
 import { seeder, type CaseContext } from '../testing/mutation-table/harness.js';
 import { createSessionRepository } from '../repositories/session.js';
-import { visibilityAuditStatements } from '../repositories/visibility-audit.js';
+import { createVisibilityAttachRepository } from '../repositories/visibility-attach.js';
+import { createVisibilitySubsetRepository } from '../repositories/visibility-subset.js';
 
 interface CoverageEntry {
   readonly actions: readonly AuditAction[];
@@ -21,6 +26,14 @@ interface CoverageEntry {
   readonly batchGuard: string;
   readonly cardinality: string;
   readonly stagingCalls: number;
+  readonly stagingBuilder?: 'visibilityAuditStatements';
+  readonly callerBuilders?: readonly {
+    readonly caller: string;
+    readonly call: string;
+    readonly builderFile: string;
+    readonly bridge?: { readonly file: string; readonly call: string; readonly builder: string };
+    readonly actions: readonly AuditAction[];
+  }[];
 }
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
@@ -192,6 +205,24 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     stagingCalls: 1,
   },
   {
+    actions: ['source.attach', 'source.detach', 'source.reorder'],
+    callers: ['core/src/catalogue/visibility-service.ts'],
+    repository: 'visibility-attach',
+    stagingBuilder: 'visibilityAuditStatements',
+    batchGuard: 'runOrgFenced; source authority, project and attachment guards',
+    cardinality: '0 or 1 per changed attachment/order using changes() > 0',
+    stagingCalls: 4,
+  },
+  {
+    actions: ['source.update'],
+    callers: ['core/src/catalogue/visibility-service.ts'],
+    repository: 'visibility-subset',
+    stagingBuilder: 'visibilityAuditStatements',
+    batchGuard: 'runOrgFenced; package management authority and attachment guards',
+    cardinality: '0 or 1 per changed pattern using changes() > 0',
+    stagingCalls: 2,
+  },
+  {
     actions: ['version.state_change'],
     callers: ['core/src/catalogue/package-manage-service.ts'],
     repository: 'catalogue-writer',
@@ -219,6 +250,19 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
       'db-sqlite/src/repositories/import-journal.ts',
     ],
     repository: 'import-journal',
+    callerBuilders: [
+      {
+        caller: 'core/src/import/verification.ts',
+        call: 'deps.store.verify(',
+        bridge: {
+          file: 'db-sqlite/src/repositories/import-verification.ts',
+          call: 'journal.markVerified(',
+          builder: 'markVerified(',
+        },
+        builderFile: 'db-sqlite/src/repositories/import-journal.ts',
+        actions: ['import_run.verify'],
+      },
+    ],
     batchGuard:
       'runFenced; delegated approver authority, run state, job lease, journal key and blob guards',
     cardinality:
@@ -241,13 +285,41 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
       'db-sqlite/src/repositories/import-verification.ts',
     ],
     repository: 'import-verification',
+    callerBuilders: [
+      {
+        caller: 'core/src/import/verification.ts',
+        call: 'deps.store.fail(',
+        builderFile: 'db-sqlite/src/repositories/import-verification.ts',
+        actions: ['import_run.fail'],
+      },
+    ],
     batchGuard: 'system fence and job lease in state-change batch',
     cardinality: '1 when verification failure transitions the run; refusal stages zero',
     stagingCalls: 1,
   },
   {
     actions: ['source.removal_applied'],
-    callers: ['core/src/ingest/finalize.ts', 'db-sqlite/src/repositories/ingest-finalize.ts'],
+    callers: [
+      'core/src/ingest/apply-description.ts',
+      'core/src/ingest/source-sync-job.ts',
+      'core/src/ingest/on-demand.ts',
+      'core/src/ingest/package-sync-job.ts',
+      'db-sqlite/src/repositories/ingest-finalize.ts',
+    ],
+    callerBuilders: [
+      ...['apply-description', 'source-sync-job'].map((caller) => ({
+        caller: `core/src/ingest/${caller}.ts`,
+        call: 'deps.finalizer.finalize(',
+        builderFile: 'db-sqlite/src/repositories/ingest-finalize.ts',
+        actions: ['source.removal_applied'] as const,
+      })),
+      ...['on-demand', 'package-sync-job'].map((caller) => ({
+        caller: `core/src/ingest/${caller}.ts`,
+        call: 'deps.apply.finalizer.finalize(',
+        builderFile: 'db-sqlite/src/repositories/ingest-finalize.ts',
+        actions: ['source.removal_applied'] as const,
+      })),
+    ],
     repository: 'ingest-finalize',
     batchGuard: 'executor.batch; catalogue/session/job guard and finalized listing predicate',
     cardinality:
@@ -286,7 +358,20 @@ export const AUDIT_INJECTED_STATEMENTS = [
   },
 ] as const;
 
-export const AUDIT_UNCAPTURED = [
+const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set([
+  'audit.export',
+  'audit.mode_change',
+  'audit.sink_admin',
+]);
+
+export const AUDIT_UNCAPTURED: readonly {
+  readonly action: AuditAction;
+  readonly reason: string;
+}[] = [
+  ...AUDIT_ACTIONS.filter((action) => LATER_PACKET_ACTIONS.has(action)).map((action) => ({
+    action,
+    reason: 'declared; producers in later packets',
+  })),
   {
     action: 'version.rebuilt',
     reason: 'Declared action; no production event producer or staging caller today.',
@@ -299,7 +384,7 @@ export const AUDIT_UNCAPTURED = [
     action: 'sync_session.finalize',
     reason: 'Declared action; no production event producer or staging caller today.',
   },
-] as const satisfies readonly { readonly action: AuditAction; readonly reason: string }[];
+];
 
 export const AUDIT_SECURITY_ATTEMPTS = [
   {
@@ -452,32 +537,73 @@ export function describeAuditCoverageContract(open: () => Promise<AuditCoverageD
         expect(await pending(database)).toEqual(original);
       });
     });
-    it.each([false, true])(
-      'conditional visibility audit follows actual changed row (changed: %s)',
-      async (changed) => {
+    it.each(['attach', 'subset'] as const)(
+      'conditional visibility audit follows real %s repository changes and no-ops',
+      async (path) => {
         await fixture(async (database) => {
-          const { executor, ctx } = database;
-          await executor.batch([
-            statement(
-              "INSERT INTO project (id, org_id, slug, name) VALUES ('project', ?, 'project', 'before')",
-              ctx.orgId,
-            ),
-          ]);
-          const results = await executor.batch([
-            statement(
-              "UPDATE project SET name = 'after' WHERE org_id = ? AND id = ?",
-              ctx.orgId,
-              changed ? 'project' : 'missing',
-            ),
-            ...visibilityAuditStatements(ctx, { audit: event('source.attach') }),
-          ]);
-          expect(results[0]?.changes).toBe(changed ? 1 : 0);
-          expect(await pending(database)).toEqual(
-            changed ? [{ id: event().id, action: 'source.attach' }] : [],
+          const { executor, ctx, foreign } = database;
+          const context: CaseContext = {
+            executor,
+            orgs: { a: ctx, b: foreign },
+            mutate: (s) => s,
+            mutateBatch: (s) => s,
+          };
+          const seed = seeder(executor);
+          await seedBindings(context);
+          await seed(
+            "INSERT INTO project (id, org_id, slug, name) VALUES ('project', ?, 'project', 'project')",
+            ctx.orgId,
           );
+          const actor = await seedSubject(context, 'visibility', { projectId: 'project' });
+          await seed(
+            "UPDATE role_permission SET permission = ? WHERE org_id = ? AND role_id = 'R-visibility'",
+            path === 'attach' ? 'project:sources:write' : 'project:packages:manage',
+            ctx.orgId,
+          );
+          await seedSource(seed, 'source', ctx.orgId, 'vcs');
+          await seed(
+            "UPDATE source SET project_id = 'project' WHERE org_id = ? AND id = 'source'",
+            ctx.orgId,
+          );
+          const action = path === 'attach' ? 'source.attach' : 'source.update';
+          const attach = createVisibilityAttachRepository(executor, { providerAnchors: ANCHORS });
+          const subset = createVisibilitySubsetRepository(executor);
+          if (path === 'subset')
+            await seed(
+              "INSERT INTO project_source (org_id, project_id, source_id, precedence) VALUES (?, 'project', 'source', 100)",
+              ctx.orgId,
+            );
+          for (const changed of [true, false]) {
+            const audit = {
+              ...event(action),
+              id: changed ? event().id : '01K7R5V0000000000000000002',
+            };
+            const input = { projectId: 'project', sourceId: 'source', audit };
+            if (path === 'attach') {
+              expect(await attach.attachSource(ctx, fenceOf(actor), input)).toMatchObject({
+                ok: true,
+              });
+            } else {
+              expect(
+                await subset.addPattern(ctx, fenceOf(actor), {
+                  ...input,
+                  pattern: 'acme/*',
+                  effect: 'include',
+                  providerAnchors: ANCHORS,
+                }),
+              ).toBe(changed ? 'added' : 'unchanged');
+            }
+            expect(await pending(database)).toEqual([{ id: event().id, action }]);
+          }
+          const table = path === 'attach' ? 'project_source' : 'project_package_pattern';
           expect(
-            await executor.all(statement('SELECT name FROM project WHERE org_id = ?', ctx.orgId)),
-          ).toEqual([{ name: changed ? 'after' : 'before' }]);
+            await executor.all(
+              statement(
+                `SELECT source_id FROM ${table} WHERE org_id = ? AND project_id = 'project'`,
+                ctx.orgId,
+              ),
+            ),
+          ).toEqual([{ source_id: 'source' }]);
         });
       },
     );

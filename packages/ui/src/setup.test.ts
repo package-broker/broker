@@ -539,6 +539,12 @@ describe('standalone setup availability rendering', () => {
           .all()
           .find((node) => node.tag === 'h1')
           ?.text(),
+      ).toBe('Set up the administrator account');
+      expect(
+        root
+          .all()
+          .find((node) => node.tag === 'h2')
+          ?.text(),
       ).toBe(title);
       expect(root.all().filter((node) => node.tag === 'input')).toHaveLength(0);
       expect(root.all().find((node) => node.tag === 'a')?.attributes['href']).toBe(

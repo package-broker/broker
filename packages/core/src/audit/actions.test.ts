@@ -43,9 +43,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 58 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(58);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(58);
+  it('has 61 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(61);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(61);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -62,6 +62,87 @@ describe('AUDIT_ACTIONS', () => {
 
   it('allows no change fields for session.login', () => {
     expect(AUDIT_FIELDS['session.login']).toEqual([]);
+  });
+});
+
+describe('audit control action registration', () => {
+  const cases = [
+    {
+      action: 'audit.export',
+      fields: ['from_seq', 'to_seq', 'count'],
+      changes: { from_seq: { new: 1 }, to_seq: { new: 10 }, count: { new: 10 } },
+    },
+    {
+      action: 'audit.mode_change',
+      fields: ['mode', 'policy', 'mode_generation', 'cutover_seq'],
+      changes: {
+        mode: { old: 'trail', new: 'export-only' },
+        policy: { old: 'availability', new: 'required' },
+        mode_generation: { old: 1, new: 2 },
+        cutover_seq: { new: 10 },
+      },
+    },
+    {
+      action: 'audit.sink_admin',
+      fields: ['sink_id', 'operation', 'from_seq', 'to_seq', 'reason_code', 'policy'],
+      changes: {
+        sink_id: { new: 'archive' },
+        operation: { new: 'retire' },
+        from_seq: { new: 1 },
+        to_seq: { new: 10 },
+        reason_code: { new: 'operator_confirmed' },
+        policy: { old: 'required', new: 'availability' },
+      },
+    },
+  ] satisfies Array<{
+    action: AuditAction;
+    fields: string[];
+    changes: Record<string, { old?: unknown; new?: unknown }>;
+  }>;
+
+  it.each(cases)(
+    'registers $action with exactly its allowed fields',
+    ({ action, fields, changes }) => {
+      expect(AUDIT_ACTIONS).toContain(action);
+      expect(AUDIT_FIELDS[action]).toEqual(fields);
+      const result = build(action, changes);
+      expect(result.ok).toBe(true);
+      expect(JSON.parse(payloadOf(result)).changes).toEqual(changes);
+    },
+  );
+
+  for (const { action, fields } of cases) {
+    it.each(['url', 'headers', 'email', 'token', 'unknown'])(
+      `${action} refuses unlisted field %s`,
+      (field) => {
+        expect(build(action, { [field]: { new: 'hidden' } })).toEqual({
+          ok: false,
+          reason: 'unknown_field',
+        });
+      },
+    );
+
+    it.each(fields)(`${action} sanitizes old and new values in %s`, (field) => {
+      for (const value of ['person@example.test', FAKE.GITHUB_PAT_CLASSIC_4]) {
+        for (const side of ['old', 'new']) {
+          expect(build(action, { [field]: { [side]: value } })).toEqual({
+            ok: false,
+            reason: 'credential_value',
+          });
+        }
+      }
+    });
+  }
+
+  it.each([
+    ['audit.export', 'sink_id'],
+    ['audit.mode_change', 'count'],
+    ['audit.sink_admin', 'mode'],
+  ])('%s refuses another action’s field %s', (action, field) => {
+    expect(build(action, { [field]: { new: 1 } })).toEqual({
+      ok: false,
+      reason: 'unknown_field',
+    });
   });
 });
 

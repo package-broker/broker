@@ -62,6 +62,9 @@ export const AUDIT_ACTIONS = [
   'import_run.credential_set',
   'purge.batch',
   'sync_session.finalize',
+  'audit.export',
+  'audit.mode_change',
+  'audit.sink_admin',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -145,6 +148,9 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.credential_set': ['external_ref'],
   'purge.batch': ['count', 'kind'],
   'sync_session.finalize': ['source_id', 'added', 'updated', 'removed'],
+  'audit.export': ['from_seq', 'to_seq', 'count'],
+  'audit.mode_change': ['mode', 'policy', 'mode_generation', 'cutover_seq'],
+  'audit.sink_admin': ['sink_id', 'operation', 'from_seq', 'to_seq', 'reason_code', 'policy'],
 };
 
 export type AuditValue = string | number | boolean | null | readonly string[];

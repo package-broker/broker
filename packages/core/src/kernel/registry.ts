@@ -26,7 +26,11 @@ import {
   qualifyJobName,
   type JobDefinition,
 } from '../platform/jobs.js';
-import { collectAuditDefinitions } from './registry-audit.js';
+import {
+  AUDIT_PLUGINS_AVAILABLE,
+  collectAuditDefinitions,
+  snapshotPluginGate,
+} from './registry-audit.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
 import {
@@ -183,6 +187,10 @@ const HOOK_NAMES: ReadonlySet<string> = new Set(Object.keys(HOOK_NAME_KEYS));
 
 const MAX_NAME_LENGTH = 80;
 
+function isBindablePort(port: string): port is PortName {
+  return BINDABLE.includes(port);
+}
+
 function isHookName(name: unknown): name is keyof HookMap {
   return typeof name === 'string' && HOOK_NAMES.has(name);
 }
@@ -212,7 +220,11 @@ export function collectRegistrations(
   options: RegistrationOptions = {},
 ): Registration {
   const problems: string[] = [];
-  const audit = collectAuditDefinitions(plugins, problems);
+  const gates = plugins.map((plugin) => snapshotPluginGate(plugin, problems));
+  const audit = collectAuditDefinitions(plugins, gates, problems);
+  if (!AUDIT_PLUGINS_AVAILABLE && (audit.trail !== null || audit.sinks.length > 0)) {
+    problems.push('audit plugins are not available in this build');
+  }
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
     'access.check': [],
@@ -240,14 +252,15 @@ export function collectRegistrations(
     jobNames.add(core.qualifiedName);
   }
 
-  for (const plugin of plugins) {
+  for (const [index, plugin] of plugins.entries()) {
     const id = plugin.id;
+    const { apiVersion, binds } = gates[index]!;
 
-    if (!Number.isInteger(plugin.apiVersion)) {
+    if (!Number.isInteger(apiVersion)) {
       problems.push(`plugin "${id}" apiVersion must be an integer`);
-    } else if (!(plugin.apiVersion >= minApi && plugin.apiVersion <= maxApi)) {
+    } else if (!(apiVersion >= minApi && apiVersion <= maxApi)) {
       problems.push(
-        `plugin "${id}" has apiVersion ${plugin.apiVersion}, core supports ${minApi} to ${maxApi}`,
+        `plugin "${id}" has apiVersion ${apiVersion}, core supports ${minApi} to ${maxApi}`,
       );
     }
     let validId: boolean | undefined;
@@ -261,9 +274,8 @@ export function collectRegistrations(
       }
     }
 
-    const binds = plugin.binds ?? [];
     for (const port of binds) {
-      if (!BINDABLE.includes(port)) {
+      if (!isBindablePort(port)) {
         problems.push(`plugin "${id}" cannot bind port "${port}": provided by the runtime`);
         continue;
       }
@@ -299,7 +311,7 @@ export function collectRegistrations(
     problems.push(
       ...providerFactoryProblems(id, 'source', 'sourceProviders', sourceFactory, binds),
     );
-    if (sourceFactory !== undefined && plugin.apiVersion < SOURCE_PROVIDERS_API_VERSION) {
+    if (sourceFactory !== undefined && apiVersion < SOURCE_PROVIDERS_API_VERSION) {
       problems.push(
         `plugin "${id}" declares sourceProviders and requires apiVersion ${SOURCE_PROVIDERS_API_VERSION}`,
       );
@@ -407,7 +419,7 @@ export function collectRegistrations(
       const boundaryProblems = routeBoundaryProblems(
         route,
         `plugin "${id}" route ${route.method} ${route.path}`,
-        { ...options, apiVersion: plugin.apiVersion },
+        { ...options, apiVersion },
       );
       const apiProblems = routeApiProblems(
         route,

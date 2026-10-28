@@ -98,12 +98,21 @@ describe('createOrgResolver', () => {
 });
 
 describe('kernel organization context provenance', () => {
-  it('accepts resolved contexts and rejects public constructors, copies and forged values', async () => {
-    const { assertKernelOrgContext } = await import('./org.js');
+  it('accepts private issuance and rejects public resolvers, constructors, copies and proxies', async () => {
+    const { assertKernelOrgContext, issueKernelOrgContext } = await import('./org-issuer.js');
     const { orgContext } = await import('../db/port.js');
-    const context = await createOrgResolver({ findSingleton: async () => identity('org-1') })();
+    const context = issueKernelOrgContext('org-1');
+    const publicContext = await createOrgResolver({
+      findSingleton: async () => identity('org-1'),
+    })();
     expect(() => assertKernelOrgContext(context)).not.toThrow();
-    for (const forged of [orgContext('org-1'), { ...context }, Object.freeze({ ...context })]) {
+    for (const forged of [
+      publicContext,
+      orgContext('org-1'),
+      { ...context },
+      Object.freeze({ ...context }),
+      new Proxy(context, {}),
+    ]) {
       expect(() => assertKernelOrgContext(forged)).toThrow('kernel organization context required');
     }
   });

@@ -48,6 +48,21 @@ const definingModules = globSync('**/*.ts', { cwd: fileURLToPath(new URL('src/',
   );
 
 describe('core exports', () => {
+  it.each(['js', 'd.ts'])(
+    'keeps organization issuance and assertion private for %s',
+    (extension) => {
+      expect(resolve('./kernel/org-issuer')).toEqual([]);
+      const target = `./dist/kernel/org-issuer.${extension}`;
+      for (const [subpath, value] of Object.entries(exportsMap)) {
+        for (const pattern of targets(value)) {
+          const replacement = capture(pattern, target);
+          if (replacement === undefined) continue;
+          expect(resolve(subpath.replaceAll('*', replacement))).not.toContain(target);
+        }
+      }
+    },
+  );
+
   it('does not export registerCoreJob from any reachable kernel module', () => {
     const files = globSync('kernel/**/*.ts', {
       cwd: fileURLToPath(new URL('src/', packageRoot)),

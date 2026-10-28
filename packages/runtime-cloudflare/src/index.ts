@@ -441,7 +441,7 @@ async function buildAuth(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
   );
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
-  const localAuth = parseLocalAuthPolicy(env.PB_AUTH_LOCAL);
+  const localAuth = parseLocalAuthPolicy(read(env, 'PB_AUTH_LOCAL'));
   await selfTestPasswordHashing(keyring);
   await keyring.hmacKey('token-pepper', keyring.currentVersion);
   const registration = collectRegistration();
@@ -1353,7 +1353,10 @@ export function createWorker(
       JSON.stringify(
         [...variables].sort().map((name) => {
           const value = read(env, name);
-          return [name, typeof value === 'string' ? value : null];
+          return [
+            name,
+            typeof value === 'string' ? value : `!${value === null ? 'null' : typeof value}`,
+          ];
         }),
       ),
     );
@@ -1774,6 +1777,12 @@ export function createWorker(
                     ]),
               ],
       });
+    if (
+      db === undefined &&
+      parseLocalAuthPolicy(read(env ?? NO_ENV, 'PB_AUTH_LOCAL')) === 'disabled'
+    ) {
+      throw new KernelConfigError(['auth_no_sign_in_method']);
+    }
     const built =
       db === undefined
         ? undefined

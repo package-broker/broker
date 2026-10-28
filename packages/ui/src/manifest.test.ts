@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -7,7 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { parseUiManifest as coreParser } from '@package-broker/core/platform/ui-manifest';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { checkBudget, findInlineCode, parseUiManifest } from './manifest.js';
+import {
+  checkBudget,
+  checkLoadBudgets,
+  measureInitialLoad,
+  findInlineCode,
+  parseUiManifest,
+} from './manifest.js';
 
 const run = promisify(execFile);
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -149,7 +156,26 @@ describe('browser bundle isolation', () => {
         cwd: packageRoot,
         timeout: 60_000,
       });
-      const { inputs } = JSON.parse(await readFile(metafile, 'utf8'));
+      const { inputs, outputs } = JSON.parse(await readFile(metafile, 'utf8'));
+      const entry = Object.keys(outputs).find((key) =>
+        outputs[key].entryPoint?.endsWith('src/main.tsx'),
+      )!;
+      const initial = new Set<string>();
+      const visit = (key: string) => {
+        if (initial.has(key)) return;
+        initial.add(key);
+        for (const imported of outputs[key].imports) {
+          if (imported.kind !== 'dynamic-import') visit(imported.path);
+        }
+      };
+      visit(entry);
+      for (const key of initial) {
+        expect(outputs[key].entryPoint ?? '').not.toMatch(/src\/pages\//);
+        expect(Object.keys(outputs[key].inputs).join('\n')).not.toMatch(/src\/pages\/[^/]+\.tsx/);
+      }
+      expect(
+        outputs[entry].imports.filter((item: { kind: string }) => item.kind === 'dynamic-import'),
+      ).toHaveLength(7);
       const inputPaths = Object.keys(inputs).map((input) =>
         path.resolve(packageRoot, input).split(path.sep).join('/'),
       );
@@ -212,41 +238,38 @@ describe('packed UI assets', () => {
       for (const [name, descriptor] of Object.entries(manifest.files)) {
         const bytes = await packedFile(`dist/assets/${name}`);
         expect(bytes.length).toBe(descriptor.bytes);
+        if (name.endsWith('.js')) {
+          expect(name).toContain(
+            `.${createHash('sha256').update(bytes).digest('hex').slice(0, 12)}.`,
+          );
+          for (const [, dependency] of bytes
+            .toString('utf8')
+            .matchAll(/(?:from|import)\s*(?:\(\s*)?["']\.\/([^"']+)["']/g)) {
+            expect(Object.hasOwn(manifest.files, dependency!)).toBe(true);
+          }
+        }
         expect(bytes.equals(await readFile(path.join(assets, name)))).toBe(true);
       }
-      const layout = manifestBytes
-        .toString('utf8')
-        .replace(/app\.[a-f0-9]{12}\.js/g, 'app.<hash>.js')
-        .replace(/setup\.[a-f0-9]{12}\.js/g, 'setup.<hash>.js')
-        .replace(/app\.[a-f0-9]{12}\.css/g, 'app.<hash>.css')
-        .replace(/"bytes": \d+/g, '"bytes": <bytes>');
-      expect(layout).toBe(`{
-  "version": 1,
-  "entry": "index.html",
-  "files": {
-    "index.html": {
-      "contentType": "text/html",
-      "bytes": <bytes>
-    },
-    "setup.html": {
-      "contentType": "text/html",
-      "bytes": <bytes>
-    },
-    "app.<hash>.js": {
-      "contentType": "text/javascript",
-      "bytes": <bytes>
-    },
-    "setup.<hash>.js": {
-      "contentType": "text/javascript",
-      "bytes": <bytes>
-    },
-    "app.<hash>.css": {
-      "contentType": "text/css",
-      "bytes": <bytes>
-    }
-  }
-}
-`);
+      const names = Object.keys(manifest.files);
+      expect(names.filter((name) => !name.endsWith('.js')).sort()).toEqual([
+        expect.stringMatching(/^app\.[a-f0-9]{12}\.css$/),
+        'index.html',
+        'setup.html',
+      ]);
+      const scripts = names.filter((name) => name.endsWith('.js'));
+      expect(scripts.length).toBeGreaterThan(9);
+      for (const name of scripts) expect(name).toMatch(/^[a-z-]+\.[a-f0-9]{12}\.js$/);
+      for (const page of [
+        'projects',
+        'access',
+        'sources',
+        'packages',
+        'tokens',
+        'audit',
+        'import',
+      ]) {
+        expect(scripts.some((name) => name.startsWith(`${page}.`))).toBe(true);
+      }
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -308,5 +331,67 @@ describe('checkBudget', () => {
 
   it('fails above +10%', () => {
     expect(checkBudget(1101, 1000)).toEqual({ ok: false, limit: 1100 });
+  });
+});
+
+describe('split load budgets', () => {
+  it('counts static dependencies once and excludes dynamic pages from initial load', () => {
+    const outputs = {
+      app: {
+        imports: [
+          { path: 'shared', kind: 'import-statement' },
+          { path: 'page', kind: 'dynamic-import' },
+        ],
+      },
+      shared: { imports: [{ path: 'common', kind: 'import-statement' }] },
+      common: { imports: [] },
+      page: { imports: [{ path: 'common', kind: 'import-statement' }] },
+    };
+    expect(
+      measureInitialLoad(outputs, 'app', { app: 100, shared: 200, common: 50, page: 400 }, 25),
+    ).toEqual({
+      initialGzipBytes: 375,
+      chunkGzipBytes: 400,
+      totalGzipBytes: 775,
+      initialFiles: ['app', 'shared', 'common'],
+    });
+  });
+
+  const sizes = { initialGzipBytes: 550, chunkGzipBytes: 110, totalGzipBytes: 1100 };
+  const budget = { initialGzipBytes: 500, chunkGzipBytes: 100, totalGzipBytes: 1000 };
+
+  it.each(['initial', 'chunk', 'total'] as const)('enforces the %s cap independently', (cap) => {
+    expect(checkLoadBudgets(sizes, budget)[cap]).toEqual({
+      ok: true,
+      limit: sizes[`${cap}GzipBytes`],
+    });
+    const exceeded = { ...sizes, [`${cap}GzipBytes`]: sizes[`${cap}GzipBytes`] + 1 };
+    const result = checkLoadBudgets(exceeded, budget);
+    for (const key of ['initial', 'chunk', 'total'] as const)
+      expect(result[key].ok).toBe(key !== cap);
+  });
+
+  it('accepts a measured zero chunk cap for an app without deferred chunks', () => {
+    expect(
+      checkLoadBudgets({ ...sizes, chunkGzipBytes: 0 }, { ...budget, chunkGzipBytes: 0 }).chunk.ok,
+    ).toBe(true);
+  });
+
+  it.each(Object.keys(budget))('rejects missing %s', (key) => {
+    const missing: Record<string, number> = { ...budget };
+    delete missing[key];
+    expect(() => checkLoadBudgets(sizes, missing)).toThrow(`Missing bundle budget key: ${key}`);
+  });
+
+  it.each(['gzipBytes', 'typo'])('rejects unknown %s', (key) => {
+    expect(() => checkLoadBudgets(sizes, { ...budget, [key]: 1000 })).toThrow(
+      `Unknown bundle budget key: ${key}`,
+    );
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid budgets: %s', (value) => {
+    expect(() => checkLoadBudgets(sizes, { ...budget, initialGzipBytes: value })).toThrow(
+      /positive safe integers/,
+    );
   });
 });

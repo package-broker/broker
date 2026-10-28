@@ -1,3 +1,4 @@
+import { ProductFooter } from './components/product-footer.js';
 import { CSPProvider } from '@base-ui/react/csp-provider';
 import {
   useCallback,
@@ -11,6 +12,7 @@ import {
 import { createApiClient } from './api.js';
 import type { paths } from './api-types.js';
 import {
+  AuthLayout,
   LoginScreen,
   ReauthConfirm,
   ReauthScreen,
@@ -224,7 +226,7 @@ export function Shell(props: {
     </li>
   );
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900">
+    <div className="flex min-h-screen flex-col bg-neutral-50 text-neutral-900">
       <header className="shell-header">
         <span className="shell-brand font-semibold">Package Broker</span>
         <nav aria-label="Main" id="main-nav" className={`shell-nav ${menuOpen ? 'is-open' : ''}`}>
@@ -262,7 +264,7 @@ export function Shell(props: {
           </button>
         </div>
       </header>
-      <main className="mx-auto min-w-0 max-w-7xl p-4 sm:p-6">
+      <main className="mx-auto w-full min-w-0 max-w-7xl flex-1 p-4 sm:p-6">
         {props.unknown === null ? null : (
           <Alert className="mb-4">
             <AlertDescription>Unknown page: {props.unknown}</AlertDescription>
@@ -275,6 +277,7 @@ export function Shell(props: {
         ) : null}
         {props.children}
       </main>
+      <ProductFooter />
     </div>
   );
 }
@@ -418,13 +421,13 @@ function AppContent(props: { client?: AuthClient }) {
   const resolved = resolveRoute(hash, session === 'in');
   if (session === 'out') {
     return (
-      <main>
+      <AuthLayout>
         {resolved.route === 'setup' ? (
           <SetupScreen client={client} onSignedIn={onSignedIn} />
         ) : (
           <LoginScreen client={client} onSignedIn={onSignedIn} />
         )}
-      </main>
+      </AuthLayout>
     );
   }
 

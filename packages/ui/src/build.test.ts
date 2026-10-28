@@ -156,6 +156,25 @@ describe('build test safeguards', () => {
 
 describe('ui build output', () => {
   it(
+    'injects the UI package version into both browser entry points',
+    async () => {
+      const result = await build(await writeEntry('console.log(__UI_VERSION__);'));
+      expect(result.code).toBe(0);
+      const files = await readOutput(result.out);
+      const { version } = JSON.parse(
+        await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+      ) as { version: string };
+      const scripts = [...files].filter(([name]) => name.endsWith('.js'));
+      expect(scripts.length).toBeGreaterThanOrEqual(2);
+      for (const [, bytes] of scripts) {
+        expect(bytes.toString('utf8')).toContain(version);
+        expect(bytes.toString('utf8')).not.toContain('__UI_VERSION__');
+      }
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
+  it(
     'links script and stylesheet by file and carries no inline code',
     async () => {
       const result = await build(await writeEntry("console.log('a');"));

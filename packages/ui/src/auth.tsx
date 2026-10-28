@@ -1,3 +1,4 @@
+import { ProductFooter } from './components/product-footer.js';
 import {
   createContext,
   useContext,
@@ -6,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
   type FormEvent,
+  type ReactNode,
 } from 'react';
 import type { ApiClient, ApiErrorCode, ApiRequestDescription, ApiResult } from './api.js';
 import type { paths } from './api-types.js';
@@ -1074,5 +1076,14 @@ export function ReauthConfirm(props: { flow: ReturnType<typeof createReauthFlow>
       onConfirm={() => void props.flow.confirm()}
       onDecline={() => props.flow.decline()}
     />
+  );
+}
+
+export function AuthLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <main className="flex-1 px-4">{children}</main>
+      <ProductFooter />
+    </div>
   );
 }

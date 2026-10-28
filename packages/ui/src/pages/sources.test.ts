@@ -53,13 +53,18 @@ function setup(
   fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })),
   project: string | null = null,
   organizationPermissions = ['org:sources:write'],
+  projectPermissions = ['project:sources:write'],
 ) {
   const permissionsFetch = vi.fn(() =>
     Promise.resolve(json({ organization: organizationPermissions })),
   );
   const client = createApiClient<paths>({
     fetch: (input, init) =>
-      input === '/_pb/me/permissions' ? permissionsFetch() : fetch(input, init),
+      input === '/_pb/me/permissions'
+        ? permissionsFetch()
+        : input.endsWith('/permissions')
+          ? Promise.resolve(json({ project: projectPermissions }))
+          : fetch(input, init),
     readCookie: () => undefined,
   });
   const entries = new Map<string, string>();
@@ -1659,6 +1664,7 @@ describe('source sync', () => {
   it('disables paused sources with an accessible reason and blocks inherited source mutations', async () => {
     const paused = { ...source, status: 'paused' as const };
     const { model, fetch } = setup();
+    await model.loadMutationPermissions();
     const markup = renderToString(
       createElement(SourceActions, { model, source: paused, busy: false }),
     );
@@ -1797,13 +1803,29 @@ it.each([
 });
 
 describe('source row action controls', () => {
+  it.each([null, 'acme'])(
+    'hides sync and package request actions without source authority in %s',
+    async (project) => {
+      const { model } = setup(vi.fn(), project, [], []);
+      await model.loadMutationPermissions();
+      const controls = elements(
+        actions(model, { ...source, projectId: project, attached: true, precedence: 0 }),
+      );
+      expect(
+        controls.some(
+          (node) => node.props.children === 'Sync now' || node.props.children === 'Add package',
+        ),
+      ).toBe(false);
+    },
+  );
   it.each([
     ['Edit', 'openEditor'],
     ['Sync now', 'syncNow'],
     ['Set credential', 'chooseCredential'],
     ['Registered names', 'names'],
-  ] as const)('connects %s to the selected source', (label, method) => {
+  ] as const)('connects %s to the selected source', async (label, method) => {
     const { model } = setup();
+    await model.loadMutationPermissions();
     const action = vi.spyOn(model, method).mockImplementation(vi.fn());
     const controls = elements(actions(model));
     const button = controls.find((node) => node.props.children === label);
@@ -2664,6 +2686,7 @@ describe('UX4 add package', () => {
         'acme',
       );
       await model.load();
+      await model.loadMutationPermissions();
       for (const selected of model.snapshot().items) {
         const controls = elements(actions(model, selected));
         const control = controls.find(
@@ -2692,8 +2715,9 @@ describe('UX4 add package', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('disables paused sources and refuses to open their package dialog', () => {
+  it('disables paused sources and refuses to open their package dialog', async () => {
     const { model } = setup(vi.fn(), 'acme');
+    await model.loadMutationPermissions();
     const selected = { ...attached, status: 'paused' as const };
     const control = elements(actions(model, selected)).find(
       (node) => node.props.children === 'Add package',
@@ -2728,8 +2752,8 @@ describe('UX4 add package', () => {
       expect(model.snapshot().packageSource).toBeNull();
       expect(model.snapshot().notice).toBe(
         status === 202
-          ? 'Queued: @acme/widget will appear in Packages shortly'
-          : 'Already available',
+          ? '@acme/widget: Sync requested. Waiting for a worker. Sync continues in the background.'
+          : '@acme/widget is already available from Private packages.',
       );
       expect(html()).toContain(model.snapshot().notice);
     },

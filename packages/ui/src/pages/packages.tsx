@@ -1,3 +1,4 @@
+import { PackageSourceControls } from './packages/source-actions.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { operations } from '../api-types.js';
@@ -605,7 +606,7 @@ export function PackagesView(props: {
           >
             {filtered
               ? 'Change or clear the filters to see more packages.'
-              : `Attach a source to resolve packages. ${PROXY_DEMAND_MESSAGE}`}
+              : `No packages yet. Add a package from a connected source, or attach a source to get started. ${PROXY_DEMAND_MESSAGE}`}
           </ListState>
         )
       ) : (
@@ -819,6 +820,13 @@ export function PackagesPage() {
       <h1 tabIndex={-1} id="page-heading" className="text-2xl font-semibold">
         Packages
       </h1>
+      {state.selected === null ? (
+        <PackageSourceControls
+          key={state.query.project}
+          services={services}
+          project={state.query.project}
+        />
+      ) : null}
       {state.selected === null ? (
         <PackageFilters key={hash} query={parsePackagesHash(hash)} onChange={go} />
       ) : null}

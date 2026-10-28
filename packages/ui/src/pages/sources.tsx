@@ -1,3 +1,4 @@
+import { mirrorOutcome, sourceSyncResponse, SYNC_REQUESTED } from './sources/sync-copy.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { pollSync, syncPollResult } from './sources/sync-poll.js';
 import { AddPackageDialog } from './sources/add-package-dialog.js';
@@ -164,6 +165,7 @@ interface SourcesState {
   etag: string | null;
   vcsProviders: readonly VcsProvider[] | undefined;
   canEnableProjectSource: boolean;
+  canWriteSources: boolean;
   enableDenied: string[];
   enableConflicts: string[];
 }
@@ -232,6 +234,7 @@ export function createSourcesModel(
     order: [],
     etag: null,
     canEnableProjectSource: false,
+    canWriteSources: false,
     enableDenied: [],
     enableConflicts: [],
   };
@@ -687,8 +690,8 @@ export function createSourcesModel(
             packageSource: null,
             notice:
               result.status === 202
-                ? `Queued: ${result.data.name} will appear in Packages shortly`
-                : 'Already available',
+                ? mirrorOutcome(202, result.data.name, source.name)
+                : mirrorOutcome(200, result.data.name, source.name),
           });
         } else if (result.status === 400 && result.code === 'invalid_request') {
           set({ packageFieldError: 'Enter a valid package name for this source.' });
@@ -775,6 +778,21 @@ export function createSourcesModel(
         () => load(),
       );
     },
+    async loadMutationPermissions() {
+      const result =
+        project === null
+          ? await client.request('get', '/_pb/me/permissions')
+          : await client.request('get', '/_pb/projects/{project}/permissions', {
+              params: { project },
+            });
+      set({
+        canWriteSources:
+          result.ok &&
+          ('organization' in result.data
+            ? result.data.organization.includes('org:sources:write')
+            : result.data.project.includes('project:sources:write')),
+      });
+    },
     syncNow(source: Source) {
       if (
         state.busy ||
@@ -787,12 +805,16 @@ export function createSourcesModel(
       return mutate(
         () =>
           project === null
-            ? client.request('post', '/_pb/sources/{source}/sync', {
-                params: { source: source.id },
-              })
-            : client.request('post', '/_pb/projects/{project}/sources/{source}/sync', {
-                params: { project, source: source.id },
-              }),
+            ? client
+                .request('post', '/_pb/sources/{source}/sync', {
+                  params: { source: source.id },
+                })
+                .then(sourceSyncResponse)
+            : client
+                .request('post', '/_pb/projects/{project}/sources/{source}/sync', {
+                  params: { project, source: source.id },
+                })
+                .then(sourceSyncResponse),
         async () => {
           if (generation !== syncGeneration) return;
           const refresh = async (): Promise<boolean | 'pending'> => {
@@ -837,7 +859,7 @@ export function createSourcesModel(
             complete = await refresh();
           }
           if (generation !== syncGeneration) return;
-          set({ notice: 'Sync requested.' });
+          set({ notice: SYNC_REQUESTED });
           if (complete !== true && generation === syncGeneration)
             stopSyncPolling = pollSync(refresh);
         },
@@ -1125,13 +1147,17 @@ export function SourceActions({
   const actions: RowAction[] = owned
     ? [
         { id: 'edit', label: 'Edit', disabled: busy, onSelect: () => model.openEditor(source) },
-        {
-          id: 'sync',
-          label: 'Sync now',
-          disabled: busy || source.status === 'paused',
-          ...(source.status === 'paused' ? { describedBy: `sync-paused-${source.id}` } : {}),
-          onSelect: () => void model.syncNow(source),
-        },
+        ...(model.snapshot().canWriteSources
+          ? [
+              {
+                id: 'sync',
+                label: 'Sync now',
+                disabled: busy || source.status === 'paused',
+                ...(source.status === 'paused' ? { describedBy: `sync-paused-${source.id}` } : {}),
+                onSelect: () => void model.syncNow(source),
+              },
+            ]
+          : []),
       ]
     : [];
   const overflow: RowAction[] = [];
@@ -1174,7 +1200,7 @@ export function SourceActions({
       onSelect: () => {},
     });
   }
-  if (model.project !== null && acceptsPackage(source))
+  if (model.project !== null && model.snapshot().canWriteSources && acceptsPackage(source))
     overflow.push({
       id: 'add-package',
       label: 'Add package',
@@ -1284,6 +1310,18 @@ export function SourcesView({ model }: { model: SourcesModel }) {
           }}
           onClose={() => model.closeEditor()}
           vcsProviders={state.vcsProviders}
+          initialType={
+            typeof window !== 'undefined' &&
+            new URLSearchParams(window.location.hash.split('?')[1]).get('create') === 'vcs'
+              ? 'vcs'
+              : undefined
+          }
+          initialProvider={
+            typeof window !== 'undefined' &&
+            new URLSearchParams(window.location.hash.split('?')[1]).get('provider') === 'github'
+              ? 'github'
+              : undefined
+          }
         />
       ) : null}
       <p className="text-neutral-600">
@@ -1812,6 +1850,13 @@ export function SourcesPage() {
   useEffect(() => {
     void model.load();
     void model.loadAvailable();
+    void model.loadMutationPermissions().then(() => {
+      if (
+        model.snapshot().canWriteSources &&
+        new URLSearchParams(window.location.hash.split('?')[1]).get('create') === 'vcs'
+      )
+        model.openEditor();
+    });
     return () => model.dispose();
   }, [model]);
   useEffect(

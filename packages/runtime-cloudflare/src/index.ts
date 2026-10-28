@@ -65,7 +65,11 @@ import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
-import type { AuthModule } from '@package-broker/core/auth/module';
+import {
+  parseLocalAuthPolicy,
+  validateLocalAuthPolicy,
+  type AuthModule,
+} from '@package-broker/core/auth/module';
 import { type SessionService } from '@package-broker/core/auth/session';
 import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
 import type { ProjectAdministration } from '@package-broker/core/authz/project-administration';
@@ -283,6 +287,7 @@ export type Env = {
   readonly PB_MASTER_KEY_PREVIOUS?: string;
   readonly PB_KEYRING_RESEED?: string;
   readonly PB_PUBLIC_URL?: string;
+  readonly PB_AUTH_LOCAL?: string;
   readonly [binding: `PB_IDP_${string}`]: string | undefined;
 };
 
@@ -436,6 +441,7 @@ async function buildAuth(
     readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
   );
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
+  const localAuth = parseLocalAuthPolicy(read(env, 'PB_AUTH_LOCAL'));
   await selfTestPasswordHashing(keyring);
   await keyring.hmacKey('token-pepper', keyring.currentVersion);
   const registration = collectRegistration();
@@ -447,12 +453,14 @@ async function buildAuth(
     clock: systemClock,
     env: scopedEnv(env),
   });
+  validateLocalAuthPolicy(localAuth, providers);
   await verifyMasterKey(keyring, executor, env, log);
   const built = createAccessServices({
     executor,
     keyring,
     publicOrigin,
     providers,
+    localAuth,
     clock: systemClock,
     ids: { ulid },
     log,
@@ -1345,7 +1353,10 @@ export function createWorker(
       JSON.stringify(
         [...variables].sort().map((name) => {
           const value = read(env, name);
-          return [name, typeof value === 'string' ? value : null];
+          return [
+            name,
+            typeof value === 'string' ? value : `!${value === null ? 'null' : typeof value}`,
+          ];
         }),
       ),
     );
@@ -1766,6 +1777,12 @@ export function createWorker(
                     ]),
               ],
       });
+    if (
+      db === undefined &&
+      parseLocalAuthPolicy(read(env ?? NO_ENV, 'PB_AUTH_LOCAL')) === 'disabled'
+    ) {
+      throw new KernelConfigError(['auth_no_sign_in_method']);
+    }
     const built =
       db === undefined
         ? undefined

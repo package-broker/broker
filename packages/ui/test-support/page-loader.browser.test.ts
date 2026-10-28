@@ -20,6 +20,7 @@ beforeAll(async () => {
         globalThis.loadCalls = () => calls;
         const root = createRoot(document.getElementById('root'));
         globalThis.leavePage = () => root.render(<h1>Another page</h1>);
+        globalThis.returnPage = () => root.render(<PageLoader load={load} />);
         root.render(<PageLoader load={load} />);`,
       loader: 'tsx',
       resolveDir: fileURLToPath(new URL('../src/', import.meta.url)),
@@ -61,4 +62,45 @@ it('ignores completion after navigating away', async (context) => {
   await browserExpect(page.getByRole('heading', { name: 'Another page' })).toBeVisible();
   await page.evaluate('finishPage()');
   await browserExpect(page.getByRole('heading', { name: 'Loaded page' })).toHaveCount(0);
+});
+
+it('offers reload after a failed retry', async (context) => {
+  if (!fixture) context.skip('Chromium cannot start in this environment');
+  const { page, browserExpect } = fixture!;
+  await fixture!.mount(script);
+  await browserExpect(page.getByRole('status')).toBeVisible();
+  await page.evaluate('failPage()');
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await browserExpect(page.getByRole('status')).toBeVisible();
+  await page.evaluate('failPage()');
+  await browserExpect(page.getByRole('alert').locator('p')).toHaveText(
+    'This page could not be loaded.',
+  );
+  await Promise.all([
+    page.waitForEvent('load'),
+    page.getByRole('button', { name: 'Reload page', exact: true }).click(),
+  ]);
+});
+
+it('renders a resolved page immediately when revisiting without loading again', async (context) => {
+  if (!fixture) context.skip('Chromium cannot start in this environment');
+  const { page, browserExpect } = fixture!;
+  await fixture!.mount(script);
+  await browserExpect(page.getByRole('status')).toBeVisible();
+  await page.evaluate('finishPage()');
+  await browserExpect(page.getByRole('heading', { name: 'Loaded page' })).toBeVisible();
+  await page.evaluate('leavePage()');
+  await browserExpect(page.getByRole('heading', { name: 'Another page' })).toBeVisible();
+  await page.evaluate(`
+    globalThis.loadingSeen = false;
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node.textContent.includes('Loading page')) globalThis.loadingSeen = true;
+      }
+    }).observe(document.getElementById('root'), { childList: true, subtree: true });
+    returnPage();
+  `);
+  await browserExpect(page.getByRole('heading', { name: 'Loaded page' })).toBeVisible();
+  expect(await page.evaluate('loadCalls()')).toBe(1);
+  expect(await page.evaluate('loadingSeen')).toBe(false);
 });

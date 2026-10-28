@@ -251,7 +251,11 @@ describe('packed UI assets', () => {
         expect(bytes.equals(await readFile(path.join(assets, name)))).toBe(true);
       }
       const names = Object.keys(manifest.files);
-      expect(names).toEqual(expect.arrayContaining(['index.html', 'setup.html']));
+      expect(names.filter((name) => !name.endsWith('.js')).sort()).toEqual([
+        expect.stringMatching(/^app\.[a-f0-9]{12}\.css$/),
+        'index.html',
+        'setup.html',
+      ]);
       const scripts = names.filter((name) => name.endsWith('.js'));
       expect(scripts.length).toBeGreaterThan(9);
       for (const name of scripts) expect(name).toMatch(/^[a-z-]+\.[a-f0-9]{12}\.js$/);
@@ -345,31 +349,49 @@ describe('split load budgets', () => {
     };
     expect(
       measureInitialLoad(outputs, 'app', { app: 100, shared: 200, common: 50, page: 400 }, 25),
-    ).toEqual({ initialGzipBytes: 375, chunkGzipBytes: 400 });
+    ).toEqual({
+      initialGzipBytes: 375,
+      chunkGzipBytes: 400,
+      totalGzipBytes: 775,
+      initialFiles: ['app', 'shared', 'common'],
+    });
   });
 
-  it('enforces both independent caps and falls back to the unchanged legacy baseline', () => {
-    const budget = { gzipBytes: 1000, initialGzipBytes: 500, chunkGzipBytes: 100 };
-    expect(checkLoadBudgets({ initialGzipBytes: 550, chunkGzipBytes: 110 }, budget)).toEqual({
-      initial: { ok: true, limit: 550 },
-      chunk: { ok: true, limit: 110 },
+  const sizes = { initialGzipBytes: 550, chunkGzipBytes: 110, totalGzipBytes: 1100 };
+  const budget = { initialGzipBytes: 500, chunkGzipBytes: 100, totalGzipBytes: 1000 };
+
+  it.each(['initial', 'chunk', 'total'] as const)('enforces the %s cap independently', (cap) => {
+    expect(checkLoadBudgets(sizes, budget)[cap]).toEqual({
+      ok: true,
+      limit: sizes[`${cap}GzipBytes`],
     });
-    expect(checkLoadBudgets({ initialGzipBytes: 551, chunkGzipBytes: 111 }, budget)).toEqual({
-      initial: { ok: false, limit: 550 },
-      chunk: { ok: false, limit: 110 },
-    });
+    const exceeded = { ...sizes, [`${cap}GzipBytes`]: sizes[`${cap}GzipBytes`] + 1 };
+    const result = checkLoadBudgets(exceeded, budget);
+    for (const key of ['initial', 'chunk', 'total'] as const)
+      expect(result[key].ok).toBe(key !== cap);
+  });
+
+  it('accepts a measured zero chunk cap for an app without deferred chunks', () => {
     expect(
-      checkLoadBudgets({ initialGzipBytes: 1100, chunkGzipBytes: 1101 }, { gzipBytes: 1000 }).chunk
-        .ok,
-    ).toBe(false);
+      checkLoadBudgets({ ...sizes, chunkGzipBytes: 0 }, { ...budget, chunkGzipBytes: 0 }).chunk.ok,
+    ).toBe(true);
+  });
+
+  it.each(Object.keys(budget))('rejects missing %s', (key) => {
+    const missing: Record<string, number> = { ...budget };
+    delete missing[key];
+    expect(() => checkLoadBudgets(sizes, missing)).toThrow(`Missing bundle budget key: ${key}`);
+  });
+
+  it.each(['gzipBytes', 'typo'])('rejects unknown %s', (key) => {
+    expect(() => checkLoadBudgets(sizes, { ...budget, [key]: 1000 })).toThrow(
+      `Unknown bundle budget key: ${key}`,
+    );
   });
 
   it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid budgets: %s', (value) => {
-    expect(() =>
-      checkLoadBudgets(
-        { initialGzipBytes: 1, chunkGzipBytes: 1 },
-        { initialGzipBytes: value, chunkGzipBytes: 100 },
-      ),
-    ).toThrow(/positive safe integers/);
+    expect(() => checkLoadBudgets(sizes, { ...budget, initialGzipBytes: value })).toThrow(
+      /positive safe integers/,
+    );
   });
 });

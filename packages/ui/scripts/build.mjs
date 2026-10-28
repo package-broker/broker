@@ -62,8 +62,11 @@ async function bundleScript(entry, split = false) {
   );
   const scripts = new Map();
   const names = new Map();
+  const inProgress = new Set();
   function emit(key) {
     if (names.has(key)) return names.get(key);
+    if (inProgress.has(key)) throw new Error('UI bundle import cycle prevents content hashing');
+    inProgress.add(key);
     let text = outputs.get(key).toString('utf8');
     for (const dependency of metafile.outputs[key].imports) {
       if (dependency.external) throw new Error('UI bundle must not contain external imports');
@@ -81,6 +84,7 @@ async function bundleScript(entry, split = false) {
         ? path.basename(pageEntry, path.extname(pageEntry))
         : 'chunk';
     const name = `${prefix}.${hashOf(bytes)}.js`;
+    inProgress.delete(key);
     names.set(key, name);
     scripts.set(name, bytes);
     return name;
@@ -111,7 +115,7 @@ async function compileStyles() {
   }
 }
 
-function renderIndex(scriptName, styleName) {
+function renderIndex(scriptName, styleName, preloads) {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -119,6 +123,7 @@ function renderIndex(scriptName, styleName) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Package Broker</title>
     <link rel="stylesheet" href="${styleName}" />
+${preloads.map((name) => `    <link rel="modulepreload" href="${name}" />`).join('\n')}
     <script type="module" src="${scriptName}"></script>
   </head>
   <body>
@@ -157,7 +162,14 @@ const styles = await compileStyles();
 const scriptName = app.entryName;
 const styleName = `app.${hashOf(styles)}.css`;
 const setupScriptName = setup.entryName;
-const html = Buffer.from(renderIndex(scriptName, styleName));
+const sizes = Object.fromEntries(
+  [...app.names].map(([key, name]) => [key, gzipSync(scripts.get(name)).length]),
+);
+const initialGraph = measureInitialLoad(metafile.outputs, app.entryKey, sizes, 0);
+const preloads = initialGraph.initialFiles
+  .filter((key) => key !== app.entryKey)
+  .map((key) => app.names.get(key));
+const html = Buffer.from(renderIndex(scriptName, styleName, preloads));
 const setupHtml = Buffer.from(renderSetup(setupScriptName, styleName));
 
 for (const [label, document] of [
@@ -173,17 +185,17 @@ for (const bundled of scripts.values()) {
   }
 }
 
-const sizes = Object.fromEntries(
-  [...app.names].map(([key, name]) => [key, gzipSync(scripts.get(name)).length]),
-);
 const fixedBytes = [html, setupHtml, scripts.get(setupScriptName), styles].reduce(
   (sum, bytes) => sum + gzipSync(bytes).length,
   0,
 );
 const measured = measureInitialLoad(metafile.outputs, app.entryKey, sizes, fixedBytes);
-const total = measured.initialGzipBytes;
+const total = measured.totalGzipBytes;
 if (process.argv.includes('--init-budget')) {
-  await writeFile(budgetPath, `${JSON.stringify({ gzipBytes: total }, null, 2)}\n`);
+  await writeFile(
+    budgetPath,
+    `${JSON.stringify({ initialGzipBytes: measured.initialGzipBytes, chunkGzipBytes: measured.chunkGzipBytes, totalGzipBytes: total }, null, 2)}\n`,
+  );
   console.log(`bundle budget initialized at ${total} gzip bytes`);
   process.exit(0);
 }
@@ -199,13 +211,18 @@ try {
 }
 const checked = checkLoadBudgets(measured, budget);
 console.log(
-  `bundle gzip total ${total} bytes (initial load), largest chunk ${measured.chunkGzipBytes} bytes`,
+  `bundle gzip total ${total} bytes, initial load ${measured.initialGzipBytes} bytes, largest chunk ${measured.chunkGzipBytes} bytes`,
 );
 console.log(
-  `bundle gzip limits: initial ${checked.initial.limit}, chunk ${checked.chunk.limit} bytes`,
+  `bundle gzip limits: initial ${checked.initial.limit}, chunk ${checked.chunk.limit}, total ${checked.total.limit} bytes`,
 );
-if (!checked.initial.ok || !checked.chunk.ok) {
-  throw new Error('UI initial load or chunk exceeds budget by more than 10%');
+for (const [cap, result] of Object.entries(checked)) {
+  if (!result.ok) {
+    const key = `${cap}GzipBytes`;
+    throw new Error(
+      `UI ${key} exceeds budget: measured ${measured[key]} bytes, limit ${result.limit} bytes; update bundle-budget.json deliberately`,
+    );
+  }
 }
 
 const files = {

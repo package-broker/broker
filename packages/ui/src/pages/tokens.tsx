@@ -1,5 +1,4 @@
 import { pendingStorage } from '../token-pending.js';
-export { clearPendingTokenIssue } from '../token-pending.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { ApiResult } from '../api.js';
 import type { operations } from '../api-types.js';

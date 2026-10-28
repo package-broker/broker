@@ -37,7 +37,14 @@ async function writeEntry(source: string): Promise<string> {
 
 async function writeBudget(gzipBytes: number): Promise<string> {
   const file = path.join(scratch, `budget-${counter++}.json`);
-  await writeFile(file, JSON.stringify({ gzipBytes }));
+  await writeFile(
+    file,
+    JSON.stringify({
+      initialGzipBytes: gzipBytes,
+      chunkGzipBytes: gzipBytes,
+      totalGzipBytes: gzipBytes,
+    }),
+  );
   return file;
 }
 
@@ -219,6 +226,45 @@ describe('ui build output', () => {
 
 describe('split output budgets', () => {
   it(
+    'rejects a dynamic import cycle with a clear error',
+    async () => {
+      const a = path.join(scratch, 'cycle-a.js');
+      const b = path.join(scratch, 'cycle-b.js');
+      await writeFile(a, `export const load = () => import('./cycle-b.js');`);
+      await writeFile(b, `export const load = () => import('./cycle-a.js');`);
+      const result = await build(a);
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain('UI bundle import cycle prevents content hashing');
+      expect(result.output).not.toContain('Maximum call stack');
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
+  it.each(['initialGzipBytes', 'chunkGzipBytes', 'totalGzipBytes'])(
+    'names an exceeded %s cap and its measurements',
+    async (cap) => {
+      const page = await writeEntry("console.log('deferred');");
+      const entry = await writeEntry(`globalThis.load = () => import(${JSON.stringify(page)});`);
+      const budget = await writeBudget(1_000_000);
+      await writeFile(
+        budget,
+        JSON.stringify({
+          initialGzipBytes: 1_000_000,
+          chunkGzipBytes: 1_000_000,
+          totalGzipBytes: 1_000_000,
+          [cap]: 1,
+        }),
+      );
+      await expect(runBuild(entry, path.join(scratch, `cap-${counter++}`), budget)).rejects.toThrow(
+        new RegExp(
+          `${cap} exceeds budget: measured \\d+ bytes, limit 1 bytes; update bundle-budget.json deliberately`,
+        ),
+      );
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
+  it(
     'rejects an oversized deferred chunk independently of the initial budget',
     async () => {
       const page = await writeEntry(
@@ -231,12 +277,23 @@ describe('split output budgets', () => {
       );
       const out = path.join(scratch, `out-${counter++}`);
       const budget = path.join(scratch, `split-budget-${counter++}.json`);
-      await writeFile(budget, JSON.stringify({ initialGzipBytes: 1_000_000, chunkGzipBytes: 1 }));
+      await writeFile(
+        budget,
+        JSON.stringify({
+          initialGzipBytes: 1_000_000,
+          chunkGzipBytes: 1,
+          totalGzipBytes: 1_000_000,
+        }),
+      );
       await expect(runBuild(entry, out, budget)).rejects.toThrow(/exceeds budget/);
       await expect(readdir(out)).rejects.toThrow();
       await writeFile(
         budget,
-        JSON.stringify({ initialGzipBytes: 1_000_000, chunkGzipBytes: 10_000 }),
+        JSON.stringify({
+          initialGzipBytes: 1_000_000,
+          chunkGzipBytes: 10_000,
+          totalGzipBytes: 1_000_000,
+        }),
       );
       await expect(runBuild(entry, out, budget)).resolves.toBeUndefined();
       const files = await readOutput(out);
@@ -305,7 +362,13 @@ describe('ui setup build output', () => {
         .reduce((sum, [, bytes]) => sum + gzipSync(bytes).length, 0);
       expect(stdout).toContain(`bundle gzip total ${measured} bytes`);
       await run(process.execPath, [...args, '--init-budget'], { timeout: BUILD_TIMEOUT_MS });
-      expect(JSON.parse(await readFile(budget, 'utf8'))).toEqual({ gzipBytes: measured });
+      const initialized = JSON.parse(await readFile(budget, 'utf8'));
+      expect(initialized).toEqual({
+        initialGzipBytes: measured,
+        chunkGzipBytes: 0,
+        totalGzipBytes: measured,
+      });
+      expect(manifest.checkLoadBudgets(initialized, initialized).total.ok).toBe(true);
     },
     BUILD_TIMEOUT_MS * 2,
   );
@@ -400,6 +463,19 @@ describe('whole app CSP graph', () => {
       const files = await readOutput(out);
       for (const [name, bytes] of files)
         if (name.endsWith('.html')) assertNoInlineCode(bytes.toString('utf8'));
+      const html = files.get('index.html')!.toString('utf8');
+      const initial = html.match(/<script type="module" src="([^"]+)"/)![1]!;
+      const staticImports = [
+        ...files
+          .get(initial)!
+          .toString('utf8')
+          .matchAll(/from\s*["']\.\/([^"']+)["']/g),
+      ].map((match) => match[1]!);
+      expect(staticImports.length).toBeGreaterThan(0);
+      for (const name of staticImports)
+        expect(html).toContain(`<link rel="modulepreload" href="${name}"`);
+      for (const [, name] of html.matchAll(/rel="modulepreload" href="([^"]+)"/g))
+        expect(files.has(name!)).toBe(true);
       const css = files.get(cssName(files))?.toString('utf8') ?? '';
       expect(css).toContain('@container broker-table');
       expect(css).toContain('content:attr(data-label)');

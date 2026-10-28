@@ -18,8 +18,7 @@ export function createOrgResolver(
   async function read(): Promise<OrgContext> {
     const row = await source.findSingleton();
     if (row === null) throw new NotBootstrappedError();
-    const context = orgContext(row.id);
-    return context;
+    return orgContext(row.id);
   }
 
   return () => {

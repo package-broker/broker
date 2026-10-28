@@ -84,12 +84,16 @@ function removedCapabilities(
   inputRecord: AuditRecordV1,
   marker: AuditWithheldMarkerV1,
 ): void {
-  // @ts-expect-error org scope cannot be omitted
-  void journal.head();
+  // @ts-expect-error org scope is bound by core
+  void journal.head(org);
   // @ts-expect-error raw ids cannot supply authority
   void journal.head(org.orgId);
   // @ts-expect-error project scope is required
-  void journal.list(org, { limit: 100 });
+  void journal.list({ limit: 100 });
+  // @ts-expect-error verification scope is bound by core
+  void trail.requestVerification(org);
+  // @ts-expect-error journal queries cannot select another organization
+  void journal.list(org, { projectId: null, limit: 100 });
   // @ts-expect-error activity is resolved by core
   trail.active();
   // @ts-expect-error batch metadata is immutable
@@ -246,15 +250,13 @@ describe('public audit plugin contract', () => {
     >();
     expectTypeOf<keyof AuditTrailDefinition>().toEqualTypeOf<'toggleEnv' | 'create'>();
     expectTypeOf<keyof AuditJournalReader>().toEqualTypeOf<'list' | 'head'>();
-    expectTypeOf<Parameters<AuditJournalReader['head']>>().toEqualTypeOf<[OrgContext]>();
+    expectTypeOf<Parameters<AuditJournalReader['head']>>().toEqualTypeOf<[]>();
     expectTypeOf<Awaited<ReturnType<AuditJournalReader['head']>>>().toEqualTypeOf<AuditHeadV1>();
     expectTypeOf<Awaited<ReturnType<AuditJournalReader['list']>>['items']>().toEqualTypeOf<
       readonly AuditJournalItemV1[]
     >();
     expectTypeOf<AuditJournalItemV1>().toEqualTypeOf<AuditRecordV1 | AuditWithheldMarkerV1>();
-    expectTypeOf<Parameters<AuditTrailContext['requestVerification']>>().toEqualTypeOf<
-      [OrgContext]
-    >();
+    expectTypeOf<Parameters<AuditTrailContext['requestVerification']>>().toEqualTypeOf<[]>();
     expectTypeOf<
       Awaited<ReturnType<NonNullable<AuditSink['frontier']>>>
     >().toEqualTypeOf<AuditPositionV1 | null>();
@@ -288,7 +290,7 @@ describe('public audit plugin contract', () => {
         toggleEnv: 'PB_AUDIT_TRAIL',
         create: (ctx) => {
           expect(ctx.active).toBe(false);
-          void ctx.requestVerification(org);
+          void ctx.requestVerification();
           return {};
         },
       },
@@ -328,8 +330,8 @@ describe('public audit plugin contract', () => {
     plugin.auditTrail.create({
       active: false,
       journal,
-      requestVerification: async (scope) => {
-        requestedOrg = scope;
+      requestVerification: async () => {
+        requestedOrg = org;
       },
     });
     expect(requestedOrg).toBe(org);
@@ -350,7 +352,7 @@ describe('public audit plugin contract', () => {
       throughSeq: batch.throughSeq,
       throughHash: batch.throughHash,
     });
-    const page = await journal.list(org, { projectId: null, limit: 100 });
+    const page = await journal.list({ projectId: null, limit: 100 });
     expect(
       page.items.map((item) => (item.kind === 'event' ? item.payloadJson : item.reasonCode)),
     ).toEqual(['{}', 'sanitizer_mismatch']);

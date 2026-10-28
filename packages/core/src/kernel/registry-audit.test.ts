@@ -32,6 +32,125 @@ function collectValidatedAudit(plugins: readonly PluginDefinition[]) {
 }
 
 describe('audit registration', () => {
+  it.each(['OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_EXPORTER_OTLP_LOGS_HEADERS'])(
+    'pairs %s only with its exactly matching explicit endpoint',
+    (headersEnv) => {
+      const endpointEnv = headersEnv.replace(/HEADERS$/, 'ENDPOINT');
+      expect(
+        collectValidatedAudit([
+          plugin({
+            auditSinks: [
+              sink({ destination: { protocol: 'otlp-http-json', endpointEnv, headersEnv } }),
+            ],
+          }),
+        ]).audit.sinks,
+      ).toHaveLength(1);
+      reject(
+        { auditSinks: [sink({ destination: { protocol: 'otlp-http-json', headersEnv } })] },
+        'malformed',
+      );
+      for (const endpoint of [
+        'CUSTOM_ENDPOINT',
+        'PB_AUDIT_OTLP_ENDPOINT',
+        endpointEnv === 'OTEL_EXPORTER_OTLP_ENDPOINT'
+          ? 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'
+          : 'OTEL_EXPORTER_OTLP_ENDPOINT',
+      ]) {
+        reject(
+          {
+            auditSinks: [
+              sink({
+                destination: { protocol: 'otlp-http-json', endpointEnv: endpoint, headersEnv },
+              }),
+            ],
+          },
+          'malformed',
+        );
+      }
+    },
+  );
+
+  it.each(['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'])(
+    'snapshots matching default headers for explicit %s',
+    (endpointEnv) => {
+      const result = collectValidatedAudit([
+        plugin({
+          auditSinks: [
+            sink({
+              destination: {
+                protocol: 'otlp-http-json',
+                endpointEnv,
+              },
+            }),
+          ],
+        }),
+      ]);
+      expect(result.audit.sinks[0]!.definition.destination).toEqual({
+        protocol: 'otlp-http-json',
+        endpointEnv,
+        headersEnv: endpointEnv.replace(/ENDPOINT$/, 'HEADERS'),
+      });
+    },
+  );
+
+  it('rejects two distinct OTLP destinations sharing the implicit OTEL fallback', () => {
+    expect(() =>
+      collectValidatedAudit([
+        plugin({
+          auditSinks: [
+            sink({
+              destination: {
+                protocol: 'otlp-http-json',
+                endpointEnv: 'FIRST_URL',
+                headersEnv: 'FIRST_HEADERS',
+              },
+            }),
+            sink({
+              id: 'second',
+              destination: {
+                protocol: 'otlp-http-json',
+                endpointEnv: 'SECOND_URL',
+                headersEnv: 'SECOND_HEADERS',
+              },
+            }),
+          ],
+        }),
+      ]),
+    ).toThrow('must not be shared');
+  });
+
+  it('rejects case-insensitive destination name collisions within a sink', () => {
+    reject(
+      {
+        auditSinks: [
+          sink({
+            destination: { protocol: 'https-json', urlEnv: 'CUSTOM_URL', headersEnv: 'custom_url' },
+          }),
+        ],
+      },
+      'malformed',
+    );
+  });
+
+  it('uses the gate id snapshot for registration without reading plugin.id', () => {
+    const definition = new Proxy(plugin(), {
+      get(target, key, receiver) {
+        if (key === 'id') throw new Error('id reread');
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    expect(() => collectRegistrations([definition])).not.toThrow();
+  });
+
+  it('retains the gate id as the audit definition owner', () => {
+    const definition = plugin({ auditSinks: [sink()] });
+    const problems: string[] = [];
+    const gate = snapshotPluginGate(definition, problems);
+    Object.assign(definition, { id: 'changed' });
+    expect(collectAuditDefinitions([definition], [gate], problems).sinks[0]!.plugin).toBe('audit');
+    expect(problems).toEqual([]);
+  });
+
   it('captures one trail and multiple sinks without invoking factories', () => {
     const create = vi.fn(() => ({}));
     const sinkCreate = vi.fn(sink().create);
@@ -259,8 +378,9 @@ describe('audit registration', () => {
 
   it.each([-1, 1.5, NaN, '1', 1025])('rejects invalid array length %s', (length) => {
     const entries = new Proxy([], {
-      get(target, key, receiver) {
-        return key === 'length' ? length : (Reflect.get(target, key, receiver) as unknown);
+      getOwnPropertyDescriptor(target, key) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+        return key === 'length' ? { ...descriptor, value: length } : descriptor;
       },
     });
     reject({ auditSinks: entries as never }, 'malformed');
@@ -380,19 +500,71 @@ describe('audit registration', () => {
   });
 
   it.each([
-    'PB_AUDIT_OTLP_ENDPOINT',
-    'PB_AUDIT_OTLP_HEADERS',
-    'PB_AUDIT_WEBHOOK_URL',
-    'PB_AUDIT_WEBHOOK_HEADERS',
-    'OTEL_EXPORTER_OTLP_ENDPOINT',
-  ])('accepts documented destination variable %s', (name) => {
+    { protocol: 'otlp-http-json', endpointEnv: 'PB_AUDIT_OTLP_ENDPOINT' },
+    { protocol: 'otlp-http-json', endpointEnv: 'OTEL_EXPORTER_OTLP_ENDPOINT' },
+    { protocol: 'otlp-http-json', headersEnv: 'PB_AUDIT_OTLP_HEADERS' },
+    {
+      protocol: 'https-json',
+      urlEnv: 'PB_AUDIT_WEBHOOK_URL',
+      headersEnv: 'PB_AUDIT_WEBHOOK_HEADERS',
+    },
+  ])('accepts documented destination roles (%#)', (destination) => {
     expect(
+      collectValidatedAudit([plugin({ auditSinks: [sink({ destination: destination as never })] })])
+        .audit.sinks,
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    { protocol: 'otlp-http-json', endpointEnv: 'CUSTOM_URL', headersEnv: 'PB_AUDIT_OTLP_HEADERS' },
+    { protocol: 'https-json', urlEnv: 'CUSTOM_URL', headersEnv: 'PB_AUDIT_WEBHOOK_HEADERS' },
+    ...[
+      'PB_AUDIT_OTLP_HEADERS',
+      'PB_AUDIT_WEBHOOK_HEADERS',
+      'PB_AUDIT_WEBHOOK_URL',
+      'OTEL_EXPORTER_OTLP_HEADERS',
+    ].map((endpointEnv) => ({ protocol: 'otlp-http-json', endpointEnv })),
+    ...['PB_AUDIT_OTLP_ENDPOINT', 'PB_AUDIT_WEBHOOK_URL', 'OTEL_EXPORTER_OTLP_ENDPOINT'].map(
+      (headersEnv) => ({ protocol: 'otlp-http-json', headersEnv }),
+    ),
+    { protocol: 'https-json', urlEnv: 'PB_AUDIT_OTLP_ENDPOINT' },
+    { protocol: 'https-json', urlEnv: 'PB_AUDIT_WEBHOOK_HEADERS' },
+    {
+      protocol: 'otlp-http-json',
+      endpointEnv: 'PB_AUDIT_WEBHOOK_URL',
+      headersEnv: 'PB_AUDIT_WEBHOOK_HEADERS',
+    },
+  ])('refuses mismatched destination roles and header pairs (%#)', (destination) => {
+    reject({ auditSinks: [sink({ destination: destination as never })] }, 'malformed');
+  });
+
+  it.each([
+    [
+      { protocol: 'otlp-http-json' },
+      { protocol: 'otlp-http-json', endpointEnv: 'PB_AUDIT_OTLP_ENDPOINT' },
+    ],
+    [
+      { protocol: 'otlp-http-json' },
+      {
+        protocol: 'otlp-http-json',
+        endpointEnv: 'CUSTOM_URL',
+        headersEnv: 'PB_AUDIT_OTLP_ENDPOINT',
+      },
+    ],
+    [
+      { protocol: 'https-json', urlEnv: 'PB_AUDIT_WEBHOOK_URL' },
+      { protocol: 'https-json', urlEnv: 'OTHER_URL', headersEnv: 'pb_audit_webhook_headers' },
+    ],
+  ])('refuses implicit destination collisions or reserved aliases (%#)', (...destinations) => {
+    expect(() =>
       collectValidatedAudit([
         plugin({
-          auditSinks: [sink({ destination: { protocol: 'otlp-http-json', endpointEnv: name } })],
+          auditSinks: destinations.map((destination, i) =>
+            sink({ id: `sink-${i}`, destination: destination as never }),
+          ),
         }),
-      ]).audit.sinks,
-    ).toHaveLength(1);
+      ]),
+    ).toThrow(KernelConfigError);
   });
 
   it.each(['urlEnv', 'headersEnv'])('refuses %s shared between sinks', (key) => {
@@ -420,6 +592,17 @@ describe('audit registration', () => {
     'MCP_RATE_LIMIT',
     'DEPLOYMENT_ID',
     'COMPOSER_AUTH',
+    'GIT_SSH_COMMAND',
+    'GIT_CONFIG_GLOBAL',
+    'COMPOSER_HOME',
+    'PP_API_KEY_FILE',
+    'PP_API_SECRET_FILE',
+    'HOME',
+    'PATH',
+    'pb_master_key',
+    'otel_exporter_otlp_headers',
+    'composer_auth',
+    'path',
     'CLOUDFLARE_API_TOKEN',
     'CLOUDFLARE_ACCOUNT_ID',
   ])('refuses core variable %s for env access and trail toggle', (name) => {
@@ -444,5 +627,64 @@ describe('audit registration', () => {
       },
       'reserved or destination',
     );
+  });
+  it.each(['id', 'auditTrail', 'auditSinks'])(
+    'rejects unreadable %s without invoking accessors',
+    (key) => {
+      const get = vi.fn(() => {
+        throw new Error('private accessor text');
+      });
+      const definition = plugin();
+      Object.defineProperty(definition, key, { get });
+      expect(() => collectRegistrations([definition])).toThrow(KernelConfigError);
+      try {
+        collectRegistrations([definition]);
+      } catch (error) {
+        expect((error as Error).message).not.toContain('private accessor text');
+        if (key === 'id')
+          expect((error as Error).message).toBe(
+            'plugin id is malformed; an own string data property is required',
+          );
+      }
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([42, null, undefined, { toString: () => 'audit' }])(
+    'reports a non-string plugin id (%#) with its own diagnostic',
+    (id) => {
+      const definition = { ...plugin(), id } as unknown as PluginDefinition;
+      expect(() => collectRegistrations([definition])).toThrow(
+        'plugin id is malformed; an own string data property is required',
+      );
+      try {
+        collectRegistrations([definition]);
+      } catch (error) {
+        expect((error as Error).message).not.toContain('apiVersion or binds');
+      }
+    },
+  );
+
+  it.each([
+    'home',
+    'Path',
+    'git_ssh_command',
+    'git_config_global',
+    'composer_home',
+    'pp_api_key_file',
+    'pp_api_secret_file',
+  ])('denies mixed-case sensitive variable %s in all roles', (name) => {
+    reject({ auditSinks: [sink({ envNames: [name] })] }, 'reserved or destination');
+    reject(
+      { binds: ['audit-trail'], auditTrail: { create: () => ({}), toggleEnv: name } },
+      'reserved or destination',
+    );
+    for (const destination of [
+      { protocol: 'https-json', urlEnv: name },
+      { protocol: 'https-json', urlEnv: 'URL', headersEnv: name },
+      { protocol: 'otlp-http-json', endpointEnv: name },
+      { protocol: 'otlp-http-json', headersEnv: name },
+    ])
+      reject({ auditSinks: [sink({ destination: destination as never })] }, 'malformed');
   });
 });

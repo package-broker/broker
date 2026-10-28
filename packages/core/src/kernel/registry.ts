@@ -30,6 +30,7 @@ import {
   AUDIT_PLUGINS_AVAILABLE,
   collectAuditDefinitions,
   snapshotPluginGate,
+  pluginLabel,
 } from './registry-audit.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
@@ -225,6 +226,18 @@ export function collectRegistrations(
   if (!AUDIT_PLUGINS_AVAILABLE && (audit.trail !== null || audit.sinks.length > 0)) {
     problems.push('audit plugins are not available in this build');
   }
+  for (const plugin of plugins) {
+    try {
+      for (const key of Reflect.ownKeys(plugin)) {
+        if (typeof key === 'symbol' || !DEFINITION_KEYS.has(key)) {
+          problems.push(`${pluginLabel(plugin)} has unknown key "${String(key)}"`);
+        }
+      }
+    } catch {
+      problems.push('plugin definition is malformed');
+    }
+  }
+  if (problems.length > 0) throw new KernelConfigError(problems);
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
     'access.check': [],
@@ -253,8 +266,7 @@ export function collectRegistrations(
   }
 
   for (const [index, plugin] of plugins.entries()) {
-    const id = plugin.id;
-    const { apiVersion, binds } = gates[index]!;
+    const { id, apiVersion, binds } = gates[index]!;
 
     if (!Number.isInteger(apiVersion)) {
       problems.push(`plugin "${id}" apiVersion must be an integer`);
@@ -267,11 +279,6 @@ export function collectRegistrations(
     if (isReservedPluginId(id)) {
       validId = false;
       problems.push(`plugin id "${id}" is reserved`);
-    }
-    for (const key of Reflect.ownKeys(plugin)) {
-      if (typeof key === 'symbol' || !DEFINITION_KEYS.has(key)) {
-        problems.push(`plugin "${id}" has unknown key "${String(key)}"`);
-      }
     }
 
     for (const port of binds) {

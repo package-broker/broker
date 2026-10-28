@@ -225,6 +225,9 @@ export interface AuditOtelEnvironment {
   readonly timeoutMs: number;
 }
 
+const OTEL_ENDPOINTS = ['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', 'OTEL_EXPORTER_OTLP_ENDPOINT'];
+const OTEL_HEADERS = ['OTEL_EXPORTER_OTLP_LOGS_HEADERS', 'OTEL_EXPORTER_OTLP_HEADERS'];
+
 export function parseAuditOtelEnvironment(
   env: (name: string) => string | undefined,
   destination: Extract<AuditDestinationSpec, { protocol: 'otlp-http-json' }> = {
@@ -233,20 +236,29 @@ export function parseAuditOtelEnvironment(
 ): AuditOtelEnvironment | null {
   const value = (name: string): string | undefined => env(name) || undefined;
   const endpointName = destination.endpointEnv ?? 'PB_AUDIT_OTLP_ENDPOINT';
+  const explicitOtel = OTEL_ENDPOINTS.includes(endpointName);
+  const pairedOtelHeaders = endpointName.replace(/ENDPOINT$/, 'HEADERS');
   const headersName =
     destination.headersEnv ??
-    (endpointName === 'PB_AUDIT_OTLP_ENDPOINT' ? 'PB_AUDIT_OTLP_HEADERS' : undefined);
+    (endpointName === 'PB_AUDIT_OTLP_ENDPOINT'
+      ? 'PB_AUDIT_OTLP_HEADERS'
+      : explicitOtel
+        ? pairedOtelHeaders
+        : undefined);
+  if (
+    headersName !== undefined &&
+    headersName.toUpperCase().startsWith('OTEL_EXPORTER_OTLP_') &&
+    !(explicitOtel && headersName === pairedOtelHeaders)
+  ) {
+    throw new AuditSinkConfigError('invalid_headers');
+  }
   if (!value(endpointName) && headersName !== undefined && value(headersName)) {
     throw new AuditSinkConfigError('invalid_endpoint');
   }
-  for (const name of [
-    endpointName,
-    'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
-    'OTEL_EXPORTER_OTLP_ENDPOINT',
-  ]) {
+  for (const name of explicitOtel ? [endpointName] : [endpointName, ...OTEL_ENDPOINTS]) {
     const raw = value(name);
     if (raw === undefined) continue;
-    const otel = name !== endpointName;
+    const otel = OTEL_ENDPOINTS.includes(name);
     if (otel) {
       for (const prefix of ['OTEL_EXPORTER_OTLP_', 'OTEL_EXPORTER_OTLP_LOGS_']) {
         for (const suffix of ['CERTIFICATE', 'CLIENT_CERTIFICATE', 'CLIENT_KEY']) {
@@ -282,11 +294,12 @@ export function parseAuditOtelEnvironment(
     if (name === 'OTEL_EXPORTER_OTLP_ENDPOINT') {
       url.pathname = url.pathname.replace(/\/+$/, '') + '/v1/logs';
     }
-    const rawHeaders = otel
-      ? (value('OTEL_EXPORTER_OTLP_LOGS_HEADERS') ?? value('OTEL_EXPORTER_OTLP_HEADERS'))
-      : headersName === undefined
-        ? undefined
-        : value(headersName);
+    const rawHeaders =
+      name === endpointName
+        ? headersName === undefined
+          ? undefined
+          : value(headersName)
+        : (value('OTEL_EXPORTER_OTLP_LOGS_HEADERS') ?? value('OTEL_EXPORTER_OTLP_HEADERS'));
     return {
       endpoint: url.href,
       activationSource: name,
@@ -294,9 +307,7 @@ export function parseAuditOtelEnvironment(
       timeoutMs: duration,
     };
   }
-  if (
-    ['OTEL_EXPORTER_OTLP_LOGS_HEADERS', 'OTEL_EXPORTER_OTLP_HEADERS'].some((name) => value(name))
-  ) {
+  if (!explicitOtel && OTEL_HEADERS.some((name) => value(name))) {
     throw new AuditSinkConfigError('invalid_endpoint');
   }
   return null;

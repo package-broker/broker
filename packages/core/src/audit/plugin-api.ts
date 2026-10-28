@@ -1,4 +1,3 @@
-import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import type { AuditActorType } from './actions.js';
 
@@ -120,19 +119,16 @@ export interface AuditHeadV1 {
   readonly verification: AuditVerificationScopeV1 | null;
 }
 
-/** Core checks stored payloads against the sanitizer before returning records or withheld markers. */
+/** Bound by core to the current organization; stored payloads pass the sanitizer comparison. */
 export interface AuditJournalReader {
-  list(
-    org: OrgContext,
-    q: {
-      readonly projectId: string | null;
-      readonly actor?: string;
-      readonly action?: string;
-      readonly afterSeq?: number;
-      readonly limit: number;
-    },
-  ): Promise<{ readonly items: readonly AuditJournalItemV1[]; readonly next: number | null }>;
-  head(org: OrgContext): Promise<AuditHeadV1>;
+  list(q: {
+    readonly projectId: string | null;
+    readonly actor?: string;
+    readonly action?: string;
+    readonly afterSeq?: number;
+    readonly limit: number;
+  }): Promise<{ readonly items: readonly AuditJournalItemV1[]; readonly next: number | null }>;
+  head(): Promise<AuditHeadV1>;
 }
 
 export interface AuditTrailDefinition {
@@ -143,7 +139,7 @@ export interface AuditTrailDefinition {
 export interface AuditTrailContext {
   readonly active: boolean;
   readonly journal: AuditJournalReader;
-  readonly requestVerification: (org: OrgContext) => Promise<void>;
+  readonly requestVerification: () => Promise<void>;
 }
 
 // Reserved by the public contract for later additive members.

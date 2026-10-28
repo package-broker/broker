@@ -23,10 +23,85 @@ const transport = (options: Partial<Parameters<typeof createAuditBoundFetch>[0]>
     ...options,
   });
 const parse = (values: Record<string, string>) => parseAuditOtelEnvironment((name) => values[name]);
+const OTEL_PAIRS = [
+  ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_HEADERS'],
+  ['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_HEADERS'],
+] as const;
 
 afterEach(() => vi.useRealTimers());
 
 describe('audit OTEL environment', () => {
+  it.each(['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'])(
+    'reads only the snapshotted paired headers for explicit %s',
+    (endpointEnv) => {
+      const headersEnv = endpointEnv.replace(/ENDPOINT$/, 'HEADERS');
+      const other = OTEL_PAIRS.find(([endpoint]) => endpoint !== endpointEnv)!;
+      for (const destination of [
+        { protocol: 'otlp-http-json' as const, endpointEnv },
+        { protocol: 'otlp-http-json' as const, endpointEnv, headersEnv },
+      ]) {
+        const values: Record<string, string> = {
+          [endpointEnv]: 'https://collector.example/custom',
+          [other[0]]: 'https://other.example/custom',
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: 'x-client=logs',
+          OTEL_EXPORTER_OTLP_HEADERS: 'x-client=generic',
+        };
+        expect(parseAuditOtelEnvironment((name) => values[name], destination)).toMatchObject({
+          activationSource: endpointEnv,
+          endpoint:
+            endpointEnv === 'OTEL_EXPORTER_OTLP_ENDPOINT'
+              ? 'https://collector.example/custom/v1/logs'
+              : 'https://collector.example/custom',
+          headers: {
+            'x-client': endpointEnv === 'OTEL_EXPORTER_OTLP_ENDPOINT' ? 'generic' : 'logs',
+          },
+        });
+        delete values[headersEnv];
+        expect(parseAuditOtelEnvironment((name) => values[name], destination)?.headers).toEqual({});
+        delete values[endpointEnv];
+        expect(parseAuditOtelEnvironment((name) => values[name], destination)).toBeNull();
+        values[headersEnv] = 'x-client=orphan';
+        expect(() => parseAuditOtelEnvironment((name) => values[name], destination)).toThrow(
+          expect.objectContaining({ code: 'invalid_endpoint' }),
+        );
+      }
+    },
+  );
+
+  it.each([
+    ['A', { PB_AUDIT_OTLP_ENDPOINT: 'https://pb.example/v1/logs' }],
+    ['B', { OTEL_EXPORTER_OTLP_ENDPOINT: 'https://otel.example' }],
+  ])(
+    'never sends OTEL headers through a non-OTEL endpoint (probe %s)',
+    (_, endpoints: Record<string, string>) => {
+      for (const headersEnv of OTEL_PAIRS.map(([, headers]) => headers)) {
+        const values: Record<string, string> = {
+          ...endpoints,
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: 'authorization=otel-secret',
+          OTEL_EXPORTER_OTLP_HEADERS: 'authorization=otel-secret',
+        };
+        for (const destination of [
+          { protocol: 'otlp-http-json' as const, headersEnv },
+          {
+            protocol: 'otlp-http-json' as const,
+            endpointEnv: 'PB_AUDIT_OTLP_ENDPOINT',
+            headersEnv,
+          },
+          { protocol: 'otlp-http-json' as const, endpointEnv: 'CUSTOM_URL', headersEnv },
+          {
+            protocol: 'otlp-http-json' as const,
+            endpointEnv: OTEL_PAIRS.find(([, headers]) => headers !== headersEnv)![0],
+            headersEnv,
+          },
+        ]) {
+          expect(() => parseAuditOtelEnvironment((name) => values[name], destination)).toThrow(
+            expect.objectContaining({ code: 'invalid_headers' }),
+          );
+        }
+      }
+    },
+  );
+
   it('resolves complete endpoints, isolates PB credentials, and records activation source', () => {
     const values = {
       PB_AUDIT_OTLP_ENDPOINT: 'https://audit.example/custom',

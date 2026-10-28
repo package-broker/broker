@@ -101,6 +101,15 @@ export interface IdentityDescriptor {
     readonly id: string;
     readonly kind: 'oidc' | 'cloudflare-access';
     readonly anchor: string;
+    /**
+     * Absent means the compiled provider's domain policy is unknown.
+     * Lists contain at most 100 unique lowercase domains; verifiedDomains is nonempty,
+     * and emailAuthoritativeDomains, when supplied, is a subset of verifiedDomains.
+     */
+    readonly policy?: {
+      readonly verifiedDomains: readonly string[];
+      readonly emailAuthoritativeDomains?: readonly string[];
+    };
   }[];
 }
 
@@ -115,7 +124,7 @@ export interface PluginDefinition extends PluginApi {
   readonly binds?: readonly (typeof PLUGIN_BINDABLE_PORTS)[number][];
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
-  /** Static description of the identity providers this plugin builds; no secrets, no policy. */
+  /** Static description of the identity providers this plugin builds; no secrets. */
   readonly identityDescriptor?: IdentityDescriptor;
   /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
   readonly sourceProviders?: SourceProviderFactory;

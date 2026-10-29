@@ -181,7 +181,7 @@ describe.each([
         ['core:retention-scan:v1', { everySeconds: 86400 }],
         ['core:blob-purge:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
-        ['core:audit-verify:v1', { everySeconds: 86400 }],
+        ['core:audit-verify:v1', { everySeconds: 86400, resourceKey: 'audit-verify' }],
         ['core:import-verify:v1', undefined],
         ['core:import-apply:v1', undefined],
         ['core:import-rollback:v1', undefined],
@@ -191,6 +191,20 @@ describe.each([
         ['core:source-poll:v1', { everySeconds: 60 }],
         ['core:package-sync:v1', undefined],
       ]);
+      await worker.scheduled({}, env);
+      await executor.batch([
+        {
+          sql: "UPDATE job_schedule SET next_run_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND name = 'core:audit-verify:v1'",
+          params: [a.orgId],
+        },
+      ]);
+      await worker.scheduled({}, env);
+      expect(
+        await executor.all({
+          sql: "SELECT resource_key FROM job WHERE org_id = ? AND type = 'core:audit-verify:v1' AND idempotency_key LIKE 'schedule:%'",
+          params: [a.orgId],
+        }),
+      ).toEqual([{ resource_key: 'audit-verify' }]);
       await executor.batch(
         [a, b].map((org) => ({
           sql: `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 502)

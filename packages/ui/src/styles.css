@@ -374,3 +374,39 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+
+.readable-list {
+  container: readable-list / inline-size;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.readable-list .readable-mobile {
+  display: none;
+}
+.readable-list button,
+.readable-list summary {
+  min-height: 44px;
+}
+.readable-list tr[aria-selected='true'],
+.readable-list li[data-selected='true'] {
+  background: #eff6ff;
+}
+@container readable-list (max-width: 640px) {
+  .readable-list .readable-desktop {
+    display: none;
+  }
+  .readable-list .readable-mobile {
+    display: grid;
+  }
+}
+
+.list-role-dialog {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.list-role-dialog form,
+.list-role-dialog form > *,
+.list-role-dialog select {
+  min-width: 0;
+  max-width: 100%;
+}

@@ -19,6 +19,8 @@ export function ConfirmAction({
   open: controlledOpen,
   onOpenChange,
   hideTrigger = false,
+  title,
+  touchTargets = false,
 }: {
   action: string;
   target: string;
@@ -29,6 +31,8 @@ export function ConfirmAction({
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   hideTrigger?: boolean;
+  title?: string;
+  touchTargets?: boolean;
 }) {
   const [localOpen, setLocalOpen] = useState(false);
   const open = controlledOpen ?? localOpen;
@@ -52,9 +56,11 @@ export function ConfirmAction({
       )}
       {open ? (
         <Dialog open onOpenChange={setOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>{action}?</DialogTitle>
+          <DialogContent
+            className={touchTargets ? '[&_button]:min-h-11 [&_button]:min-w-11' : undefined}
+          >
+            <DialogHeader className={touchTargets ? 'pr-12' : undefined}>
+              <DialogTitle>{title ?? `${action}?`}</DialogTitle>
               <DialogDescription>{description}</DialogDescription>
             </DialogHeader>
             <dl className="detail-list">

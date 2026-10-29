@@ -4,9 +4,9 @@ import type { ApiResult } from '../api.js';
 import { useServices, type ShellServices, type ReplayResult } from '../auth.js';
 import { buildListFilterHash } from '../page-hash.js';
 import { Button } from '../components/ui/button.js';
-import { DataTable } from '../components/ui/table.js';
+import { ReadableList } from '../components/ui/readable-list.js';
+import { ListRowActions } from '../components/ui/list-row-actions.js';
 import { StatusBadge } from '../components/ui/status-badge.js';
-import { IdText } from '../components/ui/id-text.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
 import {
@@ -401,7 +401,11 @@ export function ProjectsView({
       <p role="status" className="sr-only">
         {state.notice}
       </p>
-      <ManagementNotice {...state} reload={() => void controller.load(state.query)} />
+      <ManagementNotice
+        listLabel="Projects"
+        {...state}
+        reload={() => void controller.load(state.query)}
+      />
       {state.query.q ? <p>Filtering loaded projects on this page.</p> : null}
       {!state.loading && !state.listError ? (
         model.items.length ? (
@@ -409,24 +413,27 @@ export function ProjectsView({
             <p className="my-3 text-sm text-neutral-600">
               {model.items.length} projects on this page
             </p>
-            <DataTable
+            <ReadableList
               label="Projects"
               items={model.items}
               selectedId={state.selected?.id ?? ''}
               columns={[
                 {
                   key: 'name',
-                  label: 'Name',
+                  label: 'Project',
                   value: (item) => item.name,
                   render: (item) => (
                     <div className="grid gap-1">
                       <a
                         className="font-medium underline"
+                        aria-current={state.selected?.id === item.id ? 'page' : undefined}
                         href={buildProjectsHash({ ...state.query, project: item.slug })}
                       >
                         {item.name}
                       </a>
-                      <code className="text-xs text-neutral-600">{item.slug}</code>
+                      <span className="text-xs text-neutral-600">
+                        Repository path: /{item.slug}
+                      </span>
                     </div>
                   ),
                 },
@@ -437,49 +444,40 @@ export function ProjectsView({
                   render: (item) => <StatusBadge status={item.status} />,
                 },
                 {
-                  key: 'id',
-                  label: 'Project ID',
-                  value: (item) => item.id,
-                  render: (item) => <IdText value={item.id} label="project ID" />,
-                  priority: 3,
-                },
-                {
                   key: 'actions',
                   label: 'Actions',
                   value: () => '',
                   sortable: false,
                   render: (item) => (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <a
-                        className="underline"
-                        href={buildProjectsHash({ ...state.query, project: item.slug })}
-                      >
-                        Open settings
-                      </a>
-                      {model.transitionItems && item.etag ? (
-                        item.status === 'active' ? (
-                          <ConfirmAction
-                            key={`${item.id}:${item.etag}`}
-                            action="Archive"
-                            target={`${item.name} (${item.id})`}
-                            scope={`Project: ${item.slug}`}
-                            description="Archiving keeps project history and blocks new publishes. You can restore this project later."
-                            disabled={state.busy}
-                            onConfirm={() => void controller.transitionItem(item.id)}
-                          />
-                        ) : (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={state.busy}
-                            onClick={() => void controller.transitionItem(item.id)}
-                          >
-                            Restore
-                          </Button>
-                        )
-                      ) : null}
-                    </div>
+                    <ListRowActions
+                      id={item.id}
+                      name={item.name}
+                      scope={`Project: ${item.name}`}
+                      primary={{
+                        id: 'settings',
+                        label: 'Open settings',
+                        onSelect: () => {
+                          window.location.hash = buildProjectsHash({
+                            ...state.query,
+                            project: item.slug,
+                          });
+                        },
+                      }}
+                      mutation={
+                        model.transitionItems && item.etag
+                          ? {
+                              label:
+                                item.status === 'active' ? 'Archive project' : 'Restore project',
+                              description:
+                                item.status === 'active'
+                                  ? 'Archiving keeps project history and blocks new publishes. You can restore this project later.'
+                                  : 'Restoring makes this project active again.',
+                              disabled: state.busy,
+                              run: () => void controller.transitionItem(item.id),
+                            }
+                          : undefined
+                      }
+                    />
                   ),
                 },
               ]}
@@ -488,8 +486,20 @@ export function ProjectsView({
         ) : (
           <ListState
             kind={state.query.q || state.query.status ? 'filtered-empty' : 'empty'}
-            title="No projects found on this page."
-          />
+            title={
+              state.query.q || state.query.status
+                ? 'No projects match these filters on this page.'
+                : 'No projects yet.'
+            }
+          >
+            {state.query.q || state.query.status ? (
+              <a className="underline" href={buildProjectsHash({ project: state.query.project })}>
+                Clear filters
+              </a>
+            ) : (
+              <p>Create a project to organize packages and access.</p>
+            )}
+          </ListState>
         )
       ) : null}
       {state.next ? (

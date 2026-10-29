@@ -10,6 +10,7 @@ import {
   buildProjectsHash,
   createProjectsController,
   parseProjectsHash,
+  projectsViewModel,
 } from './projects.js';
 
 const project = {
@@ -265,7 +266,7 @@ describe('projects', () => {
         statuses: ['active', 'archived'],
       }),
     );
-    expect(html).toContain('filtering loaded projects');
+    expect(html).toContain('Search this page (name prefix)');
   });
   it('keeps pagination available when no loaded projects match the prefix', async () => {
     const { controller } = fixture();
@@ -456,7 +457,8 @@ describe('projects', () => {
       expect(f.controller.snapshot().selected).toBeNull();
       expect(markup(f.controller)).toContain('Project archived.');
       expect(markup(f.controller)).not.toContain('Not found');
-      expect(markup(f.controller)).toContain('>Restore<');
+      expect(markup(f.controller)).toContain('More actions for Website');
+      expect(f.controller.snapshot().items[0]?.etag).toBeDefined();
       await f.controller.transitionItem(project.id);
       expect(f.fetch.mock.calls.find(([url]) => url.endsWith('/restore'))).toMatchObject([
         '/_pb/projects/web/restore',
@@ -668,11 +670,12 @@ describe('project list presentation', () => {
     const { controller } = fixture();
     await controller.load({ project: null });
     const html = markup(controller);
-    expect(html).toContain('responsive-table');
-    expect(html).toContain('data-label="Status"');
+    expect(html).toContain('readable-desktop');
+    expect(html).toContain('readable-mobile');
+    expect(html).toContain('>Status</dt>');
     expect(html).toContain('>Active<');
-    expect(html).toContain('aria-label="Copy project ID"');
-    expect(html).toContain(`title="${project.id}"`);
+    expect(html).toContain('aria-label="More actions for Website"');
+    expect(html).not.toContain(project.id);
     expect(html).toContain('New project');
     expect(html).not.toContain('<dialog');
   });
@@ -709,7 +712,11 @@ describe('project row actions', () => {
       const { controller, fetch } = fixture({ archived, listEtag: true });
       await controller.load({ project: null });
       expect(controller.snapshot().selected).toBeNull();
-      expect(markup(controller)).toContain(archived ? '>Restore<' : '>Archive<');
+      expect(markup(controller)).toContain('More actions for Website');
+      expect(controller.snapshot().items[0]).toMatchObject({
+        status: archived ? 'archived' : 'active',
+        etag: '"r7"',
+      });
       expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
       await controller.transitionItem(project.id);
       expect(fetch.mock.calls.find(([, init]) => init.method === 'POST')).toMatchObject([
@@ -726,7 +733,10 @@ describe('project row actions', () => {
       await controller.transitionItem(project.id);
       await controller.transitionItem('unknown');
       expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
-      expect(markup(controller)).not.toContain('>Archive<');
+      expect(
+        !projectsViewModel(controller.snapshot()).transitionItems ||
+          controller.snapshot().items.every((item) => !item.etag),
+      ).toBe(true);
     },
   );
   it('does not retry a conflicted row transition until reload', async () => {

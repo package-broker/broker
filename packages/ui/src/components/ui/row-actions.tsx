@@ -21,23 +21,39 @@ export interface RowActionsProps {
   entityLabel: string;
   actions: readonly RowAction[];
   overflow?: readonly RowAction[];
+  touchTargets?: boolean;
 }
 
 const controlClassName =
   'h-auto min-h-10 w-fit max-w-full shrink-0 whitespace-normal break-words py-2 sm:min-h-8 sm:py-1';
 
-function RowActionsTrigger({ entityLabel }: { entityLabel: string }) {
+function RowActionsTrigger({
+  entityLabel,
+  touchTargets,
+}: {
+  entityLabel: string;
+  touchTargets: boolean;
+}) {
   return (
     <DropdownMenuTrigger
       aria-label={`More actions for ${entityLabel}`}
-      className={cn(buttonVariants({ size: 'sm', variant: 'outline' }), controlClassName)}
+      className={cn(
+        buttonVariants({ size: 'sm', variant: 'outline' }),
+        controlClassName,
+        touchTargets && 'min-h-11 sm:min-h-11',
+      )}
     >
       More
     </DropdownMenuTrigger>
   );
 }
 
-export function RowActions({ entityLabel, actions, overflow = [] }: RowActionsProps) {
+export function RowActions({
+  entityLabel,
+  actions,
+  overflow = [],
+  touchTargets = false,
+}: RowActionsProps) {
   return (
     <div
       role="group"
@@ -48,7 +64,7 @@ export function RowActions({ entityLabel, actions, overflow = [] }: RowActionsPr
         <Button
           key={action.id}
           size="sm"
-          className={controlClassName}
+          className={cn(controlClassName, touchTargets && 'min-h-11 sm:min-h-11')}
           variant={action.variant ?? 'outline'}
           disabled={Boolean(action.disabled)}
           aria-disabled={action.pending || undefined}
@@ -63,14 +79,17 @@ export function RowActions({ entityLabel, actions, overflow = [] }: RowActionsPr
         </Button>
       ))}
       {overflow.length > 0 ? (
-        <DropdownMenu className="max-w-full">
-          <RowActionsTrigger entityLabel={entityLabel} />
+        <DropdownMenu className="max-w-full" closeWhenHidden={touchTargets}>
+          <RowActionsTrigger entityLabel={entityLabel} touchTargets={touchTargets} />
           <DropdownMenuContent>
             {overflow.map((action) => (
               <DropdownMenuItem
                 key={action.id}
                 data-variant={action.variant ?? 'outline'}
-                className={action.variant === 'destructive' ? 'text-red-700' : undefined}
+                className={cn(
+                  action.variant === 'destructive' && 'text-red-700',
+                  touchTargets && 'min-h-11',
+                )}
                 disabled={Boolean(action.disabled)}
                 aria-disabled={action.pending || undefined}
                 aria-busy={action.pending || undefined}

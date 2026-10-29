@@ -94,11 +94,21 @@ export function ManagementNotice(props: {
   busy: boolean;
   reload: () => void;
   listError?: boolean;
+  listLabel?: string | undefined;
 }) {
   return (
     <>
       {props.listError ? (
-        <ListState kind="error" title={props.notice ?? 'Unable to load this list.'} />
+        <ListState
+          kind="error"
+          title={
+            props.listLabel
+              ? props.notice?.startsWith('You do not have permission')
+                ? `You do not have permission to view ${props.listLabel.toLowerCase()}.`
+                : `${props.listLabel} could not be loaded. Try again.`
+              : (props.notice ?? 'Unable to load this list.')
+          }
+        />
       ) : props.notice ? (
         <Alert className="my-4">
           <AlertDescription>{props.notice}</AlertDescription>
@@ -111,9 +121,14 @@ export function ManagementNotice(props: {
         disabled={props.loading || props.busy}
         onClick={props.reload}
       >
-        Reload
+        {props.listError && props.listLabel ? 'Try again' : 'Reload'}
       </Button>
-      {props.loading ? <ListState kind="loading" title="Loading…" /> : null}
+      {props.loading ? (
+        <ListState
+          kind="loading"
+          title={props.listLabel ? `Loading ${props.listLabel.toLowerCase()}…` : 'Loading…'}
+        />
+      ) : null}
     </>
   );
 }
@@ -146,7 +161,7 @@ export function ManagementFilters(props: {
           ? [
               {
                 label: props.route === 'projects' ? 'Status' : 'View',
-                value: props.query.status,
+                value: props.query.status.charAt(0).toUpperCase() + props.query.status.slice(1),
                 onRemove: () =>
                   go({
                     project: props.query.project,
@@ -171,7 +186,9 @@ export function ManagementFilters(props: {
       >
         <div>
           <Label className="grid gap-1">
-            {props.route === 'projects' ? 'Name prefix (filtering loaded projects)' : 'Name prefix'}
+            {props.route === 'projects' || props.query.status !== 'roles'
+              ? 'Search this page (name prefix)'
+              : 'Name prefix'}
             <Input name="q" maxLength={200} defaultValue={props.query.q ?? ''} />
           </Label>
         </div>
@@ -187,7 +204,7 @@ export function ManagementFilters(props: {
               {props.route === 'projects' ? <option value="">All statuses</option> : null}
               {props.statuses.map((status) => (
                 <option key={status} value={status}>
-                  {status}
+                  {status.charAt(0).toUpperCase() + status.slice(1)}
                 </option>
               ))}
             </Select>

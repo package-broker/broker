@@ -7,6 +7,7 @@ import {
   requirePlatformPorts,
   SUPPORTED_PLUGIN_API,
   definePlugin,
+  type IdentityProvider,
   type AccessCheckResult,
   type AuthMapGroupsInput,
   type AuthResolveIdentityInput,
@@ -49,6 +50,12 @@ const ports: PluginPorts = {
 };
 
 describe('plugin contract', () => {
+  it('exports an optional asynchronous reauth capability resolver', () => {
+    expectTypeOf<IdentityProvider['reauthCapability']>().toEqualTypeOf<
+      (() => Promise<boolean>) | undefined
+    >();
+    expectTypeOf<IdentityProvider['supportsReauth']>().toEqualTypeOf<boolean>();
+  });
   it('keeps the supported API range and the identity definePlugin', () => {
     expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
     const definition = {

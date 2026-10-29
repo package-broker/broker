@@ -1,3 +1,4 @@
+import { reauthCapability } from '../identity/reauth-capability.js';
 import { isReauthSessionActive } from './identity-reauth.js';
 import {
   START_FAILURE_DETAILS,
@@ -257,6 +258,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     detail?: IdentityFailureDetail,
   ): Response {
     logRefusal(rc.requestId, provider, reason, error, false, detail);
+    if (isBrowserCallback(rc.request)) return callbackFailure(rc, reason, cookies);
     return withCookies(
       envelopeResponse(401, 'login_failed', 'Login failed', rc.requestId),
       cookies,
@@ -409,7 +411,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       if (!(await activeReauthSession(orgOf(rc), session.session.id))) {
         return loginFailed(rc, provider.id, 'session_inactive');
       }
-      if (!provider.supportsReauth) {
+      if (!provider.supportsReauth && provider.reauthCapability === undefined) {
         return envelopeResponse(
           400,
           'reauth_unsupported',
@@ -421,6 +423,15 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
 
     const gated = await anchorGate(rc, provider, purpose);
     if (gated !== null) return gated;
+
+    if (purpose === 'reauth' && !(await reauthCapability(provider))) {
+      return envelopeResponse(
+        400,
+        'reauth_unsupported',
+        'Re-authentication is not supported',
+        rc.requestId,
+      );
+    }
 
     let started: StartOutcome | null;
     let startError: unknown;
@@ -473,7 +484,46 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     return envelopeResponse(502, 'provider_error', 'Identity provider error', rc.requestId);
   }
 
+  function isBrowserCallback(request: Request): boolean {
+    if (!new URL(request.url).pathname.endsWith('/callback')) return false;
+    const mode = request.headers.get('sec-fetch-mode');
+    if (mode !== null) return mode === 'navigate';
+    return !prefersJson(request) && (request.headers.get('accept') ?? '').includes('text/html');
+  }
+
+  function callbackFailure(
+    rc: RequestContext,
+    reason: string,
+    cookies: readonly string[],
+  ): Response {
+    const query = new URLSearchParams({ reason, request: rc.requestId });
+    const response = redirect(`/_pb/ui/#/signin-failed?${query}`, cookies);
+    response.headers.set('vary', 'Accept, Sec-Fetch-Mode');
+    return response;
+  }
+
   async function callback(rc: RequestContext): Promise<Response> {
+    const recovery: { state?: LoginState } = {};
+    let response = await callbackResponse(rc, recovery);
+    if (response.status >= 400 && isBrowserCallback(rc.request)) {
+      response = callbackFailure(rc, 'login_refused', response.headers.getSetCookie());
+    }
+    const location = response.headers.get('location');
+    if (recovery.state?.purpose === 'reauth' && location?.startsWith('/_pb/ui/#/signin-failed?')) {
+      const returnHash = new URL(recovery.state.returnTo, publicOrigin).hash;
+      const target = new URLSearchParams(returnHash.split('?')[1] ?? '').get('return');
+      if (target !== null) {
+        response.headers.set('location', `${location}&return=${encodeURIComponent(target)}`);
+      }
+    }
+    response.headers.set('vary', 'Accept, Sec-Fetch-Mode');
+    return response;
+  }
+
+  async function callbackResponse(
+    rc: RequestContext,
+    recovery: { state?: LoginState },
+  ): Promise<Response> {
     const cleared = [clearLoginState()];
     const provider = providers.get(rc.params['provider'] ?? '');
     if (provider === undefined) {
@@ -483,7 +533,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       );
     }
     try {
-      return await finishCallback(rc, provider, cleared);
+      return await finishCallback(rc, provider, cleared, recovery);
     } catch (error) {
       return withCookies(errorResponse(error, rc.requestId, log), cleared);
     }
@@ -493,6 +543,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     rc: RequestContext,
     provider: IdentityProvider,
     cleared: readonly string[],
+    recovery: { state?: LoginState },
   ): Promise<Response> {
     const org = orgOf(rc);
     const session = await sessions.authenticate(org, rc.request);
@@ -503,6 +554,7 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
       clock.now().getTime(),
     );
     if (state === null) return loginFailed(rc, provider.id, 'state_invalid', cleared);
+    recovery.state = state;
 
     if (state.purpose === 'reauth' && session === null) {
       return loginFailed(rc, provider.id, 'no_session', cleared);
@@ -516,6 +568,10 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     }
     const gated = await anchorGate(rc, provider, state.purpose);
     if (gated !== null) return withCookies(gated, cleared);
+
+    if (state.purpose === 'reauth' && !(await reauthCapability(provider))) {
+      return loginFailed(rc, provider.id, 'not_supported', cleared);
+    }
 
     const verified = await verify(rc, provider, state.data);
     if ('reason' in verified) {
@@ -619,14 +675,30 @@ export function createSsoRoutes(deps: SsoRouteDeps): readonly RouteDefinition[] 
     });
   }
 
-  function listProviders(): Response {
+  async function listedCapability(
+    rc: RequestContext,
+    provider: IdentityProvider,
+  ): Promise<boolean> {
+    if (rc.org === null || provider.reauthCapability === undefined) return provider.supportsReauth;
+    try {
+      const anchor = await deps.bindings.anchor(rc.org, provider.id);
+      if (anchor === null || anchor !== provider.trustAnchor) return provider.supportsReauth;
+    } catch {
+      return provider.supportsReauth;
+    }
+    return reauthCapability(provider);
+  }
+
+  async function listProviders(rc: RequestContext): Promise<Response> {
     return json(200, {
-      providers: [...providers.values()].map((provider) => ({
-        id: provider.id,
-        kind: provider.kind,
-        displayName: provider.displayName,
-        supportsReauth: provider.supportsReauth,
-      })),
+      providers: await Promise.all(
+        [...providers.values()].map(async (provider) => ({
+          id: provider.id,
+          kind: provider.kind,
+          displayName: provider.displayName,
+          supportsReauth: await listedCapability(rc, provider),
+        })),
+      ),
       local: deps.localLoginAvailable,
     });
   }

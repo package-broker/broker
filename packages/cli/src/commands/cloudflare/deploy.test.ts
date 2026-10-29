@@ -9,6 +9,7 @@ import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
 import { CloudflareApi, CloudflareError, object } from './api.js';
 import {
+  assertLocalAuthAccepted,
   deploy,
   tracesMetadata,
   cloudflareDeployContract,
@@ -5747,3 +5748,68 @@ it('anchor preflight does not check a provider removed from the effective set', 
   expect(result.exitCode).toBe(0);
   expect(queriedProviders(queried)).toEqual(['test']);
 });
+
+it('reads legacy local-auth support as unknown and permits enabled mode', async () => {
+  const artifact = await validateDeploymentArtifact(out);
+  expect(artifact.localAuth).toBeNull();
+  expect(() => assertLocalAuthAccepted('enabled', artifact.localAuth)).not.toThrow();
+  expect(() => assertLocalAuthAccepted('disabled', artifact.localAuth)).toThrow(CloudflareError);
+});
+
+it('validates a supported local-auth capability for disabled mode', async () => {
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  const legacyHash = (await validateDeploymentArtifact(out)).artifactHash;
+  manifest.localAuth = { version: 1 };
+  await writeFile(file, JSON.stringify(manifest));
+  const artifact = await validateDeploymentArtifact(out);
+  expect(artifact.localAuth).toEqual({ version: 1 });
+  expect(Object.isFrozen(artifact.localAuth)).toBe(true);
+  expect(artifact.artifactHash).not.toBe(legacyHash);
+  expect(() => assertLocalAuthAccepted('disabled', artifact.localAuth)).not.toThrow();
+});
+
+it.each([
+  null,
+  [],
+  'private-input',
+  {},
+  { version: 0 },
+  { version: 2 },
+  { version: '1' },
+  { version: 1, extra: true },
+])('rejects malformed or unsupported local-auth capability %j', async (localAuth) => {
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.localAuth = localAuth;
+  await writeFile(file, JSON.stringify(manifest));
+  await expect(validateDeploymentArtifact(out)).rejects.toMatchObject({
+    code: 'invalid_input',
+    exitCode: 2,
+  });
+  try {
+    assertLocalAuthAccepted('disabled', localAuth);
+    expect.fail('disabled mode must be refused');
+  } catch (error) {
+    expect(error).toBeInstanceOf(CloudflareError);
+    expect(error).toMatchObject({ code: 'invalid_input', exitCode: 2 });
+    expect(String(error)).not.toContain('private-input');
+  }
+});
+
+it.each([undefined, null, '', 'ENABLED', 'private-input', false, 0, {}, []])(
+  'refuses an unknown local-auth mode with or without support: %j',
+  (mode) => {
+    const check = (capability: unknown) =>
+      assertLocalAuthAccepted(mode as 'enabled' | 'disabled', capability);
+    for (const capability of [undefined, null, {}, { version: 2 }, { version: 1 }]) {
+      expect(() => check(capability)).toThrow(CloudflareError);
+      try {
+        check(capability);
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'invalid_input', exitCode: 2 });
+        expect(String(error)).not.toContain('private-input');
+      }
+    }
+  },
+);

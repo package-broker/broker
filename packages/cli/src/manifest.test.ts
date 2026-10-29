@@ -3,6 +3,7 @@ import type { PlatformPortConfig } from '@package-broker/core/platform/port-conf
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
 import {
+  snapshotLocalAuthCapability,
   orderPlugins,
   renderManifestJson,
   renderManifestTs,
@@ -202,4 +203,58 @@ it.each([
   (emitted.verifiedDomains as string[]).push('output.example.com');
   (emitted.emailAuthoritativeDomains as string[] | undefined)?.push('output.example.com');
   expect(snapshot).toEqual(expected);
+});
+
+describe('local-auth artifact capability', () => {
+  it.each(['node', 'cloudflare'] as const)('uses the bundled %s runtime marker', (platform) => {
+    for (const version of ['2.0.0-rc.2', '2.0.0-rc.3', '2.0.0-rc.4', '3.0.0']) {
+      const runtimeMetadata = { version, packageBroker: { localAuth: 1 } };
+      const manifest = renderManifestJson([], new Map(), platform, { runtimeMetadata });
+      expect(JSON.parse(JSON.stringify(manifest)).localAuth).toEqual({ version: 1 });
+    }
+  });
+
+  it.each([
+    undefined,
+    null,
+    [],
+    'private-input',
+    { version: '2.0.0-rc.3' },
+    { version: '2.0.0-rc.4' },
+    { version: '2.1.0' },
+    { packageBroker: null },
+    { packageBroker: [] },
+    { packageBroker: 1 },
+    { packageBroker: {} },
+    { packageBroker: { localAuth: '1' } },
+    { packageBroker: { localAuth: true } },
+    { packageBroker: { localAuth: 0 } },
+    { packageBroker: { localAuth: 2 } },
+  ])('omits unproven runtime support: %j', (runtimeMetadata) => {
+    expect(renderManifestJson([], new Map(), 'cloudflare', { runtimeMetadata })).not.toHaveProperty(
+      'localAuth',
+    );
+  });
+
+  it('copies and freezes the supported capability', () => {
+    const source = { version: 1 };
+    const snapshot = snapshotLocalAuthCapability(source);
+    source.version = 2;
+    expect(snapshot).toEqual({ version: 1 });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
+  it.each([
+    undefined,
+    null,
+    [],
+    true,
+    'private-input',
+    {},
+    { version: '1' },
+    { version: 2 },
+    { version: 1, extra: true },
+  ])('refuses malformed or unknown capability %j', (value) => {
+    expect(snapshotLocalAuthCapability(value)).toBeNull();
+  });
 });

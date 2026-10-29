@@ -13,6 +13,7 @@ const longProvider = 'SampleBusinessSSO'.repeat(30);
 const longRole = 'SampleBusinessReader'.repeat(30);
 let projectStatus = 'active';
 let hasEtag = true;
+let duplicateHidden = false;
 const role = {
   id: 'role-id',
   name: 'Sample Business',
@@ -126,6 +127,24 @@ beforeAll(async () => {
                 visibility: 'redacted',
               },
             },
+            ...(duplicateHidden
+              ? [
+                  {
+                    id: 'second-hidden-grant-id',
+                    revision: 9,
+                    createdAt: '2026-01-02T09:30:00Z',
+                    roleId: 'org-role',
+                    role: grantRole,
+                    subject: { type: 'email', visibility: 'redacted' },
+                    principal: {
+                      id: 'second-hidden-person-id',
+                      kind: 'user',
+                      displayName: 'Person',
+                      visibility: 'redacted',
+                    },
+                  },
+                ]
+              : []),
           ],
           next: null,
         });
@@ -320,6 +339,31 @@ describe('readable lists in Chromium', () => {
         await browserExpect(more).toBeVisible();
         await browserExpect(more).toBeFocused();
         await browserExpect(more).toHaveAttribute('aria-expanded', 'false');
+      }
+    },
+  );
+  it.for(['organization-grants', 'project-grants'])(
+    'returns focus to the same row when %s rows share a label and the layout switches',
+    async (list, context) => {
+      if (!fixture) return context.skip();
+      canWrite = true;
+      duplicateHidden = true;
+      const { page, browserExpect } = fixture;
+      try {
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await fixture.mount(script, { fixtureList: list });
+        const label = 'More actions for Email address hidden';
+        const opener = (scope: string) =>
+          page.locator(scope).getByRole('button', { name: label, exact: true });
+        await browserExpect(opener('.readable-desktop')).toHaveCount(2);
+        await opener('.readable-desktop').nth(1).click();
+        await browserExpect(page.getByRole('menu')).toBeVisible();
+        await page.setViewportSize({ width: 320, height: 900 });
+        await browserExpect(page.getByRole('menu')).toHaveCount(0);
+        await browserExpect(opener('.readable-mobile').nth(1)).toBeFocused();
+        await browserExpect(opener('.readable-mobile').nth(0)).not.toBeFocused();
+      } finally {
+        duplicateHidden = false;
       }
     },
   );

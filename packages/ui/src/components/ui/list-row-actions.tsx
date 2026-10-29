@@ -4,6 +4,13 @@ import { RowActions, type RowAction } from './row-actions.js';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './dialog.js';
 import { ConfirmAction } from './confirm-action.js';
 
+function rowKeyOf(id: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < id.length; index += 1)
+    hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193);
+  return (hash >>> 0).toString(36);
+}
+
 export function ListRowActions({
   id,
   name,
@@ -34,6 +41,7 @@ export function ListRowActions({
     <>
       <RowActions
         touchTargets
+        rowKey={rowKeyOf(id)}
         entityLabel={name}
         actions={
           primary

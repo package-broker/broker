@@ -22,6 +22,7 @@ export interface RowActionsProps {
   actions: readonly RowAction[];
   overflow?: readonly RowAction[];
   touchTargets?: boolean;
+  rowKey?: string;
 }
 
 const controlClassName =
@@ -30,13 +31,16 @@ const controlClassName =
 function RowActionsTrigger({
   entityLabel,
   touchTargets,
+  rowKey,
 }: {
   entityLabel: string;
   touchTargets: boolean;
+  rowKey: string | undefined;
 }) {
   return (
     <DropdownMenuTrigger
       aria-label={`More actions for ${entityLabel}`}
+      data-row-key={rowKey}
       className={cn(
         buttonVariants({ size: 'sm', variant: 'outline' }),
         controlClassName,
@@ -53,6 +57,7 @@ export function RowActions({
   actions,
   overflow = [],
   touchTargets = false,
+  rowKey,
 }: RowActionsProps) {
   return (
     <div
@@ -80,7 +85,11 @@ export function RowActions({
       ))}
       {overflow.length > 0 ? (
         <DropdownMenu className="max-w-full" closeWhenHidden={touchTargets}>
-          <RowActionsTrigger entityLabel={entityLabel} touchTargets={touchTargets} />
+          <RowActionsTrigger
+            entityLabel={entityLabel}
+            touchTargets={touchTargets}
+            rowKey={rowKey}
+          />
           <DropdownMenuContent>
             {overflow.map((action) => (
               <DropdownMenuItem

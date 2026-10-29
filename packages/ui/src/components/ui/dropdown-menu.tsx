@@ -25,11 +25,15 @@ function visibleTrigger(trigger: HTMLButtonElement | null) {
   if (trigger.isConnected && trigger.getClientRects().length) return trigger;
   const label = trigger.getAttribute('aria-label');
   if (!label) return null;
+  const rowKey = trigger.getAttribute('data-row-key');
   return (
     Array.from(
       (trigger.closest('.readable-list') ?? trigger.ownerDocument).querySelectorAll('button'),
     ).find(
-      (button) => button.getAttribute('aria-label') === label && button.getClientRects().length,
+      (button) =>
+        button.getAttribute('aria-label') === label &&
+        button.getAttribute('data-row-key') === rowKey &&
+        button.getClientRects().length,
     ) ?? null
   );
 }

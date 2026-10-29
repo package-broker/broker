@@ -164,7 +164,7 @@ describe('audit verification reader on node:sqlite', () => {
     ).toEqual({ verified_at: null });
   });
 
-  it('rejects completion after a concurrent append', async () => {
+  it('records the original scope after a concurrent append and seal', async () => {
     database = await openMigratedDatabase({ twoOrganizations: true });
     const { executor, orgs } = database;
     const org = orgs!.a;
@@ -190,7 +190,13 @@ describe('audit verification reader on node:sqlite', () => {
         },
         snapshot,
       ),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      await executor.all({
+        sql: 'SELECT verified_from_seq, verified_through_seq FROM audit_chain WHERE org_id = ?',
+        params: [org.orgId],
+      }),
+    ).toEqual([{ verified_from_seq: 1, verified_through_seq: 0 }]);
   });
 
   it('rejects a missing newest suffix even when deletion predates the verification snapshot', async () => {
@@ -496,6 +502,176 @@ describe('audit verification reader on node:sqlite', () => {
       { level: 'error', event: 'audit.chain_broken', seq: 1, reason: 'seq_gap' },
     ]);
   });
+
+  it('persists the verified range across multiple continuations with appends and a seal', async () => {
+    database = await openMigratedDatabase({ twoOrganizations: true });
+    const { executor } = database;
+    const org = database.orgs!.a;
+    const seal = createAuditSealRepository(executor);
+    const append = async (start: number, count: number) => {
+      await executor.batch(
+        Array.from({ length: count }, (_, i) => ({
+          sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+          VALUES (?, ?, '2026-10-18T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+          params: [`row-${start + i}`, org.orgId],
+        })),
+      );
+      await seal.seal(org);
+    };
+    await append(1, 45);
+    const reader = createAuditVerifyReader(executor);
+    const original = await reader.snapshot(org);
+    const job = auditVerifyJob({
+      ...reader,
+      page: (ctx, after, limit) => reader.page(ctx, after, Math.min(limit, 1)),
+    });
+    const continuations: unknown[] = [];
+    const records: LogRecord[] = [];
+    const ctx = {
+      org,
+      jobId: 'verify-run',
+      signal: new AbortController().signal,
+      ports: {
+        clock: { now: () => new Date('2026-10-22T12:00:00.000Z') },
+        platform: {
+          jobs: {
+            enqueue: async (_org: unknown, _type: unknown, payload: unknown) => {
+              continuations.push(payload);
+              return { id: 'continuation', created: true };
+            },
+          },
+        },
+      },
+      observability: {
+        ...noopObservability,
+        log: (record: LogRecord) => void records.push(record),
+      },
+    } as unknown as JobContext;
+    await job.handler({}, ctx);
+    expect(continuations).toHaveLength(1);
+    await append(46, 2);
+    const [newHead] = await reader.page(org, 46, 1);
+    await executor.batch([
+      {
+        sql: 'UPDATE audit_chain SET head_seq = ?, head_hash = ? WHERE org_id = ?',
+        params: [newHead!.seq, newHead!.hash, org.orgId],
+      },
+    ]);
+    await job.handler(job.validate(continuations[0]), ctx);
+    expect(continuations).toHaveLength(2);
+    await append(48, 1);
+    await job.handler(job.validate(continuations[1]), ctx);
+    expect(records.map((record) => record.event)).toEqual([
+      'audit.verify_continued',
+      'audit.verify_continued',
+      'audit.verified',
+    ]);
+    expect(
+      await executor.all({
+        sql: 'SELECT verified_from_seq, verified_through_seq, verified_bodies, verified_withheld FROM audit_chain WHERE org_id = ?',
+        params: [org.orgId],
+      }),
+    ).toEqual([
+      {
+        verified_from_seq: 1,
+        verified_through_seq: original.head_seq,
+        verified_bodies: 0,
+        verified_withheld: 45,
+      },
+    ]);
+  });
+
+  it('deletion only above stored head is indistinguishable from never-sealed rows until G5 advances it', async () => {
+    database = await openMigratedDatabase({ twoOrganizations: true });
+    const { executor } = database;
+    const org = database.orgs!.a;
+    await executor.batch(
+      Array.from({ length: 3 }, (_, i) => ({
+        sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+        VALUES (?, ?, '2026-10-18T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+        params: [`row-${i}`, org.orgId],
+      })),
+    );
+    await createAuditSealRepository(executor).seal(org);
+    const reader = createAuditVerifyReader(executor);
+    const [first] = await reader.page(org, 0, 1);
+    await executor.batch([
+      {
+        sql: 'UPDATE audit_chain SET head_seq = 1, head_hash = ? WHERE org_id = ?',
+        params: [first!.hash, org.orgId],
+      },
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq > 1', params: [org.orgId] },
+    ]);
+    expect(await reader.snapshot(org)).toMatchObject({
+      head_seq: 1,
+      head_hash: first!.hash,
+      stored_seq: 1,
+    });
+    const records: LogRecord[] = [];
+    await auditVerifyJob(reader).handler({}, {
+      org,
+      signal: new AbortController().signal,
+      ports: { clock: { now: () => new Date() } },
+      observability: {
+        ...noopObservability,
+        log: (record: LogRecord) => void records.push(record),
+      },
+    } as unknown as JobContext);
+    expect(records).toContainEqual(
+      expect.objectContaining({ event: 'audit.verified', head_seq: 1, rows: 1 }),
+    );
+  });
+
+  it.each([1, 3])(
+    'fences completion on snapshot checkpoint row %s after appends and a seal',
+    async (checkpoint) => {
+      database = await openMigratedDatabase({ twoOrganizations: true });
+      const { executor } = database;
+      const org = database.orgs!.a;
+      const seal = createAuditSealRepository(executor);
+      const reader = createAuditVerifyReader(executor);
+      for (let seq = 1; seq <= 4; seq += 1) {
+        await executor.batch([
+          {
+            sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+          VALUES (?, ?, '2026-10-18T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+            params: [`row-${seq}`, org.orgId],
+          },
+        ]);
+        await seal.seal(org);
+      }
+      const rows = await reader.page(org, 0, 500);
+      await executor.batch([
+        {
+          sql: 'UPDATE audit_chain SET head_seq = 1, head_hash = ? WHERE org_id = ?',
+          params: [rows[0]!.hash, org.orgId],
+        },
+      ]);
+      const snapshot = { ...(await reader.snapshot(org)), head_seq: 3, head_hash: rows[2]!.hash };
+      await executor.batch([
+        {
+          sql: 'UPDATE audit_chain SET head_seq = 4, head_hash = ? WHERE org_id = ?',
+          params: [rows[3]!.hash, org.orgId],
+        },
+      ]);
+      const scope = { fromSeq: 1, throughSeq: 3, bodies: 3, withheld: 0 };
+      const completedAt = '2026-10-22T12:00:00.000Z';
+      expect(await reader.markVerified(org, completedAt, scope, snapshot)).toBe(true);
+      expect(
+        await executor.all({
+          sql: 'SELECT verified_through_seq FROM audit_chain WHERE org_id = ?',
+          params: [org.orgId],
+        }),
+      ).toEqual([{ verified_through_seq: 3 }]);
+      await executor.batch([
+        {
+          sql: 'UPDATE audit_event SET hash = ? WHERE org_id = ? AND seq = ?',
+          params: ['b'.repeat(64), org.orgId, checkpoint],
+        },
+      ]);
+      expect(await reader.markVerified(org, completedAt, scope, snapshot)).toBe(false);
+    },
+  );
 
   it('rejects unbounded pages and invalid sequence cursors before querying', async () => {
     database = await openMigratedDatabase({ twoOrganizations: true });

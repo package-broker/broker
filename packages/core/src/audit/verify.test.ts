@@ -51,7 +51,13 @@ function setup(rows: readonly AuditRow[] = chain) {
     },
     { deploymentId: 'test', runtime: 'node', requestId: null },
     {
-      events: new Set(['audit.verified', 'audit.chain_broken', 'audit.verify_partial']),
+      events: new Set([
+        'audit.verified',
+        'audit.chain_broken',
+        'audit.chain_integrity',
+        'audit.verify_partial',
+        'audit.verify_continued',
+      ]),
       reasonCodes: new Set(),
       routeTemplates: new Set(),
     },
@@ -219,6 +225,8 @@ describe('auditVerifyJob', () => {
   it('detects a missing retained prefix above sequence one', async () => {
     const s = setup(chain.slice(501));
     s.snapshot.boundary_seq = 501;
+    s.snapshot.stored_seq = 500;
+    s.snapshot.stored_hash = chain[499]!.hash;
     s.snapshot.boundary_prev_hash = chain[499]!.hash;
     await s.run();
     expectBroken(s, 502, 'seq_gap');
@@ -227,7 +235,9 @@ describe('auditVerifyJob', () => {
   it('detects a boundary previous hash mismatch', async () => {
     const s = setup(chain.slice(500));
     s.snapshot.boundary_seq = 501;
+    s.snapshot.stored_seq = 500;
     s.snapshot.boundary_prev_hash = AUDIT_GENESIS_HASH;
+    s.snapshot.stored_hash = AUDIT_GENESIS_HASH;
     await s.run();
     expectBroken(s, 501, 'prev_hash');
   });
@@ -249,6 +259,41 @@ describe('auditVerifyJob', () => {
     s.snapshot.head_hash = 'a'.repeat(64);
     await s.run();
     expectBroken(s, 1, 'hash');
+  });
+
+  it('reports a pruned stored checkpoint as integrity loss and finishes partial without scope', async () => {
+    const s = setup(chain.slice(500));
+    s.snapshot.boundary_seq = 501;
+    s.snapshot.boundary_prev_hash = chain[499]!.hash;
+    await s.run();
+    expect(s.logs()).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        event: 'audit.chain_integrity',
+        reason: 'checkpoint_pruned',
+      }),
+      expect.objectContaining({ event: 'audit.verify_partial', rows: 0 }),
+    ]);
+    expect(s.records.filter((record) => record.kind === 'counter')).toEqual([
+      { kind: 'counter', name: 'pb.audit.chain_integrity', labels: {}, value: 1 },
+    ]);
+    expect(s.page).not.toHaveBeenCalled();
+    expect(s.markVerified).not.toHaveBeenCalled();
+    expect(s.context.ports.platform!.jobs.enqueue).not.toHaveBeenCalled();
+    expect(JSON.stringify(s.records)).not.toContain(SENTINEL);
+    expect(s.logs()[0]).not.toHaveProperty('seq');
+    expect(s.logs()[0]).not.toHaveProperty('rows');
+  });
+
+  it('does not log continuation when the idempotent continuation already exists', async () => {
+    const s = setup();
+    for (const row of chain.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+    const enqueue = vi.mocked(s.context.ports.platform!.jobs.enqueue);
+    enqueue.mockResolvedValue({ id: 'continuation', created: false });
+    await s.run();
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(s.logs()).toEqual([]);
+    expect(s.markVerified).not.toHaveBeenCalled();
   });
 
   it('throws on an invalid snapshot', async () => {
@@ -310,7 +355,7 @@ describe('auditVerifyJob', () => {
     });
   });
 
-  it.each(['mode_generation', 'head_seq'] as const)(
+  it.each(['mode_generation'] as const)(
     'reports partial when %s changes between continuations',
     async (field) => {
       const s = setup();
@@ -320,15 +365,132 @@ describe('auditVerifyJob', () => {
       s.snapshot[field] += 1;
       await s.job.handler(s.job.validate(payload), s.context);
       expect(s.page).toHaveBeenCalledTimes(20);
-      expect(s.logs()).toEqual([expect.objectContaining({ event: 'audit.verify_partial' })]);
+      expect(s.logs()).toEqual([
+        expect.objectContaining({
+          event: 'audit.verify_continued',
+          level: 'info',
+          seq: 20,
+          rows: 20,
+        }),
+        expect.objectContaining({ event: 'audit.verify_partial' }),
+      ]);
       expect(s.records.filter((r) => r.kind === 'counter')).toEqual([]);
       expect(s.markVerified).not.toHaveBeenCalled();
     },
   );
 
+  it('completes the original range across continuations despite appends and a seal', async () => {
+    const s = setup();
+    const original = { ...s.snapshot };
+    for (const row of chain.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+    await s.run();
+    s.snapshot.head_seq = 1300;
+    s.snapshot.head_hash = 'b'.repeat(64);
+    s.snapshot.stored_seq = 1200;
+    s.snapshot.stored_hash = chain[1199]!.hash;
+    const enqueue = vi.mocked(s.context.ports.platform!.jobs.enqueue);
+    const payload = enqueue.mock.calls[0]![2];
+    // Anchor reads precede the next bounded walk.
+    s.page.mockResolvedValueOnce([chain[1199]!]);
+    for (const row of chain.slice(20, 40)) s.page.mockResolvedValueOnce([row]);
+    await s.job.handler(s.job.validate(payload), s.context);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    s.snapshot.head_seq = 1400;
+    await s.job.handler(s.job.validate(enqueue.mock.calls[1]![2]), s.context);
+    expect(s.markVerified).toHaveBeenCalledWith(
+      org,
+      expect.any(String),
+      {
+        fromSeq: 1,
+        throughSeq: 1200,
+        bodies: 0,
+        withheld: 1200,
+      },
+      original,
+    );
+    expect(s.logs().map((log) => log.event)).toEqual([
+      'audit.verify_continued',
+      'audit.verify_continued',
+      'audit.verified',
+    ]);
+  });
+
+  it('catches a consistent rewrite of already verified rows between continuations', async () => {
+    const rows = chain.map((row) => ({ ...row }));
+    const s = setup(rows);
+    s.snapshot.stored_seq = 10;
+    s.snapshot.stored_hash = rows[9]!.hash;
+    for (const row of rows.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+    await s.run();
+    let prev = AUDIT_GENESIS_HASH;
+    for (const row of rows) {
+      row.prev_hash = prev;
+      row.payload_json = 'rewritten';
+      row.hash = await hashRow(prev, row);
+      prev = row.hash;
+    }
+    s.snapshot.head_hash = prev;
+    const payload = vi.mocked(s.context.ports.platform!.jobs.enqueue).mock.calls[0]![2];
+    await s.job.handler(s.job.validate(payload), s.context);
+    expect(s.markVerified).not.toHaveBeenCalled();
+    expect(s.logs().at(-1)).toMatchObject({
+      event: 'audit.chain_broken',
+      seq: 1200,
+      reason: 'hash',
+    });
+  });
+
+  it.each(['hash', 'missing'] as const)(
+    'catches a %s stored checkpoint after the stored head advances',
+    async (change) => {
+      const rows = chain.map((row) => ({ ...row }));
+      const s = setup(rows);
+      s.snapshot.stored_seq = 10;
+      s.snapshot.stored_hash = rows[9]!.hash;
+      for (const row of rows.slice(0, 20)) s.page.mockResolvedValueOnce([row]);
+      await s.run();
+      s.snapshot.stored_seq = 1200;
+      s.snapshot.stored_hash = chain[1199]!.hash;
+      if (change === 'hash') rows[9]!.hash = 'b'.repeat(64);
+      else rows.splice(9, 1);
+      const payload = vi.mocked(s.context.ports.platform!.jobs.enqueue).mock.calls[0]![2];
+      await s.job.handler(s.job.validate(payload), s.context);
+      expect(s.markVerified).not.toHaveBeenCalled();
+      expect(s.logs().at(-1)).toMatchObject({
+        event: 'audit.chain_broken',
+        seq: 10,
+        reason: change === 'hash' ? 'hash' : 'seq_gap',
+      });
+    },
+  );
+
+  it('finishes repeated runs with a pruned checkpoint without retrying an error', async () => {
+    const s = setup();
+    s.snapshot.boundary_seq = 501;
+    await expect(s.run()).resolves.toBeUndefined();
+    expect(s.records.filter((record) => record.kind === 'counter')).toEqual([
+      { kind: 'counter', name: 'pb.audit.chain_integrity', labels: {}, value: 1 },
+    ]);
+    await expect(s.run()).resolves.toBeUndefined();
+    expect(s.records.filter((record) => record.kind === 'counter')).toEqual([
+      { kind: 'counter', name: 'pb.audit.chain_integrity', labels: {}, value: 1 },
+      { kind: 'counter', name: 'pb.audit.chain_integrity', labels: {}, value: 1 },
+    ]);
+    expect(s.page).not.toHaveBeenCalled();
+    expect(s.markVerified).not.toHaveBeenCalled();
+    expect(s.logs().map((log) => log.event)).toEqual([
+      'audit.chain_integrity',
+      'audit.verify_partial',
+      'audit.chain_integrity',
+      'audit.verify_partial',
+    ]);
+  });
+
   it('verifies a retained suffix from its trusted boundary', async () => {
     const s = setup(chain.slice(500));
     s.snapshot.boundary_seq = 501;
+    s.snapshot.stored_seq = 500;
+    s.snapshot.stored_hash = chain[499]!.hash;
     s.snapshot.boundary_prev_hash = chain[499]!.hash;
     await s.run();
     expect(s.markVerified).toHaveBeenCalledWith(
@@ -388,7 +550,7 @@ describe('auditVerifyJob', () => {
     expect(job).toMatchObject({
       name: 'audit-verify',
       version: 1,
-      schedule: { everySeconds: 86400 },
+      schedule: { everySeconds: 86400, resourceKey: 'audit-verify' },
       maxAttempts: 2,
     });
     expect(job.validate({})).toEqual({});

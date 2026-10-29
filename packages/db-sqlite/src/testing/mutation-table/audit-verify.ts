@@ -50,6 +50,52 @@ const pageSparesForeign: ContractCase = {
   },
 };
 
+const checkpointSparesForeign = (checkpoint: 'head' | 'stored'): ContractCase => ({
+  name: `foreign ${checkpoint} checkpoint hashes cannot satisfy completion`,
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    for (const org of [own, foreign]) {
+      await context.executor.batch(
+        [1, 2].map((seq) => ({
+          sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+          VALUES (?, ?, '2026-10-18T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+          params: [`${org.orgId}-${seq}`, org.orgId],
+        })),
+      );
+      await createAuditSealRepository(context.executor).seal(org);
+    }
+    const plain = createAuditVerifyReader(context.executor);
+    const ownRows = await plain.page(own, 0, 500);
+    const foreignRows = await plain.page(foreign, 0, 500);
+    const snapshot = await plain.snapshot(own);
+    const reader = createAuditVerifyReader({
+      driver: context.executor.driver,
+      all: (statement) => context.executor.all(context.mutate(statement)),
+      batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
+    });
+    {
+      expect(
+        await reader.markVerified(
+          own,
+          '2026-10-22T12:00:00.000Z',
+          {
+            fromSeq: 1,
+            throughSeq: 2,
+            bodies: 0,
+            withheld: 2,
+          },
+          {
+            ...snapshot,
+            stored_seq: 1,
+            stored_hash: checkpoint === 'stored' ? foreignRows[0]!.hash : ownRows[0]!.hash,
+            head_hash: checkpoint === 'head' ? foreignRows[1]!.hash : ownRows[1]!.hash,
+          },
+        ),
+      ).toBe(false);
+    }
+  },
+});
+
 const completionSparesForeign: ContractCase = {
   name: 'verification completion updates only its organization',
   async run(context) {
@@ -173,7 +219,14 @@ export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditVerifyReader',
     file: 'repositories/audit-verify.ts',
-    cases: [pageSparesForeign, completionSparesForeign, clearSparesForeign, snapshotSparesForeign],
+    cases: [
+      pageSparesForeign,
+      checkpointSparesForeign('head'),
+      checkpointSparesForeign('stored'),
+      completionSparesForeign,
+      clearSparesForeign,
+      snapshotSparesForeign,
+    ],
     predicates: [
       {
         name: 'clear chain scope belongs to its organization',
@@ -194,9 +247,16 @@ export const entries: readonly MutationEntry[] = [
         name: 'snapshot and completion tails belong to the organization',
         locate: /org_id = \?(?= ORDER BY seq DESC LIMIT 1)/,
         neutral: '(? is not null)',
-        copies: 4,
+        copies: 2,
         caseName: pageSparesForeign.name,
       },
+      ...(['head', 'stored'] as const).map((checkpoint) => ({
+        name: `${checkpoint} checkpoint rows belong to the organization`,
+        locate: new RegExp(`${checkpoint === 'head' ? 'h' : 's'}\\.org_id = \\?(?= AND)`),
+        neutral: '(? is not null)',
+        copies: 1,
+        caseName: checkpointSparesForeign(checkpoint).name,
+      })),
       {
         name: 'chain completion belongs to its organization',
         locate: /org_id = \?(?= AND chain_id)/,

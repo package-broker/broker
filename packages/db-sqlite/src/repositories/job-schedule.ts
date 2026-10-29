@@ -32,10 +32,15 @@ export interface ScheduleDefinition {
   readonly nextRunAt?: string;
   /** Defaults to the core default. Held in memory by `sync`, so call `sync` on the same instance that ticks. */
   readonly maxAttempts?: number;
+  readonly resourceKey?: string;
 }
 
 export interface JobScheduleRepository {
-  /** Creates the row if missing. An existing row keeps its slot and is re-enabled. `nextRunAt` is truncated to the minute. */
+  /**
+   * Creates the row if missing. An existing row keeps its slot and is re-enabled.
+   * `nextRunAt` is truncated to the minute. Ignores `maxAttempts` and `resourceKey`;
+   * register them through `sync` on the same instance that ticks.
+   */
   upsert(
     ctx: OrgContext,
     row: { name: string; everySeconds: number; nextRunAt: string },
@@ -65,6 +70,7 @@ interface Checked {
   readonly everySeconds: number;
   readonly nextRunAt: string | null;
   readonly maxAttempts: number;
+  readonly resourceKey: string | null;
 }
 
 function statement(query: RawBuilder<unknown>): Statement {
@@ -87,7 +93,7 @@ function minuteAligned(value: string): string {
 
 function check(definition: ScheduleDefinition): Checked {
   const name = scheduleName(definition.name);
-  validateSchedule({ everySeconds: definition.everySeconds });
+  validateSchedule(definition);
   if (definition.everySeconds > MAX_EVERY_SECONDS) {
     throw new RangeError(`everySeconds must be at most ${String(MAX_EVERY_SECONDS)}`);
   }
@@ -102,7 +108,13 @@ function check(definition: ScheduleDefinition): Checked {
   ) {
     throw new RangeError('nextRunAt leaves no representable next slot');
   }
-  return { name, everySeconds: definition.everySeconds, nextRunAt, maxAttempts };
+  return {
+    name,
+    everySeconds: definition.everySeconds,
+    nextRunAt,
+    maxAttempts,
+    resourceKey: definition.resourceKey ?? null,
+  };
 }
 
 function firstRun(item: Checked): RawBuilder<string> {
@@ -238,7 +250,7 @@ export function createJobScheduleRepository(executor: SqlExecutor): JobScheduleR
         statements.push(
           statement(sql`INSERT INTO job (id, org_id, type, payload_json, idempotency_key, max_attempts, resource_key)
             SELECT ${jobId}, s.org_id, s.name, '{}', ${prefix} || ${slot}, ${maxAttempts},
-              CASE WHEN s.name = 'core:audit-verify:v1' THEN 'audit-verify' ELSE NULL END
+              ${definition?.resourceKey ?? null}
             FROM job_schedule s
             WHERE s.org_id = ${ctx.orgId} AND s.name = ${name} AND s.enabled = 1
               AND s.every_seconds IS NOT NULL AND s.next_run_at <= ${NOW}

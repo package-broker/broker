@@ -789,7 +789,7 @@ describe('audit verifier fields', () => {
       event: 'audit.verified',
       ...fields,
     });
-    for (const reason of ['seq_gap', 'prev_hash', 'hash', 'org_mismatch']) {
+    for (const reason of ['seq_gap', 'prev_hash', 'hash', 'org_mismatch', 'checkpoint_pruned']) {
       expect(safeRecord({ level: 'error', event: 'audit.chain_broken', reason })).toHaveProperty(
         'reason',
         reason,

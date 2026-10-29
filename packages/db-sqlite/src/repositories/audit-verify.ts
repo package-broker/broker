@@ -46,10 +46,11 @@ export function createAuditVerifyReader(executor: ScalarSqlExecutor): AuditVerif
           sql: `UPDATE audit_chain SET verified_from_seq = ?, verified_through_seq = ?,
             verified_bodies = ?, verified_withheld = ?, verified_at = ?
             WHERE org_id = ? AND chain_id = ? AND epoch = ? AND incarnation = ?
-              AND head_seq = ? AND head_hash = ?
               AND mode_generation = ? AND boundary_seq = ? AND boundary_prev_hash = ?
-              AND COALESCE((SELECT seq FROM audit_event WHERE org_id = ? ORDER BY seq DESC LIMIT 1), head_seq) = ?
-              AND COALESCE((SELECT hash FROM audit_event WHERE org_id = ? ORDER BY seq DESC LIMIT 1), head_hash) = ?
+              AND ((? = boundary_seq - 1 AND ? = boundary_prev_hash)
+                OR EXISTS (SELECT 1 FROM audit_event h WHERE h.org_id = ? AND h.seq = ? AND h.hash = ?))
+              AND ((? = boundary_seq - 1 AND ? = boundary_prev_hash)
+                OR EXISTS (SELECT 1 FROM audit_event s WHERE s.org_id = ? AND s.seq = ? AND s.hash = ?))
               AND (verified_at IS NULL OR verified_at <= ?) RETURNING org_id`,
           params: [
             scope.fromSeq,
@@ -61,22 +62,26 @@ export function createAuditVerifyReader(executor: ScalarSqlExecutor): AuditVerif
             snapshot.chain_id,
             snapshot.epoch,
             snapshot.incarnation,
-            snapshot.stored_seq,
-            snapshot.stored_hash,
             snapshot.mode_generation,
             snapshot.boundary_seq,
             snapshot.boundary_prev_hash,
+            snapshot.head_seq,
+            snapshot.head_hash,
             ctx.orgId,
             snapshot.head_seq,
-            ctx.orgId,
             snapshot.head_hash,
+            snapshot.stored_seq,
+            snapshot.stored_hash,
+            ctx.orgId,
+            snapshot.stored_seq,
+            snapshot.stored_hash,
             completedAt,
           ],
         },
         {
           sql: `UPDATE organization SET audit_last_verified_at = ? WHERE id = ?
             AND ? = 1 AND changes() = 1
-            AND (audit_last_verified_at IS NULL OR audit_last_verified_at < ?)`,
+            AND (audit_last_verified_at IS NULL OR audit_last_verified_at <= ?)`,
           params: [completedAt, ctx.orgId, scope.fromSeq, completedAt],
         },
       ]);

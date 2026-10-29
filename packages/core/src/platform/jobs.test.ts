@@ -446,6 +446,37 @@ describe('defineJob', () => {
     expect(Object.isFrozen(def.schedule)).toBe(true);
   });
 
+  it('copies and freezes a schedule resource key', () => {
+    const schedule = { everySeconds: 60, resourceKey: 'audit-verify' };
+    const def = defineJob({ ...base, schedule });
+    schedule.resourceKey = 'changed';
+    expect(def.schedule).toEqual({ everySeconds: 60, resourceKey: 'audit-verify' });
+    expect(Object.isFrozen(def.schedule)).toBe(true);
+  });
+
+  it.each(['', 'x'.repeat(161), 'line\nfeed', 42, null])(
+    'rejects invalid schedule resource key %j',
+    (resourceKey) => {
+      expect(
+        codeOf(() =>
+          defineJob({
+            ...base,
+            schedule: { everySeconds: 60, resourceKey: resourceKey as string },
+          }),
+        ),
+      ).toBe('invalid_schedule');
+    },
+  );
+
+  it('rejects a schedule resource key accessor without invoking it', () => {
+    const schedule = { everySeconds: 60 };
+    const get = () => {
+      throw new Error('must not be invoked');
+    };
+    Object.defineProperty(schedule, 'resourceKey', { get });
+    expect(codeOf(() => defineJob({ ...base, schedule }))).toBe('invalid_definition');
+  });
+
   it('rejects accessor properties and reads each field once', () => {
     let reads = 0;
     const hostile = { ...base };

@@ -103,7 +103,7 @@ export interface JobDefinition<P = unknown> {
   readonly version: number;
   readonly validate: (input: unknown) => P;
   readonly handler: (payload: P, context: JobContext) => Promise<void>;
-  readonly schedule?: { readonly everySeconds: number };
+  readonly schedule?: { readonly everySeconds: number; readonly resourceKey?: string };
   readonly maxAttempts?: number;
 }
 
@@ -182,13 +182,25 @@ export function qualifyJobName(pluginId: string, name: string, version: number):
   return `${pluginId}:${name}:v${version}`;
 }
 
-export function validateSchedule(schedule: { readonly everySeconds: number }): void {
+export function validateSchedule(schedule: {
+  readonly everySeconds: number;
+  readonly resourceKey?: string;
+}): void {
   const every: unknown = schedule?.everySeconds;
   if (
     typeof every !== 'number' ||
     !Number.isSafeInteger(every) ||
     every < MIN_SCHEDULE_SECONDS ||
     every % 60 !== 0
+  ) {
+    throw new JobError('invalid_schedule');
+  }
+  const key = schedule.resourceKey;
+  if (
+    key !== undefined &&
+    (typeof key !== 'string' ||
+      key.length > MAX_IDEMPOTENCY_KEY_LENGTH ||
+      !PRINTABLE_ASCII.test(key))
   ) {
     throw new JobError('invalid_schedule');
   }
@@ -229,15 +241,19 @@ export function defineJob<P>(definition: JobDefinition<P>): JobDefinition<P> {
   ) {
     throw new JobError('invalid_definition');
   }
-  let schedule: { readonly everySeconds: number } | undefined;
+  let schedule: JobDefinition<P>['schedule'];
   if (scheduleInput !== undefined) {
     if (typeof scheduleInput !== 'object' || scheduleInput === null) {
       throw new JobError('invalid_schedule');
     }
     const everySeconds = readOwn(scheduleInput, 'everySeconds');
     if (typeof everySeconds !== 'number') throw new JobError('invalid_schedule');
-    validateSchedule({ everySeconds });
-    schedule = Object.freeze({ everySeconds });
+    const resourceKey = readOwn(scheduleInput, 'resourceKey');
+    if (resourceKey !== undefined && typeof resourceKey !== 'string')
+      throw new JobError('invalid_schedule');
+    const copied = { everySeconds, ...(resourceKey === undefined ? {} : { resourceKey }) };
+    validateSchedule(copied);
+    schedule = Object.freeze(copied);
   }
   return Object.freeze({
     name,

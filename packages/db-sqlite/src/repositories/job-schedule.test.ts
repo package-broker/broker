@@ -113,6 +113,19 @@ describe('job schedule repository', () => {
     expect(await schedules(database.executor)).toHaveLength(0);
   });
 
+  it.each(['', 'a'.repeat(161), 'resource\nkey', 'resource\u007fkey', 'résource'])(
+    'sync rejects invalid resource key %j before storing a schedule',
+    async (resourceKey) => {
+      const repo = createJobScheduleRepository(database.executor);
+      await expect(
+        repo.sync(ctx, [{ name: NAME, everySeconds: EVERY, nextRunAt: iso(-60), resourceKey }]),
+      ).rejects.toThrow('invalid_schedule');
+      expect(await schedules(database.executor)).toEqual([]);
+      expect(await repo.tick(ctx)).toEqual([]);
+      expect(await jobs(database.executor)).toEqual([]);
+    },
+  );
+
   it('tick fires nothing before the row is due', async () => {
     const repo = createJobScheduleRepository(database.executor);
     await repo.upsert(ctx, { name: NAME, everySeconds: EVERY, nextRunAt: iso(3600) });
@@ -146,8 +159,21 @@ describe('job schedule repository', () => {
 
   it('assigns scheduled verification the same resource lease as requested runs', async () => {
     const repo = createJobScheduleRepository(database.executor);
-    for (const name of ['core:audit-verify:v1', NAME])
-      await repo.upsert(ctx, { name, everySeconds: EVERY, nextRunAt: iso(-60) });
+    await repo.sync(ctx, [
+      {
+        name: 'core:audit-verify:v1',
+        everySeconds: EVERY,
+        nextRunAt: iso(-60),
+        resourceKey: 'audit-verify',
+      },
+      { name: NAME, everySeconds: EVERY, nextRunAt: iso(-60) },
+      {
+        name: 'other:shared:v1',
+        everySeconds: EVERY,
+        nextRunAt: iso(-60),
+        resourceKey: 'another-resource',
+      },
+    ]);
     await repo.tick(ctx);
     expect(
       await database.executor.all({
@@ -157,6 +183,7 @@ describe('job schedule repository', () => {
     ).toEqual([
       { type: 'core:audit-verify:v1', resource_key: 'audit-verify' },
       { type: NAME, resource_key: null },
+      { type: 'other:shared:v1', resource_key: 'another-resource' },
     ]);
   });
 

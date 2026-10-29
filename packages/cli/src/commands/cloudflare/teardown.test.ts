@@ -503,6 +503,99 @@ it('removes only inventoried attachments before Worker, queues and data', async 
   expect(attachmentTrace()[8]?.body).toEqual([]);
 });
 
+it.each([
+  ...providerFixtures.workerDomainDeleteResponses,
+  { name: 'absent body', status: 200, body: null },
+  { name: 'no content', status: 204, body: null },
+])('completes teardown after a custom-domain DELETE with $name', async ({ status, body }) => {
+  await saveAttachments();
+  const bucket = await provisionedBucket();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const fallback = await fetcher(input, init);
+    return init?.method === 'DELETE' &&
+      new URL(String(input)).pathname.endsWith('/workers/domains/domain-1')
+      ? new Response(body, { status })
+      : fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(0);
+  expect(result.output.status).toBe('ok');
+  expect(result.output.checks).toEqual(
+    ['route', 'domain', 'consumer', 'schedules', 'worker', 'r2', 'jobs', 'dlq', 'd1'].map(
+      (name) => ({ name, status: 'deleted' }),
+    ),
+  );
+  const mutations = trace.filter((entry) => entry.method !== 'GET');
+  expect(
+    mutations.filter((entry) => entry.path.endsWith('/workers/domains/domain-1')),
+  ).toHaveLength(1);
+  expect(mutations.some((entry) => entry.path.endsWith(`/r2/buckets/${bucket}`))).toBe(true);
+  expect(mutations.at(-1)?.path).toBe(
+    `/client/v4/accounts/${ACCOUNT}/d1/database/${DB}?jurisdiction=eu`,
+  );
+});
+
+it.each([
+  '{"success":false}',
+  '{"success":false,"result":null}',
+  'null',
+  '[]',
+  '{}',
+  '{"result":null}',
+  '{"success":"true"}',
+  '{"success":true,"result":',
+  ' ',
+])('rejects an invalid custom-domain DELETE response: %s', async (body) => {
+  await saveAttachments();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const fallback = await fetcher(input, init);
+    return init?.method === 'DELETE' &&
+      new URL(String(input)).pathname.endsWith('/workers/domains/domain-1')
+      ? new Response(body)
+      : fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(6);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(result.output.checks).toEqual([{ name: 'route', status: 'deleted' }]);
+  expect(trace.at(-1)?.path).toBe(`/client/v4/accounts/${ACCOUNT}/workers/domains/domain-1`);
+  expect(trace.at(-1)?.method).toBe('DELETE');
+});
+
+it.each(
+  [null, '', '{"success":true}'].flatMap((body) =>
+    ['domain_read', 'route_delete', 'schedules_put', 'database_delete'].map((endpoint) => ({
+      body,
+      endpoint,
+    })),
+  ),
+)('keeps strict parsing for $endpoint with body $body', async ({ body, endpoint }) => {
+  await saveAttachments();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const fallback = await fetcher(input, init);
+    const path = new URL(String(input)).pathname;
+    const selected =
+      endpoint === 'domain_read'
+        ? init?.method === 'GET' && path.endsWith('/workers/domains/domain-1')
+        : endpoint === 'route_delete'
+          ? init?.method === 'DELETE' && path.endsWith('/workers/routes/route-1')
+          : endpoint === 'schedules_put'
+            ? init?.method === 'PUT' && path.endsWith('/schedules')
+            : init?.method === 'DELETE' && path.endsWith(`/d1/database/${DB}`);
+    return selected ? new Response(body) : fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(endpoint === 'domain_read' ? 1 : 6);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(trace.at(-1)?.method).toBe(
+    endpoint === 'domain_read' ? 'GET' : endpoint === 'schedules_put' ? 'PUT' : 'DELETE',
+  );
+  expect(result.output.checks.some((check) => check.name === 'd1')).toBe(false);
+});
+
 it('uses only durable resolved IDs when a create response preceded the resource receipt', async () => {
   const resource = journal.resources.d1!;
   resource.id = null;

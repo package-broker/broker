@@ -246,7 +246,7 @@ class CleanupApi {
         ]);
         const read = async (source: Response): Promise<string> => {
           const reader = source.body?.getReader();
-          if (!reader) throw new Error();
+          if (!reader) return '';
           const chunks: Uint8Array[] = [];
           let bytes = 0;
           try {
@@ -283,12 +283,19 @@ class CleanupApi {
             response.status,
           );
         const text = await read(response);
+        const domainDeletion =
+          method === 'DELETE' &&
+          new RegExp(`^/accounts/${this.auth.accountId}/workers/domains/[a-zA-Z0-9_-]+$`).test(
+            path,
+          );
+        if (domainDeletion && text === '') return { gone: false, result: null };
         try {
           const parsed = object(JSON.parse(text));
-          if (parsed.success !== true || !Object.hasOwn(parsed, 'result')) throw new Error();
+          if (parsed.success !== true || (!domainDeletion && !Object.hasOwn(parsed, 'result')))
+            throw new Error();
           return {
             gone: false,
-            result: parsed.result,
+            result: Object.hasOwn(parsed, 'result') ? parsed.result : null,
             ...(parsed.result_info == null ? {} : { result_info: object(parsed.result_info) }),
             ...(Object.hasOwn(parsed, 'result_info') ? {} : { resultInfoAbsent: true }),
           };

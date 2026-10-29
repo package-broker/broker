@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.2...core-v2.0.0-rc.3) (2026-10-28)
+
+
+### Features
+
+* **core:** grant lists show subjects to grant readers ([#954](https://github.com/package-broker/broker/issues/954)) ([eabb6fa](https://github.com/package-broker/broker/commit/eabb6facf4a463cf018d0802deb8b9187857f94b))
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.1...core-v2.0.0-rc.2) (2026-10-28)
 
 

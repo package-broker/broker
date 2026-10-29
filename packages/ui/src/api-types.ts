@@ -5975,8 +5975,20 @@ export interface operations {
                     | {
                         installationId?: number;
                         packageName?: string;
+                        /** @constant */
+                        provider?: 'github';
+                        refs?: {
+                          branches?: string[];
+                          tags?: boolean;
+                        };
+                        repository?: string;
+                        repositoryId?: number;
+                      }
+                    | {
+                        installationId?: number;
+                        packageName?: string;
                         /** @enum {string} */
-                        provider?: 'github' | 'git' | 'ssh';
+                        provider?: 'git' | 'ssh';
                         refs?: {
                           branches?: string[];
                           tags?: boolean;
@@ -6075,8 +6087,20 @@ export interface operations {
                     | {
                         installationId?: number;
                         packageName?: string;
+                        /** @constant */
+                        provider?: 'github';
+                        refs?: {
+                          branches?: string[];
+                          tags?: boolean;
+                        };
+                        repository?: string;
+                        repositoryId?: number;
+                      }
+                    | {
+                        installationId?: number;
+                        packageName?: string;
                         /** @enum {string} */
-                        provider?: 'github' | 'git' | 'ssh';
+                        provider?: 'git' | 'ssh';
                         refs?: {
                           branches?: string[];
                           tags?: boolean;
@@ -6236,8 +6260,19 @@ export interface operations {
             | {
                 installationId?: number;
                 packageName?: string;
+                /** @constant */
+                provider: 'github';
+                refs?: {
+                  branches?: string[];
+                  tags?: boolean;
+                };
+                repository: string;
+              }
+            | {
+                installationId?: number;
+                packageName?: string;
                 /** @enum {string} */
-                provider: 'github' | 'git' | 'ssh';
+                provider: 'git' | 'ssh';
                 refs?: {
                   branches?: string[];
                   tags?: boolean;
@@ -6485,8 +6520,19 @@ export interface operations {
             | {
                 installationId?: number;
                 packageName?: string;
+                /** @constant */
+                provider: 'github';
+                refs?: {
+                  branches?: string[];
+                  tags?: boolean;
+                };
+                repository: string;
+              }
+            | {
+                installationId?: number;
+                packageName?: string;
                 /** @enum {string} */
-                provider: 'github' | 'git' | 'ssh';
+                provider: 'git' | 'ssh';
                 refs?: {
                   branches?: string[];
                   tags?: boolean;
@@ -8656,8 +8702,20 @@ export interface operations {
                 | {
                     installationId?: number;
                     packageName?: string;
+                    /** @constant */
+                    provider?: 'github';
+                    refs?: {
+                      branches?: string[];
+                      tags?: boolean;
+                    };
+                    repository?: string;
+                    repositoryId?: number;
+                  }
+                | {
+                    installationId?: number;
+                    packageName?: string;
                     /** @enum {string} */
-                    provider?: 'github' | 'git' | 'ssh';
+                    provider?: 'git' | 'ssh';
                     refs?: {
                       branches?: string[];
                       tags?: boolean;
@@ -8806,8 +8864,19 @@ export interface operations {
             | {
                 installationId?: number;
                 packageName?: string;
+                /** @constant */
+                provider: 'github';
+                refs?: {
+                  branches?: string[];
+                  tags?: boolean;
+                };
+                repository: string;
+              }
+            | {
+                installationId?: number;
+                packageName?: string;
                 /** @enum {string} */
-                provider: 'github' | 'git' | 'ssh';
+                provider: 'git' | 'ssh';
                 refs?: {
                   branches?: string[];
                   tags?: boolean;
@@ -8936,8 +9005,19 @@ export interface operations {
             | {
                 installationId?: number;
                 packageName?: string;
+                /** @constant */
+                provider: 'github';
+                refs?: {
+                  branches?: string[];
+                  tags?: boolean;
+                };
+                repository: string;
+              }
+            | {
+                installationId?: number;
+                packageName?: string;
                 /** @enum {string} */
-                provider: 'github' | 'git' | 'ssh';
+                provider: 'git' | 'ssh';
                 refs?: {
                   branches?: string[];
                   tags?: boolean;

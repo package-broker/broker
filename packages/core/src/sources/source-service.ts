@@ -257,6 +257,7 @@ const PUBLIC_CONFIG_FIELDS: Record<
     provider: 'provider',
     repository: 'string',
     installationId: 'number',
+    repositoryId: 'number',
     packageName: 'string',
     refs: { tags: 'boolean', branches: 'strings' },
   },

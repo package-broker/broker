@@ -344,6 +344,37 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
   const setup = (extra: Parameters<typeof fixture>[0] = {}) =>
     fixture({ sourceProject: project ? PROJECT : null, ...extra });
   describe(base, () => {
+    it('refuses client-supplied repository ids on creation and update', async () => {
+      const f = await setup({ vcsProviders: ['github'] });
+      const config = { provider: 'github', repository: 'acme/widgets', repositoryId: 42 };
+      const created = await f.request('POST', base, {
+        name: 'Widgets',
+        ecosystem: 'composer',
+        type: 'vcs',
+        config,
+      });
+      const updated = await f.request('PATCH', `${base}/${SOURCE}`, { config });
+      for (const response of [created, updated]) {
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: 'invalid_request' } });
+      }
+      expect(f.createSource).not.toHaveBeenCalled();
+      expect(f.update).not.toHaveBeenCalled();
+      expect(f.sources.create).not.toHaveBeenCalled();
+      expect(f.sources.update).not.toHaveBeenCalled();
+    });
+    it('returns a stored repository id in the source list', async () => {
+      const f = await setup();
+      const row = await f.sources.get();
+      if (row === null) throw new Error('expected source');
+      const config = { provider: 'github', repository: 'acme/widgets', repositoryId: 42 };
+      f.sources.list.mockResolvedValue([
+        { ...row, type: 'vcs', configJson: JSON.stringify(config) },
+      ]);
+      const response = await f.request('GET', base);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ items: [{ config, configComplete: true }] });
+    });
     it('lists the VCS providers the runtime reports', async () => {
       const f = await setup({ vcsProviders: ['github', 'git', 'ssh'] });
       const response = await f.request('GET', base);

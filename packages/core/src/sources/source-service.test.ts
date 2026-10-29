@@ -2216,7 +2216,10 @@ describe('readable source DTO configuration', () => {
     ['hosted', {}],
   ] as const;
 
-  it.each(cases)(
+  it.each([
+    ...cases,
+    ['vcs', { provider: 'github', repository: 'owner/repo', repositoryId: 42 }],
+  ] as const)(
     'allowlists %s configuration independently of credentials: %j',
     async (type, config) => {
       const { service, sources, credentialRepository } = setup();

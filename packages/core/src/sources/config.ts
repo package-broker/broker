@@ -19,6 +19,7 @@ export interface VcsConfig {
   readonly provider: 'github' | 'git' | 'ssh';
   readonly repository: string;
   readonly installationId?: number;
+  readonly repositoryId?: number;
   readonly packageName?: string;
   readonly refs: { readonly tags: boolean; readonly branches: readonly string[] };
 }
@@ -65,6 +66,7 @@ export interface ParseSourceConfigOptions {
   readonly runtime: 'node' | 'cloudflare';
   readonly policy: OutboundPolicy;
   readonly hasCredential: boolean;
+  readonly managed?: boolean;
 }
 
 const SERVED_VCS_PROVIDERS: Readonly<
@@ -259,8 +261,16 @@ function parseVcs(
   obj: Obj,
   runtime: string,
   policy: OutboundPolicy,
+  managed: boolean,
 ): VcsConfig | null {
-  rejectUnknown(c, obj, ['provider', 'repository', 'installationId', 'packageName', 'refs']);
+  rejectUnknown(c, obj, [
+    'provider',
+    'repository',
+    'installationId',
+    'repositoryId',
+    'packageName',
+    'refs',
+  ]);
   const provider = obj.provider;
   if (provider !== 'github' && provider !== 'git' && provider !== 'ssh') {
     c.add('provider', 'must be github, git or ssh');
@@ -291,6 +301,17 @@ function parseVcs(
       installationId = id;
     }
   }
+  let repositoryId: number | undefined;
+  if (obj.repositoryId !== undefined) {
+    const id = obj.repositoryId;
+    if (provider !== 'github' || typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+      c.add('repositoryId', 'only valid for github, as a positive integer');
+    } else {
+      repositoryId = id;
+    }
+  } else if (managed && provider === 'github') {
+    c.add('repositoryId', 'is required for managed github sources');
+  }
   let packageName: string | undefined;
   if (obj.packageName !== undefined) {
     if (typeof obj.packageName !== 'string' || !validComposerName(obj.packageName)) {
@@ -320,6 +341,7 @@ function parseVcs(
     provider: provider as VcsConfig['provider'],
     repository: repository as string,
     ...(installationId === undefined ? {} : { installationId }),
+    ...(repositoryId === undefined ? {} : { repositoryId }),
     ...(packageName === undefined ? {} : { packageName }),
     refs: { tags, branches },
   };
@@ -452,7 +474,7 @@ export function parseSourceConfig(
   switch (type) {
     case 'vcs': {
       if (hasUrl) c.add('url', 'must be empty for vcs');
-      const config = parseVcs(c, parsed, options.runtime, policy);
+      const config = parseVcs(c, parsed, options.runtime, policy, options.managed === true);
       return c.problems.length > 0 || config === null ? fail() : { ok: true, config };
     }
     case 'composer_repository': {

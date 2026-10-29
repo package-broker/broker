@@ -17,14 +17,20 @@ const type = z.enum([
 const removalPolicy = z.enum(['flag', 'exclude']);
 const vcsProvider = z.enum(['github', 'git', 'ssh']);
 const strings = z.array(z.string());
+const vcsFields = {
+  repository: z.string(),
+  installationId: z.number().int().positive().optional(),
+  packageName: z.string().optional(),
+  refs: z.strictObject({ tags: z.boolean().optional(), branches: strings.optional() }).optional(),
+};
+const githubConfig = z.strictObject({
+  provider: z.literal('github'),
+  ...vcsFields,
+});
+const otherVcsConfig = z.strictObject({ provider: z.enum(['git', 'ssh']), ...vcsFields });
 const config = z.union([
-  z.strictObject({
-    provider: vcsProvider,
-    repository: z.string(),
-    installationId: z.number().int().positive().optional(),
-    packageName: z.string().optional(),
-    refs: z.strictObject({ tags: z.boolean().optional(), branches: strings.optional() }).optional(),
-  }),
+  githubConfig,
+  otherVcsConfig,
   z.strictObject({
     selection: z
       .strictObject({
@@ -40,7 +46,11 @@ const config = z.union([
   z.strictObject({ githubToken: z.boolean().optional() }),
   z.strictObject({}),
 ]);
-const readableConfig = z.union([config.options[0].partial(), ...config.options.slice(1)]);
+const readableConfig = z.union([
+  githubConfig.extend({ repositoryId: z.number().int().positive().optional() }).partial(),
+  otherVcsConfig.partial(),
+  ...config.options.slice(2),
+]);
 const changes = {
   url: z.string().max(2048).nullable().optional(),
   config: config.optional(),

@@ -33,6 +33,7 @@ import {
   removePrebuilt,
 } from '../../prebuilt.js';
 import { builtRouteProblems, loadBuiltMigrations } from '../built-manifest.js';
+import { snapshotLocalAuthCapability } from '../../manifest.js';
 import { validateProvidersDocument, type ProvidersOption } from './providers-file.js';
 import { normalizeQueueConsumer } from './queue-consumer.js';
 import { assertMigrationsApplied } from './migrations-check.js';
@@ -110,6 +111,11 @@ const conflict = (field: string, ...fields: string[]): never => {
 const unknown = (): never => {
   throw new CloudflareError('outcome_unknown', 6, false, 'deploy');
 };
+export function assertLocalAuthAccepted(mode: 'enabled' | 'disabled', capability: unknown): void {
+  if (mode === 'enabled') return;
+  if (mode !== 'disabled' || snapshotLocalAuthCapability(capability) === null)
+    invalid('Cannot disable local sign-in on an artifact without local-auth support');
+}
 export function assertProvidersAccepted(
   option: ProvidersOption | undefined,
   identity: ReturnType<typeof snapshotIdentityDescriptor>,
@@ -372,6 +378,9 @@ export async function validateDeploymentArtifact(out: string) {
     const hasIdentity = Object.hasOwn(manifest, 'identity');
     const identity = hasIdentity ? snapshotIdentityDescriptor(manifest.identity) : null;
     if (hasIdentity && identity === null) return invalid();
+    const hasLocalAuth = Object.hasOwn(manifest, 'localAuth');
+    const localAuth = hasLocalAuth ? snapshotLocalAuthCapability(manifest.localAuth) : null;
+    if (hasLocalAuth && localAuth === null) return invalid();
     if (
       manifest.schemaVersion !== 1 ||
       manifest.platform !== 'cloudflare' ||
@@ -458,6 +467,7 @@ export async function validateDeploymentArtifact(out: string) {
       artifactHash,
       migrations,
       identity,
+      localAuth,
     };
   } catch {
     return invalid();

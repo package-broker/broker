@@ -13,6 +13,26 @@ counts statements inside that invocation and checks completion and stale-version
 removal after all continuations. Miniflare does not establish the hosted D1 query
 limit: the statement count must also be checked against the published limit.
 
+## Platform subrequest limits
+
+Workers allows **10,000 subrequests per invocation on Paid** and **50 on Free**,
+not 1,000 on Paid. Subrequests include outbound HTTP requests and calls to
+Cloudflare services. The separate D1 query limit is 1,000 per invocation on Paid
+and 50 on Free; a D1 `batch()` counts as one query against that platform limit.
+The ingest planner's conservative SQL-statement budget above is an application
+budget, not the platform's batch accounting.
+
+Workers Free has a 10 ms CPU limit. Paid HTTP requests default to 30 seconds of
+CPU and can be configured up to 5 minutes.
+GitHub import rules require Paid until Free-plan execution has been measured.
+Their planned per-invocation meter stops at 2,000 subrequests, 600 D1 calls or
+20 seconds wall time, with a durable checkpoint. These budgets leave platform
+headroom and do not raise the existing fill or token-source ceilings.
+
+Sources: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
+[D1 limits](https://developers.cloudflare.com/d1/platform/limits/) and
+[D1 batch accounting](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch).
+
 ## Metadata sizing
 
 `registry.caps.metadataBytes` limits upstream metadata fetches in the registry
@@ -91,9 +111,10 @@ larger than that is read but its version is refused. Every continuation of a
 package sync reads the manifests again. With 250 KB manifests one step applies
 about 33 versions, so a full sync of N such refs takes about
 `ceil(N / 33) × (N / 5 + N / 50 + 3)` API requests: about 480 for 256 refs
-(64 MB). The 1,000-request Workers ceiling assumes the Workers Paid limit of
-1,000 subrequests per invocation; verify it on hosted Workers before
-changing it.
+(64 MB). The 1,000-request Workers ceiling is a conservative application limit,
+within the Workers Paid platform limit of 10,000 subrequests per invocation.
+Token minting and other binding calls also consume subrequests. Verify total
+subrequests, CPU and memory on hosted Workers before changing this ceiling.
 
 Run the GitHub fill measurement without building:
 

@@ -42,7 +42,11 @@ function twoRunnerBarrier(): () => Promise<void> {
   };
 }
 
-function raceExecutors(executors: readonly [SqlExecutor, SqlExecutor], pending: boolean) {
+function raceExecutors(
+  executors: readonly [SqlExecutor, SqlExecutor],
+  pending: boolean,
+  loseResponse = false,
+) {
   const firstReadBarrier = twoRunnerBarrier();
   const pendingReadBarrier = twoRunnerBarrier();
   return executors.map((executor) => {
@@ -60,7 +64,11 @@ function raceExecutors(executors: readonly [SqlExecutor, SqlExecutor], pending: 
         }
         return rows;
       },
-      batch: (statements) => executor.batch(statements),
+      async batch(statements) {
+        const result = await executor.batch(statements);
+        if (loseResponse) throw new Error('response lost');
+        return result;
+      },
     };
     return { executor: wrapped, reads };
   });
@@ -197,43 +205,73 @@ export function describeMigrationLockContract(
       }
     }
 
-    it('12. two fresh runners both resolve and apply core once (ten races)', async () => {
-      for (let iteration = 0; iteration < 10; iteration += 1) {
-        await withPair(open, async ({ executor, second }) => {
-          const init = await core0001();
-          const other = await second();
-          const runners = raceExecutors([executor, other], false);
-          const events: MigrateLogEvent[] = [];
-          const results = await Promise.all(
-            runners.map((runner, index) =>
-              migrate(runner.executor, [init], {
-                holder: `runner-${index}`,
-                log: (event) => events.push(event),
-              }),
-            ),
-          );
-          expect(runners.map((runner) => runner.reads[0]?.rows)).toEqual([[], []]);
-          expect(
-            events.filter(
-              (event) =>
-                event.level === 'warn' &&
-                event.id === init.id &&
-                event.message.includes('is already recorded; another runner applied it'),
-            ),
-          ).toHaveLength(1);
-          expect(results.filter((result) => result.applied.includes(init.id))).toHaveLength(1);
-          expect(
-            await executor.all({ sql: 'SELECT id FROM schema_migration', params: [] }),
-          ).toEqual([{ id: init.id }]);
-          expect(
-            await executor.all({
-              sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
-              params: [],
+    async function freshRace(loseResponse: boolean): Promise<void> {
+      await withPair(open, async ({ executor, second }) => {
+        const init = await core0001();
+        const other = await second();
+        const runners = raceExecutors([executor, other], false, loseResponse);
+        const events: MigrateLogEvent[] = [];
+        const results = await Promise.all(
+          runners.map((runner, index) =>
+            migrate(runner.executor, [init], {
+              holder: `runner-${index}`,
+              log: (event) => events.push(event),
             }),
-          ).toHaveLength(56);
-        });
-      }
+          ),
+        );
+        expect(runners.map((runner) => runner.reads[0]?.rows)).toEqual([[], []]);
+        const warning = `${init.id} is already recorded; another runner applied it, or this runner's own response was lost`;
+        const outcomes = results
+          .map((result, index) => {
+            expect(result.unknown).toEqual([]);
+            expect(result.pending).toEqual([]);
+            const runnerEvents = events.filter((event) => event.holder === `runner-${index}`);
+            if (result.applied.includes(init.id)) {
+              expect(result.applied).toEqual([init.id]);
+              expect(result.skipped).toEqual([]);
+              expect(runnerEvents).toEqual([
+                {
+                  level: 'info',
+                  message: `applied ${init.id}`,
+                  id: init.id,
+                  holder: `runner-${index}`,
+                },
+              ]);
+              return 'applied';
+            }
+            expect(result.applied).toEqual([]);
+            expect(result.skipped).toEqual([init.id]);
+            expect(runnerEvents).toEqual([
+              { level: 'warn', message: warning, id: init.id, holder: `runner-${index}` },
+            ]);
+            return 'recovered';
+          })
+          .sort();
+        // A committed initialization can lose its response; both runners then recover it.
+        expect([
+          ['applied', 'recovered'],
+          ['recovered', 'recovered'],
+        ]).toContainEqual(outcomes);
+        if (loseResponse) expect(outcomes).toEqual(['recovered', 'recovered']);
+        expect(await executor.all({ sql: 'SELECT id FROM schema_migration', params: [] })).toEqual([
+          { id: init.id },
+        ]);
+        expect(
+          await executor.all({
+            sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+            params: [],
+          }),
+        ).toHaveLength(56);
+      });
+    }
+
+    it('12. two fresh runners both resolve and apply core once (ten races)', async () => {
+      for (let iteration = 0; iteration < 10; iteration += 1) await freshRace(false);
     }, 60_000);
+
+    it('12b. two fresh runners recover when initialization commits but its response is lost', async () => {
+      await freshRace(true);
+    });
 
     it('13. two pending runners both resolve, one applies and one skips (ten races)', async () => {
       for (let iteration = 0; iteration < 10; iteration += 1) {

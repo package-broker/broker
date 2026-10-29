@@ -16,6 +16,8 @@ import { reportableErrorName } from '@package-broker/core/kernel/error-name';
 import { formatMasterKey, generateMasterKey } from '@package-broker/core/secrets/master-key';
 import {
   bootstrapAdminWithTopUp,
+  bootstrapSsoAdmin,
+  hasUnusedLocalSetupToken,
   resetLocalLogin,
 } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
@@ -38,7 +40,11 @@ export type AdminTarget =
     };
 
 export interface AdminOptions {
-  readonly email: string;
+  readonly email?: string | undefined;
+  readonly group?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly signIn?: string | undefined;
+  readonly localAuth?: 'enabled' | 'disabled';
   readonly target: AdminTarget;
   readonly tokenFile?: string | undefined;
   readonly stdoutIsTTY?: boolean;
@@ -221,7 +227,7 @@ function toppedUpText(count: number): string {
 
 export interface AdminIssueResult {
   readonly exitCode: number;
-  readonly state: 'issued' | 'already_set_up' | 'error' | 'unknown';
+  readonly state: 'issued' | 'sso_complete' | 'already_set_up' | 'error' | 'unknown';
   readonly expiresAt: string | null;
 }
 
@@ -247,8 +253,32 @@ async function issue(
     state: AdminIssueResult['state'] = exitCode === 7 ? 'unknown' : 'error',
     expiresAt: string | null = null,
   ): AdminIssueResult => ({ exitCode, state, expiresAt });
+  const signIn = o.signIn ?? 'local';
+  if (
+    (signIn !== 'local' && signIn !== 'sso') ||
+    (command !== 'admin bootstrap' && signIn !== 'local')
+  ) {
+    say(command, 'invalid_sign_in');
+    return finish(2);
+  }
+  const group = signIn === 'sso' && o.group !== undefined && o.email === undefined;
+  if (
+    (signIn === 'sso' && o.tokenFile !== undefined) ||
+    (o.group !== undefined && !group) ||
+    (o.provider !== undefined && !group) ||
+    (group &&
+      (o.provider === undefined ||
+        !isValidProviderId(o.provider) ||
+        o.group!.trim() !== o.group ||
+        [...o.group!].length < 1 ||
+        [...o.group!].length > 256 ||
+        /[\p{Cc}\p{Cf}]/u.test(o.group!)))
+  ) {
+    say(command, 'invalid_sign_in_options');
+    return finish(2);
+  }
   const email = typeof o.email === 'string' ? normalizeEmail(o.email) : null;
-  if (email === null) {
+  if (!group && email === null) {
     say(command, 'invalid_email');
     return finish(2);
   }
@@ -256,6 +286,7 @@ async function issue(
   let handle: FileHandle | null = null;
   let identity: FileIdentity | null = null;
   let issued = false;
+  let ssoComplete = false;
   const pending: { signal: NodeJS.Signals | null } = { signal: null };
   let opened: Opened | null = null;
   const onSignal = (signal: NodeJS.Signals): void => {
@@ -291,9 +322,50 @@ async function issue(
     }
 
     const now = systemClock.now();
+    const ctx = orgContext(organization.id);
+    if (signIn === 'sso') {
+      say(
+        command,
+        group
+          ? 'SSO provider configuration is not validated here; configure the named provider to supply verified identities and the named group; test administrator sign-in'
+          : 'SSO provider configuration is not validated here; require verifiedDomains and emailAuthoritativeDomains to include the exact admin email domain; test administrator sign-in',
+      );
+      if (!group && (await hasUnusedLocalSetupToken(opened.executor, ctx, email!)))
+        say(
+          command,
+          'warning: SSO bootstrap leaves the existing unused local setup token unchanged; it is unusable while local sign-in is disabled',
+        );
+      const outcome = await bootstrapSsoAdmin(opened.executor, ctx, {
+        ...(group
+          ? { subject: { type: 'group' as const, provider: o.provider!, value: o.group! } }
+          : { subject: { type: 'email' as const, value: email! }, userId: ulid() }),
+        grantId: ulid(),
+        roleIds: roleIds(),
+        now: isoTimestamp(now),
+      });
+      ssoComplete = true;
+      sink.output({
+        signIn: 'sso',
+        ...outcome,
+        next: ['Open /_pb/ui/login on the broker and sign in with the configured SSO provider'],
+      });
+      return finish(0, 'sso_complete');
+    }
+    if (o.localAuth !== 'enabled')
+      say(
+        command,
+        o.localAuth === 'disabled'
+          ? 'warning: deployment local sign-in mode is disabled; this command prepares local credentials and does not enable deployment local sign-in; the setup token cannot be used until local sign-in is enabled'
+          : 'warning: deployment local sign-in mode is unknown; this command prepares local credentials and does not enable deployment local sign-in; setup tokens are unusable while it is disabled',
+      );
+    if (command === 'admin reset-local')
+      say(
+        command,
+        'warning: reset-local revokes all sessions for this account and resets its password and TOTP',
+      );
     const token = randomToken();
     const input = {
-      email,
+      email: email!,
       userId: ulid(),
       setupHash: await sha256Hex(token),
       setupExpiresAt: isoTimestamp(new Date(now.getTime() + SETUP_TOKEN_TTL_MS)),
@@ -302,8 +374,6 @@ async function issue(
       opId: ulid(),
       now: isoTimestamp(now),
     };
-    const ctx = orgContext(organization.id);
-
     if (pending.signal !== null) {
       say(command, 'outcome unknown; re-running is safe');
       return finish(7);
@@ -366,6 +436,10 @@ async function issue(
     });
     return finish(0, 'issued', input.setupExpiresAt);
   } catch (error) {
+    if (ssoComplete) {
+      say(command, 'outcome unknown; re-running is safe');
+      return finish(7);
+    }
     if (issued && sink !== cliAdminSink) {
       say(command, 'outcome unknown; use explicit setup-token refresh if delivery was lost');
       return finish(7);

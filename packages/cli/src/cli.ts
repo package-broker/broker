@@ -45,7 +45,7 @@ const USAGE =
   '       pb cloudflare migrate [--prebuilt] --database-id <id> [--out <dir> (default .pb/cloudflare)] [--dry-run]\n' +
   '       pb cloudflare bootstrap --database-id <id> --slug <slug> --name <name>\n' +
   '       pb secrets generate-master-key [--key-version <n> (default 1)]\n' +
-  '       pb admin bootstrap --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
+  '       pb admin bootstrap [--sign-in local|sso] (--email <e> | --group <group> --provider <id>) (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin reset-local --email <e> (--sqlite <file> | --cloudflare --database-id <id>) [--token-file <path>]\n' +
   '       pb admin rebind-provider --provider <id> --confirm <id> --expected-anchor <anchor> --new-anchor <anchor> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
   '       pb admin show-provider-binding --provider <id> (--sqlite <file> | --cloudflare --database-id <id>)\n' +
@@ -67,7 +67,8 @@ const USAGE =
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
   'Exit codes for pb cloudflare teardown/janitor: 0 cleaned or skipped; 1 cleanup failed; 2 invalid inventory, wrong inventory id or missing destructive confirmation; 4 inventory locked; 6 unresolved resource or deletion outcome; 8 ownership conflict. Production confirmation uses identity.owner_digest as --inventory-id. Adopted D1 and R2 resources always require --i-understand-this-deletes; janitor retains them. Inventory schema version 2 records deployment history and lifecycle baselines. Janitor requires run_identity pb-e2e-<repository-id>-<epoch-seconds> (optional run suffix) and a matching worker_name stem; Worker stems may encode both numbers in lowercase base 36 to fit name limits. Both the run and inventory update must be older than 6 hours. Deleting a Worker removes its versions.\n' +
   'Import commands use PB_IMPORT_TOKEN or --token-file. --resume requires the same token (idempotency principal); --principal is only a non-secret receipt label. Approval, apply and accept stay in the UI. Import exit codes: 0 success; 1 API or run failure; 2 local validation; 3 pending UI action or wait timeout; 6 outcome unknown.\n' +
-  'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error; 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
+  'Admin bootstrap: --sign-in defaults to local; --group and --provider require sso; --token-file is local-only. SSO provider configuration must be verified separately.\n' +
+  'Exit codes for pb admin bootstrap/reset-local: 0 success; 1 error (including a suspended SSO account; nothing changed); 2 usage, invalid e-mail or existing token file; 5 organization not bootstrapped; 6 already_set_up (bootstrap) or not_found (reset-local); 7 outcome unknown (D1 request sent, no usable response, re-running is safe); 8 admin_role_missing (reset-local); SIGINT or SIGTERM received during a synchronous SQLite batch is handled after the batch returns\n' +
   'Exit codes for pb admin rebind-provider: 0 success; 1 error; 2 usage, --confirm not equal to --provider, or invalid provider or anchor; 5 organization not bootstrapped; 6 anchor_mismatch (no binding with that provider and expected anchor; nothing changed); 7 outcome unknown (D1 response lost; the swap may have applied; a re-run that reports anchor_mismatch means it did or the anchor is wrong)\n' +
   'Exit codes for pb admin show-provider-binding: 0 success; 1 error; 2 usage or invalid provider; 5 organization not bootstrapped; 6 no_binding; nothing is bound for that provider; 7 outcome unknown (D1 response lost, re-running is safe)';
 
@@ -125,6 +126,8 @@ function parseCliArgs(argv: string[]) {
         'new-anchor': { type: 'string' },
         cloudflare: { type: 'boolean' },
         prebuilt: { type: 'boolean' },
+        'sign-in': { type: 'string' },
+        group: { type: 'string' },
         'token-file': { type: 'string' },
         'key-file': { type: 'string' },
         'master-key-env': { type: 'string' },
@@ -302,7 +305,16 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'dry-run',
   ],
   'secrets generate-master-key': ['key-version'],
-  'admin bootstrap': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
+  'admin bootstrap': [
+    'sign-in',
+    'email',
+    'group',
+    'provider',
+    'sqlite',
+    'cloudflare',
+    'database-id',
+    'token-file',
+  ],
   'admin reset-local': ['email', 'sqlite', 'cloudflare', 'database-id', 'token-file'],
   'admin rebind-provider': [
     'provider',
@@ -810,8 +822,15 @@ export async function run(argv: readonly string[]): Promise<number> {
 
   if (command === 'admin' && (subcommand === 'bootstrap' || subcommand === 'reset-local')) {
     const target = adminTarget(values);
-    if (values.email !== undefined && target !== null) {
-      const options = { email: values.email, target, tokenFile: values['token-file'] };
+    if ((values.email !== undefined || values.group !== undefined) && target !== null) {
+      const options = {
+        email: values.email,
+        group: values.group,
+        provider: values.provider,
+        signIn: values['sign-in'],
+        target,
+        tokenFile: values['token-file'],
+      };
       return subcommand === 'bootstrap' ? runAdminBootstrap(options) : runAdminResetLocal(options);
     }
   }

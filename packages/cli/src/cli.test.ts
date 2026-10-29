@@ -113,6 +113,9 @@ it('documents sign-in and rejects invalid or misplaced sign-in flags without ref
   try {
     expect(await run(['--help'])).toBe(0);
     expect(log).toHaveBeenCalledWith(expect.stringContaining('--sign-in local|sso'));
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('1 error (including a suspended SSO account; nothing changed)'),
+    );
     expect(
       await run([
         'admin',

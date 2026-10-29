@@ -17,6 +17,7 @@ import { formatMasterKey, generateMasterKey } from '@package-broker/core/secrets
 import {
   bootstrapAdminWithTopUp,
   bootstrapSsoAdmin,
+  hasUnusedLocalSetupToken,
   resetLocalLogin,
 } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
@@ -329,10 +330,11 @@ async function issue(
           ? 'SSO provider configuration is not validated here; configure the named provider to supply verified identities and the named group; test administrator sign-in'
           : 'SSO provider configuration is not validated here; require verifiedDomains and emailAuthoritativeDomains to include the exact admin email domain; test administrator sign-in',
       );
-      say(
-        command,
-        'warning: SSO bootstrap leaves any existing unused local setup token unchanged; it is unusable while local sign-in is disabled',
-      );
+      if (!group && (await hasUnusedLocalSetupToken(opened.executor, ctx, email!)))
+        say(
+          command,
+          'warning: SSO bootstrap leaves the existing unused local setup token unchanged; it is unusable while local sign-in is disabled',
+        );
       const outcome = await bootstrapSsoAdmin(opened.executor, ctx, {
         ...(group
           ? { subject: { type: 'group' as const, provider: o.provider!, value: o.group! } }
@@ -349,10 +351,13 @@ async function issue(
       });
       return finish(0, 'sso_complete');
     }
-    say(
-      command,
-      `warning: deployment local sign-in mode is ${o.localAuth ?? 'unknown'}; this command prepares local credentials and does not enable deployment local sign-in; setup tokens are unusable while it is disabled`,
-    );
+    if (o.localAuth !== 'enabled')
+      say(
+        command,
+        o.localAuth === 'disabled'
+          ? 'warning: deployment local sign-in mode is disabled; this command prepares local credentials and does not enable deployment local sign-in; the setup token cannot be used until local sign-in is enabled'
+          : 'warning: deployment local sign-in mode is unknown; this command prepares local credentials and does not enable deployment local sign-in; setup tokens are unusable while it is disabled',
+      );
     if (command === 'admin reset-local')
       say(
         command,

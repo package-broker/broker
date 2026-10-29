@@ -16,6 +16,7 @@ import {
   bootstrapAdmin,
   bootstrapAdminWithTopUp,
   bootstrapSsoAdmin,
+  hasUnusedLocalSetupToken,
   resetLocalLogin,
   SuspendedSsoAdminError,
   type BootstrapAdminInput,
@@ -1505,4 +1506,47 @@ describe('bootstrapSsoAdmin', () => {
       expect(await snapshot(a)).toEqual(before);
     },
   );
+});
+
+describe('hasUnusedLocalSetupToken', () => {
+  it('finds only the named account pending token in the requested organization', async () => {
+    expect(await hasUnusedLocalSetupToken(executor, a, EMAIL)).toBe(false);
+    await bootstrapAdmin(executor, a, input());
+    expect(await hasUnusedLocalSetupToken(executor, a, '  Admin@Example.TEST ')).toBe(true);
+    expect(await hasUnusedLocalSetupToken(executor, a, OTHER_EMAIL)).toBe(false);
+    expect(await hasUnusedLocalSetupToken(executor, b, EMAIL)).toBe(false);
+  });
+
+  it('does not report an SSO-only account or a cleared or completed setup', async () => {
+    await bootstrapSsoAdmin(executor, a, {
+      subject: { type: 'email', value: EMAIL },
+      userId: input().userId,
+      grantId: input().grantId,
+      roleIds: ROLE_IDS,
+      now: NOW,
+    });
+    expect(await hasUnusedLocalSetupToken(executor, a, EMAIL)).toBe(false);
+    await bootstrapAdmin(executor, a, input());
+    await run(
+      'UPDATE local_login SET setup_hash = NULL, setup_expires_at = NULL WHERE org_id = ?',
+      a.orgId,
+    );
+    expect(await hasUnusedLocalSetupToken(executor, a, EMAIL)).toBe(false);
+    await run(
+      'UPDATE local_login SET setup_hash = ?, setup_expires_at = ?, password_hash = ? WHERE org_id = ?',
+      HASH_1,
+      SETUP_EXPIRES,
+      PASSWORD_HASH,
+      a.orgId,
+    );
+    expect(await hasUnusedLocalSetupToken(executor, a, EMAIL)).toBe(false);
+  });
+
+  it('rejects an invalid email before reading', async () => {
+    const record = recording(executor);
+    await expect(hasUnusedLocalSetupToken(record.executor, a, 'invalid')).rejects.toThrow(
+      TypeError,
+    );
+    expect(record.calls).toEqual({ all: 0, batch: 0 });
+  });
 });

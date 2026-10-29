@@ -7,6 +7,7 @@ import * as authPrimitives from '@package-broker/core/auth/primitives';
 import type { ScalarStatement, StatementResult } from '@package-broker/core/db/port';
 import { isoTimestamp, systemClock, ulid } from '@package-broker/core/ids';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
+import * as adminRepository from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import {
   openMigratedDatabase,
@@ -1245,6 +1246,13 @@ it('SSO email bootstrap completes without token delivery, local credentials or i
   expect(sink.diagnostic).toHaveBeenCalledWith(
     expect.stringContaining('configuration is not validated here'),
   );
+  expect(JSON.stringify(sink.diagnostic.mock.calls) + output().stderr).not.toContain(
+    'unused local setup token',
+  );
+  expect(await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file) })).toBe(0);
+  expect(generateToken).toHaveBeenCalledTimes(1);
+  expect(hashToken).toHaveBeenCalledTimes(1);
+  expect(hashToken).toHaveBeenCalledWith(generateToken.mock.results[0]?.value);
 });
 
 it('SSO group CLI bootstrap seeds the provider grant without a user or local enrollment', async () => {
@@ -1313,9 +1321,17 @@ it.each(['enabled', 'disabled', undefined] as const)(
     const harness = await createHarness({
       override: (call) => {
         if (call === 2) {
-          expect(messages[0]).toContain(`mode is ${localAuth ?? 'unknown'}`);
-          expect(messages[0]).toContain('does not enable');
-          expect(messages[0]).toContain('unusable while it is disabled');
+          if (localAuth === 'enabled') {
+            expect(messages).toEqual([]);
+          } else {
+            expect(messages[0]).toContain(`mode is ${localAuth ?? 'unknown'}`);
+            expect(messages[0]).toContain('does not enable');
+            expect(messages[0]).toContain(
+              localAuth === 'disabled'
+                ? 'setup token cannot be used until local sign-in is enabled'
+                : 'unusable while it is disabled',
+            );
+          }
           checked = true;
         }
         return undefined;
@@ -1356,6 +1372,15 @@ it('SSO rerun warns about unused setup tokens before mutation and preserves them
   ).toBe(0);
   const before = await sqliteQuery(file, 'SELECT * FROM local_login');
   const diagnostics: string[] = [];
+  const original = adminRepository.bootstrapSsoAdmin;
+  let checked = false;
+  vi.spyOn(adminRepository, 'bootstrapSsoAdmin').mockImplementationOnce(async (...args) => {
+    expect(diagnostics).toContainEqual(
+      expect.stringContaining('existing unused local setup token unchanged'),
+    );
+    checked = true;
+    return original(...args);
+  });
   expect(
     (
       await bootstrapAdmin(
@@ -1364,18 +1389,18 @@ it('SSO rerun warns about unused setup tokens before mutation and preserves them
       )
     ).state,
   ).toBe('sso_complete');
-  expect(diagnostics).toContainEqual(
-    expect.stringContaining('existing unused local setup token unchanged'),
-  );
+  expect(checked).toBe(true);
   expect(await sqliteQuery(file, 'SELECT * FROM local_login')).toEqual(before);
 });
 
 it('reset-local warns about revocation before the operation and ignores ambient Worker mode', async () => {
+  let checked = false;
   const harness = await createHarness({
     override: (call) => {
       if (call === 2) {
         expect(output().stderr).toContain('mode is unknown');
         expect(output().stderr).toContain('revokes all sessions');
+        checked = true;
       }
       return undefined;
     },
@@ -1385,6 +1410,7 @@ it('reset-local warns about revocation before the operation and ignores ambient 
     expect(
       await runAdminResetLocal({ email: EMAIL, target: cloudflareTarget(harness.fetch) }),
     ).toBe(8);
+    expect(checked).toBe(true);
   } finally {
     vi.unstubAllEnvs();
     await harness.database.close();
@@ -1422,7 +1448,7 @@ it('SSO failures preserve exit codes and redact request data', async () => {
 it('SSO lost mutation response reports unknown without token output', async () => {
   const harness = await createHarness({
     override: (call) => {
-      if (call === 2) return Promise.reject(new Error(SENTINEL));
+      if (call === 3) return Promise.reject(new Error(SENTINEL));
       return undefined;
     },
   });

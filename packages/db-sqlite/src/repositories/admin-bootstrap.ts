@@ -133,6 +133,26 @@ function userIdOf(ctx: OrgContext, email: string) {
     .where('target.email', '=', email);
 }
 
+export async function hasUnusedLocalSetupToken(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  rawEmail: string,
+): Promise<boolean> {
+  const email = requireEmail(rawEmail);
+  const rows = await executor.all(
+    scalar(
+      db
+        .selectFrom('local_login')
+        .select('local_login.user_id')
+        .where('local_login.org_id', '=', ctx.orgId)
+        .where('local_login.user_id', '=', userIdOf(ctx, email))
+        .where('local_login.password_hash', 'is', null)
+        .where('local_login.setup_hash', 'is not', null),
+    ),
+  );
+  return rows.length > 0;
+}
+
 function adminRoleIdOf(ctx: OrgContext) {
   return db
     .selectFrom('role')

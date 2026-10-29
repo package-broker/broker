@@ -163,8 +163,27 @@ describe('GitHub plugin wiring', () => {
           return Response.json({
             total_count: 120,
             repositories: [
-              { owner: { login: 'acme' }, name: 'lib', archived: false, default_branch: 'main' },
-              { owner: { login: 'acme' }, name: 'old', archived: true, default_branch: 'main' },
+              {
+                id: 101,
+                fork: false,
+                visibility: 'private',
+                topics: ['php'],
+                pushed_at: '2026-10-28T00:00:00Z',
+                owner: { login: 'acme' },
+                name: 'lib',
+                archived: false,
+                default_branch: 'main',
+              },
+              {
+                id: 102,
+                fork: true,
+                visibility: 'internal',
+                pushed_at: null,
+                owner: { login: 'acme' },
+                name: 'old',
+                archived: true,
+                default_branch: 'main',
+              },
             ],
           });
         }
@@ -185,13 +204,22 @@ describe('GitHub plugin wiring', () => {
     expect(await provider.discoverRepositories!(ctx, credential, '2')).toEqual({
       repositories: [
         {
-          id: 'acme/lib',
+          id: 101,
+          fork: false,
+          visibility: 'private',
+          defaultBranch: 'main',
+          topics: ['php'],
+          pushedAt: '2026-10-28T00:00:00Z',
           name: 'acme/lib',
           url: 'https://github.com/acme/lib.git',
           archived: false,
         },
         {
-          id: 'acme/old',
+          id: 102,
+          fork: true,
+          visibility: 'internal',
+          defaultBranch: 'main',
+          pushedAt: null,
           name: 'acme/old',
           url: 'https://github.com/acme/old.git',
           archived: true,
@@ -199,21 +227,12 @@ describe('GitHub plugin wiring', () => {
       ],
       next: '3',
     });
-    expect(grants).toEqual([
-      { permissions: { metadata: 'read' } },
-      { repositories: ['lib'], permissions: { contents: 'read', metadata: 'read' } },
-    ]);
-    expect(calls).toEqual([
-      '/app/installations/42/access_tokens',
-      '/installation/repositories',
-      '/app/installations/42/access_tokens',
-      '/repos/acme/lib/contents/composer.json',
-      '/repos/acme/lib/contents/package.json',
-    ]);
+    expect(grants).toEqual([{ permissions: { metadata: 'read' } }]);
+    expect(calls).toEqual(['/app/installations/42/access_tokens', '/installation/repositories']);
     await expect(
       provider.discoverRepositories!({ ...ctx, org: orgContext('org-b') }, credential, null),
     ).rejects.toMatchObject({ name: 'DiscoveryError', code: 'invalid_request' });
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(2);
   });
 
   it('rejects discovery without runtime capabilities', async () => {

@@ -1,12 +1,18 @@
 import { GITHUB_API_VERSION, UpstreamError } from '@package-broker/core/plugin';
 import type {
+  SourceProvider,
   DiscoveryCandidate as ExistingCandidate,
   PlanEntry,
   PolicyFetch,
   SkipReason,
   UpstreamCredential,
 } from '@package-broker/core/plugin';
+import { globMatch } from './filters.js';
 import { InstallationTokenError, type InstallationTokens } from './installation-token.js';
+
+type DiscoveredRepository = Awaited<
+  ReturnType<NonNullable<SourceProvider['discoverRepositories']>>
+>['repositories'][number];
 
 export const PAGE_SIZE = 49;
 
@@ -82,12 +88,13 @@ const MANIFESTS = [
   ['package.json', 'npm'],
 ] as const;
 
-interface Listed {
+interface Listed extends Omit<DiscoveredRepository, 'name'> {
+  readonly repositoryName: string;
   readonly owner: string;
-  readonly name: string;
   readonly fullName: string;
   readonly archived: boolean;
-  readonly branch: string;
+  readonly defaultBranch: string;
+  readonly visibility: 'public' | 'private' | 'internal';
 }
 
 type Manifest =
@@ -98,31 +105,6 @@ type Manifest =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function globMatch(pattern: string, name: string): boolean {
-  const p = pattern.toLowerCase();
-  const n = name.toLowerCase();
-  let pi = 0;
-  let ni = 0;
-  let star = -1;
-  let mark = 0;
-  while (ni < n.length) {
-    if (pi < p.length && p[pi] === '*') {
-      star = pi++;
-      mark = ni;
-    } else if (pi < p.length && (p[pi] === '?' || p[pi] === n[ni])) {
-      pi++;
-      ni++;
-    } else if (star >= 0) {
-      pi = star + 1;
-      ni = ++mark;
-    } else {
-      return false;
-    }
-  }
-  while (pi < p.length && p[pi] === '*') pi++;
-  return pi === p.length;
 }
 
 function patternMatcher(pattern: string | undefined): (name: string) => boolean {
@@ -192,11 +174,38 @@ function parseListing(text: string | undefined): { listed: Listed[]; total: numb
     throw new DiscoveryError('invalid_response');
   }
   if (parsed.repositories.length > PAGE_SIZE) throw new DiscoveryError('invalid_response');
+  const ids = new Set<number>();
   const listed = parsed.repositories.map((entry: unknown): Listed => {
     if (!isRecord(entry) || !isRecord(entry.owner)) throw new DiscoveryError('invalid_response');
-    const { name, archived, default_branch: branch } = entry;
+    const {
+      id,
+      name,
+      archived,
+      fork,
+      visibility,
+      topics,
+      pushed_at: pushedAt,
+      default_branch: branch,
+    } = entry;
     const owner = entry.owner.login;
     if (
+      typeof id !== 'number' ||
+      !Number.isSafeInteger(id) ||
+      id <= 0 ||
+      typeof fork !== 'boolean' ||
+      typeof visibility !== 'string' ||
+      !['public', 'private', 'internal'].includes(visibility) ||
+      (topics !== undefined &&
+        (!Array.isArray(topics) ||
+          topics.length > 100 ||
+          topics.some(
+            (topic: unknown) => typeof topic !== 'string' || !/^[a-z0-9-]{1,50}$/.test(topic),
+          ))) ||
+      (pushedAt !== null &&
+        (typeof pushedAt !== 'string' ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(pushedAt) ||
+          !Number.isFinite(Date.parse(pushedAt)) ||
+          new Date(pushedAt).toISOString().replace('.000Z', 'Z') !== pushedAt)) ||
       typeof name !== 'string' ||
       !REPOSITORY_NAME.test(name) ||
       /^\.+$/.test(name) ||
@@ -208,7 +217,21 @@ function parseListing(text: string | undefined): { listed: Listed[]; total: numb
     ) {
       throw new DiscoveryError('invalid_response');
     }
-    return { owner, name, fullName: `${owner}/${name}`, archived, branch };
+    if (ids.has(id)) throw new DiscoveryError('invalid_response');
+    ids.add(id);
+    return {
+      id,
+      owner,
+      repositoryName: name,
+      fullName: `${owner}/${name}`,
+      url: `https://github.com/${owner}/${name}.git`,
+      archived,
+      fork,
+      visibility: visibility as Listed['visibility'],
+      defaultBranch: branch,
+      pushedAt: pushedAt as string | null,
+      ...(topics === undefined ? {} : { topics: topics as string[] }),
+    };
   });
   return { listed, total };
 }
@@ -224,7 +247,7 @@ function normaliseOrigin(text: string): string {
   }
 }
 
-function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
+function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions, listingOnly = false) {
   const { tokens, fetch, installationId, exists } = options;
   const apiOrigin = normaliseOrigin(options.apiOrigin ?? 'https://api.github.com');
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -257,6 +280,7 @@ function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
       url,
       method: 'GET',
       purpose: 'api',
+      ...(listingOnly ? { redirects: 'error' as const } : {}),
       headers: { accept, 'x-github-api-version': GITHUB_API_VERSION },
       credential: credential(bearer),
       destinations: [apiOrigin],
@@ -283,11 +307,15 @@ function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
     );
   }
 
-  async function manifest(repo: Listed, file: string, bearer: string): Promise<Manifest> {
+  async function manifest(
+    repo: Pick<Listed, 'owner' | 'repositoryName' | 'defaultBranch'>,
+    file: string,
+    bearer: string,
+  ): Promise<Manifest> {
     let response: Awaited<ReturnType<PolicyFetch>>;
     try {
       response = await request(
-        `${apiOrigin}/repos/${repo.owner}/${repo.name}/contents/${file}?ref=${encodeURIComponent(repo.branch)}`,
+        `${apiOrigin}/repos/${repo.owner}/${repo.repositoryName}/contents/${file}?ref=${encodeURIComponent(repo.defaultBranch)}`,
         'application/vnd.github.raw+json',
         bearer,
         MAX_MANIFEST_BYTES,
@@ -347,7 +375,10 @@ function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
     };
   }
 
-  async function plan(repo: Listed, bearer: string): Promise<readonly PlanEntry[]> {
+  async function plan(
+    repo: Pick<Listed, 'owner' | 'repositoryName' | 'fullName' | 'archived' | 'defaultBranch'>,
+    bearer: string,
+  ): Promise<readonly PlanEntry[]> {
     if (repo.archived) return [skipped(repo.fullName, 'archived')];
     const found: PlanEntry[] = [];
     for (const [file, ecosystem] of MANIFESTS) {
@@ -422,10 +453,10 @@ export async function planRepository(options: PlanRepositoryOptions): Promise<Pl
   const entries = await client.plan(
     {
       owner,
-      name,
+      repositoryName: name,
       fullName: options.repository,
       archived: parsed.archived,
-      branch: parsed.default_branch,
+      defaultBranch: parsed.default_branch,
     },
     contentsToken.value,
   );
@@ -434,31 +465,24 @@ export async function planRepository(options: PlanRepositoryOptions): Promise<Pl
 
 export async function discoverRepositories(options: DiscoveryOptions): Promise<DiscoveryPage> {
   const { tokens, installationId } = options;
-  const { apiOrigin, request, failure, plan } = discoveryClient(options);
+  const { plan } = discoveryClient(options);
   if (options.pattern !== undefined && !PATTERN.test(options.pattern)) {
     throw new DiscoveryError('invalid_request');
   }
   if (options.cursor !== undefined && !CURSOR.test(options.cursor)) {
     throw new DiscoveryError('invalid_request');
   }
-  const page = options.cursor === undefined ? 1 : Number(options.cursor);
   const matches = patternMatcher(options.pattern);
 
-  const listingToken = await tokens.forListing(installationId);
-  const listingResponse = await request(
-    `${apiOrigin}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
-    'application/vnd.github+json',
-    listingToken.value,
-    MAX_LISTING_BYTES,
-  );
-  if (listingResponse.status !== 200) throw failure(listingResponse);
-  const { listed, total } = parseListing(await readCapped(listingResponse.body, MAX_LISTING_BYTES));
-  const nextCursor = page * PAGE_SIZE < total ? String(page + 1) : null;
+  const { listed, nextCursor } = await listPage({
+    ...options,
+    timeoutMs: options.timeoutMs ?? 30_000,
+  });
 
   const entries = new Map<string, readonly PlanEntry[]>();
   const candidates: Listed[] = [];
   for (const repo of listed) {
-    if (!matches(repo.name)) {
+    if (!matches(repo.repositoryName)) {
       entries.set(repo.fullName, [skipped(repo.fullName, 'filtered_out')]);
     } else if (repo.archived) {
       entries.set(repo.fullName, [skipped(repo.fullName, 'archived')]);
@@ -470,7 +494,7 @@ export async function discoverRepositories(options: DiscoveryOptions): Promise<D
   if (candidates.length > 0) {
     const contentsToken = await tokens.forRepositories(
       installationId,
-      candidates.map((repo) => repo.name),
+      candidates.map((repo) => repo.repositoryName),
     );
 
     for (const repo of candidates) {
@@ -488,4 +512,51 @@ function skipped(
   packageName: string | null = null,
 ): PlanEntry {
   return { repository, ecosystem, packageName, action: 'skipped', reason };
+}
+
+export type RepositoryListingOptions = Omit<DiscoveryOptions, 'exists' | 'pattern'>;
+
+async function listPage(options: RepositoryListingOptions) {
+  const { tokens, installationId } = options;
+  const { apiOrigin, request, failure } = discoveryClient(
+    {
+      ...options,
+      timeoutMs: options.timeoutMs ?? 15_000,
+      exists: () => false,
+    },
+    true,
+  );
+  if (options.cursor !== undefined && !CURSOR.test(options.cursor))
+    throw new DiscoveryError('invalid_request');
+  const page = options.cursor === undefined ? 1 : Number(options.cursor);
+  const listingToken = await tokens.forListing(installationId);
+  const listingResponse = await request(
+    `${apiOrigin}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
+    'application/vnd.github+json',
+    listingToken.value,
+    MAX_LISTING_BYTES,
+  );
+  if (listingResponse.status !== 200) throw failure(listingResponse);
+  const { listed, total } = parseListing(await readCapped(listingResponse.body, MAX_LISTING_BYTES));
+  const nextCursor = page * PAGE_SIZE < total ? String(page + 1) : null;
+
+  return { listed, nextCursor };
+}
+
+export async function listRepositories(options: RepositoryListingOptions) {
+  const { listed, nextCursor } = await listPage(options);
+  return {
+    repositories: listed.map((repo): DiscoveredRepository => ({
+      id: repo.id,
+      name: repo.fullName,
+      url: repo.url,
+      archived: repo.archived,
+      fork: repo.fork,
+      visibility: repo.visibility,
+      defaultBranch: repo.defaultBranch,
+      pushedAt: repo.pushedAt,
+      ...(repo.topics === undefined ? {} : { topics: repo.topics }),
+    })),
+    next: nextCursor,
+  };
 }

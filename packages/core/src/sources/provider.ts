@@ -186,10 +186,15 @@ export interface DistStream {
 }
 
 export interface DiscoveredRepository {
-  readonly id: string;
+  readonly id: number;
   readonly name: string;
   readonly url: string;
-  readonly archived?: boolean;
+  readonly archived: boolean;
+  readonly fork: boolean;
+  readonly visibility?: 'public' | 'private' | 'internal';
+  readonly defaultBranch?: string;
+  readonly topics?: readonly string[];
+  readonly pushedAt: string | null;
 }
 
 export interface RepositoryPage {
@@ -444,6 +449,56 @@ export interface ProviderRegistry {
   forSource(source: ProviderSource): SourceProvider;
 }
 
+function validDiscoveredRepository(value: unknown): value is DiscoveredRepository {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const repo = value as Record<string, unknown>;
+  const bounded = (text: unknown, max: number) =>
+    typeof text === 'string' && text.length > 0 && text.length <= max;
+  const pushedAt = repo.pushedAt;
+  return (
+    typeof repo.id === 'number' &&
+    Number.isSafeInteger(repo.id) &&
+    repo.id > 0 &&
+    bounded(repo.name, 255) &&
+    !Array.from(repo.name as string).some((character) => character.charCodeAt(0) < 32) &&
+    bounded(repo.url, 2048) &&
+    typeof repo.archived === 'boolean' &&
+    typeof repo.fork === 'boolean' &&
+    (repo.visibility === undefined ||
+      ['public', 'private', 'internal'].includes(repo.visibility as string)) &&
+    (repo.defaultBranch === undefined || bounded(repo.defaultBranch, 255)) &&
+    (repo.topics === undefined ||
+      (Array.isArray(repo.topics) &&
+        repo.topics.length <= 100 &&
+        Array.from(repo.topics).every((topic: unknown) => bounded(topic, 50)))) &&
+    (pushedAt === null ||
+      (typeof pushedAt === 'string' &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(pushedAt) &&
+        Number.isFinite(Date.parse(pushedAt)) &&
+        new Date(pushedAt).toISOString() ===
+          pushedAt.replace(/Z$/, pushedAt.includes('.') ? 'Z' : '.000Z')))
+  );
+}
+
+function copyDiscoveredRepository(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const { id, name, url, archived, fork, visibility, defaultBranch, topics, pushedAt } =
+    value as DiscoveredRepository;
+  return {
+    id,
+    name,
+    url,
+    archived,
+    fork,
+    pushedAt,
+    ...(visibility === undefined ? {} : { visibility }),
+    ...(defaultBranch === undefined ? {} : { defaultBranch }),
+    ...(topics === undefined
+      ? {}
+      : { topics: Array.isArray(topics) ? Object.freeze(Array.from(topics)) : topics }),
+  };
+}
+
 /** Returned providers check their own answers so a consumer cannot skip the contract. */
 function guardProvider(provider: SourceProvider): SourceProvider {
   const { listPackages, discoverRepositories } = provider;
@@ -466,8 +521,30 @@ function guardProvider(provider: SourceProvider): SourceProvider {
     ...(discoverRepositories === undefined
       ? {}
       : {
-          discoverRepositories: (ctx, credential, cursor) =>
-            discoverRepositories.call(provider, ctx, credential, cursor),
+          async discoverRepositories(ctx, credential, cursor) {
+            const page = await discoverRepositories.call(provider, ctx, credential, cursor);
+            const invalid = () =>
+              new ProviderRegistryError('invalid', provider.sourceTypes[0]!, provider.id);
+            if (typeof page !== 'object' || page === null || Array.isArray(page)) {
+              throw invalid();
+            }
+            const { repositories, next } = page;
+            if (
+              !Array.isArray(repositories) ||
+              (next !== null && (typeof next !== 'string' || next.length > 2048))
+            ) {
+              throw invalid();
+            }
+            const copied = Array.from(repositories, copyDiscoveredRepository);
+            if (!copied.every(validDiscoveredRepository)) throw invalid();
+            if (new Set(copied.map((repository) => repository.id)).size !== copied.length) {
+              throw invalid();
+            }
+            return Object.freeze({
+              repositories: Object.freeze(copied.map((repository) => Object.freeze(repository))),
+              next,
+            });
+          },
         }),
     openDist: (ctx, source, target) => provider.openDist(ctx, source, target),
     async describe(ctx, source, name, options) {

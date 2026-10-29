@@ -21,7 +21,7 @@ import {
 import { createGithubProvider, GithubProviderError, RateLimited } from './provider.js';
 import { GithubRestError } from './token-rest.js';
 import { githubWebhookVerifier } from './webhook.js';
-import { discoverRepositories, DiscoveryError } from './discovery.js';
+import { listRepositories, DiscoveryError } from './discovery.js';
 
 export default function github() {
   return definePlugin({
@@ -215,24 +215,11 @@ export default function github() {
             const binding = await tokensFor(ctx, credential);
             if (binding === undefined || binding === null)
               throw new DiscoveryError('invalid_request');
-            const page = await discoverRepositories({
+            return listRepositories({
               ...binding,
               fetch: fetchFor(ctx),
-              exists: () => false,
               ...(cursor === null ? {} : { cursor }),
             });
-            const repositories = new Map(
-              page.entries.map((entry) => [
-                entry.repository,
-                {
-                  id: entry.repository,
-                  name: entry.repository,
-                  url: `https://github.com/${entry.repository}.git`,
-                  archived: entry.reason === 'archived',
-                },
-              ]),
-            );
-            return { repositories: [...repositories.values()], next: page.nextCursor };
           },
           webhookVerifier: githubWebhookVerifier,
         },

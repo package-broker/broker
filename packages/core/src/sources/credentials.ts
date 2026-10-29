@@ -1,3 +1,4 @@
+import { isCanonicalCredentialTimestamp } from '../db/credentials.js';
 import type { UpstreamCredential } from './policy-fetch.js';
 
 export type CredentialKind =
@@ -44,6 +45,9 @@ export interface GithubAppMaterial extends Redacted {
   readonly appId: string;
   readonly privateKeyPem: string;
   readonly webhookSecret: string;
+  readonly pendingWebhookSecret?: string;
+  readonly previousWebhookSecret?: string;
+  readonly previousUntil?: string;
 }
 export interface NpmTokenMaterial extends Redacted {
   readonly kind: 'npm_token';
@@ -130,6 +134,7 @@ const invalid = (reason: string): CredentialError => new CredentialError('invali
 export function parseCredentialMaterial(
   kind: CredentialKind,
   plaintext: string | Uint8Array,
+  options: { readonly connection?: boolean } = {},
 ): CredentialMaterial {
   const shape = Object.hasOwn(SHAPES, kind) ? SHAPES[kind] : undefined;
   if (shape === undefined) throw invalid('kind');
@@ -147,7 +152,19 @@ export function parseCredentialMaterial(
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
     throw invalid('format');
   const record = parsed as Record<string, unknown>;
-  const expected = Object.keys(shape);
+  const checks = { ...shape };
+  if (kind === 'github_app' && options.connection === true) {
+    if (Object.hasOwn(record, 'pendingWebhookSecret')) checks['pendingWebhookSecret'] = secret;
+  }
+  if (
+    kind === 'github_app' &&
+    options.connection === true &&
+    (Object.hasOwn(record, 'previousWebhookSecret') || Object.hasOwn(record, 'previousUntil'))
+  ) {
+    checks['previousWebhookSecret'] = secret;
+    checks['previousUntil'] = isCanonicalCredentialTimestamp;
+  }
+  const expected = Object.keys(checks);
   if (
     Object.keys(record).length !== expected.length ||
     !expected.every((key) => Object.hasOwn(record, key))
@@ -155,7 +172,7 @@ export function parseCredentialMaterial(
     throw invalid('fields');
   }
   const fields: Record<string, string> = {};
-  for (const [key, check] of Object.entries(shape)) {
+  for (const [key, check] of Object.entries(checks)) {
     const raw = record[key];
     if (typeof raw !== 'string' || LONE_SURROGATE.test(raw)) throw invalid('fields');
     const normalise = Object.hasOwn(NORMALISE, key) ? NORMALISE[key] : undefined;
@@ -163,6 +180,14 @@ export function parseCredentialMaterial(
     if (!check(value)) throw invalid('fields');
     fields[key] = kind === 'header' && key === 'name' ? value.toLowerCase() : value;
   }
+  if (
+    kind === 'github_app' &&
+    (fields['pendingWebhookSecret'] === fields['webhookSecret'] ||
+      fields['previousWebhookSecret'] === fields['webhookSecret'] ||
+      (fields['pendingWebhookSecret'] !== undefined &&
+        fields['pendingWebhookSecret'] === fields['previousWebhookSecret']))
+  )
+    throw invalid('fields');
   Object.freeze(fields);
 
   const material: Record<PropertyKey, unknown> = { kind };
@@ -291,7 +316,16 @@ function pemForms(pem: string): string[] {
   return [...encodedForms(pem), ...encodedForms(pem.replace(/\n$/, ''))];
 }
 
-export function credentialEchoProbe(material: CredentialMaterial): CredentialEchoProbe {
+export interface GithubConversionSecrets {
+  readonly pem?: string;
+  readonly client_secret?: string;
+  readonly webhook_secret?: string | null;
+}
+
+export function credentialEchoProbe(
+  material: CredentialMaterial,
+  conversion?: GithubConversionSecrets,
+): CredentialEchoProbe {
   assertGenuine(material);
   const candidates: string[] = [];
   const queryParams: string[] = [];
@@ -318,6 +352,20 @@ export function credentialEchoProbe(material: CredentialMaterial): CredentialEch
       break;
     case 'github_app':
       candidates.push(...pemForms(material.privateKeyPem), ...encodedForms(material.webhookSecret));
+      if (material.pendingWebhookSecret !== undefined) {
+        candidates.push(...encodedForms(material.pendingWebhookSecret));
+      }
+      if (material.previousWebhookSecret !== undefined) {
+        candidates.push(...encodedForms(material.previousWebhookSecret));
+      }
+      if (conversion?.pem) {
+        candidates.push(
+          ...pemForms(conversion.pem),
+          ...pemForms(NORMALISE['privateKeyPem']!(conversion.pem)),
+        );
+      }
+      if (conversion?.client_secret) candidates.push(...encodedForms(conversion.client_secret));
+      if (conversion?.webhook_secret) candidates.push(...encodedForms(conversion.webhook_secret));
       break;
     case 'ssh_key':
       candidates.push(...pemForms(material.privateKeyPem));

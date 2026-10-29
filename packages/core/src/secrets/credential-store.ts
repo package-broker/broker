@@ -1,4 +1,8 @@
-import type { CredentialRecord, CredentialRepository } from '../db/credentials.js';
+import {
+  isCanonicalCredentialTimestamp,
+  type CredentialRecord,
+  type CredentialRepository,
+} from '../db/credentials.js';
 import type { OrgContext, Statement } from '../db/port.js';
 import { isoTimestamp, type Clock } from '../ids.js';
 import { SecretDecryptError, credentialAad, type SecretCipher } from './cipher.js';
@@ -27,6 +31,28 @@ export interface CredentialStore {
   ): Promise<{ readonly id: string; readonly statement: Statement }>;
   put(ctx: OrgContext, input: CredentialInput): Promise<string>;
   read(ctx: OrgContext, id: string): Promise<Uint8Array>;
+  readForUpdate(
+    ctx: OrgContext,
+    id: string,
+  ): Promise<{ readonly plaintext: Uint8Array; readonly updatedAt: string }>;
+  /**
+   * Null for a stale timestamp or missing row at preparation. Execution may still miss the CAS,
+   * updating zero rows without aborting the batch. Precede it with an abort-on-mismatch guard
+   * on the credential token, alongside connection CAS and fence guards, in the same batch.
+   */
+  prepareReplace(
+    ctx: OrgContext,
+    id: string,
+    expectedUpdatedAt: string,
+    plaintext: Uint8Array,
+  ): Promise<Statement | null>;
+  /** False for a stale timestamp or missing row. Plaintext remains owned by the caller. */
+  replaceMaterial(
+    ctx: OrgContext,
+    id: string,
+    expectedUpdatedAt: string,
+    plaintext: Uint8Array,
+  ): Promise<boolean>;
   /**
    * Rows that cannot be opened never stop the page and are never modified: `lost` counts an AAD
    * mismatch or a key version that is not loaded, `failed` any other decryption failure. An
@@ -83,6 +109,22 @@ export function createCredentialStore(deps: CredentialStoreDeps): CredentialStor
     };
   }
 
+  async function sealReplacement(
+    ctx: OrgContext,
+    id: string,
+    expectedUpdatedAt: string,
+    plaintext: Uint8Array,
+  ) {
+    if (!isCanonicalCredentialTimestamp(expectedUpdatedAt))
+      throw new TypeError('Invalid credential timestamp');
+    const row = await repository.get(ctx, id);
+    if (row === null || row.updatedAt !== expectedUpdatedAt) return null;
+    const aad = credentialAad({ id: row.id, orgId: ctx.orgId, kind: row.kind });
+    if (row.aad !== aad) throw new SecretDecryptError('aad_mismatch');
+    const sealed = await cipher.seal(plaintext, aad);
+    return { sealed, now: isoTimestamp(clock.now()) };
+  }
+
   return {
     seal: sealNew,
 
@@ -101,6 +143,37 @@ export function createCredentialStore(deps: CredentialStoreDeps): CredentialStor
       const row = await repository.get(ctx, id);
       if (row === null) throw new CredentialNotFoundError();
       return openRow(ctx, row);
+    },
+
+    async readForUpdate(ctx, id) {
+      const row = await repository.get(ctx, id);
+      if (row === null) throw new CredentialNotFoundError();
+      return { plaintext: await openRow(ctx, row), updatedAt: row.updatedAt };
+    },
+
+    async prepareReplace(ctx, id, expectedUpdatedAt, plaintext) {
+      const replacement = await sealReplacement(ctx, id, expectedUpdatedAt, plaintext);
+      return replacement === null
+        ? null
+        : repository.replaceMaterialStatement(
+            ctx,
+            id,
+            expectedUpdatedAt,
+            replacement.sealed,
+            replacement.now,
+          );
+    },
+
+    async replaceMaterial(ctx, id, expectedUpdatedAt, plaintext) {
+      const replacement = await sealReplacement(ctx, id, expectedUpdatedAt, plaintext);
+      if (replacement === null) return false;
+      return repository.replaceMaterial(
+        ctx,
+        id,
+        expectedUpdatedAt,
+        replacement.sealed,
+        replacement.now,
+      );
     },
 
     async resealBatch(ctx, page) {

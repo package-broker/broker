@@ -1,6 +1,14 @@
 import type { Sealed } from '../secrets/cipher.js';
 import type { OrgContext, Statement } from './port.js';
 
+export function isCanonicalCredentialTimestamp(value: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
+}
+
 export interface CredentialRecord {
   readonly id: string;
   readonly projectId: string | null;
@@ -27,7 +35,10 @@ export interface CredentialRepository {
    * belong to the context organization.
    */
   insert(ctx: OrgContext, row: CredentialRecord & { readonly now: string }): Promise<void>;
-  get(ctx: OrgContext, id: string): Promise<CredentialRecord | null>;
+  get(
+    ctx: OrgContext,
+    id: string,
+  ): Promise<(CredentialRecord & { readonly updatedAt: string }) | null>;
   /** Rows with `key_version < version`, ordered by id, after `afterId`. `limit` is an integer from 1 to 500. */
   listBelowVersion(
     ctx: OrgContext,
@@ -43,6 +54,26 @@ export interface CredentialRepository {
     ctx: OrgContext,
     id: string,
     expectedVersion: number,
+    sealed: Sealed,
+    now: string,
+  ): Promise<boolean>;
+  /**
+   * Same CAS as replaceMaterial. A CAS miss updates zero rows without aborting the batch.
+   * When composing with other writes, precede it with an abort-on-mismatch guard on the
+   * credential's organization, id and expected updated_at token in the same batch.
+   */
+  replaceMaterialStatement(
+    ctx: OrgContext,
+    id: string,
+    expectedUpdatedAt: string,
+    sealed: Sealed,
+    now: string,
+  ): Statement;
+  /** Replaces material only if updated_at still matches; preserves id, kind, project and AAD. */
+  replaceMaterial(
+    ctx: OrgContext,
+    id: string,
+    expectedUpdatedAt: string,
     sealed: Sealed,
     now: string,
   ): Promise<boolean>;

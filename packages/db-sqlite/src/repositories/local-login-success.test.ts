@@ -971,6 +971,9 @@ describe('local login audit through the service and database', () => {
       reader: createLocalLoginReader(executor),
       writer,
       credentials: {
+        prepareReplace: () => Promise.reject(new Error('unexpected prepareReplace')),
+        readForUpdate: () => Promise.reject(new Error('unexpected readForUpdate')),
+        replaceMaterial: () => Promise.reject(new Error('unexpected replaceMaterial')),
         seal: () => Promise.reject(new Error('unexpected seal')),
         prepare: () => Promise.reject(new Error('unexpected prepare')),
         resealBatch: () => Promise.reject(new Error('unexpected reseal')),

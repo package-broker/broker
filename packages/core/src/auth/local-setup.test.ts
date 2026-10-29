@@ -137,10 +137,12 @@ async function harness(
     insert: unexpected('insert'),
     get: (_ctx, id) =>
       hooks.readError === null
-        ? Promise.resolve(rows.get(id) ?? null)
+        ? Promise.resolve(rows.has(id) ? { ...rows.get(id)!, updatedAt: NOW } : null)
         : Promise.reject(hooks.readError),
     listBelowVersion: unexpected('listBelowVersion'),
     reseal: unexpected('reseal'),
+    replaceMaterialStatement: unexpected('replaceMaterialStatement'),
+    replaceMaterial: unexpected('replaceMaterial'),
     delete: unexpected('delete'),
   };
   const innerStore = createCredentialStore({

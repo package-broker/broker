@@ -7,6 +7,7 @@ import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/
 import type { SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
 import { sql } from 'kysely';
 import { assertCheck } from '../kysely.js';
+import { createAuditLedgerRepository } from './audit-ledger.js';
 import { auditPendingStatement } from './audit-pending.js';
 
 const columns: readonly {
@@ -42,7 +43,7 @@ export function createAuditSinkRepository(executor: SqlExecutor): AuditSinkRegis
   return {
     async read(ctx) {
       const [chain] = await executor.all<Omit<AuditSinkSnapshot, 'sinks'>>({
-        sql: `SELECT chain_id AS chainId, epoch, mode_generation AS generation, boundary_seq AS boundarySeq,
+        sql: `SELECT chain_id AS chainId, epoch, incarnation, mode_generation AS modeGeneration, boundary_seq AS boundarySeq,
           boundary_prev_hash AS boundaryPrevHash, boundary_reason AS boundaryReason, policy, restore_pending AS restorePending
           FROM audit_chain WHERE org_id = ?`,
         params: [ctx.orgId],
@@ -59,19 +60,15 @@ export function createAuditSinkRepository(executor: SqlExecutor): AuditSinkRegis
       };
     },
     async save(ctx, expected, change) {
-      if (
-        change.generation < expected.generation ||
-        expected.sinks.some((sink) => sink.generation > change.generation)
-      )
-        return false;
+      if (expected.sinks.some((sink) => sink.generation > change.generation)) return false;
       const statements: Statement[] = [
         {
-          sql: `UPDATE audit_chain SET mode_generation = ? WHERE org_id = ? AND mode_generation = ?
+          sql: `UPDATE audit_chain SET incarnation = incarnation WHERE org_id = ? AND mode_generation = ? AND incarnation = ?
           AND chain_id = ? AND epoch = ? AND boundary_seq = ? AND boundary_prev_hash = ? AND policy = ? AND restore_pending = ?`,
           params: [
-            change.generation,
             ctx.orgId,
-            expected.generation,
+            expected.modeGeneration,
+            expected.incarnation,
             expected.chainId,
             expected.epoch,
             expected.boundarySeq,
@@ -107,27 +104,31 @@ export function createAuditSinkRepository(executor: SqlExecutor): AuditSinkRegis
           params: [ctx.orgId, ...values(sink), change.now],
         });
       }
-      // Control rows have count 0; 0002 requires a positive range even before first custody.
+      const ledger = createAuditLedgerRepository(executor);
       for (const rebind of change.rebinds) {
-        statements.push(
-          {
-            sql: `INSERT INTO audit_ledger (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count, sink_id,
-            reason_code, policy, mode_generation, actor_type, actor_id, created_at)
-            VALUES (?, ?, 'rebind', ?, ?, 1, ?, 0, ?, 'receiver_changed', ?, ?, 'system', NULL, ?)`,
-            params: [
-              ctx.orgId,
-              rebind.id,
-              expected.chainId,
-              expected.epoch,
-              Math.max(1, rebind.custodySeq),
-              rebind.sinkId,
-              expected.policy,
-              change.generation,
-              change.now,
-            ],
-          },
-          auditPendingStatement(ctx, rebind.event),
-        );
+        if (rebind.custodySeq >= rebind.fromSeq) {
+          statements.push(
+            ...ledger.statements(ctx, [
+              {
+                id: rebind.id,
+                kind: 'rebind',
+                chainId: expected.chainId,
+                epoch: expected.epoch,
+                fromSeq: rebind.fromSeq,
+                toSeq: rebind.custodySeq,
+                count: 0,
+                sinkId: rebind.sinkId,
+                reasonCode: 'receiver_changed',
+                policy: expected.policy,
+                modeGeneration: expected.modeGeneration,
+                actorType: 'system',
+                actorId: null,
+                createdAt: change.now,
+              },
+            ]),
+          );
+        }
+        statements.push(auditPendingStatement(ctx, rebind.event));
       }
       try {
         await executor.batch(statements);

@@ -1,4 +1,6 @@
 import type { OrgContext } from '../../db/port.js';
+import { assertPluginId } from '../../platform/jobs.js';
+import { auditWireMarker } from '../wire.js';
 import { ulid } from '../../ids.js';
 import { auditEvent, type AuditEvent } from '../actions.js';
 import type { AuditBatchV1, AuditMarkerV1 } from '../plugin-api.js';
@@ -36,7 +38,8 @@ export interface AuditSinkState {
 export interface AuditSinkSnapshot {
   readonly chainId: string;
   readonly epoch: number;
-  readonly generation: number;
+  readonly incarnation: number;
+  readonly modeGeneration: number;
   readonly boundarySeq: number;
   readonly boundaryPrevHash: string;
   readonly boundaryReason: string | null;
@@ -48,6 +51,7 @@ export interface AuditSinkSnapshot {
 export interface AuditSinkRebind {
   readonly id: string;
   readonly sinkId: string;
+  readonly fromSeq: number;
   readonly custodySeq: number;
   readonly event: AuditEvent;
 }
@@ -71,10 +75,14 @@ function validate(generation: number, sinks: readonly AuditSinkRegistration[]): 
   if (!Number.isSafeInteger(generation) || generation < 0)
     throw new TypeError('Invalid audit generation');
   for (const sink of sinks) {
+    try {
+      assertPluginId(sink.pluginId);
+    } catch {
+      throw new TypeError('Invalid audit sink registration');
+    }
     if (
       !/^[a-z0-9-]{1,32}(?![\s\S])/.test(sink.id) ||
       !/^[a-z0-9-]{1,32}(?![\s\S])/.test(sink.kind) ||
-      !/^[a-z0-9][a-z0-9-]{0,63}(?![\s\S])/.test(sink.pluginId) ||
       ids.has(sink.id) ||
       (sink.destination !== null &&
         (!/^[a-f0-9]{64}(?![\s\S])/.test(sink.destination.receiverFingerprint) ||
@@ -86,7 +94,10 @@ function validate(generation: number, sinks: readonly AuditSinkRegistration[]): 
   }
 }
 
-function representationOf(raw: string | null): { registryMarkers?: readonly AuditMarkerV1[] } {
+function representationOf(raw: string | null): {
+  custodyFromSeq?: number;
+  registryMarkers?: readonly AuditMarkerV1[];
+} {
   try {
     const parsed: unknown = JSON.parse(raw ?? '{}');
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error();
@@ -96,14 +107,21 @@ function representationOf(raw: string | null): { registryMarkers?: readonly Audi
   }
 }
 
+function custodyStart(sink: AuditSinkState): number {
+  const start = representationOf(sink.inflightRepr).custodyFromSeq;
+  if (typeof start !== 'number' || !Number.isSafeInteger(start) || start < 1)
+    throw new Error('Audit sink custody start unavailable');
+  return start;
+}
+
 /** An unregistered configured sink is a zero watermark, including before boot reconciliation. */
 export function auditSinkPruneProgress(
   configuredIds: readonly string[],
   sinks: readonly AuditSinkState[],
-): number {
+): number | null {
   if (configuredIds.some((id) => !sinks.some((sink) => sink.id === id))) return 0;
   const holding = sinks.filter((sink) => sink.state !== 'inactive' && sink.state !== 'retired');
-  return holding.length === 0 ? 0 : Math.min(...holding.map((sink) => sink.progressSeq));
+  return holding.length === 0 ? null : Math.min(...holding.map((sink) => sink.progressSeq));
 }
 
 /** Callers must finish reconciliation before starting delivery; contended boots retry. */
@@ -117,11 +135,10 @@ export async function reconcileAuditSinks(
   validate(generation, configured);
   const timestamp = now.toISOString();
   const snapshot = await port.read(ctx);
-  if (
-    generation < snapshot.generation ||
-    snapshot.sinks.some((sink) => sink.generation > generation)
-  )
-    return 'stale';
+  if (snapshot.sinks.some((sink) => sink.generation > generation)) return 'stale';
+  for (const sink of snapshot.sinks) {
+    if (sink.state !== 'retired') custodyStart(sink);
+  }
   const next: AuditSinkState[] = [];
   const rebinds: AuditSinkRebind[] = [];
   for (const registration of configured) {
@@ -133,10 +150,13 @@ export async function reconcileAuditSinks(
     }
     const destination = registration.destination;
     const changed =
-      destination !== null &&
       old !== undefined &&
+      old.state !== 'retired' &&
       old.receiverFingerprint !== '' &&
-      destination.receiverFingerprint !== old.receiverFingerprint;
+      ((destination !== null && destination.receiverFingerprint !== old.receiverFingerprint) ||
+        registration.pluginId !== old.pluginId ||
+        registration.kind !== old.kind ||
+        registration.durableAck !== old.durableAck);
     const start = snapshot.boundarySeq - 1;
     const fresh = old === undefined || old.state === 'retired';
     let sink: AuditSinkState = {
@@ -144,45 +164,64 @@ export async function reconcileAuditSinks(
       pluginId: registration.pluginId,
       kind: registration.kind,
       generation,
-      receiverFingerprint: destination?.receiverFingerprint ?? old?.receiverFingerprint ?? '',
+      receiverFingerprint:
+        destination?.receiverFingerprint ?? (fresh ? '' : old.receiverFingerprint),
       durableAck: registration.durableAck,
-      activationSource: destination?.activationSource ?? old?.activationSource ?? 'none',
+      activationSource: destination?.activationSource ?? (fresh ? 'none' : old.activationSource),
       state:
-        snapshot.restorePending || (!fresh && old?.blockedReason != null)
-          ? 'blocked'
-          : destination === null
-            ? 'inactive'
+        destination === null
+          ? 'inactive'
+          : snapshot.restorePending || (!fresh && old?.blockedReason != null)
+            ? 'blocked'
             : 'active',
       progressSeq: fresh ? start : old.progressSeq,
       progressHash: fresh ? snapshot.boundaryPrevHash : old.progressHash,
       custodySeq: fresh ? start : old.custodySeq,
-      blockedReason: snapshot.restorePending ? 'fork' : fresh ? null : old.blockedReason,
+      blockedReason:
+        (!fresh ? old.blockedReason : null) ?? (snapshot.restorePending ? 'fork' : null),
       inflightFrom: fresh ? null : old.inflightFrom,
       inflightTo: fresh ? null : old.inflightTo,
       inflightBody: fresh ? null : old.inflightBody,
-      inflightRepr: fresh ? null : old.inflightRepr,
+      inflightRepr: fresh
+        ? JSON.stringify({ custodyFromSeq: snapshot.boundarySeq })
+        : old.inflightRepr,
     };
     const markers: AuditMarkerV1[] = [];
-    const identity = () => ({
-      chainId: snapshot.chainId,
-      epoch: snapshot.epoch,
-      markerId: ulid(now.getTime()),
-    });
-    if (fresh && snapshot.boundarySeq > 1)
-      markers.push({
-        ...identity(),
-        kind: 'boundary',
-        boundarySeq: snapshot.boundarySeq,
-        boundaryPrevHash: snapshot.boundaryPrevHash,
-        provenance: snapshot.boundaryReason ?? 'retained_suffix',
-      });
+    const scope = { chainId: snapshot.chainId, epoch: snapshot.epoch };
+    if (fresh && snapshot.boundarySeq > 1) {
+      if (
+        !['backfill', 'prune', 'capacity', 'chain_reset', 'epoch_bump'].includes(
+          snapshot.boundaryReason ?? '',
+        )
+      )
+        throw new TypeError('Invalid audit boundary reason');
+      markers.push(
+        await auditWireMarker(scope, {
+          kind: 'boundary',
+          boundarySeq: snapshot.boundarySeq,
+          boundaryPrevHash: snapshot.boundaryPrevHash,
+          provenance: snapshot.boundaryReason!,
+        }),
+      );
+    }
     if (changed) {
-      markers.push({
-        ...identity(),
-        kind: 'receiver_changed',
-        oldFingerprint: old.receiverFingerprint,
-        newFingerprint: sink.receiverFingerprint,
-      });
+      if (old.receiverFingerprint !== sink.receiverFingerprint)
+        markers.push(
+          await auditWireMarker(scope, {
+            kind: 'receiver_changed',
+            custodySeq: old.custodySeq,
+            oldFingerprint: old.receiverFingerprint,
+            newFingerprint: sink.receiverFingerprint,
+          }),
+        );
+      const fromSeq = custodyStart(old);
+      sink = {
+        ...sink,
+        inflightRepr: JSON.stringify({
+          ...representationOf(sink.inflightRepr),
+          custodyFromSeq: old.custodySeq + 1,
+        }),
+      };
       const event = auditEvent({
         id: ulid(now.getTime()),
         now: timestamp,
@@ -198,8 +237,8 @@ export async function reconcileAuditSinks(
         changes: {
           operation: { new: 'rebind' },
           sink_id: { new: sink.id },
-          from_seq: { new: 0 },
-          to_seq: { new: old.custodySeq },
+          from_seq: { new: fromSeq },
+          ...(old.custodySeq >= fromSeq ? { to_seq: { new: old.custodySeq } } : {}),
           generation: { new: generation },
           reason_code: { new: 'receiver_changed' },
         },
@@ -208,6 +247,7 @@ export async function reconcileAuditSinks(
       rebinds.push({
         id: ulid(now.getTime()),
         sinkId: sink.id,
+        fromSeq,
         custodySeq: old.custodySeq,
         event: event.event,
       });
@@ -228,16 +268,36 @@ export async function reconcileAuditSinks(
           inflightFrom: sink.progressSeq + 1,
           inflightTo: sink.progressSeq + 1,
           inflightBody: JSON.stringify(batch),
-          inflightRepr: JSON.stringify({ v: 1, purpose: 'registry_markers' }),
+          inflightRepr: JSON.stringify({
+            ...representationOf(sink.inflightRepr),
+            v: 1,
+            purpose: 'registry_markers',
+          }),
         };
       } else {
         // Delivery drains registryMarkers before retrying the frozen body; representation fields stay intact.
         const representation = representationOf(sink.inflightRepr);
+        const queued = [...(representation.registryMarkers ?? []), ...markers];
+        const receiverChanges = queued.filter((marker) => marker.kind === 'receiver_changed');
+        const first = receiverChanges[0];
+        const last = receiverChanges.at(-1);
+        const collapsed =
+          first && last
+            ? await auditWireMarker(scope, {
+                kind: 'receiver_changed',
+                custodySeq: old!.custodySeq,
+                oldFingerprint: first.oldFingerprint,
+                newFingerprint: last.newFingerprint,
+              })
+            : null;
         sink = {
           ...sink,
           inflightRepr: JSON.stringify({
             ...representation,
-            registryMarkers: [...(representation.registryMarkers ?? []), ...markers],
+            registryMarkers: [
+              ...queued.filter((marker) => marker.kind !== 'receiver_changed'),
+              ...(collapsed ? [collapsed] : []),
+            ],
           }),
         };
       }

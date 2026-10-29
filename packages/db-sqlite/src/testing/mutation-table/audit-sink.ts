@@ -43,8 +43,8 @@ const save: ContractCase = {
     const ownChain = await plain.read(own);
     await context.executor.batch([
       {
-        sql: 'UPDATE audit_chain SET chain_id = ? WHERE org_id = ?',
-        params: [ownChain.chainId, foreign.orgId],
+        sql: 'UPDATE audit_chain SET chain_id = ?, incarnation = ? WHERE org_id = ?',
+        params: [ownChain.chainId, ownChain.incarnation, foreign.orgId],
       },
     ]);
     const before = await plain.read(foreign);

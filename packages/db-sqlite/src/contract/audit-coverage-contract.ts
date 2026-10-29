@@ -42,9 +42,9 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     callers: ['core/src/audit/sinks/registry.ts'],
     repository: 'audit-sink',
     batchGuard:
-      'executor.batch; chain generation, boundary, restore state and sink snapshot compare-and-swap',
+      'executor.batch; chain identity, incarnation, mode generation, boundary, restore state and sink snapshot compare-and-swap',
     cardinality:
-      '1 per receiver fingerprint change; replay, inactive, stale and unchanged registrations stage zero',
+      '1 per receiver configuration change; retired reuse, stale and unchanged registrations stage zero',
     stagingCalls: 1,
   },
   {

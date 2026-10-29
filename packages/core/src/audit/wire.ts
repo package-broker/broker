@@ -12,7 +12,8 @@ export interface AuditWireIdentity {
 }
 
 type MarkerFields<T> = T extends AuditMarkerV1
-  ? Omit<T, 'chainId' | 'epoch' | 'orgId' | 'markerId'>
+  ? Omit<T, 'chainId' | 'epoch' | 'orgId' | 'markerId'> &
+      (T extends { kind: 'receiver_changed' } ? { readonly custodySeq: number } : unknown)
   : never;
 export type AuditMarkerFields = MarkerFields<AuditMarkerV1>;
 
@@ -76,7 +77,9 @@ function safeFields(row: Record<string, unknown>): void {
   assert(validEnvelope(row));
 }
 
-async function markerId(scope: AuditWireIdentity, fields: AuditMarkerFields): Promise<string> {
+type MarkerScope = Omit<AuditWireIdentity, 'orgId'> & { readonly orgId?: string };
+
+async function markerId(scope: MarkerScope, fields: AuditMarkerFields): Promise<string> {
   let position: readonly unknown[];
   switch (fields.kind) {
     case 'boundary':
@@ -95,7 +98,8 @@ async function markerId(scope: AuditWireIdentity, fields: AuditMarkerFields): Pr
       position = [fields.lastCommonSeq];
       break;
     case 'receiver_changed':
-      position = [fields.oldFingerprint, fields.newFingerprint];
+      assert(seq(fields.custodySeq));
+      position = [fields.custodySeq, fields.oldFingerprint, fields.newFingerprint];
       break;
     default:
       throw new TypeError('Invalid audit wire data');
@@ -114,12 +118,13 @@ async function markerId(scope: AuditWireIdentity, fields: AuditMarkerFields): Pr
   return '00' + encoded;
 }
 
-/** Creates an unsigned marker with a stable identity and projects only its declared fields. */
+/** Creates a stable unsigned marker; receiver custodySeq affects identity but is not emitted. */
 export async function auditWireMarker(
-  scope: AuditWireIdentity,
+  scope: MarkerScope,
   fields: AuditMarkerFields,
 ): Promise<AuditMarkerV1> {
-  identity(scope);
+  assert((id(scope.chainId) || /^[0-9a-f]{32}$/.test(scope.chainId)) && seq(scope.epoch));
+  if (scope.orgId !== undefined) assert(id(scope.orgId));
   const base = {
     chainId: scope.chainId,
     epoch: scope.epoch,
@@ -197,6 +202,7 @@ export async function auditWireMarker(
         reasonCode: fields.reasonCode,
       });
     case 'withheld':
+      assert(typeof scope.orgId === 'string' && id(scope.orgId));
       safeFields(fields as unknown as Record<string, unknown>);
       assert(fields.reasonCode === WITHHELD_REASON);
       return Object.freeze({

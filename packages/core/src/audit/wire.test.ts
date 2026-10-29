@@ -386,7 +386,12 @@ const markers: AuditMarkerFields[] = [
     reasonCode: 'content_unavailable',
   },
   { kind: 'fork', lastCommonSeq: 0, lastCommonHash: '0'.repeat(64) },
-  { kind: 'receiver_changed', oldFingerprint: 'a'.repeat(64), newFingerprint: 'b'.repeat(64) },
+  {
+    kind: 'receiver_changed',
+    custodySeq: 0,
+    oldFingerprint: 'a'.repeat(64),
+    newFingerprint: 'b'.repeat(64),
+  },
   { kind: 'head', seq: 0, hash: '0'.repeat(64), boundarySeq: 1 },
 ];
 
@@ -401,8 +406,10 @@ describe('audit wire markers', () => {
         sourceIp: '127.0.0.1',
         tokenSelector: 'abcdefghijkl',
       } as unknown as AuditMarkerFields);
+      const projected = { ...fields } as Record<string, unknown>;
+      delete projected['custodySeq'];
       expect(output).toEqual({
-        ...fields,
+        ...projected,
         markerId: expect.any(String),
         chainId: scope.chainId,
         epoch: 1,
@@ -467,6 +474,30 @@ describe('audit wire markers', () => {
       ).rejects.toThrow('Invalid audit wire data');
     },
   );
+
+  it('builds stable markers for database chain identities without an organization field', async () => {
+    const scope = { chainId: 'a'.repeat(32), epoch: 1 };
+    const fields = {
+      kind: 'receiver_changed',
+      custodySeq: 0,
+      oldFingerprint: 'b'.repeat(64),
+      newFingerprint: 'c'.repeat(64),
+    } as const;
+    const marker = await auditWireMarker(scope, fields);
+    expect(marker).toEqual(await auditWireMarker(scope, fields));
+    expect(isUlid(marker.markerId)).toBe(true);
+    expect(marker).not.toHaveProperty('orgId');
+    expect(marker).not.toHaveProperty('custodySeq');
+    expect((await auditWireMarker(scope, { ...fields, custodySeq: 1 })).markerId).not.toBe(
+      marker.markerId,
+    );
+    await expect(auditWireMarker({ ...scope, chainId: 'bad' }, fields)).rejects.toThrow(
+      new TypeError('Invalid audit wire data'),
+    );
+    await expect(auditWireMarker(scope, markers[4]!)).rejects.toThrow(
+      new TypeError('Invalid audit wire data'),
+    );
+  });
 
   it.each([
     { ...markers[0], provenance: 'hidden@example.test' },

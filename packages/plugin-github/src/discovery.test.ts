@@ -7,6 +7,7 @@ import {
   PAGE_SIZE,
   discoverRepositories,
   planRepository,
+  listRepositories,
   type PlanRepositoryOptions,
   type DiscoveryOptions,
 } from './discovery.js';
@@ -66,7 +67,12 @@ function setup(repos: readonly Repo[], files: Files, total = repos.length) {
         return new Response(
           JSON.stringify({
             total_count: total,
-            repositories: repos.map((repo) => ({
+            repositories: repos.map((repo, i) => ({
+              id: i + 1,
+              fork: false,
+              visibility: 'private',
+              topics: ['php'],
+              pushed_at: null,
               name: repo.name,
               full_name: `acme/${repo.name}`,
               owner: { login: 'acme' },
@@ -274,7 +280,12 @@ describe('discoverRepositories', () => {
           return new Response(
             JSON.stringify({
               total_count: 120,
-              repositories: repos.map((repo) => ({
+              repositories: repos.map((repo, i) => ({
+                id: i + 1,
+                fork: false,
+                visibility: 'private',
+                topics: ['php'],
+                pushed_at: null,
                 name: repo.name,
                 owner: { login: 'acme' },
                 archived: false,
@@ -668,5 +679,133 @@ describe('planRepository', () => {
     });
     await expect(planOne(harness)).rejects.toMatchObject({ code: 'rate_limited', retryAfter: 30 });
     expect(harness.observed).toHaveLength(1);
+  });
+});
+
+describe('listRepositories', () => {
+  it.each([
+    ['listing', 15_000],
+    ['discovery', 30_000],
+  ] as const)('%s preserves its default timeout', async (operation, timeoutMs) => {
+    const harness = setup([{ name: 'old', archived: true }], {});
+    const fetch: typeof harness.fetch = async (request) => {
+      expect(request.timeoutMs).toBe(timeoutMs);
+      return harness.fetch(request);
+    };
+    const options = { tokens: harness.tokens, fetch, installationId: '42' };
+    if (operation === 'listing') await listRepositories(options);
+    else await discoverRepositories({ ...options, exists: () => false });
+    expect(harness.calls).toHaveLength(1);
+  });
+  it('keeps metadata and lists without any manifest probes or contents grants', async () => {
+    const harness = setup([{ name: 'lib' }, { name: 'old', archived: true }], {}, 120);
+    const page = await listRepositories({
+      tokens: harness.tokens,
+      fetch: harness.fetch,
+      installationId: '42',
+    });
+    expect(page).toEqual({
+      repositories: [
+        {
+          id: 1,
+          name: 'acme/lib',
+          url: 'https://github.com/acme/lib.git',
+          archived: false,
+          fork: false,
+          visibility: 'private',
+          defaultBranch: 'main',
+          topics: ['php'],
+          pushedAt: null,
+        },
+        {
+          id: 2,
+          name: 'acme/old',
+          url: 'https://github.com/acme/old.git',
+          archived: true,
+          fork: false,
+          visibility: 'private',
+          defaultBranch: 'main',
+          topics: ['php'],
+          pushedAt: null,
+        },
+      ],
+      next: '2',
+    });
+    expect(harness.minted).toEqual([null]);
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  const valid = {
+    id: 123,
+    name: 'lib',
+    owner: { login: 'acme' },
+    archived: false,
+    fork: true,
+    visibility: 'internal',
+    default_branch: 'main',
+    pushed_at: '2026-10-28T12:00:00Z',
+  };
+  async function listing(entry: object, duplicate = false) {
+    const harness = setup([], {});
+    const fetch = createPolicyFetch({
+      fetchImpl: async () =>
+        Response.json({ total_count: 1, repositories: duplicate ? [entry, entry] : [entry] }),
+      policy: createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+      userAgent: 'package-broker-test',
+    });
+    return listRepositories({ tokens: harness.tokens, fetch, installationId: '42' });
+  }
+  it('rejects duplicate repository ids within a page', async () => {
+    await expect(listing(valid, true)).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+  it('distinguishes missing topics from a definitive empty list', async () => {
+    expect((await listing(valid)).repositories[0]).not.toHaveProperty('topics');
+    expect((await listing({ ...valid, topics: [] })).repositories[0]).toMatchObject({
+      id: 123,
+      fork: true,
+      visibility: 'internal',
+      topics: [],
+      pushedAt: valid.pushed_at,
+    });
+  });
+  it.each([
+    { id: 0 },
+    { id: -1 },
+    { id: 1.5 },
+    { id: Number.MAX_SAFE_INTEGER + 1 },
+    { id: '123' },
+    { fork: undefined },
+    { visibility: 'secret' },
+    { topics: null },
+    { topics: ['PHP'] },
+    { topics: Array(101).fill('php') },
+    { pushed_at: undefined },
+    { pushed_at: 'invalid' },
+    { pushed_at: '2026-99-28T12:00:00Z' },
+    { pushed_at: '2026-02-31T12:00:00Z' },
+    { visibility: { toString: 'invalid' } },
+  ])('rejects malformed metadata %# with no request data in errors', async (patch) => {
+    const error = await listing({ ...valid, ...patch }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(DiscoveryError);
+    expect((error as Error).message).toBe('GitHub returned an unusable discovery response');
+  });
+  it('rejects redirects for the listing', async () => {
+    const harness = setup([], {});
+    let requests = 0;
+    const fetch = createPolicyFetch({
+      fetchImpl: async () => {
+        requests++;
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://api.github.com/elsewhere' },
+        });
+      },
+      policy: createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+      userAgent: 'package-broker-test',
+    });
+    await expect(
+      listRepositories({ tokens: harness.tokens, fetch, installationId: '42' }),
+    ).rejects.toMatchObject({ code: 'refused', reason: 'redirect_refused' });
+    expect(requests).toBe(1);
   });
 });

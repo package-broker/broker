@@ -448,7 +448,18 @@ describe('guarded providers keep the original receiver', () => {
     }
     discoverRepositories() {
       return Promise.resolve({
-        repositories: [{ id: '1', name: this.#label, url: 'https://example.com/a' }],
+        repositories: [
+          {
+            id: 1,
+            name: this.#label,
+            url: 'https://example.com/a',
+            archived: false,
+            fork: false,
+            visibility: 'private' as const,
+            defaultBranch: 'main',
+            pushedAt: null,
+          },
+        ],
         next: null,
       });
     }
@@ -670,5 +681,159 @@ describe('createPackageDescription: skipped members', () => {
     });
     await drain(description.members);
     expect(description.upstreamComplete).toBe(false);
+  });
+});
+
+describe('guarded repository discovery', () => {
+  const valid = {
+    id: 1,
+    name: 'group/repo',
+    url: 'https://example.com/repo.git',
+    archived: false,
+    fork: false,
+    pushedAt: null,
+  };
+  function discover(repositories: unknown, next: unknown = null) {
+    return discoverPage({ repositories, next });
+  }
+  function discoverPage(page: unknown) {
+    const registry = createProviderRegistry();
+    registry.register({
+      ...provider('git', ['vcs']),
+      discoverRepositories: () => Promise.resolve(page as never),
+    });
+    return registry.get('vcs', 'git').discoverRepositories!(
+      {} as ProviderContext,
+      {} as never,
+      null,
+    );
+  }
+  it('accepts a provider without GitHub-specific optional fields', async () => {
+    await expect(discover([valid])).resolves.toEqual({ repositories: [valid], next: null });
+  });
+  it('rejects duplicate ids within a page', async () => {
+    await expect(discover([valid, { ...valid, name: 'group/other' }])).rejects.toMatchObject({
+      name: 'ProviderRegistryError',
+      code: 'invalid',
+    });
+  });
+  it.each([undefined, 1, {}, [], 'a'.repeat(2049)])(
+    'rejects invalid next cursor %#',
+    async (next) => {
+      await expect(discoverPage({ repositories: [valid], next })).rejects.toMatchObject({
+        name: 'ProviderRegistryError',
+        code: 'invalid',
+      });
+    },
+  );
+  it.each([null, '', 'cursor', 'a'.repeat(2048)])(
+    'accepts bounded next cursor %#',
+    async (next) => {
+      await expect(discover([valid], next)).resolves.toMatchObject({ next });
+    },
+  );
+  it.each(Array.from({ length: 32 }, (_, code) => code))(
+    'rejects C0 name character %i',
+    async (code) => {
+      await expect(
+        discover([{ ...valid, name: `group/repo${String.fromCharCode(code)}` }]),
+      ).rejects.toMatchObject({ name: 'ProviderRegistryError', code: 'invalid' });
+    },
+  );
+  it('copies and freezes the page, repositories and topics', async () => {
+    const topics = ['topic'];
+    const repository = { ...valid, topics };
+    const repositories = [repository];
+    const original = { repositories, next: 'cursor' };
+    const page = await discoverPage(original);
+    original.next = 'changed';
+    repository.name = 'changed';
+    topics[0] = 'changed';
+    repositories.push({ ...valid, topics: [] });
+    expect(page).toEqual({ repositories: [{ ...valid, topics: ['topic'] }], next: 'cursor' });
+    expect(page).not.toBe(original);
+    expect(page.repositories).not.toBe(repositories);
+    expect(page.repositories[0]).not.toBe(repository);
+    expect(page.repositories[0]?.topics).not.toBe(topics);
+    expect(Object.isFrozen(page)).toBe(true);
+    expect(Object.isFrozen(page.repositories)).toBe(true);
+    expect(Object.isFrozen(page.repositories[0])).toBe(true);
+    expect(Object.isFrozen(page.repositories[0]?.topics)).toBe(true);
+  });
+  it('captures provider getters once before validating and returning their values', async () => {
+    const reads = new Map<string, number>();
+    function getters(values: Record<string, unknown>) {
+      return Object.defineProperties(
+        {},
+        Object.fromEntries(
+          Object.entries(values).map(([key, value]) => [
+            key,
+            {
+              get() {
+                const count = (reads.get(key) ?? 0) + 1;
+                reads.set(key, count);
+                return count === 1 ? value : undefined;
+              },
+            },
+          ]),
+        ),
+      );
+    }
+    const values = { ...valid, visibility: 'private', defaultBranch: 'main', topics: ['topic'] };
+    const repository = getters(values);
+    const original = getters({ repositories: [repository], next: 'cursor' });
+    const page = await discoverPage(original);
+    expect(page).toEqual({ repositories: [values], next: 'cursor' });
+    expect(page).toEqual({ repositories: [values], next: 'cursor' });
+    expect([...reads.values()]).toEqual(Array(reads.size).fill(1));
+  });
+  it('accepts bounded optional metadata and ISO timestamps', async () => {
+    const repository = {
+      ...valid,
+      visibility: 'internal',
+      defaultBranch: 'main',
+      topics: ['topic'],
+      pushedAt: '2026-10-28T12:00:00.123Z',
+    };
+    await expect(discover([repository])).resolves.toMatchObject({ repositories: [repository] });
+  });
+  it.each([
+    null,
+    [],
+    1,
+    ...[
+      { id: 0 },
+      { id: -1 },
+      { id: 1.5 },
+      { id: Number.MAX_SAFE_INTEGER + 1 },
+      { id: '1' },
+      { name: '' },
+      { name: 1 },
+      { name: 'a'.repeat(256) },
+      { url: null },
+      { url: '' },
+      { url: 'a'.repeat(2049) },
+      { archived: undefined },
+      { archived: 0 },
+      { fork: undefined },
+      { fork: 'false' },
+      { visibility: null },
+      { visibility: 'secret' },
+      { defaultBranch: null },
+      { defaultBranch: '' },
+      { defaultBranch: 'a'.repeat(256) },
+      { topics: null },
+      { topics: [1] },
+      { topics: ['a'.repeat(51)] },
+      { topics: Array(101).fill('a') },
+      { pushedAt: undefined },
+      { pushedAt: 0 },
+      { pushedAt: 'invalid' },
+      { pushedAt: '2026-02-31T12:00:00Z' },
+      { pushedAt: '2026-10-28' },
+    ].map((patch) => ({ ...valid, ...patch })),
+  ])('fails closed on a bad entry %# after a valid entry', async (entry) => {
+    await expect(discover([valid, entry])).rejects.toBeInstanceOf(ProviderRegistryError);
+    await expect(discover([valid, entry])).rejects.toMatchObject({ code: 'invalid' });
   });
 });

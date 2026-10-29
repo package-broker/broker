@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
 import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
-import { bindSnapshot, exportDatabase } from './sql-snapshot.test.support.js';
+import { exportDatabase, restoreDatabase } from './sql-snapshot.test.support.js';
 
 describe('length-preserving logical text export', () => {
   it.each([60_000, 262_000])(
@@ -41,7 +41,7 @@ describe('length-preserving logical text export', () => {
           expect(Buffer.byteLength(sql)).toBeLessThan(100_000);
           expect(params.length).toBeLessThanOrEqual(100);
         }
-        await restored.executor.batch(bindSnapshot(JSON.parse(JSON.stringify(statements))));
+        await restoreDatabase(restored.executor, JSON.parse(JSON.stringify(statements)));
         for (const org of ['org-a', 'org-b']) {
           const query = {
             sql: 'SELECT hex(description) AS description, hex(metadata_json) AS metadata FROM publisher_content WHERE org_id = ? ORDER BY rowid',
@@ -83,7 +83,7 @@ describe('length-preserving logical text export', () => {
         { sql: 'INSERT INTO publisher_content VALUES (?, ?)', params: ['org-b', 'foreign\0text'] },
       ]);
       const statements = await exportDatabase(source.executor);
-      await restored.executor.batch(bindSnapshot(JSON.parse(JSON.stringify(statements))));
+      await restoreDatabase(restored.executor, JSON.parse(JSON.stringify(statements)));
       for (const org of ['org-a', 'org-b']) {
         const sql =
           'SELECT typeof(value) AS type, hex(value) AS bytes FROM publisher_content WHERE org_id = ? ORDER BY rowid';

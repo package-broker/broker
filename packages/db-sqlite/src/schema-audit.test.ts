@@ -74,6 +74,7 @@ const declared: { [T in AuditTable]: Nullability<T> } = {
     actor_type: 1,
     actor_id: 0,
     created_at: 1,
+    superseded_by: 0,
   },
 };
 let database: MigratedDatabase;
@@ -121,8 +122,29 @@ it('audit enums and generated defaults have their published database types', () 
     | 'unblock'
     | 'restore_confirmed'
     | 'export'
+    | 'replay'
+    | 'chain_reset'
+    | 'epoch_bump'
   >();
   expectTypeOf<Insertable<AuditChainTable>['chain_id']>().toEqualTypeOf<string | undefined>();
   expectTypeOf<Insertable<AuditSinkTable>['attempt']>().toEqualTypeOf<number | undefined>();
   expectTypeOf<Insertable<AuditLedgerTable>['created_at']>().toEqualTypeOf<string | undefined>();
+});
+
+it('indexes visible ledger rows with partial indexes that exclude superseded gaps', async () => {
+  const indexes = await database.executor.all<{ name: string; sql: string }>({
+    sql: "SELECT name, sql FROM sqlite_schema WHERE type = 'index' AND name IN ('audit_ledger_open_gap', 'audit_ledger_visible', 'audit_ledger_superseded') ORDER BY name",
+    params: [],
+  });
+  expect(indexes.map(({ name, sql }) => [name, sql.slice(sql.indexOf(' ON '))])).toEqual([
+    [
+      'audit_ledger_open_gap',
+      " ON audit_ledger (org_id, chain_id, epoch, reason_code, sink_id, from_seq, id) WHERE kind = 'gap' AND superseded_by IS NULL",
+    ],
+    [
+      'audit_ledger_superseded',
+      ' ON audit_ledger (org_id, superseded_by) WHERE superseded_by IS NOT NULL',
+    ],
+    ['audit_ledger_visible', ' ON audit_ledger (org_id, id) WHERE superseded_by IS NULL'],
+  ]);
 });

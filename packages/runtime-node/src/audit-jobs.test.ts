@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { SafeLogRecord, ObsRecord } from '@package-broker/core/platform/observability';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
+import { createJobLoop } from './jobs/loop.js';
 import { createNodeServer } from './index.js';
 
 describe('Node audit job registration', () => {
@@ -39,8 +40,41 @@ describe('Node audit job registration', () => {
       ).toEqual([
         ['core:vulnerability-sync:v1', { everySeconds: 300 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
-        ['core:audit-verify:v1', { everySeconds: 86400 }],
+        ['core:audit-verify:v1', { everySeconds: 86400, resourceKey: 'audit-verify' }],
       ]);
+      await executor.batch([
+        {
+          sql: `INSERT INTO job_schedule (org_id, name, every_seconds, next_run_at, enabled)
+          VALUES (?, 'core:audit-verify:v1', 86400, '2000-01-01T00:00:00.000Z', 1)`,
+          params: [org.orgId],
+        },
+      ]);
+      const loop = createJobLoop({
+        executor,
+        jobs: kernel.registration.jobs,
+        scope: (job, claim) => kernel.jobScope(job, claim),
+        observability: {
+          log: () => undefined,
+          counter: () => undefined,
+          histogram: () => undefined,
+        },
+      });
+      loop.start();
+      try {
+        await vi.waitFor(
+          async () => {
+            expect(
+              await executor.all({
+                sql: "SELECT resource_key FROM job WHERE org_id = ? AND type = 'core:audit-verify:v1' AND idempotency_key LIKE 'schedule:%'",
+                params: [org.orgId],
+              }),
+            ).toEqual([{ resource_key: 'audit-verify' }]);
+          },
+          { timeout: 10_000 },
+        );
+      } finally {
+        await loop.stop();
+      }
       await executor.batch([
         {
           sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)

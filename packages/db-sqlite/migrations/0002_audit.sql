@@ -70,15 +70,46 @@ CREATE TABLE audit_ledger (
   actor_type       TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),
   actor_id         TEXT,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  superseded_by    TEXT,
   PRIMARY KEY (org_id, id),
   FOREIGN KEY (org_id) REFERENCES organization (id),
-  FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id)
+  FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id),
+  CHECK (superseded_by IS NULL OR (kind = 'gap' AND superseded_by <> id))
 ) STRICT;
 
 CREATE TRIGGER audit_ledger_append_only_update
 BEFORE UPDATE ON audit_ledger
+WHEN NOT (
+  OLD.superseded_by IS NULL AND NEW.superseded_by IS NOT NULL
+  AND NEW.org_id = OLD.org_id AND NEW.id = OLD.id AND NEW.kind = OLD.kind
+  AND NEW.chain_id = OLD.chain_id AND NEW.epoch = OLD.epoch
+  AND NEW.from_seq = OLD.from_seq AND NEW.to_seq = OLD.to_seq AND NEW.count = OLD.count
+  AND NEW.sink_id IS OLD.sink_id AND NEW.reason_code = OLD.reason_code AND NEW.policy = OLD.policy
+  AND NEW.mode_generation = OLD.mode_generation AND NEW.actor_type = OLD.actor_type
+  AND NEW.actor_id IS OLD.actor_id AND NEW.created_at = OLD.created_at
+  AND EXISTS (
+    SELECT 1 FROM audit_ledger AS covering
+    WHERE covering.org_id = OLD.org_id AND covering.id = NEW.superseded_by
+      AND covering.kind = 'gap' AND covering.superseded_by IS NULL
+      AND covering.chain_id = OLD.chain_id AND covering.epoch = OLD.epoch
+      AND covering.reason_code = OLD.reason_code AND covering.sink_id IS OLD.sink_id
+      AND covering.from_seq <= OLD.from_seq AND covering.to_seq >= OLD.to_seq
+      AND covering.to_seq - covering.from_seq > OLD.to_seq - OLD.from_seq
+      AND covering.count >= OLD.count + COALESCE((
+        SELECT sum(hidden.count) FROM audit_ledger AS hidden
+        WHERE hidden.org_id = OLD.org_id AND hidden.superseded_by = NEW.superseded_by
+      ), 0)
+  )
+)
 BEGIN
   SELECT RAISE(ABORT, 'audit ledger is append-only');
+END;
+
+CREATE TRIGGER audit_ledger_insert_visible
+BEFORE INSERT ON audit_ledger
+WHEN NEW.superseded_by IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'audit ledger rows are inserted visible');
 END;
 
 CREATE TRIGGER audit_ledger_append_only_delete
@@ -90,6 +121,9 @@ END;
 CREATE INDEX audit_sink_state ON audit_sink (org_id, state);
 CREATE INDEX audit_ledger_range ON audit_ledger (org_id, from_seq, to_seq);
 CREATE INDEX audit_ledger_sink ON audit_ledger (org_id, sink_id, from_seq);
+CREATE INDEX audit_ledger_open_gap ON audit_ledger (org_id, chain_id, epoch, reason_code, sink_id, from_seq, id) WHERE kind = 'gap' AND superseded_by IS NULL;
+CREATE INDEX audit_ledger_visible ON audit_ledger (org_id, id) WHERE superseded_by IS NULL;
+CREATE INDEX audit_ledger_superseded ON audit_ledger (org_id, superseded_by) WHERE superseded_by IS NOT NULL;
 
 INSERT INTO audit_chain (org_id, head_seq, head_hash, boundary_seq, boundary_prev_hash, boundary_reason, journal_rows, journal_bytes)
 SELECT o.id,

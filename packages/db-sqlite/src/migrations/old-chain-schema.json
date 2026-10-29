@@ -86,6 +86,12 @@
     },
     {
       "type": "index",
+      "name": "audit_ledger_open_gap",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_open_gap ON audit_ledger (org_id, chain_id, epoch, reason_code, sink_id, from_seq, id) WHERE kind = 'gap' AND superseded_by IS NULL"
+    },
+    {
+      "type": "index",
       "name": "audit_ledger_range",
       "tbl_name": "audit_ledger",
       "sql": "CREATE INDEX audit_ledger_range ON audit_ledger (org_id, from_seq, to_seq)"
@@ -95,6 +101,18 @@
       "name": "audit_ledger_sink",
       "tbl_name": "audit_ledger",
       "sql": "CREATE INDEX audit_ledger_sink ON audit_ledger (org_id, sink_id, from_seq)"
+    },
+    {
+      "type": "index",
+      "name": "audit_ledger_superseded",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_superseded ON audit_ledger (org_id, superseded_by) WHERE superseded_by IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "audit_ledger_visible",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_visible ON audit_ledger (org_id, id) WHERE superseded_by IS NULL"
     },
     {
       "type": "index",
@@ -778,7 +796,7 @@
       "type": "table",
       "name": "audit_ledger",
       "tbl_name": "audit_ledger",
-      "sql": "CREATE TABLE audit_ledger (\n  org_id           TEXT NOT NULL,\n  id               TEXT NOT NULL,\n  kind             TEXT NOT NULL CHECK (kind IN ('skipped', 'uncertain', 'gap', 'withheld', 'mode_change', 'policy_change', 'cutover', 'rebind', 'retire', 'unblock', 'restore_confirmed', 'export', 'replay', 'chain_reset', 'epoch_bump')),\n  chain_id         TEXT NOT NULL CHECK (length(chain_id) = 32 AND chain_id NOT GLOB '*[^0-9a-f]*'),\n  epoch            INTEGER NOT NULL CHECK (epoch BETWEEN 0 AND 9007199254740991),\n  from_seq         INTEGER NOT NULL CHECK (from_seq BETWEEN 1 AND 9007199254740991),\n  to_seq           INTEGER NOT NULL CHECK (to_seq BETWEEN from_seq AND 9007199254740991),\n  count            INTEGER NOT NULL CHECK (count >= 0),\n  sink_id          TEXT CHECK (sink_id IS NULL OR (length(sink_id) BETWEEN 1 AND 32 AND sink_id NOT GLOB '*[^a-z0-9-]*')),\n  reason_code      TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 32 AND substr(reason_code, 1, 1) GLOB '[a-z]' AND reason_code NOT GLOB '*[^a-z_]*'),\n  policy           TEXT NOT NULL CHECK (policy IN ('availability', 'required')),\n  mode_generation  INTEGER NOT NULL CHECK (mode_generation BETWEEN 0 AND 9007199254740991),\n  actor_type       TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id         TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (org_id, id),\n  FOREIGN KEY (org_id) REFERENCES organization (id),\n  FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id)\n) STRICT"
+      "sql": "CREATE TABLE audit_ledger (\n  org_id           TEXT NOT NULL,\n  id               TEXT NOT NULL,\n  kind             TEXT NOT NULL CHECK (kind IN ('skipped', 'uncertain', 'gap', 'withheld', 'mode_change', 'policy_change', 'cutover', 'rebind', 'retire', 'unblock', 'restore_confirmed', 'export', 'replay', 'chain_reset', 'epoch_bump')),\n  chain_id         TEXT NOT NULL CHECK (length(chain_id) = 32 AND chain_id NOT GLOB '*[^0-9a-f]*'),\n  epoch            INTEGER NOT NULL CHECK (epoch BETWEEN 0 AND 9007199254740991),\n  from_seq         INTEGER NOT NULL CHECK (from_seq BETWEEN 1 AND 9007199254740991),\n  to_seq           INTEGER NOT NULL CHECK (to_seq BETWEEN from_seq AND 9007199254740991),\n  count            INTEGER NOT NULL CHECK (count >= 0),\n  sink_id          TEXT CHECK (sink_id IS NULL OR (length(sink_id) BETWEEN 1 AND 32 AND sink_id NOT GLOB '*[^a-z0-9-]*')),\n  reason_code      TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 32 AND substr(reason_code, 1, 1) GLOB '[a-z]' AND reason_code NOT GLOB '*[^a-z_]*'),\n  policy           TEXT NOT NULL CHECK (policy IN ('availability', 'required')),\n  mode_generation  INTEGER NOT NULL CHECK (mode_generation BETWEEN 0 AND 9007199254740991),\n  actor_type       TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id         TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  superseded_by    TEXT,\n  PRIMARY KEY (org_id, id),\n  FOREIGN KEY (org_id) REFERENCES organization (id),\n  FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id),\n  CHECK (superseded_by IS NULL OR (kind = 'gap' AND superseded_by <> id))\n) STRICT"
     },
     {
       "type": "table",
@@ -1108,7 +1126,13 @@
       "type": "trigger",
       "name": "audit_ledger_append_only_update",
       "tbl_name": "audit_ledger",
-      "sql": "CREATE TRIGGER audit_ledger_append_only_update\nBEFORE UPDATE ON audit_ledger\nBEGIN\n  SELECT RAISE(ABORT, 'audit ledger is append-only');\nEND"
+      "sql": "CREATE TRIGGER audit_ledger_append_only_update\nBEFORE UPDATE ON audit_ledger\nWHEN NOT (\n  OLD.superseded_by IS NULL AND NEW.superseded_by IS NOT NULL\n  AND NEW.org_id = OLD.org_id AND NEW.id = OLD.id AND NEW.kind = OLD.kind\n  AND NEW.chain_id = OLD.chain_id AND NEW.epoch = OLD.epoch\n  AND NEW.from_seq = OLD.from_seq AND NEW.to_seq = OLD.to_seq AND NEW.count = OLD.count\n  AND NEW.sink_id IS OLD.sink_id AND NEW.reason_code = OLD.reason_code AND NEW.policy = OLD.policy\n  AND NEW.mode_generation = OLD.mode_generation AND NEW.actor_type = OLD.actor_type\n  AND NEW.actor_id IS OLD.actor_id AND NEW.created_at = OLD.created_at\n  AND EXISTS (\n    SELECT 1 FROM audit_ledger AS covering\n    WHERE covering.org_id = OLD.org_id AND covering.id = NEW.superseded_by\n      AND covering.kind = 'gap' AND covering.superseded_by IS NULL\n      AND covering.chain_id = OLD.chain_id AND covering.epoch = OLD.epoch\n      AND covering.reason_code = OLD.reason_code AND covering.sink_id IS OLD.sink_id\n      AND covering.from_seq <= OLD.from_seq AND covering.to_seq >= OLD.to_seq\n      AND covering.to_seq - covering.from_seq > OLD.to_seq - OLD.from_seq\n      AND covering.count >= OLD.count + COALESCE((\n        SELECT sum(hidden.count) FROM audit_ledger AS hidden\n        WHERE hidden.org_id = OLD.org_id AND hidden.superseded_by = NEW.superseded_by\n      ), 0)\n  )\n)\nBEGIN\n  SELECT RAISE(ABORT, 'audit ledger is append-only');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "audit_ledger_insert_visible",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE TRIGGER audit_ledger_insert_visible\nBEFORE INSERT ON audit_ledger\nWHEN NEW.superseded_by IS NOT NULL\nBEGIN\n  SELECT RAISE(ABORT, 'audit ledger rows are inserted visible');\nEND"
     },
     {
       "type": "trigger",
@@ -1309,6 +1333,30 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 0,
+      "name": "audit_ledger_superseded",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 1,
+      "name": "audit_ledger_visible",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 2,
+      "name": "audit_ledger_open_gap",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 3,
       "name": "audit_ledger_sink",
       "unique": 0,
       "origin": "c",
@@ -1316,7 +1364,7 @@
     },
     {
       "tbl_name": "audit_ledger",
-      "seq": 1,
+      "seq": 4,
       "name": "audit_ledger_range",
       "unique": 0,
       "origin": "c",
@@ -1324,7 +1372,7 @@
     },
     {
       "tbl_name": "audit_ledger",
-      "seq": 2,
+      "seq": 5,
       "name": "sqlite_autoindex_audit_ledger_1",
       "unique": 1,
       "origin": "pk",

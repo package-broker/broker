@@ -211,6 +211,18 @@ describe('verifyChain', () => {
     expect(await verifyChain([first!, third!])).toEqual({ seq: 3, reason: 'seq_gap' });
   });
 
+  it('checks the explicit retained start sequence', async () => {
+    expect(await verifyChain([row2], ROW1_HASH, 2)).toBeNull();
+    expect(await verifyChain([row2], ROW1_HASH, 1)).toEqual({ seq: 2, reason: 'seq_gap' });
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid start sequence %s',
+    async (seq) => {
+      await expect(verifyChain([], ROW1_HASH, seq)).rejects.toThrow(TypeError);
+    },
+  );
+
   it('honours startPrevHash for a chain that does not start at genesis', async () => {
     expect(await verifyChain([row2], ROW1_HASH)).toBeNull();
   });

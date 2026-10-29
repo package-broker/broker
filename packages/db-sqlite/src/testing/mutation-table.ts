@@ -94,6 +94,7 @@ import { entries as catalogueWriteVersionUpdateEntries } from './mutation-table/
 import { entries as catalogueEpochEntries } from './mutation-table/catalogue-epoch.js';
 import { entries as cacheEpochEntries } from './mutation-table/cache-epoch.js';
 import { entries as sourceEntries } from './mutation-table/source.js';
+import { entries as auditLedgerEntries } from './mutation-table/audit-ledger.js';
 import { entries as auditPendingEntries } from './mutation-table/audit-pending.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
 import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
@@ -206,6 +207,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...projectSourceReadEntries,
   ...projectGrantReadEntries,
   ...auditSinkEntries,
+  ...auditLedgerEntries,
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,

@@ -155,3 +155,10 @@ export async function openMigratedDatabase(
     throw error;
   }
 }
+
+export async function auditLedgerRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditLedgerRepositorySuite: run } = await import('./audit-ledger-suite.js');
+  run(open);
+}

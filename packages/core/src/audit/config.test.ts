@@ -417,6 +417,7 @@ describe('audit build configuration', () => {
   it('never invokes audit or sink accessors', () => {
     let reads = 0;
     const getter = {
+      enumerable: true,
       get: () => {
         reads++;
         throw new Error('secret@example.test');
@@ -458,4 +459,185 @@ describe('audit build configuration', () => {
     expect(brokerAuditProblems(selected, 'node')).toEqual([]);
     expect(brokerAuditWarnings(selected, 'node')).toEqual([]);
   });
+  it.each(['platformPorts', 'node', 'observability', 'endpointEnv', 'headersEnv'])(
+    'refuses telemetry accessors at %s without invoking or disclosing them',
+    (key) => {
+      let reads = 0;
+      const telemetry = { endpointEnv: 'OTLP_ENDPOINT' };
+      const node = { observability: telemetry };
+      const ports = { node };
+      const selected = config(
+        { policy: 'required' },
+        {
+          platformPorts: ports as NonNullable<BrokerConfig['platformPorts']>,
+        },
+      );
+      const owner =
+        key === 'platformPorts'
+          ? selected
+          : key === 'node'
+            ? ports
+            : key === 'observability'
+              ? node
+              : telemetry;
+      Object.defineProperty(owner, key, {
+        get: () => {
+          reads++;
+          throw new Error('Bearer secret@example.test');
+        },
+      });
+      expect(brokerAuditProblems(selected, 'node')).toEqual([
+        'audit: telemetry configuration is malformed',
+        'audit: required policy needs a telemetry OTLP endpoint or alerts.webhookEnv',
+      ]);
+      expect(reads).toBe(0);
+    },
+  );
+
+  it('ignores inherited telemetry properties at every level', () => {
+    const telemetry = { endpointEnv: 'OTLP_ENDPOINT' };
+    const node = { observability: telemetry };
+    const ports = { node };
+    for (const platformPorts of [
+      Object.create(ports),
+      { node: Object.create(node) },
+      { node: { observability: Object.create(telemetry) } },
+    ]) {
+      expect(
+        brokerAuditProblems(config({ policy: 'required' }, { platformPorts }), 'node'),
+      ).toEqual(['audit: required policy needs a telemetry OTLP endpoint or alerts.webhookEnv']);
+    }
+    const selected = config({ policy: 'required' });
+    Object.setPrototypeOf(selected, { platformPorts: ports });
+    expect(brokerAuditProblems(selected, 'node')).toEqual([
+      'audit: required policy needs a telemetry OTLP endpoint or alerts.webhookEnv',
+    ]);
+  });
+
+  it.each([
+    'CUSTOM_OPTION',
+    'custom_option',
+    'TRAIL_SWITCH',
+    'trail_switch',
+    'CUSTOM_ENDPOINT',
+    'custom_endpoint',
+    'CUSTOM_HEADERS',
+    'custom_headers',
+  ])('rejects alert collisions with all declared variables (%s)', (webhookEnv) => {
+    const archive = sink('archive');
+    const plugins = [
+      {
+        ...archive,
+        auditSinks: archive.auditSinks!.map((entry) => ({
+          ...entry,
+          envNames: ['CUSTOM_OPTION'],
+        })),
+      },
+      { ...trail, auditTrail: { ...trail.auditTrail!, toggleEnv: 'TRAIL_SWITCH' } },
+    ];
+    expect(
+      brokerAuditProblems(
+        config(
+          { alerts: { webhookEnv } },
+          {
+            plugins,
+            platformPorts: {
+              node: {
+                observability: {
+                  endpointEnv: 'CUSTOM_ENDPOINT',
+                  headersEnv: 'CUSTOM_HEADERS',
+                },
+              },
+            } as NonNullable<BrokerConfig['platformPorts']>,
+          },
+        ),
+        'node',
+      ),
+    ).toEqual(['audit.alerts.webhookEnv: must not be a reserved or destination variable']);
+  });
+
+  it('checks telemetry collisions only for the build target', () => {
+    expect(
+      brokerAuditProblems(
+        config(
+          { alerts: { webhookEnv: 'CUSTOM_ENDPOINT' } },
+          {
+            platform: 'cloudflare',
+            platformPorts: {
+              cloudflare: { observability: { endpointEnv: 'CUSTOM_ENDPOINT' } },
+            } as NonNullable<BrokerConfig['platformPorts']>,
+          },
+        ),
+        'node',
+      ),
+    ).toEqual([]);
+  });
+
+  it('continues after malformed plugins and reports malformed definitions once', () => {
+    const malformed = { ...sink('bad'), auditSinks: null } as unknown as PluginDefinition;
+    const selected = config(
+      {
+        policy: 'required',
+        alerts: { webhookEnv: 'audit_url' },
+        egress: { allowPrivate: ['archive'] },
+      },
+      {
+        plugins: [malformed, malformed, sink('archive'), sink('archive'), trail],
+      },
+    );
+    expect(brokerAuditProblems(selected, 'node')).toEqual([
+      'audit: duplicate sink id',
+      'audit: sink definitions are malformed',
+      'audit.alerts.webhookEnv: must not be a reserved or destination variable',
+      'audit: required policy needs a telemetry OTLP endpoint or alerts.webhookEnv',
+    ]);
+    expect(brokerAuditWarnings(selected, 'node')).toEqual([
+      'audit: trail toggleEnv is ignored under required policy',
+    ]);
+  });
+
+  it('snapshots enumerable own string keys only', () => {
+    let reads = 0;
+    const audit = {};
+    for (const key of ['policy', Symbol('secret')]) {
+      Object.defineProperty(audit, key, {
+        get: () => {
+          reads++;
+          throw new Error('secret');
+        },
+      });
+    }
+    Object.defineProperty(audit, Symbol('enumerable secret'), {
+      enumerable: true,
+      get: () => {
+        reads++;
+        throw new Error('secret');
+      },
+    });
+    expect(brokerAuditProblems(config(audit), 'node')).toEqual([]);
+    expect(brokerAuditWarnings(config(audit), 'node')).toEqual([]);
+    expect(reads).toBe(0);
+  });
+
+  it('rejects arrays with a custom prototype', () => {
+    const allowPrivate = Object.setPrototypeOf(['archive'], Object.create(Array.prototype));
+    expect(brokerAuditProblems(config({ egress: { allowPrivate } }), 'node')).toEqual([
+      'audit: configuration is malformed',
+    ]);
+  });
+
+  it.each([-1, 1.5, NaN, Infinity, 1025])(
+    'rejects malformed snapshot array lengths (%s)',
+    (length) => {
+      const allowPrivate = new Proxy([], {
+        getOwnPropertyDescriptor: (target, key) =>
+          key === 'length'
+            ? { ...Object.getOwnPropertyDescriptor(target, key)!, value: length }
+            : Object.getOwnPropertyDescriptor(target, key),
+      });
+      expect(brokerAuditProblems(config({ egress: { allowPrivate } }), 'node')).toEqual([
+        'audit: configuration is malformed',
+      ]);
+    },
+  );
 });

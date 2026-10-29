@@ -69,8 +69,10 @@ function snapshot(value: unknown, ancestors = new Set<object>()): unknown {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) throw new Error();
       const length = ownData(value, 'length');
-      if (typeof length !== 'number' || length > 1024) throw new Error();
+      if (typeof length !== 'number' || !Number.isInteger(length) || length < 0 || length > 1024)
+        throw new Error();
       return Array.from({ length }, (_, index) =>
         snapshot(ownData(value, String(index)), ancestors),
       );
@@ -78,7 +80,7 @@ function snapshot(value: unknown, ancestors = new Set<object>()): unknown {
     const proto: unknown = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) throw new Error();
     return Object.fromEntries(
-      Reflect.ownKeys(value).map((key) => [key, snapshot(ownData(value, key), ancestors)]),
+      Object.keys(value).map((key) => [key, snapshot(ownData(value, key), ancestors)]),
     );
   } finally {
     ancestors.delete(value);
@@ -89,34 +91,50 @@ function auditDefinitions(config: BrokerConfig, problems: string[]) {
   const sinkIds = new Set<string>();
   const destinations = new Set<string>();
   let toggle = false;
+  let malformed = false;
   try {
     const plugins = ownData(config, 'plugins');
     if (!Array.isArray(plugins)) throw new Error();
-    const length = ownData(plugins, 'length') as number;
+    const length = ownData(plugins, 'length');
+    if (typeof length !== 'number' || !Number.isInteger(length) || length < 0 || length > 1024)
+      throw new Error();
     for (let index = 0; index < length; index++) {
-      const plugin = ownData(plugins, String(index));
-      if (!object(plugin)) throw new Error();
-      const sinks = snapshot(ownData(plugin, 'auditSinks'));
-      if (sinks !== undefined) {
-        if (!Array.isArray(sinks)) throw new Error();
-        for (const sink of sinks as unknown[]) {
-          if (!object(sink) || typeof sink.id !== 'string') throw new Error();
-          if (sinkIds.has(sink.id)) problems.push('audit: duplicate sink id');
-          sinkIds.add(sink.id);
-          if (object(sink.destination)) {
-            for (const key of ['urlEnv', 'endpointEnv', 'headersEnv']) {
-              const name = sink.destination[key];
-              if (typeof name === 'string') destinations.add(name.toUpperCase());
+      try {
+        const plugin = ownData(plugins, String(index));
+        if (!object(plugin)) throw new Error();
+        const sinks = snapshot(ownData(plugin, 'auditSinks'));
+        if (sinks !== undefined) {
+          if (!Array.isArray(sinks)) throw new Error();
+          for (const sink of sinks as unknown[]) {
+            if (!object(sink) || typeof sink.id !== 'string') throw new Error();
+            if (sinkIds.has(sink.id)) problems.push('audit: duplicate sink id');
+            sinkIds.add(sink.id);
+            if (Array.isArray(sink.envNames)) {
+              for (const name of sink.envNames as unknown[]) {
+                if (typeof name === 'string') destinations.add(name.toUpperCase());
+              }
+            }
+            if (object(sink.destination)) {
+              for (const key of ['urlEnv', 'endpointEnv', 'headersEnv']) {
+                const name = sink.destination[key];
+                if (typeof name === 'string') destinations.add(name.toUpperCase());
+              }
             }
           }
         }
+        const trail = snapshot(ownData(plugin, 'auditTrail'));
+        if (object(trail) && trail.toggleEnv !== undefined) {
+          toggle = true;
+          if (typeof trail.toggleEnv === 'string') destinations.add(trail.toggleEnv.toUpperCase());
+        }
+      } catch {
+        malformed = true;
       }
-      const trail = snapshot(ownData(plugin, 'auditTrail'));
-      if (object(trail) && trail.toggleEnv !== undefined) toggle = true;
     }
   } catch {
-    problems.push('audit: sink definitions are malformed');
+    malformed = true;
   }
+  if (malformed) problems.push('audit: sink definitions are malformed');
   return { sinkIds, destinations, toggle };
 }
 
@@ -131,6 +149,28 @@ function alertEnv(value: unknown, destinations: ReadonlySet<string>): value is s
   );
 }
 
+function telemetryEndpoint(
+  config: BrokerConfig,
+  target: Platform,
+  destinations: Set<string>,
+  problems: string[],
+): unknown {
+  try {
+    const ports = ownData(config, 'platformPorts');
+    const platform = object(ports) ? ownData(ports, target) : undefined;
+    const telemetry = object(platform) ? ownData(platform, 'observability') : undefined;
+    const endpoint = object(telemetry) ? ownData(telemetry, 'endpointEnv') : undefined;
+    const headers = object(telemetry) ? ownData(telemetry, 'headersEnv') : undefined;
+    for (const name of [endpoint, headers]) {
+      if (typeof name === 'string') destinations.add(name.toUpperCase());
+    }
+    return endpoint;
+  } catch {
+    problems.push('audit: telemetry configuration is malformed');
+    return undefined;
+  }
+}
+
 export function brokerAuditProblems(config: BrokerConfig, target: Platform): string[] {
   const problems: string[] = [];
   const { sinkIds, destinations } = auditDefinitions(config, problems);
@@ -142,6 +182,7 @@ export function brokerAuditProblems(config: BrokerConfig, target: Platform): str
   }
   if (value === undefined) return problems;
   if (!object(value)) return [...problems, 'audit: must be an object'];
+  const telemetry = telemetryEndpoint(config, target, destinations, problems);
   problems.push(
     ...unknownKeys(
       value,
@@ -222,9 +263,6 @@ export function brokerAuditProblems(config: BrokerConfig, target: Platform): str
 
   if (value.policy === 'required') {
     const webhook = object(value.alerts) && alertEnv(value.alerts.webhookEnv, destinations);
-    const ports = config.platformPorts;
-    const telemetry =
-      ports && Object.hasOwn(ports, target) ? ports[target]?.observability?.endpointEnv : undefined;
     if (!webhook && !envName(telemetry)) {
       problems.push('audit: required policy needs a telemetry OTLP endpoint or alerts.webhookEnv');
     }

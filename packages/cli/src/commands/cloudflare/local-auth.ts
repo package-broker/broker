@@ -1,4 +1,5 @@
 import { CloudflareError } from './api.js';
+import { inputMessages } from './input-messages.js';
 import type { DeploymentAttempt } from './inventory.js';
 
 export type LocalAuthMode = 'enabled' | 'disabled';
@@ -7,6 +8,7 @@ type Stage = 'deploy' | 'setup';
 function invalid(stage: Stage, reason: string): never {
   const error = new CloudflareError('invalid_input', 2, false, stage);
   error.message = reason;
+  inputMessages.set(error, reason);
   throw error;
 }
 
@@ -17,7 +19,8 @@ export function isLocalAuthMode(value: unknown): value is LocalAuthMode {
 export function resolveLocalAuth(options: {
   flag?: unknown;
   env?: unknown;
-  sources?: readonly { bindings: readonly unknown[] }[];
+  // null explicitly identifies a fresh installation with no Worker.
+  sources: readonly { bindings: readonly unknown[] }[] | null;
   secretNames?: readonly string[];
   frozen?: Pick<DeploymentAttempt, 'local_auth'>;
   stage?: Stage;
@@ -34,7 +37,13 @@ export function resolveLocalAuth(options: {
   const explicit = flag ?? env;
   if (options.secretNames?.includes('PB_AUTH_LOCAL'))
     return invalid(stage, 'Remove the secret first: wrangler secret delete PB_AUTH_LOCAL');
-  const live = (options.sources ?? []).map(({ bindings }) => {
+  const sources = options.sources;
+  if (sources !== null && (!Array.isArray(sources) || sources.length === 0))
+    return invalid(stage, 'Local auth live state is incomplete');
+  const live = (sources === null ? [{ bindings: [] }] : Array.from(sources)).map((source) => {
+    if (!source || !Array.isArray(source.bindings))
+      return invalid(stage, 'Local auth live state is incomplete');
+    const bindings: readonly unknown[] = source.bindings;
     const found = bindings.filter(
       (binding): binding is Record<string, unknown> =>
         binding !== null &&
@@ -51,21 +60,28 @@ export function resolveLocalAuth(options: {
       return invalid(stage, 'Malformed PB_AUTH_LOCAL binding');
     return binding?.text;
   });
-  if (options.frozen !== undefined) {
-    // Attempts from before this setting used enabled local sign-in.
-    const frozen =
-      options.frozen.local_auth === undefined ? 'enabled' : parse(options.frozen.local_auth);
+  if (options.frozen?.local_auth !== undefined) {
+    const frozen = parse(options.frozen.local_auth);
     if (explicit !== undefined && explicit !== frozen)
       throw new CloudflareError('configuration_conflict', 8, false, stage, null, null, null, null, [
         'local_auth',
       ]);
     return frozen;
   }
-  if (explicit !== undefined) return explicit;
-  const modes = live.map((value) => (value === undefined ? 'enabled' : parse(value)));
+  if (explicit !== undefined && options.frozen === undefined) return explicit;
+  const modes = live.map((value) => {
+    if (value === undefined) return 'enabled';
+    if (!isLocalAuthMode(value)) return invalid(stage, 'Invalid live PB_AUTH_LOCAL binding');
+    return value;
+  });
   if (new Set(modes).size > 1)
     throw new CloudflareError('configuration_conflict', 8, false, stage, null, null, null, null, [
       'local_auth',
     ]);
-  return modes[0] ?? 'enabled';
+  const mode = modes[0]!;
+  if (explicit !== undefined && explicit !== mode)
+    throw new CloudflareError('configuration_conflict', 8, false, stage, null, null, null, null, [
+      'local_auth',
+    ]);
+  return mode;
 }

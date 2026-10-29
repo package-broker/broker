@@ -157,6 +157,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'mode_generation',
     'cutover_seq',
   ],
+  // A rebind always includes from_seq; to_seq is omitted when custody is empty.
   'audit.sink_admin': [
     'operation',
     'sink_id',

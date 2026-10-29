@@ -38,6 +38,16 @@ interface CoverageEntry {
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
+    actions: ['audit.sink_admin'],
+    callers: ['core/src/audit/sinks/registry.ts'],
+    repository: 'audit-sink',
+    batchGuard:
+      'executor.batch; chain identity, incarnation, mode generation, boundary, restore state and sink snapshot compare-and-swap',
+    cardinality:
+      '1 per receiver configuration change; retired reuse, stale and unchanged registrations stage zero',
+    stagingCalls: 1,
+  },
+  {
     actions: ['session.login'],
     callers: ['core/src/auth/identity-login.ts'],
     repository: 'login',
@@ -358,11 +368,7 @@ export const AUDIT_INJECTED_STATEMENTS = [
   },
 ] as const;
 
-const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set([
-  'audit.export',
-  'audit.mode_change',
-  'audit.sink_admin',
-]);
+const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set(['audit.export', 'audit.mode_change']);
 
 export const AUDIT_UNCAPTURED: readonly {
   readonly action: AuditAction;

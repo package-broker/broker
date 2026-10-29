@@ -1,3 +1,4 @@
+import { entries as auditSinkEntries } from './mutation-table/audit-sink.js';
 import { entries as sourcePackageRequestEntries } from './mutation-table/source-package-request.js';
 import { entries as npmAuditSnapshotEntries } from './mutation-table/npm-audit-snapshot.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
@@ -205,6 +206,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...attachedProxyEntries,
   ...projectSourceReadEntries,
   ...projectGrantReadEntries,
+  ...auditSinkEntries,
   ...auditLedgerEntries,
   ...auditPendingEntries,
   ...auditSealEntries,

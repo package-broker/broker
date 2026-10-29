@@ -1,13 +1,13 @@
 {
-  "packages/core": "2.0.0-rc.2",
-  "packages/cli": "2.0.0-rc.2",
-  "packages/runtime-cloudflare": "2.0.0-rc.2",
-  "packages/runtime-node": "2.0.0-rc.2",
-  "packages/ui": "2.0.0-rc.2",
-  "packages/plugin-sso-oidc": "0.1.0-rc.2",
-  "packages/plugin-github": "0.1.0-rc.2",
-  "packages/db-sqlite": "2.0.0-rc.2",
-  "packages/ui-assets": "0.1.0-rc.2",
-  "packages/prebuilt": "2.0.0-rc.2",
-  "packages/prebuilt-cloudflare": "2.0.0-rc.2"
+  "packages/core": "2.0.0-rc.3",
+  "packages/cli": "2.0.0-rc.3",
+  "packages/runtime-cloudflare": "2.0.0-rc.3",
+  "packages/runtime-node": "2.0.0-rc.3",
+  "packages/ui": "2.0.0-rc.3",
+  "packages/plugin-sso-oidc": "0.1.0-rc.3",
+  "packages/plugin-github": "0.1.0-rc.3",
+  "packages/db-sqlite": "2.0.0-rc.3",
+  "packages/ui-assets": "0.1.0-rc.3",
+  "packages/prebuilt": "2.0.0-rc.3",
+  "packages/prebuilt-cloudflare": "2.0.0-rc.3"
 }

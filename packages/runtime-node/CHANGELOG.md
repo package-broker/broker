@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/runtime-node-v2.0.0-rc.2...runtime-node-v2.0.0-rc.3) (2026-10-28)
+
+
+### Miscellaneous Chores
+
+* **runtime-node:** Synchronize product versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/runtime-node-v2.0.0-rc.1...runtime-node-v2.0.0-rc.2) (2026-10-28)
 
 

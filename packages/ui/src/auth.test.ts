@@ -3,6 +3,9 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   LoginView,
+  ReauthView,
+  SigninFailedView,
+  ssoFailureMessage,
   ReauthConfirmContent,
   ReauthConfirm,
   SetupView,
@@ -684,4 +687,55 @@ describe('package reauth integration', () => {
 it('drops unknown package return filters and invalid project scopes', () => {
   const target = '/packages?project=%2F%2Foutside.invalid&redirect=https%3A%2F%2Foutside.invalid';
   expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(target)}`)).toBe('#/packages');
+});
+
+describe('SSO confirmation recovery', () => {
+  it.each([true, false])('hides unsupported providers and shows recovery (local=%s)', (local) => {
+    const html = renderToString(
+      createElement(ReauthView, {
+        providers: [
+          { id: 'old', displayName: 'Old Dex', kind: 'oidc', supportsReauth: false },
+          { id: 'new', displayName: 'New Dex', kind: 'oidc', supportsReauth: true },
+        ],
+        local,
+        busy: false,
+        error: false,
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).not.toContain('Old Dex');
+    expect(html.replaceAll('<!-- -->', '')).toContain('Confirm with New Dex');
+    expect(html).toContain('Sign out and sign in again');
+    expect(html).toContain('within 10 minutes');
+    expect(html.includes('local sign-in form')).toBe(local);
+  });
+  it('renders a readable callback failure and never echoes arbitrary reason data', () => {
+    const html = renderToString(
+      createElement(SigninFailedView, { reason: 'no_auth_time', signedIn: true }),
+    );
+    expect(html).toContain('did not confirm a fresh sign-in');
+    expect(html).toContain('Return to confirmation');
+    expect(ssoFailureMessage('secret@example.test')).not.toContain('secret@example.test');
+    expect(ssoFailureMessage('state_invalid')).toContain('expired');
+    expect(ssoFailureMessage('stale_auth_time')).toContain('older sign-in');
+  });
+});
+
+it.each([
+  ['/tokens?project=acme', '#/tokens?project=acme'],
+  ['/packages?project=web&status=active', '#/packages?project=web&status=active'],
+  ['//outside.invalid', '#/projects'],
+  ['/tokens?redirect=https://outside.invalid', '#/tokens'],
+])('keeps a safe retry target from callback failure: %s', async (target, expected) => {
+  const hash = `#/signin-failed?reason=no_auth_time&return=${encodeURIComponent(target)}`;
+  const html = renderToString(
+    createElement(SigninFailedView, { reason: 'no_auth_time', signedIn: true, hash }),
+  );
+  const retryHash = `#/reauth?return=${encodeURIComponent(expected.slice(1))}`;
+  expect(html).toContain(`href="${retryHash}"`);
+  const { client, request } = fakeClient(ok(200, { location: '/idp' }));
+  await startSso(client, 'corp', 'reauth', vi.fn(), retryHash);
+  const returnTo = (request.mock.calls[0]![2] as { body: { returnTo: string } }).body.returnTo;
+  expect(reauthReturnHash(returnTo.slice(returnTo.indexOf('#')))).toBe(expected);
 });

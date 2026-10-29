@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.2...ui-v2.0.0-rc.3) (2026-10-28)
+
+
+### Features
+
+* **core:** grant lists show subjects to grant readers ([#954](https://github.com/package-broker/broker/issues/954)) ([eabb6fa](https://github.com/package-broker/broker/commit/eabb6facf4a463cf018d0802deb8b9187857f94b))
+* **ui:** add packages and sync from a source on the Packages page ([#958](https://github.com/package-broker/broker/issues/958)) ([cadb091](https://github.com/package-broker/broker/commit/cadb091f624bbed275c0c253595bd9db088c4a3c))
+* **ui:** guided token issuance and service identities on the Tokens page ([#959](https://github.com/package-broker/broker/issues/959)) ([0c33030](https://github.com/package-broker/broker/commit/0c33030c91abf4f4908494fe81ac1b1bb2affa26))
+* **ui:** load admin pages on demand ([#960](https://github.com/package-broker/broker/issues/960)) ([cf0d187](https://github.com/package-broker/broker/commit/cf0d1877f43fc5661f3c143173a34748e726dcd6))
+* **ui:** new grant form a first-time admin can fill ([#952](https://github.com/package-broker/broker/issues/952)) ([599a4ae](https://github.com/package-broker/broker/commit/599a4ae3a32a1918a6b8aafbf0e1d795caee8c94))
+* **ui:** new project form that explains the access policy ([#948](https://github.com/package-broker/broker/issues/948)) ([b426d4a](https://github.com/package-broker/broker/commit/b426d4a4b9faa2325f8c54969294cb62af58fe13))
+* **ui:** product footer on admin pages and sign-in screens ([#963](https://github.com/package-broker/broker/issues/963)) ([05f52e1](https://github.com/package-broker/broker/commit/05f52e1f7b16e9fc7f339ba49d2800c1ba4af089))
+* **ui:** separate Audit and Import from everyday navigation ([#955](https://github.com/package-broker/broker/issues/955)) ([4dc1dc7](https://github.com/package-broker/broker/commit/4dc1dc7af99b9d2b71f46b9605bac37c1ea3a103))
+* **ui:** two-column project forms on wide screens ([#953](https://github.com/package-broker/broker/issues/953)) ([df688f5](https://github.com/package-broker/broker/commit/df688f5c46ec07fcc325d0289c392ff908ebefa6))
+
+
+### Bug Fixes
+
+* **ui:** generic example names in form placeholders and UI tests ([#962](https://github.com/package-broker/broker/issues/962)) ([c65ed5b](https://github.com/package-broker/broker/commit/c65ed5b90b99da8621f478509298a023f6e80ebe))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.1...ui-v2.0.0-rc.2) (2026-10-28)
 
 

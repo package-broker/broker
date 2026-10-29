@@ -95,6 +95,7 @@ function activeSession(id: string, csrfHash: string, expiresAt: string): ActiveS
 }
 
 interface Options {
+  readonly organizationAvailable?: boolean;
   readonly bindings?: SsoRouteDeps['bindings'];
   readonly clientIp?: (request: Request) => string | null;
   readonly providers?: readonly IdentityProvider[];
@@ -238,7 +239,10 @@ async function build(options: Options = {}) {
       clock,
       ids: { ulid: () => '01J0A0000000000000000000000'.slice(0, 26) },
     },
-    resolveOrg: () => Promise.resolve(ORG),
+    resolveOrg: () =>
+      options.organizationAvailable === false
+        ? Promise.reject(new Error('organization unavailable'))
+        : Promise.resolve(ORG),
     health: () => Promise.resolve(true),
     coreRoutes: documented(createSsoRoutes(deps)),
     log: (entry) => {
@@ -2439,4 +2443,224 @@ describe('auth call metadata', () => {
     const spy = action === 'logout' ? logout : app.reauth;
     expect(spy.mock.calls[0]?.at(-1)).toEqual(expect.objectContaining({ ip: null }));
   });
+});
+
+describe('resolved reauthentication support', () => {
+  it.each([true, false])(
+    'uses resolved %s for listing, start and callback despite the static flag',
+    async (resolved) => {
+      const reauthCapability = vi.fn(async () => resolved);
+      const start = vi.fn(makeProvider('dex').start);
+      const finish = vi.fn(makeProvider('dex').finish);
+      const app = await build({
+        providers: [
+          {
+            ...makeProvider('dex', { supportsReauth: !resolved, start, finish }),
+            reauthCapability,
+          },
+        ],
+      });
+      const listed = await app.kernel.fetch(new Request(`${ORIGIN}/_pb/auth/providers`));
+      expect(await bodyOf(listed)).toMatchObject({ providers: [{ supportsReauth: resolved }] });
+      const session = await app.seed();
+      const started = await app.kernel.fetch(
+        startRequest(
+          'dex',
+          { purpose: 'reauth', returnTo: '/projects/a' },
+          {
+            cookie: session.cookie,
+            'x-csrf-token': session.csrf,
+          },
+        ),
+      );
+      expect(started.status).toBe(resolved ? 303 : 400);
+      expect(start).toHaveBeenCalledTimes(resolved ? 1 : 0);
+      const sealed = await sealLoginState(app.cipher, {
+        provider: 'dex',
+        purpose: 'reauth',
+        returnTo: '/projects/a',
+        issuedAt: NOW,
+        sessionId: session.id,
+        data: {},
+      });
+      const response = await app.kernel.fetch(
+        callback('dex', `${pairOf(sealed)}; ${session.cookie}`),
+      );
+      expect(response.status).toBe(resolved ? 303 : 401);
+      expect(finish).toHaveBeenCalledTimes(resolved ? 1 : 0);
+      expect(app.reauth).toHaveBeenCalledTimes(resolved ? 1 : 0);
+      if (resolved) expect(response.headers.get('location')).toBe('/projects/a');
+      else
+        expect(refusals(app)).toContainEqual(expect.objectContaining({ reason: 'not_supported' }));
+      expect(reauthCapability).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['unbound', 'changed', 'unavailable', 'no organization'] as const)(
+    'lists a provider without resolving capability when the binding is %s',
+    async (binding) => {
+      const reauthCapability = vi.fn(async () => false);
+      const anchor = vi.fn(async () => {
+        if (binding === 'unavailable') throw new Error(PROVIDER_ERROR_TEXT);
+        return binding === 'unbound' ? null : 'oidc:https://old.example.test';
+      });
+      const app = await build({
+        organizationAvailable: binding !== 'no organization',
+        providers: [{ ...makeProvider('dex'), reauthCapability }],
+        bindings: { anchor },
+      });
+      const response = await app.kernel.fetch(new Request(`${ORIGIN}/_pb/auth/providers`));
+      expect(response.status).toBe(200);
+      expect(await bodyOf(response)).toMatchObject({ providers: [{ supportsReauth: true }] });
+      expect(reauthCapability).not.toHaveBeenCalled();
+      expect(app.logs.filter((entry) => entry['event'] !== 'http.request')).toEqual([]);
+      if (binding === 'no organization') expect(anchor).not.toHaveBeenCalled();
+      else expect(anchor).toHaveBeenCalledExactlyOnceWith(ORG, 'dex');
+    },
+  );
+
+  it.each(['unbound', 'changed', 'unavailable'] as const)(
+    'checks a %s binding before resolving confirmation capability',
+    async (binding) => {
+      const reauthCapability = vi.fn(async () => true);
+      const start = vi.fn();
+      const app = await build({
+        providers: [{ ...makeProvider('dex', { start }), reauthCapability }],
+        bindings: {
+          anchor: async () => {
+            if (binding === 'unavailable') throw new Error(PROVIDER_ERROR_TEXT);
+            return binding === 'unbound' ? null : 'oidc:https://old.example.test';
+          },
+        },
+      });
+      const session = await app.seed();
+      const response = await app.kernel.fetch(
+        startRequest(
+          'dex',
+          { purpose: 'reauth' },
+          { cookie: session.cookie, 'x-csrf-token': session.csrf },
+        ),
+      );
+      expect(response.status).toBe(binding === 'unavailable' ? 503 : 401);
+      expect(reauthCapability).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])('lists the resolved capability %s before login', async (resolved) => {
+    const app = await build({
+      providers: [
+        {
+          ...makeProvider('dex', { supportsReauth: !resolved }),
+          reauthCapability: async () => resolved,
+        },
+      ],
+    });
+    const response = await app.kernel.fetch(new Request(`${ORIGIN}/_pb/auth/providers`));
+    expect(await bodyOf(response)).toMatchObject({ providers: [{ supportsReauth: resolved }] });
+  });
+  it.each([true, false])(
+    'falls back to the static flag %s on resolver failure',
+    async (supportsReauth) => {
+      const app = await build({
+        providers: [
+          {
+            ...makeProvider('dex', { supportsReauth }),
+            reauthCapability: async () => {
+              throw new Error(PROVIDER_ERROR_TEXT);
+            },
+          },
+        ],
+      });
+      const response = await app.kernel.fetch(new Request(`${ORIGIN}/_pb/auth/providers`));
+      expect(await bodyOf(response)).toMatchObject({ providers: [{ supportsReauth }] });
+      expect(JSON.stringify(app.logs)).not.toContain(PROVIDER_ERROR_TEXT);
+    },
+  );
+  it('refuses confirmation when discovery disables it without calling start', async () => {
+    const start = vi.fn();
+    const app = await build({
+      providers: [{ ...makeProvider('dex', { start }), reauthCapability: async () => false }],
+    });
+    const session = await app.seed();
+    const response = await app.kernel.fetch(
+      startRequest(
+        'dex',
+        { purpose: 'reauth' },
+        { cookie: session.cookie, 'x-csrf-token': session.csrf },
+      ),
+    );
+    expect(response.status).toBe(400);
+    expect(await bodyOf(response)).toMatchObject({ error: { code: 'reauth_unsupported' } });
+    expect(start).not.toHaveBeenCalled();
+  });
+});
+
+describe('browser callback failures', () => {
+  it.each([{ accept: 'text/html' }, { 'sec-fetch-mode': 'navigate', accept: '*/*' }])(
+    'redirects browser navigation %j with safe reason codes and clears state',
+    async (headers) => {
+      const app = await build();
+      const response = await app.kernel.fetch(new Request(callback('dex', null), { headers }));
+      expect(response.status).toBe(303);
+      const location = response.headers.get('location')!;
+      expect(location).toMatch(/^\/_pb\/ui\/#\/signin-failed\?reason=state_invalid&request=/);
+      expect(location).not.toContain(EMAIL);
+      expect(response.headers.getSetCookie().join()).toContain(`${LOGIN_COOKIE}=`);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+    },
+  );
+  it.each([{ accept: 'application/json' }, { accept: 'text/html', 'sec-fetch-mode': 'cors' }])(
+    'keeps the API envelope for fetch requests %j',
+    async (headers) => {
+      const app = await build();
+      const response = await app.kernel.fetch(new Request(callback('dex', null), { headers }));
+      expect(response.status).toBe(401);
+      expect(await bodyOf(response)).toMatchObject({ error: { code: 'login_failed' } });
+    },
+  );
+  it('redirects a missing auth_time refusal without completing confirmation', async () => {
+    const app = await build({ reauthRefusal: 'no_auth_time' });
+    const session = await app.seed();
+    const login = await loginCookieOf(
+      app,
+      'dex',
+      { purpose: 'reauth' },
+      { cookie: session.cookie, 'x-csrf-token': session.csrf },
+    );
+    const response = await app.kernel.fetch(
+      new Request(callback('dex', `${login}; ${session.cookie}`), {
+        headers: { cookie: `${login}; ${session.cookie}`, accept: 'text/html' },
+      }),
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toContain('reason=no_auth_time');
+  });
+});
+
+it('retains the original confirmation target after a failed callback and successful retry', async () => {
+  const app = await build();
+  const session = await app.seed();
+  app.reauth.mockResolvedValueOnce({ ok: false, reason: 'no_auth_time' });
+  const returnTo = '/_pb/ui#/reauth?return=%2Ftokens%3Fproject%3Dacme&sso=complete';
+  const headers = { cookie: session.cookie, 'x-csrf-token': session.csrf };
+  const login = await loginCookieOf(app, 'dex', { purpose: 'reauth', returnTo }, headers);
+  const failed = await app.kernel.fetch(
+    new Request(callback('dex', `${login}; ${session.cookie}`), {
+      headers: { cookie: `${login}; ${session.cookie}`, accept: 'text/html' },
+    }),
+  );
+  const failureHash = new URL(failed.headers.get('location')!, ORIGIN).hash;
+  const target = new URLSearchParams(failureHash.split('?')[1]).get('return');
+  expect(target).toBe('/tokens?project=acme');
+  const retryReturn = `/_pb/ui#/reauth?return=${encodeURIComponent(target!)}&sso=complete`;
+  const retry = await loginCookieOf(
+    app,
+    'dex',
+    { purpose: 'reauth', returnTo: retryReturn },
+    headers,
+  );
+  const success = await app.kernel.fetch(callback('dex', `${retry}; ${session.cookie}`));
+  expect(success.status).toBe(303);
+  expect(success.headers.get('location')).toBe(returnTo);
 });

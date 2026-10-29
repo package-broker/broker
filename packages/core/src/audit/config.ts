@@ -87,6 +87,40 @@ function snapshot(value: unknown, ancestors = new Set<object>()): unknown {
   }
 }
 
+/** Capture only the inputs used by audit validation and resolution, without invoking accessors. */
+export function snapshotAuditBuildConfig(config: BrokerConfig, target: Platform): BrokerConfig {
+  const plugins = ownData(config, 'plugins');
+  if (!Array.isArray(plugins)) throw new Error();
+  const length = ownData(plugins, 'length');
+  if (typeof length !== 'number' || !Number.isInteger(length) || length < 0 || length > 1024)
+    throw new Error();
+  const ports = ownData(config, 'platformPorts');
+  const platform = object(ports) ? ownData(ports, target) : undefined;
+  const telemetry = object(platform) ? ownData(platform, 'observability') : undefined;
+  return snapshot({
+    platform: ownData(config, 'platform'),
+    audit: ownData(config, 'audit'),
+    plugins: Array.from({ length }, (_, index) => {
+      const plugin = ownData(plugins, String(index));
+      if (!object(plugin)) throw new Error();
+      return {
+        auditTrail: ownData(plugin, 'auditTrail'),
+        auditSinks: ownData(plugin, 'auditSinks'),
+      };
+    }),
+    platformPorts: {
+      [target]: {
+        observability: object(telemetry)
+          ? {
+              endpointEnv: ownData(telemetry, 'endpointEnv'),
+              headersEnv: ownData(telemetry, 'headersEnv'),
+            }
+          : telemetry,
+      },
+    },
+  }) as BrokerConfig;
+}
+
 function auditDefinitions(config: BrokerConfig, problems: string[]) {
   const sinkIds = new Set<string>();
   const destinations = new Set<string>();

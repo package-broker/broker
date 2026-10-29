@@ -15,7 +15,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
+import { base32Decode, totpCode, verifyTotp } from '@package-broker/core/auth/totp';
 import {
   authenticatedActorOf,
   organizationActorOf,
@@ -39,6 +39,18 @@ import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import { runEntry } from './entry.js';
 import { createNodeServer, type NodeAccessServices, type NodeBroker } from './index.js';
 import { startNode, StartupConfigError, type StartOptions } from './startup.js';
+
+const totpClock = vi.hoisted(() => ({ nowMs: Date.parse('2026-10-29T12:00:29.999Z') }));
+
+vi.mock('@package-broker/core/auth/totp', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@package-broker/core/auth/totp')>();
+  return {
+    ...actual,
+    // Pin only TOTP step selection; session and token timestamps must track SQLite time.
+    verifyTotp: (...args: Parameters<typeof actual.verifyTotp>) =>
+      actual.verifyTotp(args[0], args[1], totpClock.nowMs, args[3]),
+  };
+});
 
 const hooks = vi.hoisted(() => ({
   before: undefined as ((sql: string) => Promise<void> | undefined) | undefined,
@@ -164,6 +176,26 @@ function cookieHeader(responses: readonly Response[]): string {
 function projectId(n: number): string {
   return `01J0PR0J${String(n).padStart(18, '0')}`;
 }
+
+it('pins only TOTP step selection across clock boundaries and preserves replay rejection', async () => {
+  const secret = new Uint8Array(20).fill(1);
+  const step = Math.floor(totpClock.nowMs / 30_000);
+  for (const offset of [-1, 0, 1]) {
+    const code = await totpCode(secret, step + offset);
+    // Simulate a request delayed beyond the acceptance window without changing Date.
+    expect(await verifyTotp(secret, code, totpClock.nowMs + 90_000, step + offset - 1)).toEqual({
+      ok: true,
+      step: step + offset,
+    });
+    expect(await verifyTotp(secret, code, totpClock.nowMs + 90_000, step + offset)).toEqual({
+      ok: false,
+    });
+  }
+  expect(await verifyTotp(secret, await totpCode(secret, step - 2), totpClock.nowMs, null)).toEqual(
+    { ok: false },
+  );
+  expect(vi.isFakeTimers()).toBe(false);
+});
 
 describe('node access wiring', () => {
   let directory: string;
@@ -546,7 +578,7 @@ describe('node access wiring', () => {
     const started = await post(base, '/_pb/auth/local/setup/start', { token });
     const { secret } = (await started.json()) as { secret: string };
     const totpSecret = base32Decode(secret);
-    const step = Math.floor(Date.now() / 30_000);
+    const step = Math.floor(totpClock.nowMs / 30_000);
     const finished = await post(base, '/_pb/auth/local/setup/finish', {
       token,
       password: PASSWORD,

@@ -12,6 +12,7 @@ const UI_INPUT_DENY =
 const UI_RUNTIME_DENY =
   /(?:packages|@package-broker)\/(?:ui-assets|ui)\/(?:src|dist)\/|createUiAssetsProvider|MANIFEST_SPECIFIER|createRequire|import\.meta\.resolve|require\.resolve|node:module|react-dom|tailwindcss|openapi-typescript/;
 const OPENAPI_INPUT = /core\/(src|dist)\/api\/openapi\.(?:js|ts)$/;
+const AUDIT_TESTING_INPUT = /core\/(src|dist)\/audit\/plugin-testing\.(?:js|ts)$/;
 const DYNAMIC_IMPORT = /(?:^|[^\w$.])import\s*\(/g;
 const REQUIRE_CALL = /(?:^|[^\w$.])(?:__)?require\s*\(/g;
 const FROM_SPECIFIER = /\bfrom\s*/g;
@@ -176,7 +177,10 @@ for (const target of ['cloudflare', 'node']) {
         `${label}/${target}: OpenAPI generator in bundle without the OpenAPI route:\n${openapi.join('\n')}`,
       );
     }
-    const forbidden = inputs.filter((input) => inputDeny.test(input) || UI_INPUT_DENY.test(input));
+    const forbidden = inputs.filter(
+      (input) =>
+        inputDeny.test(input) || UI_INPUT_DENY.test(input) || AUDIT_TESTING_INPUT.test(input),
+    );
     if (forbidden.length > 0) {
       failed = true;
       console.error(

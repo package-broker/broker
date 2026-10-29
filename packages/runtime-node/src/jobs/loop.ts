@@ -113,6 +113,9 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
           {
             name: job.qualifiedName,
             everySeconds: job.definition.schedule.everySeconds,
+            ...(job.definition.schedule.resourceKey === undefined
+              ? {}
+              : { resourceKey: job.definition.schedule.resourceKey }),
             ...(job.definition.maxAttempts === undefined
               ? {}
               : { maxAttempts: job.definition.maxAttempts }),

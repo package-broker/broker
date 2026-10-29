@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { promisify } from 'node:util';
 import { CloudflareError, GitWorktreeRequiredError } from './api.js';
 import type { BuildInfo } from '../../build-artifacts.js';
+import { isLocalAuthMode, type LocalAuthMode } from './local-auth.js';
 
 export type Jurisdiction = 'eu' | 'default';
 export type ResourceKey = 'd1' | 'r2' | 'dlq' | 'jobs' | 'analytics' | 'worker';
@@ -177,6 +178,7 @@ export interface DeploymentAttempt {
   providers_sha256?: string | null;
   identity_sha256?: string | null;
   providers_text?: string;
+  local_auth?: LocalAuthMode;
   secret_names: string[];
   build_info: BuildInfo;
   version_id: string | null;
@@ -446,6 +448,7 @@ function deploymentValid(raw: unknown): boolean {
         ...(Object.hasOwn(v, 'providers_sha256') ? ['providers_sha256'] : []),
         ...(Object.hasOwn(v, 'identity_sha256') ? ['identity_sha256'] : []),
         ...(Object.hasOwn(v, 'providers_text') ? ['providers_text'] : []),
+        ...(Object.hasOwn(v, 'local_auth') ? ['local_auth'] : []),
         'secret_names',
         'build_info',
         'version_id',
@@ -481,6 +484,7 @@ function deploymentValid(raw: unknown): boolean {
       hash(v.artifact_sha256) &&
       (v.assets_sha256 === null || hash(v.assets_sha256)) &&
       hash(v.settings_sha256) &&
+      (!Object.hasOwn(v, 'local_auth') || isLocalAuthMode(v.local_auth)) &&
       (v.identity_sha256 === undefined || v.identity_sha256 === null || hash(v.identity_sha256)) &&
       (v.providers_sha256 === undefined ||
         v.providers_sha256 === null ||
@@ -618,7 +622,12 @@ function deploymentValid(raw: unknown): boolean {
         /^[A-Z][A-Z0-9_]{0,127}$/.test(b.name) &&
         Array.isArray(b.texts) &&
         b.texts.length > 0 &&
-        b.texts.every((text) => typeof text === 'string' && text.length <= 4096) &&
+        b.texts.every(
+          (text) =>
+            typeof text === 'string' &&
+            text.length <= 4096 &&
+            (b.name !== 'PB_AUTH_LOCAL' || isLocalAuthMode(text)),
+        ) &&
         new Set(b.texts).size === b.texts.length,
     ) &&
     v.plain_bindings.reduce((count, b) => count + b.texts.length, 0) <=

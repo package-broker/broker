@@ -48,6 +48,7 @@ import {
   type CommandEnvelope,
   type CommandResult,
 } from './api.js';
+import { inputMessages } from './input-messages.js';
 import { resolveZone } from './zone.js';
 import { routeConflict } from './routes.js';
 import {
@@ -95,7 +96,6 @@ const uuid = (v: unknown): v is string =>
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(v);
 const safeId = (v: unknown): v is string =>
   typeof v === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(v);
-const inputMessages = new WeakMap<CloudflareError, string>();
 const invalid = (message?: string): never => {
   const error = new CloudflareError('invalid_input', 2, false, 'deploy');
   if (message) inputMessages.set(error, message);

@@ -12,6 +12,8 @@ import {
   inventoryTransportPolicy,
   lifecycleRule,
   validateInventory,
+  recordDeploymentHistory,
+  type DeploymentAttempt,
 } from './inventory.js';
 
 let project: string;
@@ -266,4 +268,111 @@ it('accepts only normalized lifecycle baselines in a stored inventory', () => {
   expect(() =>
     validateInventory(withBaseline({ ...DEFAULT_RULE, conditions: {} }), identity),
   ).toThrow(expect.objectContaining({ code: 'invalid_inventory' }));
+});
+
+function deploymentInventory() {
+  const inventory = emptyInventory(identity, Date.now());
+  const settings = () => ({
+    endpoints: { enabled: true, previews_enabled: false },
+    schedules: [],
+    consumer: null,
+    routes: [],
+    domain: null,
+  });
+  const attempt: DeploymentAttempt = {
+    operation_id: 'candidate-operation',
+    artifact_sha256: 'a'.repeat(64),
+    assets_sha256: null,
+    settings_sha256: 'b'.repeat(64),
+    secret_names: ['PB_MASTER_KEY'],
+    build_info: {
+      schemaVersion: 1,
+      target: 'cloudflare',
+      core: '2.0.0',
+      plugins: {},
+      lockfileSha256: null,
+      gitSha: null,
+    },
+    version_id: 'candidate-version',
+    previous_version_id: 'old-version',
+    previous_deployment_id: 'old-deploy',
+    previous_distribution: [{ version_id: 'old-version', percentage: 100 }],
+    requested_rollout: 100,
+    worker_url: 'https://broker.example',
+    candidate_probe_url: null,
+    migration_ledger_sha256: 'c'.repeat(64),
+    rollback_compatible: true,
+    contract_ids: [],
+    phase: 'active',
+    activated_at: new Date(0).toISOString(),
+    smoke: 'pending',
+    rollback: 'not_needed',
+    preview: 'disabled',
+    prior_settings: settings(),
+    intended_settings: settings(),
+    changes: [],
+  };
+
+  inventory.deployment = { attempt, last_verified: null };
+  return inventory;
+}
+
+it('reads legacy attempts and round-trips both local modes in current and verified attempts', async () => {
+  const inventory = deploymentInventory();
+  const store = await stores();
+  await store.write(inventory);
+  expect(await store.read()).toEqual(inventory);
+  for (const local_auth of ['enabled', 'disabled'] as const) {
+    inventory.deployment!.attempt.local_auth = local_auth;
+    inventory.deployment!.last_verified = {
+      ...inventory.deployment!.attempt,
+      phase: 'verified',
+      smoke: 'passed',
+    };
+    recordDeploymentHistory(inventory.deployment!, {
+      plainBinding: { name: 'PB_AUTH_LOCAL', text: local_auth },
+    });
+    await store.write(inventory);
+    expect(await store.read()).toEqual(inventory);
+  }
+  expect(inventory.deployment!.history!.plain_bindings).toContainEqual({
+    name: 'PB_AUTH_LOCAL',
+    texts: ['enabled', 'disabled'],
+  });
+});
+
+it.each(['', 'Enabled', 'break-glass', null, 1, false, {}, undefined])(
+  'rejects invalid present attempt local mode: %j',
+  (value) => {
+    for (const target of ['attempt', 'last_verified'] as const) {
+      const inventory = deploymentInventory();
+      inventory.deployment!.last_verified = {
+        ...inventory.deployment!.attempt,
+        phase: 'verified',
+        smoke: 'passed',
+      };
+      Object.assign(inventory.deployment![target]!, { local_auth: value });
+      expect(() => validateInventory(inventory, identity)).toThrow(
+        expect.objectContaining({ code: 'invalid_inventory' }),
+      );
+    }
+  },
+);
+
+it('rejects invalid local mode history while retaining legacy plain binding receipts', () => {
+  const inventory = deploymentInventory();
+  for (const text of ['', 'Enabled', 'break-glass', 'private-value']) {
+    inventory.deployment!.history = {
+      version_ids: [],
+      plain_bindings: [{ name: 'PB_AUTH_LOCAL', texts: [text] }],
+    };
+    expect(() => validateInventory(inventory, identity)).toThrow(
+      expect.objectContaining({ code: 'invalid_inventory' }),
+    );
+  }
+  inventory.deployment!.history = {
+    version_ids: [],
+    plain_bindings: [{ name: 'PB_PUBLIC_URL', texts: ['https://broker.example'] }],
+  };
+  expect(validateInventory(inventory, identity)).toBe(inventory);
 });

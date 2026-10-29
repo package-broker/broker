@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { envelopeResponse } from '@package-broker/core/kernel/errors';
 import { smoke } from './smoke.js';
+import { resolveLocalAuth } from './local-auth.js';
 import { readProvidersOption } from './providers-file.js';
 import { teardown } from './teardown.js';
 import { stageAssets } from '../../build-assets.js';
@@ -5747,3 +5748,39 @@ it('anchor preflight does not check a provider removed from the effective set', 
   expect(result.exitCode).toBe(0);
   expect(queriedProviders(queried)).toEqual(['test']);
 });
+
+it.each([
+  [{ flag: 'private-value' }, 'auth_local_invalid'],
+  [
+    {
+      sources: [
+        { bindings: [{ name: 'PB_AUTH_LOCAL', type: 'plain_text', text: 'private-value' }] },
+      ],
+    },
+    'Invalid live PB_AUTH_LOCAL binding',
+  ],
+  [{ flag: 'enabled', env: 'disabled' }, 'PB_AUTH_LOCAL conflicts with --local-auth'],
+  [
+    { secretNames: ['PB_AUTH_LOCAL'] },
+    'Remove the secret first: wrangler secret delete PB_AUTH_LOCAL',
+  ],
+] as const)(
+  'preserves local-auth input reason through deploy failure wrapping: %j',
+  async (input, message) => {
+    const h = harness();
+    const result = await deploy(
+      options(h, {
+        contract: {
+          ...fixtureContract,
+          domainZone: async () => {
+            resolveLocalAuth({ sources: null, ...input, stage: 'setup' });
+            return ZONE;
+          },
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.output.error).toMatchObject({ code: 'invalid_input', stage: 'deploy', message });
+    expect(JSON.stringify(result.output)).not.toContain('private-value');
+  },
+);

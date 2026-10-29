@@ -471,6 +471,36 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
       expect((await f.request('PUT', `${base}/${SOURCE}/credential`, credential)).status).toBe(403);
       expect(f.credentials.prepare).not.toHaveBeenCalled();
     });
+    it.each([
+      { pendingWebhookSecret: SENTINEL + '-pending' },
+      { previousWebhookSecret: SENTINEL + '-previous', previousUntil: '2026-10-28T13:00:00.000Z' },
+      { previousUntil: '2026-10-28T13:00:00.000Z' },
+    ])('rejects connection-only fields on hand-made credentials', async (fields) => {
+      const f = await setup();
+      const response = await f.request('PUT', `${base}/${SOURCE}/credential`, {
+        kind: 'github_app',
+        material: JSON.stringify({
+          appId: '1',
+          privateKeyPem: '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----',
+          webhookSecret: SENTINEL,
+          ...fields,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.text()).not.toContain(SENTINEL);
+      expect(f.credentials.prepare).not.toHaveBeenCalled();
+      const positive = await fixture();
+      const control = await positive.request('PUT', `/_pb/sources/${SOURCE}/credential`, {
+        kind: 'github_app',
+        material: JSON.stringify({
+          appId: '1',
+          privateKeyPem: '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----',
+          webhookSecret: SENTINEL,
+        }),
+      });
+      expect(control.status).toBe(204);
+      expect(positive.credentials.prepare).toHaveBeenCalledOnce();
+    });
     it('rejects a malformed credential without echoing it', async () => {
       const f = await setup();
       const response = await f.request('PUT', `${base}/${SOURCE}/credential`, {

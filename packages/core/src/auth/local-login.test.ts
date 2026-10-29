@@ -130,9 +130,13 @@ function fakeCredentialRepository(): CredentialRepository & {
       rows.set(row.id, row);
       return Promise.resolve();
     },
-    get: (_ctx, id) => Promise.resolve(rows.get(id) ?? null),
+    get: (_ctx, id) => Promise.resolve(rows.has(id) ? { ...rows.get(id)!, updatedAt: NOW } : null),
     listBelowVersion: unexpected('listBelowVersion'),
     reseal: unexpected('reseal'),
+    replaceMaterialStatement: () => {
+      throw new Error('unexpected replaceMaterialStatement');
+    },
+    replaceMaterial: unexpected('replaceMaterial'),
     delete: unexpected('delete'),
   };
 }

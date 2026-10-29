@@ -1,9 +1,13 @@
 import { sql, type Compilable } from 'kysely';
-import type { CredentialRecord, CredentialRepository } from '@package-broker/core/db/credentials';
+import {
+  isCanonicalCredentialTimestamp,
+  type CredentialRecord,
+  type CredentialRepository,
+} from '@package-broker/core/db/credentials';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { credentialAad, type Sealed } from '@package-broker/core/secrets/cipher';
-import { compile, db } from '../kysely.js';
+import { assertCheck, compile, db } from '../kysely.js';
 
 const MAX_LIMIT = 500;
 const NONCE_BYTES = 12;
@@ -17,6 +21,7 @@ interface CredentialRow {
   readonly key_version: number;
   readonly aad: string;
   readonly rotated_at: string | null;
+  readonly updated_at: string;
 }
 
 const COLUMNS = [
@@ -28,6 +33,7 @@ const COLUMNS = [
   'key_version',
   'aad',
   'rotated_at',
+  'updated_at',
 ] as const;
 
 function run<R>(executor: SqlExecutor, query: Compilable): Promise<R[]> {
@@ -121,7 +127,52 @@ function insertQuery(
     .returning('id');
 }
 
-export function createCredentialRepository(executor: SqlExecutor): CredentialRepository {
+function replaceMaterialQuery(
+  ctx: OrgContext,
+  id: string,
+  expectedUpdatedAt: string,
+  sealed: Sealed,
+  now: string,
+): Compilable {
+  requireNonce(sealed.nonce);
+  requireKeyVersion('keyVersion', sealed.keyVersion);
+  if (![expectedUpdatedAt, now].every(isCanonicalCredentialTimestamp)) {
+    throw new TypeError('Invalid credential timestamp');
+  }
+  return db
+    .updateTable('credential')
+    .set({
+      ciphertext: sealed.ciphertext,
+      nonce: sealed.nonce,
+      key_version: sealed.keyVersion,
+      updated_at: monotonicTimestamp(now),
+    })
+    .where('org_id', '=', ctx.orgId)
+    .where('id', '=', id)
+    .where('updated_at', '=', expectedUpdatedAt)
+    .returning('id');
+}
+
+function monotonicTimestamp(now: string) {
+  return sql<string>`case when updated_at >= ${now}
+    then strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+0.001 seconds') else ${now} end`;
+}
+
+export function createCredentialRepository(executor: SqlExecutor): CredentialRepository & {
+  /** Place before replacement in the same batch; a missing, foreign or stale row aborts it. */
+  replaceGuardStatement(
+    ctx: OrgContext,
+    id: string,
+    expectedUpdatedAt: string,
+  ): readonly Statement[];
+} {
+  const replaceMaterialStatement: CredentialRepository['replaceMaterialStatement'] = (
+    ctx,
+    id,
+    expectedUpdatedAt,
+    sealed,
+    now,
+  ) => compile(replaceMaterialQuery(ctx, id, expectedUpdatedAt, sealed, now));
   return {
     insertStatement(ctx: OrgContext, row: CredentialRecord & { readonly now: string }): Statement {
       return compile(insertQuery(ctx, row));
@@ -137,7 +188,10 @@ export function createCredentialRepository(executor: SqlExecutor): CredentialRep
       }
     },
 
-    async get(ctx: OrgContext, id: string): Promise<CredentialRecord | null> {
+    async get(
+      ctx: OrgContext,
+      id: string,
+    ): Promise<(CredentialRecord & { readonly updatedAt: string }) | null> {
       const rows = await run<CredentialRow>(
         executor,
         db
@@ -147,7 +201,7 @@ export function createCredentialRepository(executor: SqlExecutor): CredentialRep
           .where('id', '=', id),
       );
       const row = rows[0];
-      return row === undefined ? null : toRecord(row);
+      return row === undefined ? null : { ...toRecord(row), updatedAt: row.updated_at };
     },
 
     async listBelowVersion(
@@ -181,6 +235,7 @@ export function createCredentialRepository(executor: SqlExecutor): CredentialRep
         throw new RangeError('keyVersion must be greater than expectedVersion');
       }
       requireNonce(sealed.nonce);
+      if (!isCanonicalCredentialTimestamp(now)) throw new TypeError('Invalid credential timestamp');
       const rows = await run<{ readonly id: string }>(
         executor,
         db
@@ -190,12 +245,36 @@ export function createCredentialRepository(executor: SqlExecutor): CredentialRep
             nonce: sealed.nonce,
             key_version: nextVersion,
             rotated_at: now,
-            updated_at: now,
+            updated_at: monotonicTimestamp(now),
           })
           .where('org_id', '=', ctx.orgId)
           .where('id', '=', id)
           .where('key_version', '=', expectedVersion)
           .returning('id'),
+      );
+      return rows.length > 0;
+    },
+
+    replaceGuardStatement(ctx, id, expectedUpdatedAt) {
+      if (!isCanonicalCredentialTimestamp(expectedUpdatedAt)) {
+        throw new TypeError('Invalid credential timestamp');
+      }
+      return assertCheck(
+        db
+          .selectFrom('credential')
+          .select(sql.lit(1).as('one'))
+          .where('org_id', '=', ctx.orgId)
+          .where('id', '=', id)
+          .where('updated_at', '=', expectedUpdatedAt)
+          .$call((query) => sql<boolean>`exists ${query}`),
+      );
+    },
+
+    replaceMaterialStatement,
+
+    async replaceMaterial(ctx, id, expectedUpdatedAt, sealed, now) {
+      const rows = await executor.all(
+        replaceMaterialStatement(ctx, id, expectedUpdatedAt, sealed, now),
       );
       return rows.length > 0;
     },

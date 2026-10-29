@@ -320,6 +320,24 @@ describe('import credential window', () => {
       { kind: 'github_app', material: github },
     );
   });
+  it.each([
+    { pendingWebhookSecret: sentinel + '-pending' },
+    { previousWebhookSecret: sentinel + '-previous', previousUntil: '2026-10-28T13:00:00.000Z' },
+    { previousUntil: '2026-10-28T13:00:00.000Z' },
+  ])('refuses connection-only fields through credential import', async (fields) => {
+    await setup({
+      manifest: manifest([vcs]),
+      source: { id, projectId: null, credentialId: null },
+    }).refused('invalid_credential', {
+      kind: 'github_app',
+      material: JSON.stringify({
+        appId: '1',
+        privateKeyPem: pem,
+        webhookSecret: sentinel,
+        ...fields,
+      }),
+    });
+  });
   it('accepts organization GitHub app material', async () => {
     expect(
       await setup({

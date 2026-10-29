@@ -71,7 +71,7 @@ describe('credential repository', () => {
     await repository.insert(a, { ...row, now: NOW });
     const found = await repository.get(a, row.id);
 
-    expect(found).toEqual(row);
+    expect(found).toEqual({ ...row, updatedAt: NOW });
     expect(found?.sealed.ciphertext).toBeInstanceOf(Uint8Array);
     expect(found?.sealed.nonce).toBeInstanceOf(Uint8Array);
     expect(
@@ -100,7 +100,7 @@ describe('credential repository', () => {
     expect(await repository.get(a, row.id)).toBeNull();
 
     await executor.batch([statement]);
-    expect(await repository.get(a, row.id)).toEqual(row);
+    expect(await repository.get(a, row.id)).toEqual({ ...row, updatedAt: NOW });
   });
 
   it('2: reseal with the expected version succeeds once and a stale second reseal changes nothing', async () => {
@@ -112,7 +112,7 @@ describe('credential repository', () => {
     expect(await repository.reseal(a, row.id, 1, first, LATER)).toBe(true);
 
     const afterFirst = await repository.get(a, row.id);
-    expect(afterFirst).toEqual({ ...row, sealed: first, rotatedAt: LATER });
+    expect(afterFirst).toEqual({ ...row, sealed: first, rotatedAt: LATER, updatedAt: LATER });
     expect(await rawRow(a.orgId, row.id)).toMatchObject({ created_at: NOW, updated_at: LATER });
 
     const second = sealed(202, 3);
@@ -171,7 +171,7 @@ describe('credential repository', () => {
     expect(await repository.reseal(b, row.id, 1, sealed(9, 2), LATER)).toBe(false);
     expect(await repository.delete(b, row.id)).toBe(false);
 
-    expect(await repository.get(a, row.id)).toEqual(row);
+    expect(await repository.get(a, row.id)).toEqual({ ...row, updatedAt: NOW });
     expect((await repository.listBelowVersion(a, 2, null, 10)).map((entry) => entry.id)).toEqual([
       row.id,
     ]);
@@ -238,7 +238,7 @@ describe('credential repository project guard', () => {
 
     await repository.insert(a, { ...row, now: NOW });
 
-    expect(await repository.get(a, row.id)).toEqual(row);
+    expect(await repository.get(a, row.id)).toEqual({ ...row, updatedAt: NOW });
   });
 
   it('6b: insert with a project of another organization throws DbError foreign_key and stores nothing', async () => {
@@ -290,7 +290,7 @@ describe('credential repository delete and source reference', () => {
 
     expect(failure).toBeInstanceOf(DbError);
     expect((failure as DbError).kind).toBe('foreign_key');
-    expect(await repository.get(a, row.id)).toEqual(row);
+    expect(await repository.get(a, row.id)).toEqual({ ...row, updatedAt: NOW });
 
     await executor.all({ sql: 'DELETE FROM source WHERE credential_id = ?', params: [row.id] });
     expect(await repository.delete(a, row.id)).toBe(true);
@@ -414,7 +414,7 @@ describe('credential repository input validation', () => {
         guarded.reseal(a, row.id, 3, sealed(9, keyVersion), LATER),
       );
     }
-    expect(await repository.get(a, row.id)).toEqual(row);
+    expect(await repository.get(a, row.id)).toEqual({ ...row, updatedAt: NOW });
   });
 
   it('10b: reseal throws TypeError for a nonce that is not 12 bytes', async () => {
@@ -423,4 +423,136 @@ describe('credential repository input validation', () => {
       repository.reseal(a, id(49), 1, bad, LATER),
     );
   });
+});
+
+describe('replaceMaterial', () => {
+  it('allows one winner at the same clock tick and preserves identity and AAD', async () => {
+    const repo = createCredentialRepository(executor);
+    const row = record(a, id(901));
+    await repo.insert(a, { ...row, now: NOW });
+    const results = await Promise.all([
+      repo.replaceMaterial(a, row.id, NOW, sealed(31), NOW),
+      repo.replaceMaterial(a, row.id, NOW, sealed(32), NOW),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const after = await repo.get(a, row.id);
+    expect(after).toMatchObject({ id: row.id, aad: row.aad, kind: row.kind, projectId: null });
+    expect(after?.updatedAt).toBe('2026-10-15T12:00:00.001Z');
+    expect(after?.rotatedAt).toBeNull();
+    expect(await repo.replaceMaterial(a, row.id, NOW, sealed(33), LATER)).toBe(false);
+    expect(after?.sealed.ciphertext).toEqual(sealed(results[0] ? 31 : 32).ciphertext);
+    expect(await repo.replaceMaterial(b, row.id, after?.updatedAt ?? '', sealed(33), LATER)).toBe(
+      false,
+    );
+    expect(await repo.replaceMaterial(a, 'missing', NOW, sealed(33), LATER)).toBe(false);
+  });
+
+  it('rejects invalid seals before executing SQL', async () => {
+    const counted = countCalls(executor);
+    const repo = createCredentialRepository(counted.executor);
+    await expect(
+      repo.replaceMaterial(a, id(901), NOW, { ...sealed(1), nonce: new Uint8Array(1) }, LATER),
+    ).rejects.toThrow('nonce must be 12 bytes');
+    await expect(repo.replaceMaterial(a, id(901), NOW, sealed(1, 0), LATER)).rejects.toThrow(
+      'keyVersion must be a positive safe integer',
+    );
+    await expect(repo.replaceMaterial(a, id(901), 'invalid', sealed(1), LATER)).rejects.toThrow(
+      'Invalid credential timestamp',
+    );
+    expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+  });
+});
+
+describe('prepared credential replacement', () => {
+  it('rolls back material when the second statement in the batch fails', async () => {
+    const repo = createCredentialRepository(executor);
+    const row = record(a, id(902), { rotatedAt: NOW });
+    await repo.insert(a, { ...row, now: NOW });
+    const before = await rawRow(a.orgId, row.id);
+    await expect(
+      executor.batch([
+        repo.replaceMaterialStatement(a, row.id, NOW, sealed(40), LATER),
+        { sql: 'INSERT INTO credential (id) VALUES (NULL)', params: [] },
+      ]),
+    ).rejects.toThrow();
+    expect(await rawRow(a.orgId, row.id)).toEqual(before);
+    const [result] = await executor.batch([
+      repo.replaceMaterialStatement(a, row.id, NOW, sealed(40), LATER),
+    ]);
+    expect(result?.changes).toBe(1);
+    expect(await repo.get(a, row.id)).toMatchObject({
+      sealed: sealed(40),
+      rotatedAt: NOW,
+      updatedAt: LATER,
+    });
+  });
+
+  it('advances tokens across a same-tick replace then reseal and refuses both stale tokens', async () => {
+    const repo = createCredentialRepository(executor);
+    const row = record(a, id(905));
+    await repo.insert(a, { ...row, now: NOW });
+    expect(await repo.replaceMaterial(a, row.id, NOW, sealed(43), NOW)).toBe(true);
+    const replaced = await repo.get(a, row.id);
+    expect(replaced?.updatedAt).toBe('2026-10-15T12:00:00.001Z');
+    expect(await repo.reseal(a, row.id, 1, sealed(44, 2), NOW)).toBe(true);
+    const resealed = await repo.get(a, row.id);
+    expect(resealed?.updatedAt).toBe('2026-10-15T12:00:00.002Z');
+    for (const token of [NOW, replaced!.updatedAt]) {
+      expect(await repo.replaceMaterial(a, row.id, token, sealed(45, 2), NOW)).toBe(false);
+    }
+    expect(await repo.get(a, row.id)).toEqual(resealed);
+  });
+
+  it('aborts all batch writes when the credential token guard is stale, missing or foreign', async () => {
+    const repo = createCredentialRepository(executor);
+    const row = record(a, id(906));
+    await repo.insert(a, { ...row, now: NOW });
+    await repo.replaceMaterial(a, row.id, NOW, sealed(46), LATER);
+    const before = await rawRow(a.orgId, row.id);
+    for (const [ctx, rowId, token] of [
+      [a, row.id, NOW],
+      [b, row.id, LATER],
+      [a, 'missing', NOW],
+    ] as const) {
+      const inserted = record(a, id(907));
+      await expect(
+        executor.batch([
+          repo.insertStatement(a, { ...inserted, now: NOW }),
+          ...repo.replaceGuardStatement(ctx, rowId, token),
+          repo.replaceMaterialStatement(ctx, rowId, token, sealed(47), LATER),
+        ]),
+      ).rejects.toThrow();
+      expect(await repo.get(a, inserted.id)).toBeNull();
+      expect(await rawRow(a.orgId, row.id)).toEqual(before);
+    }
+    await executor.batch([
+      ...repo.replaceGuardStatement(a, row.id, LATER),
+      repo.replaceMaterialStatement(a, row.id, LATER, sealed(48), LATER),
+    ]);
+    expect((await repo.get(a, row.id))?.sealed).toEqual(sealed(48));
+  });
+
+  it('rejects the pre-reseal timestamp', async () => {
+    const repo = createCredentialRepository(executor);
+    const row = record(a, id(903));
+    await repo.insert(a, { ...row, now: NOW });
+    expect(await repo.reseal(a, row.id, 1, sealed(41, 2), LATER)).toBe(true);
+    expect(await repo.replaceMaterial(a, row.id, NOW, sealed(42, 2), LATER)).toBe(false);
+    expect(await repo.get(a, row.id)).toMatchObject({ sealed: sealed(41, 2), rotatedAt: LATER });
+  });
+
+  it.each(['2026-10-15', '2026-10-15T12:00:00Z', '2026-02-30T12:00:00.000Z'])(
+    'rejects noncanonical timestamps before SQL: %s',
+    async (timestamp) => {
+      const counted = countCalls(executor);
+      const repo = createCredentialRepository(counted.executor);
+      expect(() => repo.replaceMaterialStatement(a, id(904), timestamp, sealed(1), LATER)).toThrow(
+        'Invalid credential timestamp',
+      );
+      await expect(repo.replaceMaterial(a, id(904), timestamp, sealed(1), LATER)).rejects.toThrow(
+        'Invalid credential timestamp',
+      );
+      expect(counted.counts()).toEqual({ all: 0, batch: 0 });
+    },
+  );
 });

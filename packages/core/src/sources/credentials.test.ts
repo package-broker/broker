@@ -475,3 +475,159 @@ describe('credentialEchoProbe encoded variants', () => {
     });
   });
 });
+
+describe('GitHub rotation material', () => {
+  const parseConnection = (value: unknown) =>
+    parseCredentialMaterial('github_app', JSON.stringify(value), { connection: true });
+
+  const pending = {
+    pendingWebhookSecret: SECRET + '-pending-hook',
+  };
+  const overlap = {
+    ...samples.github_app,
+    previousWebhookSecret: SECRET + '-old-hook',
+    previousUntil: '2026-10-28T13:00:00.000Z',
+  };
+
+  it.each([{}, pending, { pendingWebhookSecret: pending.pendingWebhookSecret }])(
+    'accepts optional rotation fields with and without overlap',
+    (fields) => {
+      for (const base of [samples.github_app, overlap]) {
+        const material = parseConnection({ ...base, ...fields });
+        expect(material).toMatchObject(fields);
+        expect(Object.isFrozen(material)).toBe(true);
+        expect(Object.keys(material)).toEqual(['kind']);
+        expect(JSON.stringify(material)).toBe('"[redacted]"');
+        expect(String(material)).toBe('[redacted]');
+        expect(inspect(material)).toBe('[redacted]');
+      }
+    },
+  );
+
+  it('refuses raw and encoded echoes of current, pending and previous secrets', () => {
+    const material = parseConnection({ ...overlap, ...pending });
+    const probe = credentialEchoProbe(material);
+    for (const secret of [
+      samples.github_app.webhookSecret as string,
+      pending.pendingWebhookSecret,
+      overlap.previousWebhookSecret,
+    ]) {
+      for (const value of [
+        secret,
+        encodeURIComponent(secret),
+        Buffer.from(secret).toString('base64url'),
+      ]) {
+        expect(probe.secrets).toContain(value);
+        expect(stripCredentialEcho({ name: value }, probe)).toMatchObject({
+          reason: 'credential_echo',
+        });
+      }
+    }
+  });
+
+  it.each([
+    { pendingWebhookSecret: 'short' },
+    { pendingWebhookSecret: SECRET + '\r\n' },
+    { pendingWebhookSecret: null },
+    { pendingWebhookSecret: 123 },
+    { secretRotationId: '' },
+    { secretRotationId: SECRET },
+    { secretRotationId: null },
+    { secretRotationId: 123 },
+    { secretRotationId: '81J00000000000000000000A0A' },
+  ])('rejects malformed rotation fields without echoing input', (fields) => {
+    refusal(() => parseConnection({ ...samples.github_app, ...fields }));
+  });
+
+  it('parses overlap as redacted material and probes both secrets and conversion fields', () => {
+    const material = parseConnection(overlap);
+    expect(material).toMatchObject({
+      previousWebhookSecret: overlap.previousWebhookSecret,
+      previousUntil: overlap.previousUntil,
+    });
+    expect(JSON.stringify(material)).toBe('"[redacted]"');
+    expect(String(material)).toBe('[redacted]');
+    expect(Object.keys(material)).toEqual(['kind']);
+    const conversionPem =
+      (samples.github_app.privateKeyPem as string).replace(PEM_BODY, 'Y29udmVyc2lvbi1wZW0=') + '\n';
+    const probe = credentialEchoProbe(material, {
+      pem: conversionPem,
+      client_secret: SECRET + '-client',
+      webhook_secret: SECRET + '-conversion',
+    });
+    for (const secret of [
+      conversionPem,
+      conversionPem.replace(/\n$/, ''),
+      encodeURIComponent(conversionPem),
+      Buffer.from(conversionPem).toString('base64'),
+      overlap.previousWebhookSecret,
+      samples.github_app.webhookSecret,
+      SECRET + '-client',
+      SECRET + '-conversion',
+    ]) {
+      expect(probe.secrets).toContain(secret);
+      expect(stripCredentialEcho({ name: secret }, probe)).toMatchObject({
+        reason: 'credential_echo',
+      });
+    }
+  });
+
+  it.each([
+    { previousWebhookSecret: SECRET },
+    { previousUntil: overlap.previousUntil },
+    { previousWebhookSecret: 'short', previousUntil: overlap.previousUntil },
+    { previousWebhookSecret: SECRET, previousUntil: '2026-02-30T13:00:00.000Z' },
+    { previousWebhookSecret: SECRET, previousUntil: 123 },
+  ])('rejects malformed overlap without echoing input', (fields) => {
+    refusal(() => parseConnection({ ...samples.github_app, ...fields }));
+  });
+  it('probes raw and normalized CRLF conversion PEMs and their encoded forms', () => {
+    const material = parseConnection(samples.github_app);
+    const pem =
+      '  \r\n-----BEGIN PRIVATE KEY-----\r\nY3JsZi1jb252ZXJzaW9u\r\n-----END PRIVATE KEY-----\r\n';
+    const normalized = pem.trim() + '\n';
+    const probe = credentialEchoProbe(material, { pem });
+    for (const form of [pem, pem.replace(/\n$/, ''), normalized, normalized.replace(/\n$/, '')]) {
+      for (const value of [form, encodeURIComponent(form), Buffer.from(form).toString('base64')]) {
+        expect(probe.secrets).toContain(value);
+        expect(stripCredentialEcho({ description: value }, probe)).toMatchObject({ refused: true });
+      }
+    }
+  });
+
+  it('accepts null conversion webhook secret and retains conversion PEM probe forms', () => {
+    const material = parseConnection(samples.github_app);
+    const pem =
+      (samples.github_app.privateKeyPem as string).replace(PEM_BODY, 'bnVsbC1jb252ZXJzaW9u') + '\n';
+    const probe = credentialEchoProbe(material, { pem, webhook_secret: null });
+    for (const value of [
+      pem,
+      pem.replace(/\n$/, ''),
+      encodeURIComponent(pem),
+      Buffer.from(pem).toString('base64url'),
+    ]) {
+      expect(probe.secrets).toContain(value);
+    }
+    expect(probe.secrets).not.toContain('null');
+  });
+
+  it.each([
+    { pendingWebhookSecret: samples.github_app.webhookSecret },
+    { ...overlap, pendingWebhookSecret: overlap.previousWebhookSecret },
+    {
+      previousWebhookSecret: samples.github_app.webhookSecret,
+      previousUntil: overlap.previousUntil,
+    },
+    { secretRotationId: '01J00000000000000000000A0A' },
+  ])('rejects duplicate current secrets and rotation ids in connection material', (fields) => {
+    refusal(() => parseConnection({ ...samples.github_app, ...fields }));
+  });
+
+  it.each([
+    { pendingWebhookSecret: pending.pendingWebhookSecret },
+    { previousWebhookSecret: overlap.previousWebhookSecret, previousUntil: overlap.previousUntil },
+    { previousUntil: overlap.previousUntil },
+  ])('keeps hand-made credential parsing closed to connection fields', (fields) => {
+    refusal(() => parse('github_app', { ...samples.github_app, ...fields }));
+  });
+});

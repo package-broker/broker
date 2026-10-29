@@ -64,6 +64,7 @@ interface FakeRepository extends CredentialRepository {
 function fakeRepository(): FakeRepository {
   const rows = new Map<string, CredentialRecord>();
   const owners = new Map<string, string>();
+  const timestamps = new Map<string, string>();
   const statements: Statement[] = [];
   const resealCalls: FakeRepository['resealCalls'] = [];
   const ownedBy = (orgId: string, id: string): boolean => (owners.get(id) ?? ORG.orgId) === orgId;
@@ -81,6 +82,7 @@ function fakeRepository(): FakeRepository {
     },
     async insert(ctx, row) {
       checkInsert(ctx.orgId, row);
+      timestamps.set(row.id, row.now);
       owners.set(row.id, ctx.orgId);
       rows.set(row.id, {
         id: row.id,
@@ -92,7 +94,10 @@ function fakeRepository(): FakeRepository {
       });
     },
     async get(ctx, id) {
-      return ownedBy(ctx.orgId, id) ? (rows.get(id) ?? null) : null;
+      const row = rows.get(id);
+      return ownedBy(ctx.orgId, id) && row !== undefined
+        ? { ...row, updatedAt: timestamps.get(id) ?? NOW }
+        : null;
     },
     async listBelowVersion(ctx, version, afterId, limit) {
       return [...rows.values()]
@@ -116,7 +121,26 @@ function fakeRepository(): FakeRepository {
       ) {
         return false;
       }
+      timestamps.set(id, now);
       rows.set(id, { ...row, sealed, rotatedAt: now });
+      return true;
+    },
+    replaceMaterialStatement(ctx, id, expectedUpdatedAt, sealed, now) {
+      const statement = {
+        sql: 'replace credential',
+        params: [ctx.orgId, id, expectedUpdatedAt, sealed.ciphertext, now],
+      };
+      statements.push(statement);
+      return statement;
+    },
+    async replaceMaterial(ctx, id, expectedUpdatedAt, sealed, now) {
+      const row = await repository.get(ctx, id);
+      if (row === null || row.updatedAt !== expectedUpdatedAt) return false;
+      const updatedAt = new Date(
+        Math.max(Date.parse(now), Date.parse(expectedUpdatedAt) + 1),
+      ).toISOString();
+      timestamps.set(id, updatedAt);
+      rows.set(id, { ...row, sealed });
       return true;
     },
     async delete(ctx, id) {
@@ -342,7 +366,10 @@ describe('credential store', () => {
   it('refuses a row of another organization if a repository returns it anyway (defence in depth)', async () => {
     const { repository, cipher, store } = setup();
     const id = await store.put(ORG, input('payload'));
-    repository.get = async (_ctx, rowId) => repository.rows.get(rowId) ?? null;
+    repository.get = async (_ctx, rowId) => {
+      const row = repository.rows.get(rowId);
+      return row === undefined ? null : { ...row, updatedAt: NOW };
+    };
 
     expect(await problemOf(store.read(orgContext('01J00000000000000000000B0B'), id))).toBe(
       'aad_mismatch',
@@ -559,6 +586,108 @@ describe('credential store resealBatch', () => {
     expect(result).toEqual({ resealed: 1, lost: 1, failed: 0, nextAfterId: null });
     expect(sealedBytes((repository.rows.get(ids[0] as string) as CredentialRecord).sealed)).toBe(
       gapBefore,
+    );
+  });
+});
+
+describe('credential material replacement', () => {
+  it('keeps id, scope, kind and AAD while resealing with a fresh nonce', async () => {
+    const { store, repository } = setup();
+    const id = await store.put(ORG, input('original'));
+    const before = await repository.get(ORG, id);
+    expect(await store.replaceMaterial(ORG, id, NOW, encoder.encode('replacement'))).toBe(true);
+    const after = await repository.get(ORG, id);
+    expect(after).toMatchObject({ id, kind: KIND, projectId: null, aad: before?.aad });
+    expect(after?.sealed.nonce).not.toEqual(before?.sealed.nonce);
+    expect(decoder.decode(await store.read(ORG, id))).toBe('replacement');
+    expect(await store.replaceMaterial(ORG, id, NOW, encoder.encode('stale'))).toBe(false);
+    expect(decoder.decode(await store.read(ORG, id))).toBe('replacement');
+  });
+
+  it('refuses missing and foreign credentials', async () => {
+    const { store } = setup();
+    const id = await store.put(ORG, input('original'));
+    expect(await store.replaceMaterial(orgContext('other'), id, NOW, encoder.encode('new'))).toBe(
+      false,
+    );
+    expect(await store.replaceMaterial(ORG, 'missing', NOW, encoder.encode('new'))).toBe(false);
+    expect(decoder.decode(await store.read(ORG, id))).toBe('original');
+  });
+
+  it('refuses an AAD mismatch without replacing material', async () => {
+    const { store, repository } = setup();
+    const id = await store.put(ORG, input('original'));
+    const row = repository.rows.get(id) as CredentialRecord;
+    repository.rows.set(id, { ...row, aad: 'wrong' });
+    expect(await problemOf(store.replaceMaterial(ORG, id, NOW, encoder.encode('new')))).toBe(
+      'aad_mismatch',
+    );
+    expect(repository.rows.get(id)?.sealed).toEqual(row.sealed);
+  });
+});
+
+describe('credential CAS reads and preparation', () => {
+  it('returns plaintext and timestamp from one row and catches a replacement between reads', async () => {
+    const { store } = setup();
+    const id = await store.put(ORG, input('original'));
+    const before = await store.readForUpdate(ORG, id);
+    expect(decoder.decode(before.plaintext)).toBe('original');
+    expect(await store.replaceMaterial(ORG, id, before.updatedAt, encoder.encode('new'))).toBe(
+      true,
+    );
+    const after = await store.readForUpdate(ORG, id);
+    expect(decoder.decode(after.plaintext)).toBe('new');
+    expect(after.updatedAt).not.toBe(before.updatedAt);
+    expect(await store.replaceMaterial(ORG, id, before.updatedAt, before.plaintext)).toBe(false);
+  });
+
+  it('prepares sealed replacement without changing material and rejects stale preparation', async () => {
+    const { store, repository, cipher } = setup();
+    const id = await store.put(ORG, input('original'));
+    const original = await repository.get(ORG, id);
+    const prepare = repository.replaceMaterialStatement;
+    let preparedSeal: Sealed | undefined;
+    repository.replaceMaterialStatement = (...args) => {
+      preparedSeal = args[3];
+      return prepare(...args);
+    };
+    const statement = await store.prepareReplace(ORG, id, NOW, encoder.encode('new'));
+    expect(statement).toBe(repository.statements.at(-1));
+    expect(statement).not.toBeNull();
+    expect(preparedSeal).toBeDefined();
+    expect(original).not.toBeNull();
+    expect(decoder.decode(await cipher.open(preparedSeal!, original!.aad))).toBe('new');
+    expect(decoder.decode(await store.read(ORG, id))).toBe('original');
+    await store.replaceMaterial(ORG, id, NOW, encoder.encode('changed'));
+    expect(await store.prepareReplace(ORG, id, NOW, encoder.encode('stale'))).toBeNull();
+  });
+
+  it.each(['2026-10-15', '2026-10-15T10:00:00Z', '2026-02-30T10:00:00.000Z'])(
+    'rejects a noncanonical CAS token before reading: %s',
+    async (timestamp) => {
+      const { store } = setup();
+      await expect(
+        store.prepareReplace(ORG, 'missing', timestamp, encoder.encode('new')),
+      ).rejects.toThrow('Invalid credential timestamp');
+      await expect(
+        store.replaceMaterial(ORG, 'missing', timestamp, encoder.encode('new')),
+      ).rejects.toThrow('Invalid credential timestamp');
+    },
+  );
+
+  it('refuses a replacement with a timestamp captured before master-key resealing', async () => {
+    const { store, repository } = setup(cipherFor(masterKey(1, 0)));
+    const id = await store.put(ORG, input('original'));
+    const before = await store.readForUpdate(ORG, id);
+    const newer = createCredentialStore({
+      repository,
+      cipher: cipherFor(masterKey(2, 32), masterKey(1, 0)),
+      ids: sequentialIds(),
+      clock: fixedClock('2026-10-16T10:00:00.000Z'),
+    });
+    expect((await newer.resealBatch(ORG, { afterId: null, limit: 10 })).resealed).toBe(1);
+    expect(await newer.replaceMaterial(ORG, id, before.updatedAt, encoder.encode('new'))).toBe(
+      false,
     );
   });
 });

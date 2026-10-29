@@ -371,7 +371,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/catalogue.ts': '',
   'db-sqlite/src/repositories/closure-edges.ts': '',
   'db-sqlite/src/repositories/credential.ts':
-    "deleteFrom('credential'); insertInto('credential'); updateTable('credential')",
+    "deleteFrom('credential'); insertInto('credential'); updateTable('credential') x2",
   'db-sqlite/src/repositories/fetch-lease.ts':
     "deleteFrom('fetch_lease') x2; insertInto('fetch_lease') [onConflict:doUpdateSet]; updateTable('fetch_lease')",
   'db-sqlite/src/repositories/idempotency.ts':
@@ -1927,9 +1927,30 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Shared canonical timestamp validator is pure and performs no SQL or result-count reads.',
+      sites: [
+        "db-sqlite/src/repositories/credential.ts:opaque dependency: import {\n  isCanonicalCredentialTimestamp,\n  type CredentialRecord,\n  type CredentialRepository,\n} from '@package-broker/core/db/credentials'; #1",
+      ],
+    },
+    {
+      reason:
+        'Both credential updates advance the stored token in SQL; no side effects or count reads.',
+      sites: [
+        "db-sqlite/src/repositories/credential.ts:SQL template: sql<string>`case when updated_at >= ${now}\n    then strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+0.001 seconds') else ${now} end` #1",
+      ],
+    },
+    {
+      reason:
+        'The credential CAS guard tests an organization-scoped token before replacement and aborts the batch on mismatch.',
+      sites: [
+        'db-sqlite/src/repositories/credential.ts:SQL template: sql<boolean>`exists ${query}` #1',
+      ],
+    },
+    {
+      reason:
         'Local builder in credential; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
-        "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .updateTable('credential')\n          .set({\n            ciphertext: sealed.ciphertext,\n            nonce: sealed.nonce,\n            key_version: nextVersion,\n            rotated_at: now,\n            updated_at: now,\n          })\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .where('key_version', '=', expectedVersion)\n          .returning('id'),\n      ); #1",
+        "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .updateTable('credential')\n          .set({\n            ciphertext: sealed.ciphertext,\n            nonce: sealed.nonce,\n            key_version: nextVersion,\n            rotated_at: now,\n            updated_at: monotonicTimestamp(now),\n          })\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .where('key_version', '=', expectedVersion)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/credential.ts:builder variable: return rows.length > 0; #1',
         "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .deleteFrom('credential')\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/credential.ts:builder variable: return rows.length > 0; #2',

@@ -4,7 +4,12 @@ import { AUDIT_EVENTS, KERNEL_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-
 import { registerCoreJob } from '../runtime/core-jobs.js';
 import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
 import { createObservability, type ObsRecord } from '../platform/observability.js';
-import { AuditIntegrityError, auditSealJob, requestAuditSeal, type SealOutcome } from './sealer.js';
+import {
+  AuditSealInterruptedError,
+  auditSealJob,
+  requestAuditSeal,
+  type SealOutcome,
+} from './sealer.js';
 
 const org = orgContext('org-a');
 const sealed: SealOutcome = { outcome: 'sealed', sealed: 4, headSeq: 9, headHash: 'private-hash' };
@@ -121,6 +126,16 @@ describe('auditSealJob', () => {
       auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, context()),
     ).resolves.toBeUndefined();
     expect(seal).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops without contention or logs while a restore is pending', async () => {
+    const seal = vi.fn().mockResolvedValue({ outcome: 'restore_pending' });
+    const ctx = context();
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, ctx);
+    expect(seal).toHaveBeenCalledTimes(1);
+    expect(ctx.observability.counter).toHaveBeenCalledWith('pb.audit.seal_restore_pending');
+    expect(ctx.observability.counter).not.toHaveBeenCalledWith('audit_seal_contended_total');
+    expect(ctx.observability.log).not.toHaveBeenCalled();
   });
 
   it('bounds a perpetually productive port to ten rounds', async () => {
@@ -253,16 +268,39 @@ describe('auditSealJob through the real observability port', () => {
     return { ctx, records };
   }
 
+  it('reports committed integrity reasons when the seal call fails afterwards', async () => {
+    const error = new AuditSealInterruptedError(['boundary_mismatch', 'seq_gap'], {
+      cause: new Error('private'),
+    });
+    const seal = vi.fn().mockRejectedValue(error);
+    const { ctx, records } = observedContext();
+    await expect(
+      auditSealJob({ seal, pendingOldestAgeSeconds: async () => 0 }).handler({}, ctx),
+    ).rejects.toBe(error);
+    expect(
+      records.filter((record) => record.kind === 'log').map((record) => record.record),
+    ).toEqual([
+      expect.objectContaining({ event: 'audit.chain_integrity', reason: 'boundary_mismatch' }),
+      expect.objectContaining({ event: 'audit.chain_integrity', reason: 'seq_gap' }),
+    ]);
+    expect(
+      records.filter(
+        (record) => record.kind === 'counter' && record.name === 'pb.audit.chain_integrity',
+      ),
+    ).toHaveLength(2);
+    expect(JSON.stringify(records)).not.toContain('private');
+  });
+
   it.each(['seq_gap', 'head_mismatch', 'boundary_mismatch'] as const)(
-    'reports integrity reason %s and stops the run',
+    'reports integrity reason %s and continues sealing',
     async (reason) => {
-      const error = new AuditIntegrityError(reason);
-      const seal = vi.fn().mockRejectedValue(error);
+      const seal = vi
+        .fn()
+        .mockResolvedValueOnce({ ...sealed, integrity: [reason] })
+        .mockResolvedValue({ outcome: 'empty' });
       const { ctx, records } = observedContext();
-      await expect(
-        auditSealJob({ seal, pendingOldestAgeSeconds: async () => 0 }).handler({}, ctx),
-      ).rejects.toBe(error);
-      expect(seal).toHaveBeenCalledTimes(1);
+      await auditSealJob({ seal, pendingOldestAgeSeconds: async () => 0 }).handler({}, ctx);
+      expect(seal).toHaveBeenCalledTimes(2);
       expect(records.filter((record) => record.kind === 'log')).toEqual([
         {
           kind: 'log',
@@ -272,6 +310,7 @@ describe('auditSealJob through the real observability port', () => {
             reason,
           }),
         },
+        { kind: 'log', record: expect.objectContaining({ event: 'audit.sealed' }) },
       ]);
       expect(records).toContainEqual({
         kind: 'counter',

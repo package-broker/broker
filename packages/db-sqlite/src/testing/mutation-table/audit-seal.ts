@@ -1,7 +1,8 @@
 import { expect } from 'vitest';
-import { AuditIntegrityError } from '@package-broker/core/audit/sealer';
 import { AUDIT_GENESIS_HASH, verifyChain, type AuditRow } from '@package-broker/core/audit/chain';
 import type { SqlExecutor } from '@package-broker/core/db/port';
+import { createAuditLedgerRepository } from '../../repositories/audit-ledger.js';
+import { entries as ledgerEntries } from './audit-ledger.js';
 import { createAuditSealRepository } from '../../repositories/audit-seal.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 
@@ -186,17 +187,20 @@ const indexedReads: ContractCase = {
       all: (statement) => context.executor.all(context.mutate(statement)),
       batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
     };
-    await expect(createAuditSealRepository(executor).seal(own)).resolves.toMatchObject({
+    await expect(createAuditSealRepository(executor).seal(own)).resolves.toEqual({
       outcome: 'sealed',
+      sealed: 1,
       headSeq: 3,
+      headHash: expect.any(String),
       repaired: true,
     });
     expect(
       await context.executor.all({
-        sql: 'SELECT journal_rows FROM audit_chain WHERE org_id = ?',
+        sql: 'SELECT journal_rows, boundary_seq, boundary_reason FROM audit_chain WHERE org_id = ?',
         params: [own.orgId],
       }),
-    ).toEqual([{ journal_rows: 2 }]);
+    ).toEqual([{ journal_rows: 2, boundary_seq: 2, boundary_reason: null }]);
+    expect(await createAuditLedgerRepository(context.executor).page(own, null, 100)).toEqual([]);
   },
 };
 
@@ -268,8 +272,8 @@ const headScope: ContractCase = {
   },
 };
 
-const integrityStopScope: ContractCase = {
-  name: 'an integrity stop preserves foreign organization state',
+const integrityRecoveryScope: ContractCase = {
+  name: 'integrity recovery preserves foreign organization state',
   async run(context) {
     const { own, foreign } = orgOf(context);
     const seed = seeder(context.executor);
@@ -279,21 +283,22 @@ const integrityStopScope: ContractCase = {
       all: (statement) => context.executor.all(context.mutate(statement)),
       batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
     };
-    await expect(createAuditSealRepository(executor).seal(own)).rejects.toEqual(
-      new AuditIntegrityError('seq_gap'),
-    );
+    await expect(createAuditSealRepository(executor).seal(own)).resolves.toMatchObject({
+      outcome: 'empty',
+      repaired: true,
+    });
     expect(
       await context.executor.all({
-        sql: 'SELECT restore_pending FROM audit_chain WHERE org_id = ?',
+        sql: 'SELECT boundary_seq FROM audit_chain WHERE org_id = ?',
         params: [foreign.orgId],
       }),
-    ).toEqual([{ restore_pending: 0 }]);
+    ).toEqual([{ boundary_seq: 1 }]);
     expect(
       await context.executor.all({
-        sql: 'SELECT restore_pending FROM audit_chain WHERE org_id = ?',
+        sql: 'SELECT boundary_seq FROM audit_chain WHERE org_id = ?',
         params: [own.orgId],
       }),
-    ).toEqual([{ restore_pending: 1 }]);
+    ).toEqual([{ boundary_seq: 1 }]);
   },
 };
 
@@ -328,6 +333,216 @@ const probeScope: ContractCase = {
   },
 };
 
+const gapRecoveryScope: ContractCase = {
+  name: 'gap recovery reads and writes only the organization journal and ledger',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seed(
+      'UPDATE audit_chain SET chain_id = (SELECT chain_id FROM audit_chain WHERE org_id = ?) WHERE org_id = ?',
+      own.orgId,
+      foreign.orgId,
+    );
+    for (const [seq, orgId] of [
+      [1, own.orgId],
+      [3, own.orgId],
+      [2, foreign.orgId],
+    ] as const)
+      await seed(
+        `INSERT INTO audit_event (id, org_id, seq, prev_hash, hash, created_at, actor_type, action, target_type)
+        VALUES (?, ?, ?, ?, ?, '2026-10-17T09:00:00.000Z', 'system', 'org.update', 'organization')`,
+        `gap-${seq}`,
+        orgId,
+        seq,
+        seq === 1 ? AUDIT_GENESIS_HASH : String(seq).repeat(64),
+        'a'.repeat(64),
+      );
+    await seed(
+      'UPDATE audit_chain SET head_seq = 3, head_hash = ?, journal_rows = 2, journal_bytes = 1 WHERE org_id = ?',
+      'a'.repeat(64),
+      own.orgId,
+    );
+    const [chain] = await context.executor.all<{ chain_id: string }>({
+      sql: 'SELECT chain_id FROM audit_chain WHERE org_id = ?',
+      params: [own.orgId],
+    });
+    if (chain === undefined) throw new Error('missing chain');
+    const ledger = createAuditLedgerRepository(context.executor);
+    await ledger.append(foreign, [
+      {
+        id: '01K7R5V0000000000000000001',
+        kind: 'gap',
+        chainId: chain.chain_id,
+        epoch: 0,
+        fromSeq: 2,
+        toSeq: 2,
+        count: 1,
+        sinkId: null,
+        reasonCode: 'seq_gap',
+        policy: 'availability',
+        modeGeneration: 0,
+        actorType: 'system',
+        actorId: null,
+        createdAt: '2026-10-28T10:00:00.000Z',
+      },
+    ]);
+    const before = await ledger.page(foreign, null, 100);
+    const executor: SqlExecutor = {
+      driver: context.executor.driver,
+      all: (statement) => context.executor.all(context.mutate(statement)),
+      batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
+    };
+    expect(await createAuditSealRepository(executor).seal(own)).toMatchObject({
+      outcome: 'empty',
+      repaired: true,
+    });
+    expect(await ledger.page(own, null, 100)).toEqual([
+      expect.objectContaining({ kind: 'gap', fromSeq: 2, toSeq: 2, count: 1 }),
+    ]);
+    expect(await ledger.page(foreign, null, 100)).toEqual(before);
+  },
+};
+
+const resetFenceScope: ContractCase = {
+  name: 'a foreign reset cannot suppress the organization pending reset',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seed(
+      'UPDATE audit_chain SET chain_id = (SELECT chain_id FROM audit_chain WHERE org_id = ?) WHERE org_id = ?',
+      own.orgId,
+      foreign.orgId,
+    );
+    const [chain] = await context.executor.all<{ chain_id: string }>({
+      sql: 'SELECT chain_id FROM audit_chain WHERE org_id = ?',
+      params: [own.orgId],
+    });
+    if (chain === undefined) throw new Error('missing chain');
+    const ledger = createAuditLedgerRepository(context.executor);
+    await ledger.append(foreign, [
+      {
+        id: '7ZZZZZZZZZZZZZZZZZZZZZZZZZ',
+        kind: 'chain_reset',
+        chainId: chain.chain_id,
+        epoch: 0,
+        fromSeq: 1,
+        toSeq: 1,
+        count: 0,
+        sinkId: null,
+        reasonCode: 'tamper_detected',
+        policy: 'availability',
+        modeGeneration: 0,
+        actorType: 'system',
+        actorId: null,
+        createdAt: '2026-10-28T10:00:00.000Z',
+      },
+    ]);
+    await seed(
+      `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+      VALUES ('reset-own', ?, '2026-10-17T10:00:00.000Z', 'system', 'org.update', 'organization')`,
+      own.orgId,
+    );
+    let changed = false;
+    const executor: SqlExecutor = {
+      driver: context.executor.driver,
+      all: (statement) => context.executor.all(context.mutate(statement)),
+      batch: async (statements) => {
+        if (!changed) {
+          changed = true;
+          await seed(
+            `UPDATE audit_pending SET payload_json = '{"changed":true}' WHERE org_id = ?`,
+            own.orgId,
+          );
+        }
+        return context.executor.batch(context.mutateBatch(statements));
+      },
+    };
+    expect(await createAuditSealRepository(executor).seal(own)).toMatchObject({
+      outcome: 'sealed',
+      sealed: 1,
+      integrity: ['head_mismatch'],
+    });
+    expect(await ledger.page(own, null, 100)).toEqual([
+      expect.objectContaining({ kind: 'chain_reset', fromSeq: 1, toSeq: 1 }),
+    ]);
+  },
+};
+
+const gapAboveScope: ContractCase = {
+  name: 'only the organization recorded gaps keep its head above them',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seed(
+      'UPDATE audit_chain SET chain_id = (SELECT chain_id FROM audit_chain WHERE org_id = ?) WHERE org_id = ?',
+      own.orgId,
+      foreign.orgId,
+    );
+    const [chain] = await context.executor.all<{ chain_id: string }>({
+      sql: 'SELECT chain_id FROM audit_chain WHERE org_id = ?',
+      params: [own.orgId],
+    });
+    if (chain === undefined) throw new Error('missing chain');
+    await createAuditLedgerRepository(context.executor).append(foreign, [
+      {
+        id: '01K7R5V0000000000000000009',
+        kind: 'gap',
+        chainId: chain.chain_id,
+        epoch: 0,
+        fromSeq: 5,
+        toSeq: 9,
+        count: 5,
+        sinkId: null,
+        reasonCode: 'seq_gap',
+        policy: 'availability',
+        modeGeneration: 0,
+        actorType: 'system',
+        actorId: null,
+        createdAt: '2026-10-28T10:00:00.000Z',
+      },
+    ]);
+    for (const id of ['above-1', 'above-2', 'above-3'])
+      await seed(
+        `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+        VALUES (?, ?, '2026-10-17T10:00:00.000Z', 'system', 'org.update', 'organization')`,
+        id,
+        own.orgId,
+      );
+    const executor: SqlExecutor = {
+      driver: context.executor.driver,
+      all: (statement) => context.executor.all(context.mutate(statement)),
+      batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
+    };
+    await seed('UPDATE audit_chain SET journal_bytes = 1 WHERE org_id = ?', own.orgId);
+    expect(await createAuditSealRepository(executor).seal(own)).toEqual({
+      outcome: 'sealed',
+      sealed: 3,
+      headSeq: 3,
+      headHash: expect.any(String),
+      repaired: true,
+    });
+    const plain = createAuditSealRepository(context.executor);
+    await seed('DELETE FROM audit_event WHERE org_id = ? AND seq = 3', own.orgId);
+    await plain.seal(own);
+    await seed(
+      'UPDATE audit_chain SET head_seq = 2, head_hash = (SELECT hash FROM audit_event WHERE org_id = ? AND seq = 2) WHERE org_id = ?',
+      own.orgId,
+      own.orgId,
+    );
+    await seed(
+      `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+      VALUES ('above-4', ?, '2026-10-17T10:00:00.000Z', 'system', 'org.update', 'organization')`,
+      own.orgId,
+    );
+    expect(await createAuditSealRepository(executor).seal(own)).toMatchObject({
+      outcome: 'sealed',
+      sealed: 1,
+      headSeq: 4,
+      integrity: ['head_mismatch'],
+    });
+  },
+};
+
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditSealRepository',
@@ -339,16 +554,45 @@ export const entries: readonly MutationEntry[] = [
       indexedReads,
       deleteScope,
       headScope,
-      integrityStopScope,
+      integrityRecoveryScope,
       probeScope,
+      gapRecoveryScope,
+      resetFenceScope,
+      gapAboveScope,
+      ...ledgerEntries.flatMap((entry) => entry.cases),
     ],
     predicates: [
+      ...ledgerEntries.flatMap((entry) => entry.predicates),
       {
-        name: 'integrity stops belong to the organization',
-        locate: /(?<=SET restore_pending = 1 WHERE )org_id = \?/,
+        name: 'gap detection reads only the organization journal',
+        locate: /org_id = \?(?=\s+\) WHERE seq)/,
         neutral: '(? is not null)',
         copies: 1,
-        caseName: integrityStopScope.name,
+        caseName: gapRecoveryScope.name,
+      },
+      {
+        name: 'recorded gaps are read only from the organization ledger',
+        locate: /org_id = \?(?= AND chain_id = \? AND epoch = \? AND reason_code)/,
+        neutral: '(? is not null)',
+        copies: 2,
+        caseName: gapRecoveryScope.name,
+      },
+      {
+        name: 'recorded gaps above the head are read only from the organization ledger',
+        locate: /t\.org_id = \?/,
+        neutral: '(? is not null)',
+        copies: 5,
+        waivedCopies: {
+          2: 'the own recorded gap already refuses this allocation; copy 2 kills the same fence with only a foreign gap above the head',
+        },
+        caseName: gapAboveScope.name,
+      },
+      {
+        name: 'gap recovery fences only the organization ledger',
+        locate: /g\.org_id = \?/,
+        neutral: '(? is not null)',
+        copies: 1,
+        caseName: gapRecoveryScope.name,
       },
       {
         name: 'snapshot probes belong to the organization',

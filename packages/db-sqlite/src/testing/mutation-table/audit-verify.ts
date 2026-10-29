@@ -21,6 +21,11 @@ const pageSparesForeign: ContractCase = {
       );
       await createAuditSealRepository(context.executor).seal(org);
     }
+    // A stored head behind the journal makes the snapshot take the journal tail's seq and hash.
+    await seed(
+      'UPDATE audit_chain SET head_seq = 0, head_hash = boundary_prev_hash WHERE org_id = ?',
+      own.orgId,
+    );
     const reader = createAuditVerifyReader({
       driver: context.executor.driver,
       all: (statement) => context.executor.all(context.mutate(statement)),

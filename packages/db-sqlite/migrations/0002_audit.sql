@@ -17,6 +17,7 @@ CREATE TABLE audit_chain (
   journal_rows          INTEGER NOT NULL DEFAULT 0 CHECK (journal_rows >= 0),
   journal_bytes         INTEGER NOT NULL DEFAULT 0 CHECK (journal_bytes >= 0),
   restore_pending       INTEGER NOT NULL DEFAULT 0 CHECK (restore_pending IN (0, 1)),
+  integrity_incidents   INTEGER NOT NULL DEFAULT 0 CHECK (integrity_incidents BETWEEN 0 AND 9007199254740991),
   verified_from_seq     INTEGER CHECK (verified_from_seq BETWEEN 1 AND 9007199254740991),
   verified_through_seq  INTEGER CHECK (verified_through_seq BETWEEN 0 AND 9007199254740991),
   verified_bodies       INTEGER CHECK (verified_bodies >= 0),

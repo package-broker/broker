@@ -670,10 +670,16 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'Compares named chain snapshot fields from readHead SELECT results for contention; neither snapshot contains executor change metadata.',
       sites: [
-        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: current[key as keyof Head] #1',
-        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key as keyof Head] #1',
-        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: current[key as keyof Head] #2',
-        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key as keyof Head] #2',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: a[key as keyof Head] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: b[key as keyof Head] #1',
+      ],
+    },
+    {
+      reason:
+        'Compares the recomputed chain state with the readHead SELECT result to skip a no-op recovery; both are SELECT-derived values, never executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: state[key] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key] #1',
       ],
     },
     {

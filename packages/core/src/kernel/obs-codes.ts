@@ -29,7 +29,6 @@ export const AUDIT_EVENTS = frozenSet([
   'audit.seal.contended',
   'audit.verified',
   'audit.chain_broken',
-  'audit.chain_integrity',
   'audit.verify_partial',
   'audit.verify_continued',
 ]);

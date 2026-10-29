@@ -1,14 +1,23 @@
 import type { OrgContext } from '../db/port.js';
 import { JobError, type JobDefinition, type Jobs } from '../platform/jobs.js';
 
-export class AuditIntegrityError extends Error {
-  constructor(readonly reason: 'seq_gap' | 'head_mismatch' | 'boundary_mismatch') {
-    super('audit chain integrity failure');
-    this.name = 'AuditIntegrityError';
+export type AuditIntegrityReason = 'seq_gap' | 'head_mismatch' | 'boundary_mismatch';
+
+/** A seal call failed after integrity evidence for these reasons was already committed. */
+export class AuditSealInterruptedError extends Error {
+  constructor(
+    readonly integrity: readonly AuditIntegrityReason[],
+    options?: { readonly cause?: unknown },
+  ) {
+    super('audit seal interrupted after recording integrity evidence', options);
+    this.name = 'AuditSealInterruptedError';
   }
 }
 
-export type SealOutcome = { readonly repaired?: true } & (
+export type SealOutcome = {
+  readonly repaired?: true;
+  readonly integrity?: readonly AuditIntegrityReason[];
+} & (
   | {
       readonly outcome: 'sealed';
       readonly sealed: number;
@@ -17,6 +26,7 @@ export type SealOutcome = { readonly repaired?: true } & (
     }
   | { readonly outcome: 'empty' }
   | { readonly outcome: 'contended' }
+  | { readonly outcome: 'restore_pending' }
 );
 
 export interface AuditSealPort {
@@ -51,6 +61,12 @@ export function auditSealJob(
       return {};
     },
     async handler(_payload, ctx) {
+      const reportIntegrity = (reasons: readonly AuditIntegrityReason[]): void => {
+        for (const reason of reasons) {
+          ctx.observability.log({ level: 'error', event: 'audit.chain_integrity', reason });
+          ctx.observability.counter('pb.audit.chain_integrity');
+        }
+      };
       let sealed = 0;
       let rounds = 0;
       try {
@@ -65,7 +81,14 @@ export function auditSealJob(
           }
         }
         for (let round = 0; round < MAX_ROUNDS && !ctx.signal.aborted; round += 1) {
-          const result = await port.seal(ctx.org);
+          let result: SealOutcome;
+          try {
+            result = await port.seal(ctx.org);
+          } catch (error) {
+            if (error instanceof AuditSealInterruptedError) reportIntegrity(error.integrity);
+            throw error;
+          }
+          reportIntegrity(result.integrity ?? []);
           if (result.repaired) {
             ctx.observability.log({ level: 'warn', event: 'audit.seal_repaired' });
             ctx.observability.counter('pb.audit.seal_repaired');
@@ -83,20 +106,14 @@ export function auditSealJob(
             break;
           }
           contention.delete(ctx.org.orgId);
+          if (result.outcome === 'restore_pending') {
+            ctx.observability.counter('pb.audit.seal_restore_pending');
+            break;
+          }
           if (result.outcome === 'empty') break;
           sealed += result.sealed;
           rounds += 1;
         }
-      } catch (error) {
-        if (error instanceof AuditIntegrityError) {
-          ctx.observability.log({
-            level: 'error',
-            event: 'audit.chain_integrity',
-            reason: error.reason,
-          });
-          ctx.observability.counter('pb.audit.chain_integrity');
-        }
-        throw error;
       } finally {
         ctx.observability.counter('audit_sealed_total', undefined, sealed);
         ctx.observability.counter('audit_seal_rounds_total', undefined, rounds);

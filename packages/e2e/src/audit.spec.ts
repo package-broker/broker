@@ -222,6 +222,49 @@ export async function auditScenario(runtime: Runtime) {
             );
           });
         }
+        const sealRecordsTail = async (from: number) => {
+          const offset = broker.logs().length;
+          const jobId = await job('seal');
+          await until(
+            async () =>
+              auditLogs(broker.logs().slice(offset)).some(
+                (log) =>
+                  log['job_id'] === jobId &&
+                  log['event'] === 'audit.chain_integrity' &&
+                  log['reason'] === 'seq_gap',
+              ),
+            'audit-seal-integrity-log',
+            10_000,
+          ).catch((error: unknown) => {
+            throw new Error('MissingSealerIntegrityAlert', { cause: error });
+          });
+          const chain = await broker.read<{ head_seq: number; head_hash: string }>(
+            // eslint-disable-next-line no-restricted-syntax -- External, organization-scoped observation of the stored chain head.
+            'SELECT head_seq, head_hash FROM audit_chain WHERE org_id = ?',
+            [orgId],
+          );
+          assert.deepEqual(
+            chain.map((row) => ({ seq: Number(row.head_seq), hash: row.head_hash })),
+            [{ seq: anchor.seq, hash: anchor.hash }],
+            'SealerMovedHeadBack',
+          );
+          const gaps = await broker.read<{ from_seq: number; to_seq: number; count: number }>(
+            // eslint-disable-next-line no-restricted-syntax -- External, organization-scoped observation of the visible gap evidence.
+            "SELECT from_seq, to_seq, count FROM audit_ledger WHERE org_id = ? AND kind = 'gap' AND reason_code = 'seq_gap' AND superseded_by IS NULL",
+            [orgId],
+          );
+          assert(
+            gaps.some(
+              (gap) =>
+                Number(gap.from_seq) <= from &&
+                Number(gap.to_seq) === anchor.seq &&
+                Number(gap.count) === Number(gap.to_seq) - Number(gap.from_seq) + 1,
+            ),
+            'LostTailNotRecorded',
+          );
+        };
+        // The stored head anchors the runtime verifier too: a lost tail is a break after the
+        // last retained row, never a verified shorter chain.
         await check('audit:truncate:external-anchor-first-missing-position', async () => {
           await restore();
           await broker.audit.truncateFrom(anchor.seq - 1);
@@ -232,10 +275,18 @@ export async function auditScenario(runtime: Runtime) {
           const logs = await verify();
           assert(
             logs.some(
-              (log) => log['event'] === 'audit.verified' && log['head_seq'] === anchor.seq - 2,
+              (log) =>
+                log['event'] === 'audit.chain_broken' &&
+                log['seq'] === anchor.seq - 2 &&
+                log['reason'] === 'seq_gap',
             ),
-            'TruncatedPrefixNotVerified',
+            'TruncatedTailNotReported',
           );
+          assert(
+            !logs.some((log) => log['event'] === 'audit.verified'),
+            'TruncatedChainMarkedVerified',
+          );
+          await sealRecordsTail(anchor.seq - 1);
           assert.equal(
             JSON.parse(await readFile(path, 'utf8')).hash,
             anchor.hash,
@@ -248,9 +299,19 @@ export async function auditScenario(runtime: Runtime) {
           assert.deepEqual(anchoredBreak(await rows(), anchor), { seq: 1, reason: 'anchor' });
           const logs = await verify();
           assert(
-            logs.some((log) => log['event'] === 'audit.verified' && log['head_seq'] === 0),
-            'EmptyPrefixNotVerified',
+            logs.some(
+              (log) =>
+                log['event'] === 'audit.chain_broken' &&
+                log['seq'] === 0 &&
+                log['reason'] === 'seq_gap',
+            ),
+            'EmptyJournalNotReported',
           );
+          assert(
+            !logs.some((log) => log['event'] === 'audit.verified'),
+            'EmptyJournalMarkedVerified',
+          );
+          await sealRecordsTail(1);
         });
         await broker.audit.restore(stored);
       } finally {

@@ -27,6 +27,7 @@ const declared: { [T in AuditTable]: Nullability<T> } = {
     journal_rows: 1,
     journal_bytes: 1,
     restore_pending: 1,
+    integrity_incidents: 1,
     verified_from_seq: 0,
     verified_through_seq: 0,
     verified_bodies: 0,

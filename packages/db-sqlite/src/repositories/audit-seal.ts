@@ -4,7 +4,14 @@ import { assertCheck } from '../kysely.js';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { hashRow, type AuditRow } from '@package-broker/core/audit/chain';
 
-import { AuditIntegrityError, type SealOutcome } from '@package-broker/core/audit/sealer';
+import type { AuditLedgerEntry } from '@package-broker/core/audit/ledger';
+import { ulid } from '@package-broker/core/ids';
+import { auditLedgerError, createAuditLedgerRepository } from './audit-ledger.js';
+import {
+  AuditSealInterruptedError,
+  type AuditIntegrityReason,
+  type SealOutcome,
+} from '@package-broker/core/audit/sealer';
 export type { SealOutcome } from '@package-broker/core/audit/sealer';
 
 export const AUDIT_SEAL_MAX_LIMIT = 100;
@@ -46,8 +53,11 @@ const SUMMARY_SQL = `SELECT count(*) AS actual_rows, coalesce(sum(${EVENT_BYTES}
   FROM audit_event e WHERE e.org_id = ?`;
 type Head = {
   restore_pending: number;
+  integrity_incidents: number;
+  policy: 'availability' | 'required';
   head_seq: number;
   head_hash: string;
+  boundary_reason: string | null;
   boundary_seq: number;
   boundary_prev_hash: string;
   chain_id: string;
@@ -62,8 +72,9 @@ type Head = {
   last_seq: number | null;
   last_hash: string | null;
 };
-const PENDING_SQL =
-  'SELECT id, created_at, actor_type, actor_id, token_selector, source_ip, action, target_type, target_id, project_id, payload_json FROM audit_pending WHERE org_id = ? ORDER BY id LIMIT ?';
+const PENDING_COLUMNS =
+  'id, created_at, actor_type, actor_id, token_selector, source_ip, action, target_type, target_id, project_id, payload_json';
+const PENDING_SQL = `SELECT ${PENDING_COLUMNS} FROM audit_pending WHERE org_id = ? ORDER BY id LIMIT ?`;
 const INSERT_SQL =
   'INSERT INTO audit_event (id, org_id, seq, prev_hash, hash, created_at, actor_type, actor_id, token_selector, source_ip, action, target_type, target_id, project_id, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 const DELETE_SQL = `DELETE FROM audit_pending WHERE org_id = ?
@@ -74,40 +85,88 @@ const DELETE_SQL = `DELETE FROM audit_pending WHERE org_id = ?
     .map((key) => `audit_pending.${key} IS json_extract(snapshot.value, '$.${key}')`)
     .join(' AND ')})`;
 
-function unchanged(
+type ChainState = Pick<
+  Head,
+  | 'head_seq'
+  | 'head_hash'
+  | 'boundary_seq'
+  | 'boundary_prev_hash'
+  | 'boundary_reason'
+  | 'journal_rows'
+  | 'journal_bytes'
+>;
+type SeqRange = { readonly from_seq: number; readonly to_seq: number };
+
+const GAPS_SQL = `SELECT from_seq, to_seq FROM audit_ledger
+  WHERE org_id = ? AND chain_id = ? AND epoch = ? AND reason_code = 'seq_gap' AND sink_id IS NULL
+  AND kind = 'gap' AND superseded_by IS NULL AND from_seq <= ? AND to_seq >= ?
+  ORDER BY from_seq`;
+const HOLES_SQL = `SELECT previous_seq + 1 AS from_seq, seq - 1 AS to_seq FROM (
+    SELECT seq, lag(seq, 1, ?) OVER (ORDER BY seq) AS previous_seq
+    FROM audit_event WHERE org_id = ?
+  ) WHERE seq > previous_seq + 1`;
+const GAP_FENCE = ` AND NOT EXISTS (SELECT 1 FROM audit_ledger g JOIN json_each(?) ranges
+  ON g.from_seq <= json_extract(ranges.value, '$[1]') AND g.to_seq >= json_extract(ranges.value, '$[0]')
+  WHERE g.org_id = ? AND g.chain_id = ? AND g.epoch = ? AND g.kind = 'gap'
+  AND g.sink_id IS NULL AND g.reason_code = 'seq_gap' AND g.superseded_by IS NULL)`;
+const GAP_ABOVE_SQL = `FROM audit_ledger t
+  WHERE t.org_id = ? AND t.chain_id = ? AND t.epoch = ? AND t.reason_code = 'seq_gap'
+  AND t.sink_id IS NULL AND t.kind = 'gap' AND t.superseded_by IS NULL`;
+const GAP_ABOVE_FENCE = ` AND NOT EXISTS (SELECT 1 ${GAP_ABOVE_SQL} AND t.to_seq > ?)`;
+/** Two ledger statements per gap plus the CAS and its assertion stay below 200 with a reset. */
+const GAPS_PER_BATCH = 98;
+const PENDING_ATTEMPTS = 3;
+
+/**
+ * With `countIncident`, the update also counts an integrity incident. The counter must still hold
+ * the value this sealer read, so of the sealers that observed one change only the first records it.
+ */
+function compareAndSet(
   ctx: OrgContext,
   head: Head,
-  rows = head.journal_rows,
-  bytes = head.journal_bytes,
+  next: ChainState = head,
+  fence?: Statement,
+  countIncident = false,
 ): Statement {
   return {
-    sql: `UPDATE audit_chain SET head_seq = ?, head_hash = ?, journal_rows = ?, journal_bytes = ?
+    sql: `UPDATE audit_chain SET head_seq = ?, head_hash = ?, boundary_seq = ?, boundary_prev_hash = ?,
+      boundary_reason = ?, journal_rows = ?, journal_bytes = ?${
+        countIncident ? ', integrity_incidents = integrity_incidents + 1' : ''
+      }
       WHERE org_id = ? AND head_seq = ? AND head_hash = ? AND boundary_seq = ?
-      AND boundary_prev_hash = ? AND chain_id = ? AND epoch = ? AND incarnation = ?
-      AND mode_generation = ? AND restore_pending = ? AND journal_rows = ? AND journal_bytes = ?
+      AND boundary_prev_hash = ? AND boundary_reason IS ? AND chain_id = ? AND epoch = ?
+      AND incarnation = ? AND mode_generation = ? AND policy = ? AND restore_pending = 0
+      AND journal_rows = ? AND journal_bytes = ?
+      AND integrity_incidents = ?
       AND (SELECT seq FROM (${NEWEST_SQL})) IS ?
-      AND (SELECT hash FROM (${NEWEST_SQL})) IS ?`,
+      AND (SELECT hash FROM (${NEWEST_SQL})) IS ?${fence?.sql ?? ''}`,
     params: [
-      head.last_seq ?? head.head_seq,
-      head.last_hash ?? head.head_hash,
-      rows,
-      bytes,
+      next.head_seq,
+      next.head_hash,
+      next.boundary_seq,
+      next.boundary_prev_hash,
+      next.boundary_reason,
+      next.journal_rows,
+      next.journal_bytes,
       ctx.orgId,
       head.head_seq,
       head.head_hash,
       head.boundary_seq,
       head.boundary_prev_hash,
+      head.boundary_reason,
       head.chain_id,
       head.epoch,
       head.incarnation,
       head.mode_generation,
-      head.restore_pending,
+      head.policy,
       head.journal_rows,
       head.journal_bytes,
+      head.integrity_incidents,
       ctx.orgId,
       head.last_seq,
       ctx.orgId,
       head.last_hash,
+      ...(fence?.params ?? []),
     ],
   };
 }
@@ -116,24 +175,141 @@ function readHead(executor: SqlExecutor, ctx: OrgContext): Promise<Head[]> {
   return executor.all<Head>({ sql: HEAD_SQL, params: Array(6).fill(ctx.orgId) });
 }
 
-function validateHead(head: Head): void {
-  if (head.last_seq === null) {
-    if (head.boundary_seq !== head.head_seq + 1) throw new AuditIntegrityError('seq_gap');
-    if (head.boundary_prev_hash !== head.head_hash)
-      throw new AuditIntegrityError('boundary_mismatch');
-    return;
+function readGaps(
+  executor: SqlExecutor,
+  ctx: OrgContext,
+  head: Head,
+  from: number,
+  to: number,
+): Promise<SeqRange[]> {
+  return executor.all<SeqRange>({
+    sql: GAPS_SQL,
+    params: [ctx.orgId, head.chain_id, head.epoch, to, from],
+  });
+}
+
+function covered(gaps: readonly SeqRange[], from: number, to: number): number {
+  let total = 0;
+  for (const gap of gaps)
+    total += Math.max(0, Math.min(gap.to_seq, to) - Math.max(gap.from_seq, from) + 1);
+  return total;
+}
+
+/**
+ * Every seq in [boundary_seq, head_seq] is a journal row or inside a recorded seq_gap, the
+ * endpoints match the stored hashes and the counters match. Interior rows deleted without the
+ * row counter changing are the verifier's to find.
+ */
+function consistent(head: Head, gaps: readonly SeqRange[]): boolean {
+  const { head_seq: top, boundary_seq: boundary } = head;
+  if (boundary > top + 1) return false;
+  if (boundary === top + 1 && head.boundary_prev_hash !== head.head_hash) return false;
+  const missing = covered(gaps, boundary, top);
+  if (head.last_seq === null || head.first_seq === null)
+    return missing === top - boundary + 1 && head.journal_rows === 0 && head.journal_bytes === 0;
+  return (
+    head.first_seq >= boundary &&
+    (head.first_seq > boundary || head.first_prev_hash === head.boundary_prev_hash) &&
+    covered(gaps, boundary, head.first_seq - 1) === head.first_seq - boundary &&
+    head.last_seq <= top &&
+    (head.last_seq < top || head.anchor_hash === head.head_hash) &&
+    covered(gaps, head.last_seq + 1, top) === top - head.last_seq &&
+    head.journal_rows === top - boundary + 1 - missing &&
+    head.journal_bytes > 0
+  );
+}
+
+/**
+ * The chain the journal supports. The head never moves below its stored seq or below a recorded
+ * gap, so no recorded seq is ever allocated again.
+ */
+function target(
+  head: Head,
+  gapTop: number | null,
+): {
+  next: Omit<ChainState, 'journal_rows' | 'journal_bytes'>;
+  reasons: AuditIntegrityReason[];
+} {
+  const reasons: AuditIntegrityReason[] = [];
+  let headSeq = head.head_seq;
+  let headHash = head.head_hash;
+  if (head.last_seq !== null && head.last_hash !== null && head.last_seq >= head.head_seq) {
+    const anchored =
+      head.head_seq >= (head.first_seq ?? head.boundary_seq)
+        ? head.anchor_hash === head.head_hash
+        : head.head_seq === head.boundary_seq - 1 && head.head_hash === head.boundary_prev_hash;
+    if (!anchored) reasons.push('head_mismatch');
+    headSeq = head.last_seq;
+    headHash = head.last_hash;
   }
-  if (head.first_seq !== head.boundary_seq) throw new AuditIntegrityError('seq_gap');
-  if (head.first_prev_hash !== head.boundary_prev_hash)
-    throw new AuditIntegrityError('boundary_mismatch');
-  if (head.last_seq < head.head_seq) throw new AuditIntegrityError('head_mismatch');
-  if (head.head_seq < head.boundary_seq) {
-    if (head.head_seq !== head.boundary_seq - 1 || head.head_hash !== head.boundary_prev_hash) {
-      throw new AuditIntegrityError('head_mismatch');
+  if (gapTop !== null && gapTop > headSeq) {
+    if (!reasons.includes('head_mismatch')) reasons.push('head_mismatch');
+    headSeq = gapTop;
+  }
+  let boundarySeq = head.boundary_seq;
+  let boundaryHash = head.boundary_prev_hash;
+  if (head.first_seq === null || head.first_prev_hash === null) {
+    if (boundarySeq > headSeq + 1) boundarySeq = headSeq + 1;
+    if (boundarySeq === headSeq + 1) boundaryHash = headHash;
+  } else if (head.first_seq <= boundarySeq) {
+    boundarySeq = head.first_seq;
+    boundaryHash = head.first_prev_hash;
+  }
+  const rebased = boundarySeq !== head.boundary_seq || boundaryHash !== head.boundary_prev_hash;
+  if (rebased) reasons.push('boundary_mismatch');
+  return {
+    next: {
+      head_seq: headSeq,
+      head_hash: headHash,
+      boundary_seq: boundarySeq,
+      boundary_prev_hash: boundaryHash,
+      boundary_reason: rebased ? 'chain_reset' : head.boundary_reason,
+    },
+    reasons,
+  };
+}
+
+function subtract(holes: readonly SeqRange[], gaps: readonly SeqRange[]): SeqRange[] {
+  const result: SeqRange[] = [];
+  for (const hole of holes) {
+    let from = hole.from_seq;
+    for (const gap of gaps) {
+      if (gap.to_seq < from || gap.from_seq > hole.to_seq) continue;
+      if (gap.from_seq > from) result.push({ from_seq: from, to_seq: gap.from_seq - 1 });
+      from = Math.max(from, gap.to_seq + 1);
     }
-  } else if (head.anchor_hash !== head.head_hash) {
-    throw new AuditIntegrityError('head_mismatch');
+    if (from <= hole.to_seq) result.push({ from_seq: from, to_seq: hole.to_seq });
   }
+  return result;
+}
+
+function ledgerEntry(
+  id: string,
+  head: Head,
+  kind: 'gap' | 'chain_reset',
+  fromSeq: number,
+  toSeq: number,
+): AuditLedgerEntry {
+  return {
+    id,
+    kind,
+    chainId: head.chain_id,
+    epoch: head.epoch,
+    fromSeq,
+    toSeq,
+    count: kind === 'gap' ? toSeq - fromSeq + 1 : 0,
+    sinkId: null,
+    reasonCode: kind === 'gap' ? 'seq_gap' : 'tamper_detected',
+    policy: head.policy,
+    modeGeneration: head.mode_generation,
+    actorType: 'system',
+    actorId: null,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function sameHead(a: Head, b: Head): boolean {
+  return Object.keys(a).every((key) => a[key as keyof Head] === b[key as keyof Head]);
 }
 
 function assertLimit(limit: number): void {
@@ -174,7 +350,272 @@ function insertStatement(row: AuditRow): Statement {
   };
 }
 
-export function createAuditSealRepository(executor: SqlExecutor): AuditSealRepository {
+export interface AuditSealOptions {
+  /** Ledger id generator; ids must be ULIDs. */
+  readonly ids?: () => string;
+}
+
+export function createAuditSealRepository(
+  executor: SqlExecutor,
+  options: AuditSealOptions = {},
+): AuditSealRepository {
+  const ledger = createAuditLedgerRepository(executor);
+  const ids = options.ids ?? (() => ulid());
+
+  async function submit(statements: readonly Statement[]): Promise<boolean> {
+    try {
+      await executor.batch(statements);
+      return true;
+    } catch (error) {
+      if (isChainConflict(error)) return false;
+      throw auditLedgerError(error);
+    }
+  }
+
+  async function gapTop(ctx: OrgContext, head: Head): Promise<number | null> {
+    const [row] = await executor.all<{ top: number | null }>({
+      sql: `SELECT max(t.to_seq) AS top ${GAP_ABOVE_SQL}`,
+      params: [ctx.orgId, head.chain_id, head.epoch],
+    });
+    return row?.top ?? null;
+  }
+
+  /**
+   * Brings the chain row in line with the journal. The reset and the head or boundary rewrite
+   * share the first batch; the remaining gaps follow in later batches fenced on the rewritten
+   * state, so an interrupted recovery resumes with gaps only. Ids are minted right before each
+   * batch, the reset first, so one recovery's ids follow its commit order. Reasons are added to
+   * `committed` as soon as their evidence is durable. Returns null when the chain moved.
+   */
+  async function recover(
+    ctx: OrgContext,
+    head: Head,
+    committed: AuditIntegrityReason[],
+    top?: number | null,
+  ): Promise<{ head: Head; repaired: boolean } | null> {
+    const [summary] = await executor.all<{ actual_rows: number; actual_bytes: number }>({
+      sql: SUMMARY_SQL,
+      params: [ctx.orgId],
+    });
+    if (summary === undefined) throw new Error('audit journal summary is missing');
+    const { next, reasons } = target(head, top === undefined ? await gapTop(ctx, head) : top);
+    const holes: SeqRange[] =
+      head.last_seq === null
+        ? []
+        : await executor.all<SeqRange>({
+            sql: HOLES_SQL,
+            params: [next.boundary_seq - 1, ctx.orgId],
+          });
+    const tailFrom = head.last_seq === null ? next.boundary_seq : head.last_seq + 1;
+    if (tailFrom <= next.head_seq) holes.push({ from_seq: tailFrom, to_seq: next.head_seq });
+    const missing =
+      holes.length === 0
+        ? []
+        : subtract(holes, await readGaps(executor, ctx, head, next.boundary_seq, next.head_seq));
+    const state: ChainState = {
+      ...next,
+      journal_rows: summary.actual_rows,
+      journal_bytes: summary.actual_bytes,
+    };
+    if (
+      reasons.length === 0 &&
+      missing.length === 0 &&
+      (Object.keys(state) as (keyof ChainState)[]).every((key) => state[key] === head[key])
+    )
+      return { head, repaired: false };
+    if (missing.length > 0) reasons.push('seq_gap');
+    const reset = reasons.some((reason) => reason !== 'seq_gap');
+    const recovered: Head = {
+      ...head,
+      ...state,
+      anchor_hash: state.head_seq === head.last_seq ? head.last_hash : null,
+    };
+    for (let i = 0; i === 0 || i < missing.length; i += GAPS_PER_BATCH) {
+      const chunk = missing.slice(i, i + GAPS_PER_BATCH);
+      const entries = [
+        ...(i === 0 && reset
+          ? [
+              ledgerEntry(
+                ids(),
+                head,
+                'chain_reset',
+                Math.max(1, next.boundary_seq),
+                Math.max(1, next.boundary_seq, next.head_seq),
+              ),
+            ]
+          : []),
+        ...chunk.map((range) => ledgerEntry(ids(), head, 'gap', range.from_seq, range.to_seq)),
+      ];
+      const fence: Statement | undefined =
+        chunk.length === 0
+          ? undefined
+          : {
+              sql: GAP_FENCE,
+              params: [
+                JSON.stringify(chunk.map((range) => [range.from_seq, range.to_seq])),
+                ctx.orgId,
+                head.chain_id,
+                head.epoch,
+              ],
+            };
+      if (
+        !(await submit([
+          compareAndSet(ctx, i === 0 ? head : recovered, state, fence),
+          ...assertCheck(sql`changes() = 1`),
+          ...ledger.statements(ctx, entries),
+        ]))
+      )
+        return null;
+      if (i === 0) committed.push(...reasons);
+    }
+    return { head: recovered, repaired: true };
+  }
+
+  /**
+   * Records a pending row changed in place and returns the head with the committed incident
+   * count. Null when another sealer counted an incident since this one read the chain: this
+   * sealer then records nothing, and its next pass starts from the fresh count and pending rows.
+   */
+  async function recordPendingReset(
+    ctx: OrgContext,
+    head: Head,
+    pending: number,
+  ): Promise<Head | null> {
+    const recorded = await submit([
+      compareAndSet(ctx, head, head, undefined, true),
+      ...assertCheck(sql`changes() = 1`),
+      ...ledger.statements(ctx, [
+        ledgerEntry(ids(), head, 'chain_reset', head.head_seq + 1, head.head_seq + pending),
+      ]),
+    ]);
+    return recorded ? { ...head, integrity_incidents: head.integrity_incidents + 1 } : null;
+  }
+
+  async function modifiedInPlace(
+    ctx: OrgContext,
+    pending: readonly PendingRow[],
+  ): Promise<boolean> {
+    const snapshot = await executor.all<PendingRow>({
+      sql: `SELECT ${PENDING_COLUMNS} FROM audit_pending WHERE org_id = ? AND id IN (SELECT json_extract(value, '$.id') FROM json_each(?))`,
+      params: [ctx.orgId, JSON.stringify(pending)],
+    });
+    return snapshot.some((row) => {
+      const original = pending.find((candidate) => candidate.id === row.id);
+      return (
+        original !== undefined &&
+        Object.keys(original).some(
+          (key) => row[key as keyof PendingRow] !== original[key as keyof PendingRow],
+        )
+      );
+    });
+  }
+
+  async function sealOnce(
+    ctx: OrgContext,
+    limit: number,
+    committed: AuditIntegrityReason[],
+  ): Promise<SealOutcome> {
+    const orgId = ctx.orgId;
+    const [read] = await readHead(executor, ctx);
+    if (read === undefined) throw new Error('audit chain is missing');
+    if (read.restore_pending !== 0) return { outcome: 'restore_pending' };
+    let head: Head = read;
+    let repaired = false;
+    const extra = () => ({
+      ...(repaired ? { repaired: true as const } : {}),
+      ...(committed.length > 0 ? { integrity: [...committed] } : {}),
+    });
+    if (
+      !consistent(head, []) &&
+      !consistent(
+        head,
+        await readGaps(
+          executor,
+          ctx,
+          head,
+          head.boundary_seq,
+          Math.max(head.head_seq, head.last_seq ?? 0),
+        ),
+      )
+    ) {
+      const recovery = await recover(ctx, head, committed);
+      if (recovery === null) return { outcome: 'contended', ...extra() };
+      head = recovery.head;
+      repaired = recovery.repaired;
+    }
+
+    for (let attempt = 0; attempt < PENDING_ATTEMPTS; attempt += 1) {
+      const pending = await executor.all<PendingRow>({
+        sql: PENDING_SQL,
+        params: [orgId, limit],
+      });
+      if (pending.length === 0) return { outcome: 'empty', ...extra() };
+
+      const statements: Statement[] = [
+        compareAndSet(ctx, head, head, {
+          sql: GAP_ABOVE_FENCE,
+          params: [orgId, head.chain_id, head.epoch, head.head_seq],
+        }),
+        ...assertCheck(sql`changes() = 1`),
+        { sql: DELETE_SQL, params: [orgId, JSON.stringify(pending), JSON.stringify(pending)] },
+        ...assertCheck(sql`changes() = ${pending.length}`),
+      ];
+      let seq = head.head_seq;
+      let prevHash = head.head_hash;
+      for (const row of pending) {
+        seq += 1;
+        const unsealed: AuditRow = { ...row, org_id: orgId, seq, prev_hash: prevHash, hash: '' };
+        const hash = await hashRow(prevHash, unsealed);
+        statements.push(insertStatement({ ...unsealed, hash }));
+        prevHash = hash;
+      }
+      statements.push({
+        sql: `UPDATE audit_chain SET head_seq = ?, head_hash = ?, journal_rows = journal_rows + ?,
+          journal_bytes = journal_bytes + (SELECT coalesce(sum(${EVENT_BYTES}), 0) FROM audit_event e
+            WHERE e.org_id = ? AND e.seq BETWEEN ? AND ?) WHERE org_id = ?`,
+        params: [seq, prevHash, pending.length, orgId, head.head_seq + 1, seq, orgId],
+      });
+
+      if (await submit(statements))
+        return {
+          outcome: 'sealed',
+          sealed: pending.length,
+          headSeq: seq,
+          headHash: prevHash,
+          ...extra(),
+        };
+      const [current] = await readHead(executor, ctx);
+      if (current === undefined || !sameHead(current, head))
+        return { outcome: 'contended', ...extra() };
+      const top = await gapTop(ctx, head);
+      if (top !== null && top > head.head_seq) {
+        const recovery = await recover(ctx, head, committed, top);
+        if (recovery === null) return { outcome: 'contended', ...extra() };
+        head = recovery.head;
+        repaired ||= recovery.repaired;
+        continue;
+      }
+      const counted: Head | null = (await modifiedInPlace(ctx, pending))
+        ? await recordPendingReset(ctx, head, pending.length)
+        : null;
+      if (counted === null) return { outcome: 'contended', ...extra() };
+      head = counted;
+      committed.push('head_mismatch');
+    }
+    return { outcome: 'contended', ...extra() };
+  }
+
+  async function seal(ctx: OrgContext, limit = AUDIT_SEAL_MAX_LIMIT): Promise<SealOutcome> {
+    assertLimit(limit);
+    const committed: AuditIntegrityReason[] = [];
+    try {
+      return await sealOnce(ctx, limit, committed);
+    } catch (error) {
+      if (committed.length > 0) throw new AuditSealInterruptedError(committed, { cause: error });
+      throw error;
+    }
+  }
+
   return {
     async pendingOldestAgeSeconds(ctx) {
       const [row] = await executor.all<{ age: number }>({
@@ -183,130 +624,6 @@ export function createAuditSealRepository(executor: SqlExecutor): AuditSealRepos
       });
       return row?.age ?? 0;
     },
-    async seal(ctx, limit = AUDIT_SEAL_MAX_LIMIT) {
-      assertLimit(limit);
-      const orgId = ctx.orgId;
-      try {
-        const [head] = await readHead(executor, ctx);
-        if (head === undefined) throw new AuditIntegrityError('head_mismatch');
-        validateHead(head);
-        if (head.restore_pending === 1) throw new AuditIntegrityError('head_mismatch');
-        let repaired = false;
-        const expectedRows = head.last_seq === null ? 0 : head.last_seq - head.boundary_seq + 1;
-        if (
-          (head.last_seq !== null && head.last_seq > head.head_seq) ||
-          expectedRows !== head.journal_rows ||
-          (expectedRows === 0 ? head.journal_bytes !== 0 : head.journal_bytes === 0)
-        ) {
-          const [summary] = await executor.all<{ actual_rows: number; actual_bytes: number }>({
-            sql: SUMMARY_SQL,
-            params: [orgId],
-          });
-          if (summary === undefined || summary.actual_rows !== expectedRows) {
-            const [current] = await readHead(executor, ctx);
-            if (
-              current === undefined ||
-              Object.keys(head).some(
-                (key) => current[key as keyof Head] !== head[key as keyof Head],
-              )
-            )
-              return { outcome: 'contended' };
-            throw new AuditIntegrityError('seq_gap');
-          }
-          try {
-            await executor.batch([
-              unchanged(ctx, head, summary.actual_rows, summary.actual_bytes),
-              ...assertCheck(sql`changes() = 1`),
-            ]);
-          } catch (error) {
-            if (isChainConflict(error)) return { outcome: 'contended' };
-            throw error;
-          }
-          head.head_seq = head.last_seq ?? head.head_seq;
-          head.head_hash = head.last_hash ?? head.head_hash;
-          head.anchor_hash = head.last_hash;
-          head.journal_rows = summary.actual_rows;
-          head.journal_bytes = summary.actual_bytes;
-          repaired = true;
-        }
-        const repair = repaired ? { repaired: true as const } : {};
-        const pending = await executor.all<PendingRow>({
-          sql: PENDING_SQL,
-          params: [orgId, limit],
-        });
-        if (pending.length === 0) return { outcome: 'empty', ...repair };
-
-        const statements: Statement[] = [
-          unchanged(ctx, head),
-          ...assertCheck(sql`changes() = 1`),
-          { sql: DELETE_SQL, params: [orgId, JSON.stringify(pending), JSON.stringify(pending)] },
-          ...assertCheck(sql`changes() = ${pending.length}`),
-        ];
-        let seq = head.head_seq;
-        let prevHash = head.head_hash;
-        for (const row of pending) {
-          seq += 1;
-          const unsealed: AuditRow = { ...row, org_id: orgId, seq, prev_hash: prevHash, hash: '' };
-          const hash = await hashRow(prevHash, unsealed);
-          statements.push(insertStatement({ ...unsealed, hash }));
-          prevHash = hash;
-        }
-
-        statements.push({
-          sql: `UPDATE audit_chain SET head_seq = ?, head_hash = ?, journal_rows = journal_rows + ?,
-          journal_bytes = journal_bytes + (SELECT coalesce(sum(${EVENT_BYTES}), 0) FROM audit_event e
-            WHERE e.org_id = ? AND e.seq BETWEEN ? AND ?) WHERE org_id = ?`,
-          params: [seq, prevHash, pending.length, orgId, head.head_seq + 1, seq, orgId],
-        });
-
-        try {
-          await executor.batch(statements);
-        } catch (error) {
-          if (isChainConflict(error)) {
-            const [current] = await readHead(executor, ctx);
-            if (
-              current !== undefined &&
-              Object.keys(head).every(
-                (key) => current[key as keyof Head] === head[key as keyof Head],
-              )
-            ) {
-              const snapshot = await executor.all<PendingRow>({
-                sql: `SELECT id, created_at, actor_type, actor_id, token_selector, source_ip, action, target_type, target_id, project_id, payload_json
-                FROM audit_pending WHERE org_id = ? AND id IN (SELECT json_extract(value, '$.id') FROM json_each(?))`,
-                params: [orgId, JSON.stringify(pending)],
-              });
-              if (
-                snapshot.some((row) => {
-                  const original = pending.find((candidate) => candidate.id === row.id);
-                  return (
-                    original !== undefined &&
-                    Object.keys(original).some(
-                      (key) => row[key as keyof PendingRow] !== original[key as keyof PendingRow],
-                    )
-                  );
-                })
-              )
-                throw new AuditIntegrityError('head_mismatch');
-            }
-            return { outcome: 'contended', ...repair };
-          }
-          throw error;
-        }
-        return {
-          outcome: 'sealed',
-          sealed: pending.length,
-          headSeq: seq,
-          headHash: prevHash,
-          ...repair,
-        };
-      } catch (error) {
-        if (error instanceof AuditIntegrityError) {
-          await executor.batch([
-            { sql: 'UPDATE audit_chain SET restore_pending = 1 WHERE org_id = ?', params: [orgId] },
-          ]);
-        }
-        throw error;
-      }
-    },
+    seal: (ctx, limit) => seal(ctx, limit),
   };
 }

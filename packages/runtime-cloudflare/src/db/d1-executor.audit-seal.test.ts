@@ -106,7 +106,7 @@ describe('audit seal on Miniflare D1', () => {
     expect(await events(executor, a.orgId)).toEqual([]);
   });
 
-  it('3: seals 120 rows as 100 then 20 with a valid chain (101 statements in a full batch)', async () => {
+  it('3: seals 120 rows as 100 then 20 with a valid chain (105 statements in a full batch)', async () => {
     const { executor, a } = await open();
     await addPending(executor, a.orgId, 1, 120);
     const batchSizes: number[] = [];
@@ -125,9 +125,9 @@ describe('audit seal on Miniflare D1', () => {
       sealed: 100,
       headSeq: 100,
     });
-    expect(batchSizes).toEqual([101]);
+    expect(batchSizes).toEqual([105]);
     expect(await repository.seal(a)).toMatchObject({ outcome: 'sealed', sealed: 20, headSeq: 120 });
-    expect(batchSizes).toEqual([101, 21]);
+    expect(batchSizes).toEqual([105, 25]);
 
     const rows = await events(executor, a.orgId);
     expect(rows.map((row) => row.seq)).toEqual(Array.from({ length: 120 }, (_, i) => i + 1));

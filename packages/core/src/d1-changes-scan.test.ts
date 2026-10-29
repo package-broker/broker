@@ -668,6 +668,24 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Compares named chain snapshot fields from readHead SELECT results for contention; neither snapshot contains executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: current[key as keyof Head] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key as keyof Head] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: current[key as keyof Head] #2',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key as keyof Head] #2',
+      ],
+    },
+    {
+      reason:
+        'Compares pending audit row fields from SELECT results against the original snapshot for integrity; neither row contains executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: row[key as keyof PendingRow] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: original[key as keyof PendingRow] #1',
+      ],
+    },
+    {
+      reason:
         'These fixed source-error lookups read JSON counter values, never executor change metadata.',
       sites: [
         'db-sqlite/src/repositories/source.ts:unresolved computed access: errors[code] #1',

@@ -15,12 +15,13 @@ const parse = (
   ecosystem: 'composer' | 'npm',
   url: string | null,
   config: unknown,
-  options: { runtime?: 'node' | 'cloudflare'; hasCredential?: boolean } = {},
+  options: { runtime?: 'node' | 'cloudflare'; hasCredential?: boolean; managed?: boolean } = {},
 ) =>
   parseSourceConfig(type, ecosystem, url, JSON.stringify(config), {
     runtime: options.runtime ?? 'node',
     policy,
     hasCredential: options.hasCredential ?? false,
+    managed: options.managed ?? false,
   });
 
 function problems(result: ReturnType<typeof parse>): string[] {
@@ -989,5 +990,54 @@ describe('reported VCS providers', () => {
       reportedVcsProviders('node', [{ id: 'github', sourceTypes: ['composer_repository'] }]),
     ).toEqual([]);
     expect(reportedVcsProviders('cloudflare', [])).toEqual([]);
+  });
+});
+
+describe('GitHub repository identity', () => {
+  it.each(['node', 'cloudflare'] as const)('preserves positive safe ids on %s', (runtime) => {
+    for (const repositoryId of [1, 42, Number.MAX_SAFE_INTEGER]) {
+      expect(parse('vcs', 'composer', null, { ...github, repositoryId }, { runtime })).toEqual({
+        ok: true,
+        config: { ...github, repositoryId, refs: { tags: true, branches: [] } },
+      });
+    }
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '42', null, {}, true])(
+    'refuses invalid repository id %j without echoing it',
+    (repositoryId) => {
+      expect(parse('vcs', 'composer', null, { ...github, repositoryId })).toEqual({
+        ok: false,
+        problems: [
+          { field: 'repositoryId', message: 'only valid for github, as a positive integer' },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    ['git', 'https://git.example.com/a.git'],
+    ['ssh', 'git@git.example.com:a.git'],
+  ])('refuses repository ids for %s', (provider, repository) => {
+    expect(
+      problems(parse('vcs', 'composer', null, { provider, repository, repositoryId: 42 })),
+    ).toEqual(['repositoryId']);
+  });
+
+  it('requires an id for managed GitHub sources while keeping manual sources compatible', () => {
+    expect(parse('vcs', 'composer', null, github)).toEqual({
+      ok: true,
+      config: { ...github, refs: { tags: true, branches: [] } },
+    });
+    expect(parse('vcs', 'composer', null, github, { managed: true })).toEqual({
+      ok: false,
+      problems: [{ field: 'repositoryId', message: 'is required for managed github sources' }],
+    });
+    expect(
+      parse('vcs', 'composer', null, { ...github, repositoryId: 42 }, { managed: true }).ok,
+    ).toBe(true);
+    expect(problems(parse('vcs', 'composer', null, { ...github, managed: true }))).toEqual([
+      'config',
+    ]);
   });
 });

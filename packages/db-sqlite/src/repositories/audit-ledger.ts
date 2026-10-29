@@ -151,6 +151,15 @@ WHERE audit_ledger.org_id = ? AND audit_ledger.id IN (SELECT id FROM candidate)
 
 type Row = AuditLedgerEntry & { readonly conflict: number };
 
+/** Maps the append statement's sentinel failures to the named ledger errors; other errors pass through. */
+export function auditLedgerError(error: unknown): unknown {
+  if (error instanceof DbError && error.kind === 'not_null') {
+    if (error.constraint === INTEGRITY_SENTINEL) return new AuditLedgerIntegrityError();
+    if (error.constraint === OVERLAP_SENTINEL) return new AuditLedgerOverlapError();
+  }
+  return error;
+}
+
 function validatedRows(rows: readonly Row[]): readonly AuditLedgerEntry[] {
   return rows.map(({ conflict, ...row }) => {
     if (conflict !== 0) throw new AuditLedgerIntegrityError();
@@ -230,11 +239,7 @@ export function createAuditLedgerRepository(executor: ScalarSqlExecutor): AuditL
       try {
         if (batch.length > 0) await executor.batch(batch);
       } catch (error) {
-        if (error instanceof DbError && error.kind === 'not_null') {
-          if (error.constraint === INTEGRITY_SENTINEL) throw new AuditLedgerIntegrityError();
-          if (error.constraint === OVERLAP_SENTINEL) throw new AuditLedgerOverlapError();
-        }
-        throw error;
+        throw auditLedgerError(error);
       }
     },
     async effectiveGaps(ctx) {

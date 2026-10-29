@@ -18,11 +18,12 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
-  it('has exactly the 7 audit events', () => {
+  it('has exactly the 8 audit events', () => {
     expect([...AUDIT_EVENTS].sort()).toEqual([
       'audit.chain_broken',
       'audit.chain_integrity',
       'audit.seal.contended',
+      'audit.seal_repaired',
       'audit.sealed',
       'audit.verified',
       'audit.verify_continued',
@@ -33,7 +34,7 @@ describe('vocabularies', () => {
     expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
-    expect(AUDIT_EVENTS.size).toBe(7);
+    expect(AUDIT_EVENTS.size).toBe(8);
   });
 
   it('has exactly the 5 kernel events', () => {

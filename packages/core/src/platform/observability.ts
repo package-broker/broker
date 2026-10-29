@@ -48,7 +48,14 @@ export interface SafeLogRecord {
   readonly seq?: number;
   readonly rows?: number;
   readonly head_hash?: string;
-  readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch' | 'checkpoint_pruned';
+  readonly reason?:
+    | 'seq_gap'
+    | 'head_mismatch'
+    | 'boundary_mismatch'
+    | 'prev_hash'
+    | 'hash'
+    | 'org_mismatch'
+    | 'checkpoint_pruned';
   readonly package_key?: string;
   readonly source_id?: string;
   readonly upstream_trace_id?: string;
@@ -387,6 +394,8 @@ const FIELD_CHECKS: Readonly<
   head_hash: matches(/^[0-9a-f]{64}$/),
   reason: (v) =>
     v === 'seq_gap' ||
+    v === 'head_mismatch' ||
+    v === 'boundary_mismatch' ||
     v === 'prev_hash' ||
     v === 'hash' ||
     v === 'org_mismatch' ||

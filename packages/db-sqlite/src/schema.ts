@@ -679,6 +679,7 @@ export interface AuditChainTable {
   journal_rows: Generated<number>;
   journal_bytes: Generated<number>;
   restore_pending: Generated<0 | 1>;
+  integrity_incidents: Generated<number>;
   verified_from_seq: number | null;
   verified_through_seq: number | null;
   verified_bodies: number | null;

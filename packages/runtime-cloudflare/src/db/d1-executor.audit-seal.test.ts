@@ -9,11 +9,12 @@ import {
 import type { SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
+import { createAuditLedgerRepository } from '@package-broker/db-sqlite/repositories/audit-ledger';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
-const bindings = Array.from({ length: 16 }, (_, index) => `SDB${index}`);
+const bindings = Array.from({ length: 32 }, (_, index) => `SDB${index}`);
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -106,7 +107,7 @@ describe('audit seal on Miniflare D1', () => {
     expect(await events(executor, a.orgId)).toEqual([]);
   });
 
-  it('3: seals 120 rows as 100 then 20 with a valid chain (101 statements in a full batch)', async () => {
+  it('3: seals 120 rows as 100 then 20 with a valid chain (105 statements in a full batch)', async () => {
     const { executor, a } = await open();
     await addPending(executor, a.orgId, 1, 120);
     const batchSizes: number[] = [];
@@ -125,9 +126,9 @@ describe('audit seal on Miniflare D1', () => {
       sealed: 100,
       headSeq: 100,
     });
-    expect(batchSizes).toEqual([101]);
+    expect(batchSizes).toEqual([105]);
     expect(await repository.seal(a)).toMatchObject({ outcome: 'sealed', sealed: 20, headSeq: 120 });
-    expect(batchSizes).toEqual([101, 21]);
+    expect(batchSizes).toEqual([105, 25]);
 
     const rows = await events(executor, a.orgId);
     expect(rows.map((row) => row.seq)).toEqual(Array.from({ length: 120 }, (_, i) => i + 1));
@@ -268,6 +269,498 @@ describe('audit seal on Miniflare D1', () => {
       },
     ]);
     expect(await verifyChain(await events(executor, a.orgId))).toEqual({ seq: 2, reason: 'hash' });
+  });
+
+  it('records an internal hole once across repeated passes and continues sealing', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 5);
+    const repo = createAuditSealRepository(executor);
+    await repo.seal(a);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq IN (3, 4)', params: [a.orgId] },
+      { sql: 'UPDATE audit_chain SET journal_rows = 3 WHERE org_id = ?', params: [a.orgId] },
+    ]);
+    await addPending(executor, a.orgId, 6, 1);
+    expect(await repo.seal(a)).toMatchObject({
+      outcome: 'sealed',
+      headSeq: 6,
+      integrity: ['seq_gap'],
+    });
+    const ledger = createAuditLedgerRepository(executor);
+    const gaps = await ledger.effectiveGaps(a);
+    expect(gaps).toEqual([
+      expect.objectContaining({
+        kind: 'gap',
+        fromSeq: 3,
+        toSeq: 4,
+        count: 2,
+        reasonCode: 'seq_gap',
+      }),
+    ]);
+    await repo.seal(a);
+    await addPending(executor, a.orgId, 7, 1);
+    expect(await createAuditSealRepository(executor).seal(a)).toMatchObject({
+      outcome: 'sealed',
+      headSeq: 7,
+    });
+    expect(await ledger.page(a, null, 100)).toEqual(gaps);
+    expect(await pendingIds(executor, a.orgId)).toEqual([]);
+  });
+
+  it.each(['head', 'boundary'] as const)(
+    'records %s tampering and continues sealing',
+    async (kind) => {
+      const { executor, a, b } = await open();
+      await addPending(executor, a.orgId, 1, 2);
+      const repo = createAuditSealRepository(executor);
+      await repo.seal(a);
+      const before = await events(executor, a.orgId);
+      await executor.batch([
+        {
+          sql:
+            kind === 'head'
+              ? 'UPDATE audit_chain SET head_hash = ? WHERE org_id = ?'
+              : 'UPDATE audit_chain SET boundary_prev_hash = ? WHERE org_id = ?',
+          params: ['f'.repeat(64), a.orgId],
+        },
+      ]);
+      await addPending(executor, a.orgId, 3, 1);
+      expect(await repo.seal(a)).toMatchObject({
+        outcome: 'sealed',
+        headSeq: 3,
+        integrity: [kind === 'head' ? 'head_mismatch' : 'boundary_mismatch'],
+      });
+      const after = await events(executor, a.orgId);
+      expect(after.slice(0, 2)).toEqual(before);
+      expect(after[2]?.prev_hash).toBe(before[1]?.hash);
+      expect(await verifyChain(after)).toBeNull();
+      expect(await repo.seal(a)).toEqual({ outcome: 'empty' });
+      const ledger = createAuditLedgerRepository(executor);
+      expect(await ledger.page(a, null, 100)).toEqual([
+        expect.objectContaining({ kind: 'chain_reset', reasonCode: 'tamper_detected' }),
+      ]);
+      expect(await ledger.page(b, null, 100)).toEqual([]);
+    },
+  );
+
+  it('records a pending-row mismatch and seals the new snapshot', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 2);
+    let raced = false;
+    const racing: SqlExecutor = {
+      ...executor,
+      all: (s) => executor.all(s),
+      batch: async (statements) => {
+        if (!raced) {
+          raced = true;
+          await executor.batch([
+            {
+              sql: `UPDATE audit_pending SET payload_json = '{}' WHERE org_id = ?`,
+              params: [a.orgId],
+            },
+          ]);
+        }
+        return executor.batch(statements);
+      },
+    };
+    expect(await createAuditSealRepository(racing).seal(a)).toMatchObject({
+      outcome: 'sealed',
+      sealed: 2,
+      integrity: ['head_mismatch'],
+    });
+    const rows = await events(executor, a.orgId);
+    expect(rows.map((row) => row.payload_json)).toEqual(['{}', '{}']);
+    expect(await verifyChain(rows)).toBeNull();
+    expect(await createAuditLedgerRepository(executor).page(a, null, 100)).toEqual([
+      expect.objectContaining({ kind: 'chain_reset', reasonCode: 'tamper_detected' }),
+    ]);
+  });
+
+  it('keeps gap recovery and full sealing within D1 statement and parameter limits', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 201);
+    const repo = createAuditSealRepository(executor);
+    await repo.seal(a);
+    await repo.seal(a);
+    await repo.seal(a);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq % 2 = 0', params: [a.orgId] },
+      { sql: 'UPDATE audit_chain SET journal_rows = 101 WHERE org_id = ?', params: [a.orgId] },
+    ]);
+    await addPending(executor, a.orgId, 202, 100);
+    const batches: (readonly Statement[])[] = [];
+    const recording: SqlExecutor = {
+      ...executor,
+      all: (s) => executor.all(s),
+      batch: (statements) => {
+        batches.push(statements);
+        return executor.batch(statements);
+      },
+    };
+    expect(await createAuditSealRepository(recording).seal(a)).toMatchObject({
+      outcome: 'sealed',
+      sealed: 100,
+      headSeq: 301,
+    });
+    expect(batches.map((batch) => batch.length)).toEqual([198, 6, 105]);
+    expect(
+      Math.max(...batches.flatMap((batch) => batch.map((statement) => statement.params.length))),
+    ).toBe(29);
+    expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(100);
+  }, 60_000);
+
+  it.each(['first', 'last', 'all'] as const)(
+    'records missing %s retained rows as a gap and continues after the stored head',
+    async (missing) => {
+      const { executor, a } = await open();
+      await addPending(executor, a.orgId, 1, 3);
+      await createAuditSealRepository(executor).seal(a);
+      const original = await events(executor, a.orgId);
+      const deleted = missing === 'first' ? [1] : missing === 'last' ? [3] : [1, 2, 3];
+      await executor.batch([
+        {
+          sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq IN (SELECT value FROM json_each(?))',
+          params: [a.orgId, JSON.stringify(deleted)],
+        },
+      ]);
+      await addPending(executor, a.orgId, 4, 1);
+      const repo = createAuditSealRepository(executor);
+      expect(await repo.seal(a)).toMatchObject({
+        outcome: 'sealed',
+        sealed: 1,
+        headSeq: 4,
+        integrity: ['seq_gap'],
+      });
+      const after = await events(executor, a.orgId);
+      expect(after.at(-1)).toMatchObject({ seq: 4, prev_hash: original[2]?.hash });
+      const ledger = createAuditLedgerRepository(executor);
+      const evidence = await ledger.page(a, null, 100);
+      expect(evidence).toEqual([
+        expect.objectContaining({
+          kind: 'gap',
+          fromSeq: deleted[0],
+          toSeq: deleted.at(-1),
+          count: deleted.length,
+        }),
+      ]);
+      expect(
+        await executor.all({
+          sql: 'SELECT head_seq, boundary_seq, boundary_reason, journal_rows FROM audit_chain WHERE org_id = ?',
+          params: [a.orgId],
+        }),
+      ).toEqual([
+        { head_seq: 4, boundary_seq: 1, boundary_reason: null, journal_rows: 4 - deleted.length },
+      ]);
+      expect(await repo.seal(a)).toEqual({ outcome: 'empty' });
+      expect(await ledger.page(a, null, 100)).toEqual(evidence);
+    },
+  );
+
+  it('writes the reset with the first rewrite and resumes an interrupted recovery with gaps only', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 201);
+    const repo = createAuditSealRepository(executor);
+    await repo.seal(a);
+    await repo.seal(a);
+    await repo.seal(a);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq % 2 = 0', params: [a.orgId] },
+      {
+        sql: 'UPDATE audit_chain SET journal_rows = 101, boundary_prev_hash = ? WHERE org_id = ?',
+        params: ['e'.repeat(64), a.orgId],
+      },
+    ]);
+    const batches: number[] = [];
+    const interrupted: SqlExecutor = {
+      ...executor,
+      all: (s) => executor.all(s),
+      batch: (statements) => {
+        batches.push(statements.length);
+        if (batches.length === 2) throw new Error('recovery interrupted');
+        return executor.batch(statements);
+      },
+    };
+    await expect(createAuditSealRepository(interrupted).seal(a)).rejects.toMatchObject({
+      name: 'AuditSealInterruptedError',
+      integrity: ['boundary_mismatch', 'seq_gap'],
+      cause: expect.objectContaining({ message: 'recovery interrupted' }),
+    });
+    expect(batches).toEqual([199, 6]);
+    expect(await repo.seal(a)).toEqual({
+      outcome: 'empty',
+      repaired: true,
+      integrity: ['seq_gap'],
+    });
+    const ledger = createAuditLedgerRepository(executor);
+    expect(
+      (await ledger.page(a, null, 500)).filter((entry) => entry.kind === 'chain_reset'),
+    ).toHaveLength(1);
+    expect(await ledger.effectiveGaps(a)).toHaveLength(100);
+  }, 60_000);
+
+  it('a second pass after a recorded hole does no journal scan and reports no repair', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 5);
+    const repo = createAuditSealRepository(executor);
+    await repo.seal(a);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq IN (2, 3)', params: [a.orgId] },
+      { sql: 'UPDATE audit_chain SET journal_rows = 3 WHERE org_id = ?', params: [a.orgId] },
+    ]);
+    expect(await repo.seal(a)).toEqual({
+      outcome: 'empty',
+      repaired: true,
+      integrity: ['seq_gap'],
+    });
+    const reads: string[] = [];
+    const watched = createAuditSealRepository({
+      ...executor,
+      all: (statement) => {
+        reads.push(statement.sql);
+        return executor.all(statement);
+      },
+      batch: (statements) => executor.batch(statements),
+    });
+    await addPending(executor, a.orgId, 6, 1);
+    expect(await watched.seal(a)).toEqual({
+      outcome: 'sealed',
+      sealed: 1,
+      headSeq: 6,
+      headHash: expect.any(String),
+    });
+    expect(await watched.seal(a)).toEqual({ outcome: 'empty' });
+    expect(reads.some((sql) => sql.includes('count(*)') || sql.includes('lag('))).toBe(false);
+  });
+
+  it.each(['low first', 'high first'] as const)(
+    'two sealers with independent id clocks record one reset for the same change: %s',
+    async (order) => {
+      const { executor, a } = await open();
+      await addPending(executor, a.orgId, 1, 2);
+      const clock = (prefix: string) => {
+        let n = 0;
+        return () => {
+          n += 1;
+          return prefix + String(n).padStart(26 - prefix.length, '0');
+        };
+      };
+      const [first, second] =
+        order === 'low first' ? [clock('01K0'), clock('7ZZZ')] : [clock('7ZZZ'), clock('01K0')];
+      let arrived = 0;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const racing: SqlExecutor = {
+        ...executor,
+        all: (s) => executor.all(s),
+        batch: async (statements) => {
+          if (
+            arrived < 2 &&
+            statements.some((statement) => statement.sql.startsWith('DELETE FROM audit_pending'))
+          ) {
+            arrived += 1;
+            if (arrived === 2) {
+              await executor.batch([
+                {
+                  sql: "UPDATE audit_pending SET payload_json = '{}' WHERE org_id = ? AND id = ?",
+                  params: [a.orgId, pendingId(1)],
+                },
+              ]);
+              release();
+            }
+            await gate;
+          }
+          return executor.batch(statements);
+        },
+      };
+      const results = await Promise.all([
+        createAuditSealRepository(racing, { ids: first }).seal(a),
+        createAuditSealRepository(racing, { ids: second }).seal(a),
+      ]);
+      expect(results).toContainEqual(
+        expect.objectContaining({ outcome: 'sealed', sealed: 2, integrity: ['head_mismatch'] }),
+      );
+      expect(results).toContainEqual({ outcome: 'contended' });
+      expect(await createAuditLedgerRepository(executor).page(a, null, 100)).toEqual([
+        expect.objectContaining({ kind: 'chain_reset', fromSeq: 1, toSeq: 2 }),
+      ]);
+    },
+  );
+
+  it('a delayed reset of an already recorded change is refused after newer incidents', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 1);
+    const isDelete = (statements: readonly Statement[]) =>
+      statements.some((statement) => statement.sql.startsWith('DELETE FROM audit_pending'));
+    const isReset = (statements: readonly Statement[]) =>
+      statements.some((statement) => statement.sql.includes('integrity_incidents + 1'));
+    const tamper = (payload: string) =>
+      executor.batch([
+        {
+          sql: 'UPDATE audit_pending SET payload_json = ? WHERE org_id = ?',
+          params: [payload, a.orgId],
+        },
+      ]);
+    let arrived = 0;
+    let releaseFirst = () => {};
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let releaseDelayed = () => {};
+    const delayed = new Promise<void>((resolve) => {
+      releaseDelayed = resolve;
+    });
+    let delayedSettled = () => {};
+    const settled = new Promise<void>((resolve) => {
+      delayedSettled = resolve;
+    });
+    let aDeletes = 0;
+    const racer = (name: 'a' | 'b'): SqlExecutor => ({
+      ...executor,
+      all: (s) => executor.all(s),
+      batch: async (statements) => {
+        if (isDelete(statements)) {
+          if (name === 'a') aDeletes += 1;
+          if (name === 'b' || aDeletes === 1) {
+            arrived += 1;
+            if (arrived === 2) {
+              await tamper('{"k":1}');
+              releaseFirst();
+            }
+            await first;
+          } else if (aDeletes === 2) await tamper('{"k":2}');
+          else {
+            releaseDelayed();
+            await settled;
+          }
+        }
+        if (name === 'b' && isReset(statements)) {
+          await delayed;
+          try {
+            return await executor.batch(statements);
+          } finally {
+            delayedSettled();
+          }
+        }
+        return executor.batch(statements);
+      },
+    });
+    const [winner, delayedResult] = await Promise.all([
+      createAuditSealRepository(racer('a')).seal(a),
+      createAuditSealRepository(racer('b')).seal(a),
+    ]);
+    expect(winner).toMatchObject({
+      outcome: 'sealed',
+      sealed: 1,
+      integrity: ['head_mismatch', 'head_mismatch'],
+    });
+    expect(delayedResult).toEqual({ outcome: 'contended' });
+    const ledger = await createAuditLedgerRepository(executor).page(a, null, 100);
+    expect(ledger.filter((entry) => entry.kind === 'chain_reset')).toHaveLength(2);
+    expect(
+      await executor.all({
+        sql: 'SELECT integrity_incidents FROM audit_chain WHERE org_id = ?',
+        params: [a.orgId],
+      }),
+    ).toEqual([{ integrity_incidents: 2 }]);
+    expect(await pendingIds(executor, a.orgId)).toEqual([]);
+  });
+
+  it('sealers with overlapping snapshots record one reset for one change', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 2);
+    let arrived = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const racing: SqlExecutor = {
+      ...executor,
+      all: (s) => executor.all(s),
+      batch: async (statements) => {
+        if (
+          arrived < 2 &&
+          statements.some((statement) => statement.sql.startsWith('DELETE FROM audit_pending'))
+        ) {
+          arrived += 1;
+          if (arrived === 2) {
+            await executor.batch([
+              {
+                sql: "UPDATE audit_pending SET payload_json = '{}' WHERE org_id = ? AND id = ?",
+                params: [a.orgId, pendingId(1)],
+              },
+            ]);
+            release();
+          }
+          await gate;
+        }
+        return executor.batch(statements);
+      },
+    };
+    const results = await Promise.all([
+      createAuditSealRepository(racing).seal(a, 1),
+      createAuditSealRepository(racing).seal(a, 100),
+    ]);
+    expect(results).toContainEqual({ outcome: 'contended' });
+    expect(results).toContainEqual(
+      expect.objectContaining({ outcome: 'sealed', integrity: ['head_mismatch'] }),
+    );
+    expect(await createAuditSealRepository(executor).seal(a)).not.toHaveProperty('integrity');
+    expect(await pendingIds(executor, a.orgId)).toEqual([]);
+    const ledger = await createAuditLedgerRepository(executor).page(a, null, 100);
+    expect(ledger).toEqual([expect.objectContaining({ kind: 'chain_reset', fromSeq: 1 })]);
+    expect(
+      await executor.all({
+        sql: 'SELECT integrity_incidents FROM audit_chain WHERE org_id = ?',
+        params: [a.orgId],
+      }),
+    ).toEqual([{ integrity_incidents: 1 }]);
+  });
+
+  it('never allocates a seq inside a recorded gap after the stored head rolls back', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 3);
+    const repo = createAuditSealRepository(executor);
+    await repo.seal(a);
+    const original = await events(executor, a.orgId);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq = 3', params: [a.orgId] },
+    ]);
+    expect(await repo.seal(a)).toEqual({
+      outcome: 'empty',
+      repaired: true,
+      integrity: ['seq_gap'],
+    });
+    await executor.batch([
+      {
+        sql: 'UPDATE audit_chain SET head_seq = 2, head_hash = ? WHERE org_id = ?',
+        params: [original[1]!.hash, a.orgId],
+      },
+    ]);
+    await addPending(executor, a.orgId, 4, 1);
+    expect(await repo.seal(a)).toMatchObject({
+      outcome: 'sealed',
+      headSeq: 4,
+      integrity: ['head_mismatch'],
+    });
+    expect((await events(executor, a.orgId)).map((row) => row.seq)).toEqual([1, 2, 4]);
+  });
+
+  it('refuses to seal or record a hole while a restore is pending', async () => {
+    const { executor, a } = await open();
+    await addPending(executor, a.orgId, 1, 3);
+    await createAuditSealRepository(executor).seal(a);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq = 3', params: [a.orgId] },
+      { sql: 'UPDATE audit_chain SET restore_pending = 1 WHERE org_id = ?', params: [a.orgId] },
+    ]);
+    await addPending(executor, a.orgId, 4, 1);
+    expect(await createAuditSealRepository(executor).seal(a)).toEqual({
+      outcome: 'restore_pending',
+    });
+    expect(await pendingIds(executor, a.orgId)).toEqual([pendingId(4)]);
+    expect(await createAuditLedgerRepository(executor).page(a, null, 100)).toEqual([]);
   });
 
   it('9: a non-unique D1 error propagates', async () => {

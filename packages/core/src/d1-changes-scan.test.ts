@@ -668,6 +668,30 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Compares named chain snapshot fields from readHead SELECT results for contention; neither snapshot contains executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: a[key as keyof Head] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: b[key as keyof Head] #1',
+      ],
+    },
+    {
+      reason:
+        'Compares the recomputed chain state with the readHead SELECT result to skip a no-op recovery; both are SELECT-derived values, never executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: state[key] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key] #1',
+      ],
+    },
+    {
+      reason:
+        'Compares pending audit row fields from SELECT results against the original snapshot for integrity; neither row contains executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: row[key as keyof PendingRow] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: original[key as keyof PendingRow] #1',
+      ],
+    },
+    {
+      reason:
         'Ledger reader rows drop their computed conflict flag before validation; they are SELECT result rows, never executor change metadata.',
       sites: ['db-sqlite/src/repositories/audit-ledger.ts:object rest access: ...row #1'],
     },

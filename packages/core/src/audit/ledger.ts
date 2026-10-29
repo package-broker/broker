@@ -54,6 +54,11 @@ export interface AuditLedgerEntry {
 export interface AuditLedgerPort {
   append(ctx: OrgContext, entries: readonly AuditLedgerEntry[]): Promise<void>;
   effectiveGaps(ctx: OrgContext): Promise<readonly AuditLedgerEntry[]>;
+  /**
+   * Visible rows in id order. Ids are not a durable append cursor: a row committed later, by
+   * another worker, can carry a smaller id than one already read. Gap totals come from
+   * `effectiveGaps()`, never from paging past a remembered id.
+   */
   page(
     ctx: OrgContext,
     afterId: string | null,

@@ -22,6 +22,8 @@ export {
   sha256Hex,
 } from './auth/primitives.js';
 export { packageKey } from './catalogue/names.js';
+export { parseCredentialMaterial } from './sources/credentials.js';
+export type { GithubAppMaterial } from './sources/credentials.js';
 export { normalizeEmail, domainPolicyProblems } from './identity/policy.js';
 export { providerFieldProblems } from './identity/provider-fields.js';
 export {

@@ -1486,3 +1486,135 @@ describe('upstream.fetch spans', () => {
     ).toHaveLength(0);
   });
 });
+
+describe('createPolicyFetch API PATCH', () => {
+  it.each([undefined, 'follow'] as const)(
+    'refuses PATCH without explicit redirect refusal (%s)',
+    async (redirects) => {
+      const { run, hops } = make({});
+      const error = await failure(
+        run(
+          request({
+            method: 'PATCH',
+            purpose: 'api',
+            ...(redirects === undefined ? {} : { redirects }),
+          }),
+        ),
+      );
+      expect(error.reason).toBe('request');
+      expect(hops).toHaveLength(0);
+    },
+  );
+
+  it.each([1024 * 1024, 1024 * 1024 + 1])(
+    'bounds PATCH request bodies at %i bytes',
+    async (size) => {
+      const { run, hops } = make({ 'https://a.example.com/start?x=1': new Response('{}') });
+      const pending = run(
+        request({
+          method: 'PATCH',
+          purpose: 'api',
+          redirects: 'error',
+          body: new Uint8Array(size),
+        }),
+      );
+      if (size > 1024 * 1024) {
+        expect(await failure(pending)).toMatchObject({ code: 'refused', reason: 'body' });
+        expect(hops).toHaveLength(0);
+      } else {
+        await (await pending).body?.cancel();
+        expect(hops).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each([301, 302, 303, 307, 308])(
+    'refuses PATCH redirect %i and redacts logs',
+    async (status) => {
+      const { obs, seen } = recorder();
+      const url = 'https://a.example.com/private-hook?token=' + SECRET;
+      const { run, hops } = make(
+        { [url]: redirect('https://b.example.com/' + SECRET, status) },
+        obs,
+      );
+      const error = await failure(
+        run(
+          request({
+            url,
+            method: 'PATCH',
+            purpose: 'api',
+            redirects: 'error',
+            credential,
+            body: new TextEncoder().encode(JSON.stringify({ secret: SECRET })),
+          }),
+        ),
+      );
+      expect(error).toMatchObject({ code: 'refused', reason: 'redirect_refused' });
+      expect(hops).toHaveLength(1);
+      expect(hops[0]?.headers.get('authorization')).toBe(`Bearer ${SECRET}`);
+      const text = JSON.stringify([error, seen]);
+      expect(text).not.toContain(SECRET);
+      expect(text).not.toContain('private-hook');
+      expect(seen).toContainEqual(
+        expect.objectContaining({
+          event: 'upstream.fetch',
+          upstream_method: 'PATCH',
+          outcome: 'upstream.redirect_refused',
+        }),
+      );
+    },
+  );
+
+  it('bounds streamed PATCH responses without logging their contents', async () => {
+    const { obs, seen } = recorder();
+    const url = 'https://a.example.com/hook';
+    const { run } = make({ [url]: new Response(SECRET.repeat(100)) }, obs);
+    const response = await run(
+      request({ url, method: 'PATCH', purpose: 'api', redirects: 'error', maxBytes: 8 }),
+    );
+    await expect(new Response(response.body).text()).rejects.toMatchObject({ code: 'too_large' });
+    expect(JSON.stringify(seen)).not.toContain(SECRET);
+    expect(seen).toContainEqual(
+      expect.objectContaining({ l: expect.objectContaining({ outcome: 'body_too_large' }) }),
+    );
+  });
+
+  it('sends a JSON PATCH body for API calls', async () => {
+    const { run, hops } = make({ 'https://a.example.com/hook': new Response('{}') });
+    const body = new TextEncoder().encode(JSON.stringify({ secret: SECRET }));
+    const response = await run(
+      request({
+        url: 'https://a.example.com/hook',
+        method: 'PATCH',
+        purpose: 'api',
+        headers: { 'content-type': 'application/json' },
+        body,
+        redirects: 'error',
+      }),
+    );
+    await response.body?.cancel();
+    expect(hops).toHaveLength(1);
+    expect(hops[0]?.method).toBe('PATCH');
+    expect(hops[0]?.body).toBe(body);
+    expect(hops[0]?.headers.get('content-type')).toBe('application/json');
+  });
+
+  it.each(['metadata', 'archive', 'git'] as const)('refuses PATCH for %s', async (purpose) => {
+    const { run, hops } = make({});
+    const error = await failure(
+      run(
+        request({
+          method: 'PATCH',
+          purpose,
+          redirects: 'error',
+          headers:
+            purpose === 'git'
+              ? { 'content-type': 'application/x-git-upload-pack-request' }
+              : { accept: 'application/json' },
+        }),
+      ),
+    );
+    expect(error.reason).toBe('request');
+    expect(hops).toHaveLength(0);
+  });
+});

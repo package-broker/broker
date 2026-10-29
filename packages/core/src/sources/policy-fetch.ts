@@ -7,7 +7,7 @@ export const GITHUB_API_VERSION = '2022-11-28';
 const MAX_REDIRECTS = 5;
 const MAX_REQUEST_BODY = 1024 * 1024;
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
-const METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'POST']);
+const METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'POST', 'PATCH']);
 const GIT_CONTENT_TYPE = 'application/x-git-upload-pack-request';
 const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding'] as const;
 const BARE_ORIGIN = /^https?:\/\/[^/?#@\\]+$/i;
@@ -39,7 +39,7 @@ export interface UpstreamCredential {
 
 export interface UpstreamRequest {
   readonly url: string;
-  readonly method: 'GET' | 'HEAD' | 'POST';
+  readonly method: 'GET' | 'HEAD' | 'POST' | 'PATCH';
   readonly headers?: Readonly<Record<string, string>>;
   readonly body?: Uint8Array;
   readonly credential?: UpstreamCredential;
@@ -265,7 +265,12 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
     child: SpanContext,
   ): Promise<UpstreamResponse> {
     const allowed = PURPOSE_HEADERS.get(request.purpose);
-    if (allowed === undefined || !METHODS.has(request.method)) throw refuse('request');
+    if (
+      allowed === undefined ||
+      !METHODS.has(request.method) ||
+      (request.method === 'PATCH' && (request.purpose !== 'api' || request.redirects !== 'error'))
+    )
+      throw refuse('request');
     if (
       request.redirects !== undefined &&
       request.redirects !== 'follow' &&
@@ -278,7 +283,10 @@ export function createPolicyFetch(options: PolicyFetchOptions): PolicyFetch {
     const headersTimeoutMs = request.headersTimeoutMs ?? Math.min(request.timeoutMs, 30000);
     if (!Number.isFinite(headersTimeoutMs) || headersTimeoutMs <= 0) throw refuse('limit');
     if (request.body !== undefined) {
-      if (request.method !== 'POST' || request.body.byteLength > MAX_REQUEST_BODY) {
+      if (
+        (request.method !== 'POST' && request.method !== 'PATCH') ||
+        request.body.byteLength > MAX_REQUEST_BODY
+      ) {
         throw refuse('body');
       }
     }

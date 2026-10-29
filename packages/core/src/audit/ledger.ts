@@ -1,5 +1,20 @@
+import { DbError } from '../db/errors.js';
 import type { OrgContext } from '../db/port.js';
 import { isUlid } from '../ids.js';
+
+export class AuditLedgerOverlapError extends DbError {
+  constructor() {
+    super('check', 'audit ledger overlapping report');
+    this.name = 'AuditLedgerOverlapError';
+  }
+}
+
+export class AuditLedgerIntegrityError extends Error {
+  constructor() {
+    super('audit ledger integrity failure');
+    this.name = 'AuditLedgerIntegrityError';
+  }
+}
 
 export const AUDIT_LEDGER_KINDS = [
   'skipped',
@@ -75,38 +90,28 @@ export function assertAuditLedgerEntry(entry: AuditLedgerEntry): void {
   }
 }
 
-/** Coalesce losses before insertion; persisted ledger rows are never rewritten. */
-export function mergeAuditLedgerGaps(
+const sameEntry = (a: AuditLedgerEntry, b: AuditLedgerEntry) =>
+  (Object.keys(a) as (keyof AuditLedgerEntry)[]).every((key) => a[key] === b[key]);
+
+/**
+ * Validates a batch and drops exact repeats; a changed report under a repeated id is a duplicate.
+ * Each remaining report is persisted as its own row in submission order, so adjacent gaps merge
+ * in the database exactly as they do across appends.
+ */
+export function normalizeAuditLedgerEntries(
   entries: readonly AuditLedgerEntry[],
 ): readonly AuditLedgerEntry[] {
   for (const entry of entries) assertAuditLedgerEntry(entry);
-  const gaps = entries
-    .filter((entry) => entry.kind === 'gap')
-    .sort(
-      (a, b) =>
-        a.chainId.localeCompare(b.chainId) ||
-        a.epoch - b.epoch ||
-        (a.sinkId ?? '').localeCompare(b.sinkId ?? '') ||
-        a.fromSeq - b.fromSeq,
-    );
-  const merged: AuditLedgerEntry[] = [];
-  const latest = new Map<string, number>();
-  for (const entry of gaps) {
-    const key = JSON.stringify([entry.chainId, entry.epoch, entry.sinkId, entry.reasonCode]);
-    const index = latest.get(key) ?? -1;
-    const previous = merged[index];
-    if (previous !== undefined && entry.fromSeq - previous.toSeq <= 1) {
-      const combined = {
-        ...previous,
-        toSeq: Math.max(previous.toSeq, entry.toSeq),
-        count: previous.count + entry.count,
-      };
-      assertAuditLedgerEntry(combined);
-      merged[index] = combined;
-    } else {
-      latest.set(key, merged.length);
-      merged.push({ ...entry });
+  const byId = new Map<string, AuditLedgerEntry>();
+  return entries.filter((entry) => {
+    const seen = byId.get(entry.id);
+    if (seen === undefined) {
+      byId.set(entry.id, entry);
+      return true;
     }
-  }
-  return [...merged, ...entries.filter((entry) => entry.kind !== 'gap')];
+    if (sameEntry(seen, entry)) return false;
+    throw new DbError('unique', 'audit ledger duplicate id', {
+      constraint: 'audit_ledger.org_id, audit_ledger.id',
+    });
+  });
 }

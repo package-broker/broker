@@ -727,7 +727,10 @@ export interface AuditLedgerTable {
     | 'retire'
     | 'unblock'
     | 'restore_confirmed'
-    | 'export';
+    | 'export'
+    | 'replay'
+    | 'chain_reset'
+    | 'epoch_bump';
   chain_id: string;
   epoch: number;
   from_seq: number;
@@ -740,6 +743,7 @@ export interface AuditLedgerTable {
   actor_type: 'user' | 'service_principal' | 'customer' | 'system';
   actor_id: string | null;
   created_at: Generated<string>;
+  superseded_by: string | null;
 }
 
 export interface Database {

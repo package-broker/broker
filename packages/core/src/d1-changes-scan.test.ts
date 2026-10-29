@@ -668,6 +668,18 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Ledger reader rows drop their computed conflict flag before validation; they are SELECT result rows, never executor change metadata.',
+      sites: ['db-sqlite/src/repositories/audit-ledger.ts:object rest access: ...row #1'],
+    },
+    {
+      reason:
+        'Lazy import loads the shared ledger test suite; its executor batches ignore change metadata and assertions read stored rows, so no trigger or FK-action counts are consumed.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-ledger-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'These fixed source-error lookups read JSON counter values, never executor change metadata.',
       sites: [
         'db-sqlite/src/repositories/source.ts:unresolved computed access: errors[code] #1',

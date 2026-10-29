@@ -545,7 +545,19 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ? AUTHENTICATED_PLACEHOLDER
         : null);
     if (permission === null) {
-      const org = route.needsOrg === false ? null : await resolveOrg();
+      let org = route.needsOrg === false ? null : await resolveOrg();
+      // The public provider list can resolve capabilities only for an existing organization.
+      if (
+        route.needsOrg === false &&
+        route.plugin === CORE_PLUGIN &&
+        route.path === '/_pb/auth/providers'
+      ) {
+        try {
+          org = await resolveOrg();
+        } catch {
+          org = null;
+        }
+      }
       return invoke(route, c, org, null, null, {
         principal: null,
         projectId: null,

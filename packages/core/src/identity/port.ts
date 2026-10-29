@@ -133,6 +133,8 @@ export interface IdentityProvider {
   readonly trustAnchor: string;
   readonly policy: DomainPolicy;
   readonly supportsReauth: boolean;
+  /** Resolves discovery-based support; failures retain supportsReauth. */
+  reauthCapability?(): Promise<boolean>;
   start(input: {
     readonly request: Request;
     readonly purpose: 'login' | 'reauth';

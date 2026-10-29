@@ -14,6 +14,7 @@ import type { paths } from './api-types.js';
 import {
   AuthLayout,
   LoginScreen,
+  SigninFailedView,
   ReauthConfirm,
   ReauthScreen,
   ServicesContext,
@@ -417,6 +418,18 @@ function AppContent(props: { client?: AuthClient }) {
       }
     });
   }, [client, flow, go]);
+
+  if (hash.split('?')[0] === '#/signin-failed') {
+    return (
+      <AuthLayout>
+        <SigninFailedView
+          hash={hash}
+          reason={parseHash(hash).query.get('reason')}
+          signedIn={session === 'in'}
+        />
+      </AuthLayout>
+    );
+  }
 
   const resolved = resolveRoute(hash, session === 'in');
   if (session === 'out') {

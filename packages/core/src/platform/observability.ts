@@ -41,12 +41,21 @@ export interface SafeLogRecord {
   readonly attempt?: number;
   readonly error_name?: ErrorName;
   readonly reason_code?: string;
+  readonly from_seq?: number;
+  readonly bodies?: number;
+  readonly withheld?: number;
   readonly head_seq?: number;
   readonly seq?: number;
   readonly rows?: number;
   readonly head_hash?: string;
   readonly reason?:
-    'seq_gap' | 'head_mismatch' | 'boundary_mismatch' | 'prev_hash' | 'hash' | 'org_mismatch';
+    | 'seq_gap'
+    | 'head_mismatch'
+    | 'boundary_mismatch'
+    | 'prev_hash'
+    | 'hash'
+    | 'org_mismatch'
+    | 'checkpoint_pruned';
   readonly package_key?: string;
   readonly source_id?: string;
   readonly upstream_trace_id?: string;
@@ -87,6 +96,9 @@ export const LOG_FIELDS = [
   'attempt',
   'error_name',
   'reason_code',
+  'from_seq',
+  'bodies',
+  'withheld',
   'head_seq',
   'seq',
   'rows',
@@ -373,6 +385,9 @@ const FIELD_CHECKS: Readonly<
   job_id: matches(ENTITY_ID),
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),
+  from_seq: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
+  bodies: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  withheld: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   head_seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   rows: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
@@ -383,7 +398,8 @@ const FIELD_CHECKS: Readonly<
     v === 'boundary_mismatch' ||
     v === 'prev_hash' ||
     v === 'hash' ||
-    v === 'org_mismatch',
+    v === 'org_mismatch' ||
+    v === 'checkpoint_pruned',
   package_key: packageKey,
   source_id: matches(ENTITY_ID),
   upstream_trace_id: matches(TRACE_ID),

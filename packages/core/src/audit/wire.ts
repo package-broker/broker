@@ -269,7 +269,7 @@ function storedOrder(clean: unknown, stored: unknown): unknown {
   return result;
 }
 
-function payloadMatches(row: AuditRow): boolean {
+export function payloadMatches(row: AuditRow): boolean {
   if (
     typeof row.payload_json !== 'string' ||
     new TextEncoder().encode(row.payload_json).length > 4096

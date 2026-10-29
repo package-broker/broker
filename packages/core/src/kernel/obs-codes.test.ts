@@ -26,6 +26,7 @@ describe('vocabularies', () => {
       'audit.seal_repaired',
       'audit.sealed',
       'audit.verified',
+      'audit.verify_continued',
       'audit.verify_partial',
     ]);
     expect(Object.isFrozen(AUDIT_EVENTS)).toBe(true);

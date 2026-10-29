@@ -1,5 +1,7 @@
 /* eslint-disable no-restricted-syntax -- Isolated fixture seeding and full database snapshots require SQL; this module is rehearsal-only. */
 import type { ScalarSqlValue, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { D1_STATEMENTS_PER_BATCH } from '@package-broker/core/db/port';
+import { assertBatchStatementCount } from '@package-broker/core/db/errors';
 const quoteId = (s: string) => `"${s.replaceAll('"', '""')}"`;
 export interface SnapshotStatement {
   sql: string;
@@ -16,6 +18,23 @@ export function bindSnapshot(statements: readonly SnapshotStatement[]): Statemen
       value !== null && typeof value === 'object' ? Buffer.from(value.hex, 'hex') : value,
     ),
   }));
+}
+
+export async function restoreDatabase(
+  executor: SqlExecutor,
+  statements: readonly SnapshotStatement[],
+): Promise<void> {
+  const schema: SnapshotStatement[] = [];
+  const data: SnapshotStatement[] = [];
+  for (const statement of statements) {
+    if (/^CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\b/i.test(statement.sql)) schema.push(statement);
+    else data.push(statement);
+  }
+  // Keep deferred foreign keys, all rows and the final triggers in one transaction.
+  assertBatchStatementCount(data.length);
+  for (let offset = 0; offset < schema.length; offset += D1_STATEMENTS_PER_BATCH)
+    await executor.batch(bindSnapshot(schema.slice(offset, offset + D1_STATEMENTS_PER_BATCH)));
+  await executor.batch(bindSnapshot(data));
 }
 
 export async function exportDatabase(executor: SqlExecutor): Promise<SnapshotStatement[]> {

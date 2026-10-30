@@ -1214,6 +1214,7 @@ async function expectOwnershipConflict() {
   expect(result.output.checks).toEqual([]);
   expect(trace.length).toBeGreaterThan(0);
   expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+  return result;
 }
 
 it.each(['missing', 'empty', 'install_only', 'owner_only', 'foreign', 'changed'] as const)(
@@ -2590,6 +2591,66 @@ it('accepts only the recorded telemetry endpoint binding', async () => {
     expect((await teardown(options)).exitCode).toBe(exit);
   }
 });
+
+it.each(
+  (['current', 'version'] as const).flatMap((location) =>
+    (['enabled', 'disabled', 'unrecorded', 'missing_receipt', 'unknown', 'secret'] as const).map(
+      (kind) => ({ location, kind }),
+    ),
+  ),
+)('checks PB_AUTH_LOCAL ownership in $location settings ($kind)', async ({ location, kind }) => {
+  await saveAttachments();
+  const mode = kind === 'enabled' ? 'enabled' : 'disabled';
+  journal.deployment!.attempt.local_auth = mode;
+  recordDeploymentHistory(journal.deployment!, {
+    versionId: 'version-1',
+    ...(kind === 'missing_receipt' ? {} : { plainBinding: { name: 'PB_AUTH_LOCAL', text: mode } }),
+  });
+  await save();
+  const binding = {
+    name: 'PB_AUTH_LOCAL',
+    type: kind === 'secret' ? 'secret_text' : 'plain_text',
+    ...(kind === 'secret'
+      ? {}
+      : {
+          text:
+            kind === 'unknown' ? 'UNKNOWN_MODE_SENTINEL' : kind === 'unrecorded' ? 'enabled' : mode,
+        }),
+  };
+  versionsFake(['version-1'], location === 'version' ? [binding] : []);
+  if (location === 'current')
+    interceptRead(async (url, fallback) =>
+      url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}/settings`)
+        ? response(ownedWorkerSettings([binding]))
+        : fallback,
+    );
+  if (kind === 'enabled' || kind === 'disabled') {
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'worker', status: 'deleted' });
+    expect(result.output.checks).toContainEqual({ name: 'd1', status: 'deleted' });
+  } else {
+    const result = await expectOwnershipConflict();
+    expect(JSON.stringify(result)).not.toContain('UNKNOWN_MODE_SENTINEL');
+  }
+});
+
+it.each([false, true])(
+  'tears down a legacy inventory without local-auth metadata (history: %s)',
+  async (history) => {
+    await saveAttachments();
+    expect(journal.deployment!.attempt).not.toHaveProperty('local_auth');
+    if (history) journal.deployment!.history = { version_ids: ['version-1'], plain_bindings: [] };
+    await save();
+    const before = await readFile(inventory, 'utf8');
+    versionsFake(['version-1']);
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'worker', status: 'deleted' });
+    expect(result.output.checks).toContainEqual({ name: 'd1', status: 'deleted' });
+    expect(await readFile(inventory, 'utf8')).toBe(before);
+  },
+);
 
 it('reports possible unrecorded multipart uploads while retaining other resources', async () => {
   const name = await provisionedBucket();

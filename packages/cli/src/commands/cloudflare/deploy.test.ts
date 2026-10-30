@@ -6458,6 +6458,73 @@ it('receipts local auth and telemetry before an interrupted version upload', asy
   });
 });
 
+it.each(['enabled', 'disabled'] as const)(
+  'preserves local auth %s through an interrupted deploy, resume and teardown',
+  async (mode) => {
+    await localAuthArtifact();
+    const h = lifecycleHarness();
+    const o = options(h, { localAuth: mode, secret: ['PB_MASTER_KEY'] });
+    expect((await deploy(o)).exitCode).toBe(0);
+    expect(
+      (
+        await smoke({
+          workerName: 'broker',
+          projectRoot: project,
+          env: o.env,
+          fetch: h.fetch,
+          now: h.now,
+          sleep: h.sleep,
+        })
+      ).exitCode,
+    ).toBe(0);
+    await writeFile(
+      join(out, 'worker.js'),
+      'export default {fetch(){return new Response("retry")}}',
+    );
+    h.uploadLost = true;
+    expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+    const interrupted = (await store.read())!;
+    expect(interrupted.deployment!.attempt.phase).toBe('upload_pending');
+    expect(interrupted.deployment!.attempt.local_auth).toBe(mode);
+    expect(interrupted.deployment!.history!.plain_bindings).toContainEqual({
+      name: 'PB_AUTH_LOCAL',
+      texts: [mode],
+    });
+    expect((h.versions.get(NEWEST)!.resources as { bindings: unknown[] }).bindings).toContainEqual(
+      localBinding(mode),
+    );
+    h.uploadLost = false;
+    h.calls.length = 0;
+    const resumed = await deploy(options(h, { secret: ['PB_MASTER_KEY'] }));
+    expect(resumed.output.error).toBeNull();
+    expect(resumed.exitCode).toBe(0);
+    expect(resumed.output.version_id).toBe(NEWEST);
+    expect(providerUploads(h)).toHaveLength(0);
+    const afterResume = (await store.read())!;
+    expect(afterResume.deployment!.attempt.local_auth).toBe(mode);
+    expect(afterResume.deployment!.history!.plain_bindings).toContainEqual({
+      name: 'PB_AUTH_LOCAL',
+      texts: [mode],
+    });
+    const result = await teardown({
+      project,
+      inventory: store.path,
+      env: o.env,
+      fetch: h.fetch,
+      now: h.now,
+      sleep: h.sleep,
+      inventoryId: identity.owner_digest,
+      iUnderstandThisDeletes: true,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'worker', status: 'deleted' });
+    expect(result.output.checks).toContainEqual({ name: 'd1', status: 'deleted' });
+    expect(h.exists).toBe(false);
+    expect(h.versions.size).toBe(0);
+    expect((await store.read())!.deployment!.attempt.local_auth).toBe(mode);
+  },
+);
+
 it.each(['pending', 'complete', 'worker'] as const)(
   'stale Worker list during journal-owned creation: %s',
   async (state) => {

@@ -30,7 +30,7 @@ export type FailureAttempt = {
         readonly id: string;
       };
       readonly routeTemplate: string;
-      readonly permission: string;
+      readonly permission: string | null;
       readonly boundary: 'organization' | 'project' | 'authenticated';
       readonly projectId?: string | null;
     }

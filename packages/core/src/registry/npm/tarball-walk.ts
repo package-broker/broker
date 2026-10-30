@@ -99,10 +99,44 @@ function limit(value: number | undefined, ceiling: number): number {
   return Math.min(value ?? ceiling, ceiling);
 }
 
+export interface RepositoryTarEntry {
+  readonly path: string;
+  readonly size: number;
+  readonly mode: number;
+  readonly type: '0' | '5' | '2';
+}
+export interface RepositoryTarSink {
+  write(chunk: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+}
+export type RepositoryTarVisitor = (
+  entry: RepositoryTarEntry,
+) => Promise<RepositoryTarSink | undefined>;
+
+export async function walkRepositoryTarball(
+  body: ReadableStream<Uint8Array>,
+  visitor: RepositoryTarVisitor,
+  options: Pick<TarballWalkOptions, 'maxEntries' | 'maxUnpackedBytes'> & {
+    signal?: AbortSignal;
+  } = {},
+): Promise<void> {
+  await scanTarball(body, { ...options, name: '', version: '' }, visitor, options.signal);
+}
+
 export async function walkTarball(
   body: ReadableStream<Uint8Array>,
   options: TarballWalkOptions,
 ): Promise<TarballWalkResult> {
+  return scanTarball(body, options);
+}
+
+async function scanTarball(
+  body: ReadableStream<Uint8Array>,
+  options: TarballWalkOptions,
+  repository?: RepositoryTarVisitor,
+  signal?: AbortSignal,
+): Promise<TarballWalkResult> {
+  let repositoryRoot: string | undefined;
   const cap = limit(options.maxUnpackedBytes, 256 * 1024 * 1024);
   const maxEntries = limit(options.maxEntries, 50_000);
   const maxExtensionBytes = limit(options.maxExtensionBytes, 65536);
@@ -110,15 +144,22 @@ export async function walkTarball(
   const maxManifestBytes = limit(options.maxManifestBytes, 262144);
   const maxReadmeBytes = limit(options.maxReadmeBytes, 524288);
   const reader = body.getReader();
+  const abort = () => {
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
   let chunk: Uint8Array = new Uint8Array(0);
   let offset = 0,
     total = 0;
   async function take(length: number, allowEof = false): Promise<Uint8Array | null> {
+    signal?.throwIfAborted();
     const out = new Uint8Array(length);
     let at = 0;
     while (at < length) {
       if (offset === chunk.length) {
         const next = await reader.read();
+        signal?.throwIfAborted();
         if (next.done) {
           if (allowEof && (!at || (zeros >= 2 && out.subarray(0, at).every((b) => b === 0))))
             return null;
@@ -178,13 +219,15 @@ export async function walkTarball(
         }
       }
       const type = header[156] === 0 ? '0' : String.fromCharCode(header[156]!);
-      if (!['0', '5', 'x', 'g', 'L', 'K'].includes(type)) invalid('entry_type');
+      if (!['0', '5', 'x', 'g', 'L', 'K', ...(repository ? ['2'] : [])].includes(type))
+        invalid('entry_type');
       const headerName = text(header.subarray(0, 100));
       const prefix =
         magic === 'ustar\0' ? text(header.subarray(345, header[475] === 0 ? 475 : 500)) : '';
       if (!headerName && !prefix) invalid('header_path');
       const headerLink = text(header.subarray(157, 257));
-      if (type !== 'x' && type !== 'g' && headerLink) invalid('header_linkpath');
+      if (type !== 'x' && type !== 'g' && !(repository && type === '2') && headerLink)
+        invalid('header_linkpath');
       if (header.subarray(124, 136).every((b) => b === 0 || b === 32)) invalid('blank_size');
       let size = headerNumber(header.subarray(124, 136));
       const extension = ['x', 'g', 'L', 'K'].includes(type);
@@ -204,24 +247,43 @@ export async function walkTarball(
       if (extension && size > maxExtensionBytes) invalid('extension_cap');
       let path = '';
       let capture = 0;
+      let sink: RepositoryTarSink | undefined;
       if (!extension) {
-        path = effectivePath(
-          local.path ?? (prefix ? prefix + '/' : '') + headerName,
-          type === '5',
-          maxPathBytes,
-        );
+        const rawPath = local.path ?? (prefix ? prefix + '/' : '') + headerName;
+        if (repository) {
+          if (/[\r\n]/.test(rawPath)) invalid('repository_path');
+          const normalized = effectivePath('package/' + rawPath, type === '5', maxPathBytes);
+          const components = normalized.slice(8).split('/');
+          repositoryRoot ??= components[0]!;
+          if (components[0] !== repositoryRoot) invalid('repository_root');
+          if (components.length === 1 && type !== '5') invalid('repository_root');
+          path = components.slice(1).join('/');
+        } else path = effectivePath(rawPath, type === '5', maxPathBytes);
         if (paths.has(path)) invalid('duplicate_path');
         paths.add(path);
-        if (attrs.linkpath || text(header.subarray(157, 257))) invalid('linkpath');
+        if (!(repository && type === '2') && (attrs.linkpath || headerLink)) invalid('linkpath');
+        if (type === '2' && size !== 0) invalid('symlink_size');
         if (type === '5' && size !== 0) invalid('directory_size');
         if (type === '0') {
           fileCount++;
           unpackedSize += size;
         }
-        if (path === 'package/package.json') {
+        if (repository) {
+          sink = await repository({
+            path,
+            size,
+            mode: headerNumber(header.subarray(100, 108)),
+            type: type as RepositoryTarEntry['type'],
+          });
+        } else if (path === 'package/package.json') {
           if (size > maxManifestBytes) invalid('manifest_cap');
           capture = size;
-        } else if (/^package\/readme[^/]*$/i.test(path) && readme === null && type === '0') {
+        } else if (
+          !repository &&
+          /^package\/readme[^/]*$/i.test(path) &&
+          readme === null &&
+          type === '0'
+        ) {
           capture = Math.min(size, maxReadmeBytes);
           readmeTruncated = size > capture;
         }
@@ -232,10 +294,12 @@ export async function walkTarball(
       while (at < size) {
         const part = (await take(Math.min(16384, size - at)))!;
         if (at < capture) captured.set(part.subarray(0, capture - at), at);
+        await sink?.write(part);
         at += part.length;
       }
       const padding = (await take((512 - (size % 512)) % 512))!;
       if (padding.some((b) => b !== 0)) invalid('padding');
+      await sink?.close();
       if (extension) {
         if (type === 'x') Object.assign(local, records(captured));
         else if (type === 'g') {
@@ -244,7 +308,7 @@ export async function walkTarball(
           if (!captured.length || captured[captured.length - 1] !== 0) invalid('gnu_terminator');
           local[type === 'L' ? 'path' : 'linkpath'] = text(captured);
         }
-      } else if (path === 'package/package.json') {
+      } else if (!repository && path === 'package/package.json') {
         try {
           const parsed: unknown = JSON.parse(decode(captured), (_key, value: unknown) => {
             if (value && typeof value === 'object' && !Array.isArray(value))
@@ -258,7 +322,12 @@ export async function walkTarball(
           if (error instanceof PublishValidationError) throw error;
           invalid('manifest_json');
         }
-      } else if (/^package\/readme[^/]*$/i.test(path) && readme === null && type === '0') {
+      } else if (
+        !repository &&
+        /^package\/readme[^/]*$/i.test(path) &&
+        readme === null &&
+        type === '0'
+      ) {
         // A truncated multibyte code point is withheld until a complete UTF-8 boundary.
         try {
           readme = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(captured, {
@@ -272,13 +341,17 @@ export async function walkTarball(
       }
     }
     if (zeros < 2 || Object.keys(local).length) invalid('end_blocks');
-    if (!manifest || manifest.name !== options.name || manifest.version !== (await options.version))
+    if (
+      !repository &&
+      (!manifest || manifest.name !== options.name || manifest.version !== (await options.version))
+    )
       throw new PublishValidationError('manifest_mismatch', 400, { detail: 'manifest_identity' });
-    return { fileCount, unpackedSize, manifest, readme, readmeTruncated };
+    return { fileCount, unpackedSize, manifest: manifest ?? {}, readme, readmeTruncated };
   } catch (error) {
     await reader.cancel(error).catch(() => {});
     throw error;
   } finally {
+    signal?.removeEventListener('abort', abort);
     reader.releaseLock();
   }
 }

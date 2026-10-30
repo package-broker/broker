@@ -169,7 +169,14 @@ describe('resolveRegistryConfig', () => {
       userAgent: { default: 'PackageBroker/2', composerStyle: 'Composer/2.8.0' },
       upstreamContact: 'https://github.com/package-broker/broker',
       timers: { metadataTtlSeconds: 300, negativeTtlSeconds: 30, waitBudgetMs: 8000 },
-      caps: { metadataBytes, archiveBytes: 67108864 },
+      caps: {
+        metadataBytes,
+        archiveBytes: 67108864,
+        publishBodyBytes: 80_000_000,
+        publishTarballBytes: 50_000_000,
+        publishMetadataBytes: 10_000_000,
+      },
+      publish: { requireLicense: false },
       npmAudit: { enabled: true },
     };
     expect(resolveRegistryConfig(undefined, target, PUBLIC_URL)).toEqual(expected);
@@ -693,5 +700,184 @@ describe('BrokerConfig.registry', () => {
       registry: { timers: { waitBudgetMs: 1000 } },
     });
     expect(config.registry?.timers?.waitBudgetMs).toBe(1000);
+  });
+});
+
+describe.each(['node', 'cloudflare'] as const)('publish configuration on %s', (target) => {
+  it('resolves identical publish defaults, including empty and undefined sections', () => {
+    for (const input of [
+      undefined,
+      {},
+      { caps: {}, publish: {} },
+      {
+        caps: {
+          publishBodyBytes: undefined,
+          publishTarballBytes: undefined,
+          publishMetadataBytes: undefined,
+        },
+        publish: { requireLicense: undefined },
+      },
+    ]) {
+      const resolved = resolveRegistryConfig(input, target, PUBLIC_URL);
+      expect(resolved.caps).toMatchObject({
+        publishBodyBytes: 80_000_000,
+        publishTarballBytes: 50_000_000,
+        publishMetadataBytes: 10_000_000,
+      });
+      expect(resolved).toHaveProperty('publish', { requireLicense: false });
+    }
+    expect(Object.isFrozen(REGISTRY_DEFAULTS.publish)).toBe(true);
+  });
+
+  it('honors publish overrides up to the blob ceiling', () => {
+    const input = {
+      caps: {
+        publishBodyBytes: 100_000_000,
+        publishTarballBytes: 64 * 1024 * 1024,
+        publishMetadataBytes: 20_000_000,
+      },
+      publish: { requireLicense: true },
+    };
+    expect(validateRegistryConfig(input, target)).toEqual([]);
+    const resolved = resolveRegistryConfig(input, target, PUBLIC_URL);
+    expect(resolved.caps).toMatchObject(input.caps);
+    expect(resolved).toHaveProperty('publish', input.publish);
+  });
+
+  it.each(['publishBodyBytes', 'publishTarballBytes', 'publishMetadataBytes'])(
+    'requires positive safe integer bytes for %s',
+    (key) => {
+      for (const value of [
+        0,
+        -1,
+        1.5,
+        NaN,
+        Infinity,
+        Number.MAX_SAFE_INTEGER + 1,
+        'secret-value',
+        null,
+        true,
+      ]) {
+        const input = { caps: { [key]: value } };
+        expect(validateRegistryConfig(input, target)).toEqual([
+          `registry.caps.${key}: must be a positive integer`,
+        ]);
+        expect(() => resolveRegistryConfig(input as never, target, PUBLIC_URL)).toThrow(
+          RegistryConfigError,
+        );
+      }
+      const caps =
+        key === 'publishBodyBytes'
+          ? { publishBodyBytes: 4, publishTarballBytes: 1, publishMetadataBytes: 1 }
+          : { [key]: 1 };
+      expect(validateRegistryConfig({ caps }, target)).toEqual([]);
+    },
+  );
+
+  it('refuses tarball bytes above the fixed blob ceiling', () => {
+    const input = { caps: { publishTarballBytes: 64 * 1024 * 1024 + 1 } };
+    expect(validateRegistryConfig(input, target)).toEqual([
+      'registry.caps.publishTarballBytes: exceeds the product cap',
+    ]);
+    expect(() => resolveRegistryConfig(input, target, PUBLIC_URL)).toThrow(RegistryConfigError);
+  });
+
+  it('requires a boolean license switch without reflecting values', () => {
+    for (const value of [null, 0, 1, 'secret-value', [], {}]) {
+      const input = { publish: { requireLicense: value } };
+      expect(validateRegistryConfig(input, target)).toEqual([
+        'registry.publish.requireLicense: must be a boolean',
+      ]);
+      expect(() => resolveRegistryConfig(input as never, target, PUBLIC_URL)).toThrow(
+        RegistryConfigError,
+      );
+    }
+    expect(
+      resolveRegistryConfig({ publish: { requireLicense: false } }, target, PUBLIC_URL),
+    ).toHaveProperty('publish.requireLicense', false);
+  });
+
+  it('rejects malformed publish sections and unknown keys', () => {
+    for (const publish of [null, false, [], 'secret-value']) {
+      expect(validateRegistryConfig({ publish }, target)).toEqual([
+        'registry.publish: must be an object',
+      ]);
+    }
+    expect(validateRegistryConfig({ publish: { requireLicence: true } }, target)).toEqual([
+      'registry.publish.requireLicence: unknown key',
+    ]);
+  });
+});
+
+describe('publish cap consistency', () => {
+  it('enforces the cloudflare request ceiling and preserves the node safe-integer ceiling', () => {
+    expect(
+      validateRegistryConfig({ caps: { publishBodyBytes: 100_000_000 } }, 'cloudflare'),
+    ).toEqual([]);
+    const input = { caps: { publishBodyBytes: 100_000_001 } };
+    expect(validateRegistryConfig(input, 'cloudflare')).toEqual([
+      'registry.caps.publishBodyBytes: exceeds the cloudflare request limit',
+    ]);
+    expect(() => resolveRegistryConfig(input, 'cloudflare', PUBLIC_URL)).toThrow(
+      RegistryConfigError,
+    );
+    expect(validateRegistryConfig(input, 'node')).toEqual([]);
+    expect(
+      validateRegistryConfig({ caps: { publishBodyBytes: Number.MAX_SAFE_INTEGER } }, 'node'),
+    ).toEqual([]);
+    expect(
+      validateRegistryConfig({ caps: { publishBodyBytes: Number.MAX_SAFE_INTEGER + 1 } }, 'node'),
+    ).toEqual(['registry.caps.publishBodyBytes: must be a positive integer']);
+  });
+
+  describe.each(['node', 'cloudflare'] as const)('on %s', (target) => {
+    it('checks base64 padding at the tarball boundary and one byte above', () => {
+      const caps = { publishBodyBytes: 12, publishTarballBytes: 9, publishMetadataBytes: 1 };
+      expect(validateRegistryConfig({ caps }, target)).toEqual([]);
+      const input = { caps: { ...caps, publishTarballBytes: 10 } };
+      expect(validateRegistryConfig(input, target)).toEqual([
+        'registry.caps.publishTarballBytes: base64 size exceeds publishBodyBytes',
+      ]);
+      expect(() => resolveRegistryConfig(input, target, PUBLIC_URL)).toThrow(RegistryConfigError);
+    });
+
+    it('checks the tarball boundary against the default body cap', () => {
+      expect(validateRegistryConfig({ caps: { publishTarballBytes: 60_000_000 } }, target)).toEqual(
+        [],
+      );
+      expect(validateRegistryConfig({ caps: { publishTarballBytes: 60_000_001 } }, target)).toEqual(
+        ['registry.caps.publishTarballBytes: base64 size exceeds publishBodyBytes'],
+      );
+    });
+
+    it('checks the default tarball against a body override', () => {
+      expect(validateRegistryConfig({ caps: { publishBodyBytes: 66_666_668 } }, target)).toEqual(
+        [],
+      );
+      expect(validateRegistryConfig({ caps: { publishBodyBytes: 66_666_667 } }, target)).toEqual([
+        'registry.caps.publishTarballBytes: base64 size exceeds publishBodyBytes',
+      ]);
+    });
+
+    it('checks metadata at the body boundary and one byte above', () => {
+      for (const body of [undefined, 70_000_000]) {
+        const boundary = body ?? REGISTRY_DEFAULTS.caps.publishBodyBytes;
+        const caps = { publishBodyBytes: body, publishMetadataBytes: boundary };
+        expect(validateRegistryConfig({ caps }, target)).toEqual([]);
+        const input = { caps: { ...caps, publishMetadataBytes: boundary + 1 } };
+        expect(validateRegistryConfig(input, target)).toEqual([
+          'registry.caps.publishMetadataBytes: exceeds publishBodyBytes',
+        ]);
+        expect(() => resolveRegistryConfig(input, target, PUBLIC_URL)).toThrow(RegistryConfigError);
+      }
+    });
+
+    it('checks default metadata against a body override', () => {
+      const caps = { publishBodyBytes: 10_000_000, publishTarballBytes: 1 };
+      expect(validateRegistryConfig({ caps }, target)).toEqual([]);
+      expect(
+        validateRegistryConfig({ caps: { ...caps, publishBodyBytes: 9_999_999 } }, target),
+      ).toEqual(['registry.caps.publishMetadataBytes: exceeds publishBodyBytes']);
+    });
   });
 });

@@ -35,7 +35,7 @@ export interface NpmRouteDeps {
   readonly onDemand: OnDemandFill;
   readonly actorOf?: (ctx: RequestContext) => ProjectActor | null;
   readonly reresolve: (ctx: RequestContext) => Promise<PackageVisibility>;
-  readonly handleOf: (ctx: RequestContext) => string | null;
+  readonly handleOf: (ctx: RequestContext) => Promise<string | null>;
   readonly defer?: (thunk: () => Promise<void>) => void;
   readonly publicUrl: string;
   readonly codecs: Pick<Codecs, 'gunzip'>;
@@ -276,8 +276,8 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     return ok(tags.tags);
   }
 
-  function whoami(ctx: RequestContext): Response {
-    const handle = deps.handleOf(ctx);
+  async function whoami(ctx: RequestContext): Promise<Response> {
+    const handle = await deps.handleOf(ctx);
     return handle === null || handle.includes('@') ? notFound(ctx) : ok({ username: handle });
   }
 

@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_BLOB_BYTES } from '../platform/blob.js';
 import type { Platform } from '../plugin.js';
 import { containsCredentialToken, looksLikeCredential } from '../platform/credential.js';
 
@@ -47,7 +48,14 @@ export interface RegistryConfig {
     readonly negativeTtlSeconds: number;
     readonly waitBudgetMs: number;
   };
-  readonly caps: { readonly metadataBytes: number; readonly archiveBytes: number };
+  readonly caps: {
+    readonly metadataBytes: number;
+    readonly archiveBytes: number;
+    readonly publishBodyBytes: number;
+    readonly publishTarballBytes: number;
+    readonly publishMetadataBytes: number;
+  };
+  readonly publish: { readonly requireLicense: boolean };
   readonly npmAudit: { readonly enabled: boolean };
 }
 
@@ -57,7 +65,14 @@ export const REGISTRY_DEFAULTS: RegistryDefaults = Object.freeze({
   userAgent: Object.freeze({ default: 'PackageBroker/2', composerStyle: 'Composer/2.8.0' }),
   upstreamContact: 'https://github.com/package-broker/broker',
   timers: Object.freeze({ metadataTtlSeconds: 300, negativeTtlSeconds: 30, waitBudgetMs: 8000 }),
-  caps: Object.freeze({ metadataBytes: MAX_METADATA_BYTES, archiveBytes: MAX_ARCHIVE_BYTES }),
+  caps: Object.freeze({
+    metadataBytes: MAX_METADATA_BYTES,
+    archiveBytes: MAX_ARCHIVE_BYTES,
+    publishBodyBytes: 80_000_000,
+    publishTarballBytes: 50_000_000,
+    publishMetadataBytes: 10_000_000,
+  }),
+  publish: Object.freeze({ requireLicense: false }),
   npmAudit: Object.freeze({ enabled: true }),
 });
 
@@ -72,12 +87,27 @@ export class RegistryConfigError extends Error {
 }
 
 const PLATFORMS: readonly Platform[] = ['cloudflare', 'node'];
-const ROOT_KEYS = ['outbound', 'userAgent', 'upstreamContact', 'timers', 'caps', 'npmAudit'];
+const ROOT_KEYS = [
+  'outbound',
+  'userAgent',
+  'upstreamContact',
+  'timers',
+  'caps',
+  'publish',
+  'npmAudit',
+];
 const SECTION_KEYS = {
   outbound: ['allowPrivateHosts', 'extraSelfOrigins'],
   userAgent: ['default', 'composerStyle'],
   timers: ['metadataTtlSeconds', 'negativeTtlSeconds', 'waitBudgetMs'],
-  caps: ['metadataBytes', 'archiveBytes'],
+  caps: [
+    'metadataBytes',
+    'archiveBytes',
+    'publishBodyBytes',
+    'publishTarballBytes',
+    'publishMetadataBytes',
+  ],
+  publish: ['requireLicense'],
   npmAudit: ['enabled'],
 } as const;
 const MAX_STRING_LENGTH = 200;
@@ -312,16 +342,49 @@ export function validateRegistryConfig(input: unknown, target: Platform): readon
 
   const caps = section('caps');
   if (caps) {
-    const limits = { metadataBytes: MAX_METADATA_BYTES, archiveBytes: MAX_ARCHIVE_BYTES };
+    const limits = {
+      metadataBytes: MAX_METADATA_BYTES,
+      archiveBytes: MAX_ARCHIVE_BYTES,
+      publishBodyBytes: target === 'cloudflare' ? 100_000_000 : Number.MAX_SAFE_INTEGER,
+      publishTarballBytes: DEFAULT_MAX_BLOB_BYTES,
+      publishMetadataBytes: Number.MAX_SAFE_INTEGER,
+    };
     for (const key of SECTION_KEYS.caps) {
       const value = own(caps, key);
       if (value === undefined) continue;
       if (!positiveInteger(value)) {
         problems.push(`registry.caps.${key}: must be a positive integer`);
       } else if (value > limits[key]) {
-        problems.push(`registry.caps.${key}: exceeds the product cap`);
+        problems.push(
+          key === 'publishBodyBytes' && target === 'cloudflare'
+            ? 'registry.caps.publishBodyBytes: exceeds the cloudflare request limit'
+            : `registry.caps.${key}: exceeds the product cap`,
+        );
       }
     }
+
+    const body = own(caps, 'publishBodyBytes') ?? REGISTRY_DEFAULTS.caps.publishBodyBytes;
+    const tarball = own(caps, 'publishTarballBytes') ?? REGISTRY_DEFAULTS.caps.publishTarballBytes;
+    const metadata =
+      own(caps, 'publishMetadataBytes') ?? REGISTRY_DEFAULTS.caps.publishMetadataBytes;
+    if (positiveInteger(body)) {
+      if (
+        positiveInteger(tarball) &&
+        tarball <= limits.publishTarballBytes &&
+        4 * Math.ceil(tarball / 3) > body
+      ) {
+        problems.push('registry.caps.publishTarballBytes: base64 size exceeds publishBodyBytes');
+      }
+      if (positiveInteger(metadata) && metadata > body) {
+        problems.push('registry.caps.publishMetadataBytes: exceeds publishBodyBytes');
+      }
+    }
+  }
+
+  const publish = section('publish');
+  const requireLicense = publish ? own(publish, 'requireLicense') : undefined;
+  if (requireLicense !== undefined && typeof requireLicense !== 'boolean') {
+    problems.push('registry.publish.requireLicense: must be a boolean');
   }
 
   const npmAudit = section('npmAudit');
@@ -387,6 +450,7 @@ export function resolveRegistryConfig(
   const ua = sub('userAgent');
   const t = sub('timers');
   const c = sub('caps');
+  const publish = sub('publish');
   const audit = sub('npmAudit');
   const num = (o: Obj, k: string, fallback: number): number =>
     (own(o, k) as number | undefined) ?? fallback;
@@ -411,6 +475,13 @@ export function resolveRegistryConfig(
         target === 'cloudflare' ? 8 * 1024 * 1024 : d.caps.metadataBytes,
       ),
       archiveBytes: num(c, 'archiveBytes', d.caps.archiveBytes),
+      publishBodyBytes: num(c, 'publishBodyBytes', d.caps.publishBodyBytes),
+      publishTarballBytes: num(c, 'publishTarballBytes', d.caps.publishTarballBytes),
+      publishMetadataBytes: num(c, 'publishMetadataBytes', d.caps.publishMetadataBytes),
+    },
+    publish: {
+      requireLicense:
+        (own(publish, 'requireLicense') as boolean | undefined) ?? d.publish.requireLicense,
     },
     npmAudit: {
       enabled: (own(audit, 'enabled') as boolean | undefined) ?? d.npmAudit.enabled,

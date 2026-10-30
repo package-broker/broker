@@ -21,6 +21,12 @@ async function readHistory(context: CaseContext, target: 'own' | 'foreign') {
       SELECT '01JZZZZZZZZZZZZZZZZZZZZZZX', org_id, 'chain_reset', chain_id, 0, 1, 1, 0, 'tamper_detected', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id = ?`,
       params: [own.orgId],
     },
+    {
+      sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+      SELECT '01JZZZZZZZZZZZZZZZZZZZZZZY', f.org_id, 'chain_reset', o.chain_id, 0, 1, 1, 0, 'tamper_detected', f.policy, f.mode_generation, 'system', '2026-10-31T00:00:00.000Z'
+      FROM audit_chain f, audit_chain o WHERE f.org_id = ? AND o.org_id = ?`,
+      params: [foreign.orgId, own.orgId],
+    },
   ]);
   await context.executor.batch([
     {
@@ -70,11 +76,22 @@ const save: ContractCase = {
       SELECT '01JZZZZZZZZZZZZZZZZZZZZZZX', org_id, 'chain_reset', chain_id, 0, 1, 1, 0, 'tamper_detected', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id = ?`,
         params: [foreign.orgId],
       },
+      {
+        sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+      SELECT '01JZZZZZZZZZZZZZZZZZZZZZZW', o.org_id, 'chain_reset', f.chain_id, 0, 1, 1, 0, 'tamper_detected', o.policy, o.mode_generation, 'system', '2026-10-29T00:00:00.000Z'
+      FROM audit_chain o, audit_chain f WHERE o.org_id = ? AND f.org_id = ?`,
+        params: [own.orgId, foreign.orgId],
+      },
     ]);
     await context.executor.batch([
       {
-        sql: 'UPDATE audit_chain SET chain_id = ? WHERE org_id IN (?, ?)',
+        sql: 'UPDATE audit_chain SET chain_id = ?, head_seq = 10 WHERE org_id IN (?, ?)',
         params: ['c'.repeat(32), own.orgId, foreign.orgId],
+      },
+      {
+        sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+        SELECT 'foreign-gap', org_id, 'gap', chain_id, epoch, 5, 5, 1, 'seq_gap', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id = ?`,
+        params: [foreign.orgId],
       },
       {
         sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
@@ -177,11 +194,62 @@ const hashes: ContractCase = {
     ).toBe(true);
   },
 };
+const carry: ContractCase = {
+  name: 'fork carry copies only the organization gaps into the new epoch',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    await seedAuditFork(context.executor, own);
+    await seedAuditFork(context.executor, foreign);
+    await context.executor.batch([
+      {
+        sql: 'UPDATE audit_chain SET chain_id = ?, head_seq = 10 WHERE org_id IN (?, ?)',
+        params: ['c'.repeat(32), own.orgId, foreign.orgId],
+      },
+      {
+        sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+        SELECT '01JZZZZZZZZZZZZZZZZZZZZZZV', org_id, 'gap', chain_id, epoch, 5, 5, 1, 'seq_gap', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id IN (?, ?)`,
+        params: [own.orgId, foreign.orgId],
+      },
+    ]);
+    const ledger = (orgId: string) =>
+      context.executor.all({
+        sql: 'SELECT * FROM audit_ledger WHERE org_id = ? ORDER BY id',
+        params: [orgId],
+      });
+    const foreignBefore = await ledger(foreign.orgId);
+    const expected = await createAuditForkRepository(context.executor).read(own);
+    expect(
+      await createAuditForkRepository(mutated(context)).save(
+        own,
+        expected,
+        [],
+        {
+          epoch: 1,
+          restorePending: true,
+          boundaryReason: 'epoch_bump',
+          sinks: expected.sinks,
+          ledger: [],
+          carriedGaps: [
+            { sourceId: '01JZZZZZZZZZZZZZZZZZZZZZZV', id: '01JZZZZZZZZZZZZZZZZZZZZZZT' },
+          ],
+          event: null,
+          now: '2026-10-30T00:00:00.000Z',
+        },
+        2,
+      ),
+    ).toBe(true);
+    expect(await ledger(own.orgId)).toEqual([
+      expect.objectContaining({ id: '01JZZZZZZZZZZZZZZZZZZZZZZT', epoch: 1, from_seq: 5 }),
+      expect.objectContaining({ id: '01JZZZZZZZZZZZZZZZZZZZZZZV', epoch: 0, from_seq: 5 }),
+    ]);
+    expect(await ledger(foreign.orgId)).toEqual(foreignBefore);
+  },
+};
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditForkRepository',
     file: 'repositories/audit-fork.ts',
-    cases: [read, historyRead, save, guard, hashes],
+    cases: [read, historyRead, save, guard, hashes, carry],
     predicates: [
       {
         name: 'history read organization',
@@ -212,11 +280,25 @@ export const entries: readonly MutationEntry[] = [
         caseName: save.name,
       },
       {
-        name: 'frozen bytes organization',
-        locate: /s\.org_id = \?(?= AND NOT)/,
-        neutral: '(? IS NOT NULL)',
+        name: 'chain reset read organization',
+        locate: /reset\.org_id = c\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+      },
+      {
+        name: 'chain reset CAS organization',
+        locate: /reset\.org_id = c\.org_id/,
+        neutral: '1',
         copies: 1,
         caseName: save.name,
+      },
+      {
+        name: 'carried gap organization',
+        locate: /g\.org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        copies: 1,
+        caseName: carry.name,
       },
       {
         name: 'history CAS organization',

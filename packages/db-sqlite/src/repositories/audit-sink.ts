@@ -100,7 +100,9 @@ export function createAuditSinkRepository(executor: SqlExecutor): AuditSinkRegis
             ON CONFLICT (org_id, sink_id) DO UPDATE SET ${columns
               .filter(({ column }) => column !== 'sink_id')
               .map(({ column }) => `${column} = excluded.${column}`)
-              .join(', ')}, updated_at = excluded.updated_at`,
+              .join(
+                ', ',
+              )}, body_version = audit_sink.body_version + 1, updated_at = excluded.updated_at`,
           params: [ctx.orgId, ...values(sink), change.now],
         });
       }

@@ -46,6 +46,7 @@ const sink = {
   retry_count_for_seq: 'retryCountForSeq',
   next_attempt_at: 'nextAttemptAt',
   last_error_code: 'lastErrorCode',
+  body_version: 'bodyVersion',
 } as const;
 const projection = (fields: Readonly<Record<string, string>>) =>
   Object.entries(fields)
@@ -54,9 +55,13 @@ const projection = (fields: Readonly<Record<string, string>>) =>
 
 const HISTORY_LIMIT = 1024;
 const relevantHistory = `audit_ledger.superseded_by IS NULL AND (
-  (audit_ledger.kind = 'gap' AND audit_ledger.reason_code = 'seq_gap' AND audit_ledger.chain_id = c.chain_id AND audit_ledger.epoch = c.epoch
+  (audit_ledger.kind = 'gap' AND audit_ledger.reason_code = 'seq_gap' AND audit_ledger.sink_id IS NULL
+    AND audit_ledger.chain_id = c.chain_id AND audit_ledger.epoch = c.epoch
     AND audit_ledger.to_seq >= c.boundary_seq - 1 AND audit_ledger.from_seq <= c.head_seq)
-  OR audit_ledger.kind = 'chain_reset'
+  OR audit_ledger.id = (SELECT reset.id FROM audit_ledger reset WHERE reset.org_id = c.org_id
+    AND reset.kind = 'chain_reset' AND reset.chain_id = audit_ledger.chain_id
+    AND reset.chain_id <> c.chain_id AND reset.superseded_by IS NULL
+    ORDER BY reset.created_at DESC, reset.id DESC LIMIT 1)
   OR audit_ledger.id = (SELECT latest.id FROM audit_ledger latest WHERE latest.org_id = c.org_id
     AND latest.chain_id = c.chain_id AND latest.epoch = c.epoch
     AND latest.kind = 'restore_confirmed' AND latest.superseded_by IS NULL
@@ -76,7 +81,7 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
           params: [org.orgId],
         },
         {
-          sql: `SELECT kind, chain_id AS chainId, epoch, from_seq AS fromSeq, to_seq AS toSeq, reason_code AS reasonCode
+          sql: `SELECT id, kind, chain_id AS chainId, epoch, from_seq AS fromSeq, to_seq AS toSeq, reason_code AS reasonCode
           FROM audit_ledger WHERE org_id = ? AND superseded_by IS NULL
           AND EXISTS (SELECT 1 FROM audit_chain c WHERE c.org_id = audit_ledger.org_id AND ${relevantHistory})
           ${historyOrder}`,
@@ -91,7 +96,7 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
         ...row,
         history: history as unknown as NonNullable<AuditForkSnapshot['history']>,
         restorePending: Boolean(row.restorePending),
-        sinks: (sinkResult!.rows as unknown as AuditExportState[]).map((value) => ({
+        sinks: (sinkResult!.rows as unknown as AuditForkSnapshot['sinks']).map((value) => ({
           ...value,
           durableAck: Boolean(value.durableAck),
         })),
@@ -117,68 +122,38 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
         (row) =>
           JSON.stringify(row) !== JSON.stringify(expected.sinks.find((old) => old.id === row.id)),
       );
+      const bytes = (value: string | null) =>
+        value === null ? null : new TextEncoder().encode(value).length;
       const compact = (row: AuditExportState) => ({
         ...row,
         inflightBody: undefined,
         inflightRepr: undefined,
+        inflightBodyBytes: bytes(row.inflightBody),
+        inflightReprBytes: bytes(row.inflightRepr),
       });
       const chainSnapshot = { ...expected, sinks: undefined, history: undefined };
       const snapshot = JSON.stringify(chainSnapshot);
-      // Compare frozen UTF-8 bytes atomically without binding an entire body.
-      const chunks: {
-        id: string;
-        column: string;
-        offset: number;
-        body: string | null;
-        length: number | null;
-      }[] = [];
-      for (const row of expected.sinks) {
-        for (const [column, body] of [
-          ['inflight_body', row.inflightBody],
-          ['inflight_repr', row.inflightRepr],
-        ] as const) {
-          const bytes = body === null ? null : new TextEncoder().encode(body);
-          for (let offset = 0; offset < Math.max(1, bytes?.length ?? 0); offset += 32000)
-            chunks.push({
-              id: row.id,
-              column,
-              offset: offset + 1,
-              body:
-                bytes === null
-                  ? null
-                  : Array.from(bytes.slice(offset, offset + 32000), (byte) =>
-                      byte.toString(16).padStart(2, '0'),
-                    )
-                      .join('')
-                      .toUpperCase(),
-              length: bytes?.length ?? null,
-            });
-        }
-      }
-      const groups: string[] = [];
-      let group: typeof chunks = [];
-      for (const chunk of chunks) {
-        if (JSON.stringify([...group, chunk]).length > 256000 && group.length > 0) {
-          groups.push(JSON.stringify(group));
-          group = [];
-        }
-        group.push(chunk);
-      }
-      if (group.length > 0) groups.push(JSON.stringify(group));
-      const frozenGuards = groups.map(
-        (value) => sql`NOT EXISTS (SELECT 1 FROM json_each(${value}) frozen
-        WHERE json_extract(frozen.value, '$.id') = s.sink_id AND (
-          CASE json_extract(frozen.value, '$.column') WHEN 'inflight_body' THEN length(CAST(s.inflight_body AS BLOB)) ELSE length(CAST(s.inflight_repr AS BLOB)) END IS NOT json_extract(frozen.value, '$.length')
-          OR CASE WHEN json_extract(frozen.value, '$.length') IS NULL THEN NULL ELSE hex(substr(CAST(CASE json_extract(frozen.value, '$.column') WHEN 'inflight_body' THEN s.inflight_body ELSE s.inflight_repr END AS BLOB),
-            json_extract(frozen.value, '$.offset'), 32000)) END IS NOT json_extract(frozen.value, '$.body')))`,
+      const carried = change.carriedGaps ?? [];
+      const carriedHistory = (Array.isArray(expected.history) ? expected.history : []).filter(
+        (row) =>
+          row.kind === 'gap' &&
+          row.reasonCode === 'seq_gap' &&
+          row.chainId === expected.chainId &&
+          row.epoch === expected.epoch,
       );
+      if (
+        (carried.length > 0 && change.epoch === expected.epoch) ||
+        new Set(carried.map((row) => row.sourceId)).size !== carried.length ||
+        carried.some((row) => !carriedHistory.some((gap) => gap.id === row.sourceId))
+      )
+        throw new TypeError('Invalid audit fork carried gaps');
       const statements: Statement[] = [
         ...assertCheck(sql`EXISTS (SELECT 1 FROM audit_chain c, json_each(${`[${snapshot}]`}) e
           WHERE c.org_id = ${org.orgId} AND ${sql.raw(
             Object.entries(chain)
               .map(([column, key]) => `c.${column} IS json_extract(e.value, '$.${key}')`)
               .join(' AND '),
-          )} AND (SELECT json_group_array(json_object('kind', kind, 'chainId', chain_id, 'epoch', epoch, 'fromSeq', from_seq, 'toSeq', to_seq, 'reasonCode', reason_code))
+          )} AND (SELECT json_group_array(json_object('id', id, 'kind', kind, 'chainId', chain_id, 'epoch', epoch, 'fromSeq', from_seq, 'toSeq', to_seq, 'reasonCode', reason_code))
             FROM (SELECT * FROM audit_ledger WHERE org_id = c.org_id AND superseded_by IS NULL
               AND ${sql.raw(relevantHistory)} ${sql.raw(historyOrder)})) IS ${JSON.stringify(expected.history ?? [])})`),
         ...assertCheck(sql`((SELECT count(*) FROM audit_sink WHERE org_id = ${org.orgId}) = ${expected.sinks.length}
@@ -189,17 +164,12 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
                   .filter(([column]) => !['inflight_body', 'inflight_repr'].includes(column))
                   .map(([column, key]) => `s.${column} IS json_extract(e.value, '$.${key}')`)
                   .join(' AND '),
-              )}))))`),
+              )} AND length(CAST(s.inflight_body AS BLOB)) IS json_extract(e.value, '$.inflightBodyBytes')
+                AND length(CAST(s.inflight_repr AS BLOB)) IS json_extract(e.value, '$.inflightReprBytes')))))`),
         ...assertCheck(sql`NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(observed)}) e
           WHERE (SELECT hash FROM audit_event WHERE org_id = ${org.orgId}
             AND seq = json_extract(e.value, '$.seq')) IS NOT json_extract(e.value, '$.hash'))`),
       ];
-      for (let offset = 0; offset < frozenGuards.length; offset += 88) {
-        statements.push(
-          ...assertCheck(sql`NOT EXISTS (SELECT 1 FROM audit_sink s
-          WHERE s.org_id = ${org.orgId} AND NOT (${sql.join(frozenGuards.slice(offset, offset + 88), sql` AND `)}))`),
-        );
-      }
       const chainUpdateIndex = statements.length;
       statements.push(
         {
@@ -209,13 +179,13 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
         {
           sql: `WITH next AS MATERIALIZED (SELECT value FROM json_each(?))
             UPDATE audit_sink SET ${Object.entries(sink)
-              .filter(([column]) => column !== 'sink_id')
+              .filter(([column]) => column !== 'sink_id' && column !== 'body_version')
               .map(
                 ([column, key]) =>
                   `${column} = CASE WHEN (SELECT json_type(value, '$.${key}') FROM next WHERE json_extract(value, '$.id') = audit_sink.sink_id) IS NULL THEN ${column} ELSE (SELECT json_extract(value, '$.${key}') FROM next WHERE json_extract(value, '$.id') = audit_sink.sink_id) END`,
               )
               .join(', ')},
-              updated_at = ? WHERE org_id = ? AND sink_id IN (
+              body_version = body_version + 1, updated_at = ? WHERE org_id = ? AND sink_id IN (
                 SELECT json_extract(value, '$.id') FROM next) RETURNING sink_id`,
           params: [
             JSON.stringify(
@@ -234,6 +204,28 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
             org.orgId,
           ],
         },
+        ...(carried.length === 0
+          ? []
+          : [
+              {
+                sql: `INSERT INTO audit_ledger (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count,
+                  sink_id, reason_code, policy, mode_generation, actor_type, actor_id, created_at)
+                SELECT g.org_id, json_extract(m.value, '$.id'), 'gap', g.chain_id, ?, g.from_seq, g.to_seq,
+                  g.count, NULL, 'seq_gap', g.policy, g.mode_generation, 'system', NULL, ?
+                FROM json_each(?) m JOIN audit_ledger g ON g.org_id = ?
+                  AND g.id = json_extract(m.value, '$.sourceId')
+                WHERE g.kind = 'gap' AND g.reason_code = 'seq_gap' AND g.sink_id IS NULL
+                  AND g.superseded_by IS NULL AND g.chain_id = ? AND g.epoch = ?`,
+                params: [
+                  change.epoch,
+                  change.now,
+                  JSON.stringify(carried),
+                  org.orgId,
+                  expected.chainId,
+                  expected.epoch,
+                ],
+              },
+            ]),
         ...clearAuditVerificationStatements(org),
         ...createAuditLedgerRepository(executor).statements(org, change.ledger),
         ...(change.event === null ? [] : [auditPendingStatement(org, change.event)]),

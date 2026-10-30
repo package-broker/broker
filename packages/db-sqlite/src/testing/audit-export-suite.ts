@@ -539,6 +539,45 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
       await expect(port().hold(org(), fence(), expected, next({}), 1)).resolves.toBe(true);
       await expect(port().hold(org(), fence(), expected, next({}), 1)).resolves.toBe(false);
     });
+    const bodyVersion = async () =>
+      (
+        await database.executor.all<{ body_version: number }>({
+          sql: "SELECT body_version FROM audit_sink WHERE org_id = ? AND sink_id = 'archive'",
+          params: [org().orgId],
+        })
+      )[0]!.body_version;
+    it('increments body_version in every export save', async () => {
+      await journal();
+      expect(await bodyVersion()).toBe(0);
+      const before = await port().read(org(), 'archive');
+      expect(await port().save(org(), fence(), before, sending(before.sink), 1)).toBe(true);
+      expect(await bodyVersion()).toBe(1);
+      const frozen = await port().read(org(), 'archive');
+      expect(await port().save(org(), fence(), frozen, { ...frozen.sink, attempt: 2 }, 1)).toBe(
+        true,
+      );
+      expect(await bodyVersion()).toBe(2);
+    });
+    it('increments body_version in the export hold', async () => {
+      await journal();
+      await runWith(async () => ({ outcome: 'retry', code: 'network' }));
+      const version = await bodyVersion();
+      const expected = await port().read(org(), 'archive');
+      const repr = JSON.parse(expected.sink.inflightRepr!) as Record<string, unknown>;
+      expect(
+        await port().hold(
+          org(),
+          fence(),
+          expected,
+          {
+            ...expected.sink,
+            inflightRepr: JSON.stringify({ ...repr, uncertainOutcome: { rejectedCount: 1 } }),
+          },
+          1,
+        ),
+      ).toBe(true);
+      expect(await bodyVersion()).toBe(version + 1);
+    });
     it('accepts a capacity disposition only for the frozen marker inside a recorded gap', async () => {
       const capacityRepr = '{"custodyFromSeq":1,"purpose":"capacity"}';
       await seed(

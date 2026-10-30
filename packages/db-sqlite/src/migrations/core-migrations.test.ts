@@ -328,6 +328,7 @@ describe('core migrations', () => {
           AND name NOT IN ('package_ecosystem_matches_source_insert',
             'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages',
             'audit_ledger_append_only_update', 'audit_ledger_append_only_delete', 'audit_ledger_insert_visible', 'audit_ledger_capacity_insert',
+            'audit_sink_body_version_monotonic', 'audit_sink_body_version_bump',
             'organization_audit_chain')`),
       ).toEqual([]);
     });

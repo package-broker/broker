@@ -708,6 +708,7 @@ export interface AuditSinkTable {
   next_attempt_at: string | null;
   attempt: Generated<number>;
   retry_count_for_seq: Generated<number>;
+  body_version: Generated<number>;
   blocked_reason: string | null;
   last_error_code: string | null;
   created_at: Generated<string>;

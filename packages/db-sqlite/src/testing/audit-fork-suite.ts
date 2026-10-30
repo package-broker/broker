@@ -243,6 +243,10 @@ export async function auditForkRepositorySuite(
       ['policy moved', "UPDATE audit_chain SET policy = 'availability' WHERE org_id = ?"],
       ['retry moved', 'UPDATE audit_sink SET attempt = attempt + 1 WHERE org_id = ?'],
       ['frozen bytes moved', "UPDATE audit_sink SET inflight_repr = '{}' WHERE org_id = ?"],
+      [
+        'body version bumped by a writer that keeps the bytes',
+        'UPDATE audit_sink SET body_version = body_version + 1 WHERE org_id = ?',
+      ],
       ['membership moved', 'DELETE FROM audit_sink WHERE org_id = ?'],
     ])('refuses concurrent changes: %s', async (_name, sql) => {
       const guarded = createAuditForkRepository(
@@ -528,9 +532,16 @@ export async function auditForkRepositorySuite(
       expect((await port.read(org)).sinks).toHaveLength(12);
       const bounded = createAuditForkRepository(
         wrap(database.executor, async (statements) => {
+          expect(statements.some((statement) => statement.sql.includes('hex('))).toBe(false);
           expect(
-            statements.filter((statement) => statement.sql.includes('hex(substr(')).length,
-          ).toBeGreaterThanOrEqual(2);
+            statements
+              .flatMap((statement) => statement.params)
+              .reduce<number>(
+                (total, value) =>
+                  total + (typeof value === 'string' ? new TextEncoder().encode(value).length : 0),
+                0,
+              ),
+          ).toBeLessThan(64 * 1024);
           expect(statements.length).toBeLessThanOrEqual(200);
           expect(
             Math.max(...statements.map((statement) => statement.params.length)),
@@ -652,6 +663,8 @@ export async function auditForkRepositorySuite(
         ['confirm-b', 'restore_confirmed', 0, 2, 2, false],
         ['confirm-old', 'restore_confirmed', 1, 1, 1, false],
         ['reset', 'chain_reset', 1, 1, 1, true],
+        ['reset-older', 'chain_reset', 0, 1, 1, true],
+        ['reset-current', 'chain_reset', 0, 1, 1, false],
       ] as const) {
         await database.executor.batch([
           {
@@ -679,9 +692,13 @@ export async function auditForkRepositorySuite(
     it('refuses capped history with a named error and a core alert', async () => {
       await database.executor.batch([
         {
+          sql: 'UPDATE audit_chain SET head_seq = 2048 WHERE org_id = ?',
+          params: [org.orgId],
+        },
+        {
           sql: `WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 1024)
         INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
-        SELECT 'reset-' || n, org_id, 'chain_reset', chain_id, epoch, 1, 1, 0, 'tamper_detected', policy, mode_generation, 'system', ? FROM audit_chain, ids WHERE org_id = ?`,
+        SELECT 'gap-' || n, org_id, 'gap', chain_id, epoch, 2 * n, 2 * n, 1, 'seq_gap', policy, mode_generation, 'system', ? FROM audit_chain, ids WHERE org_id = ?`,
           params: [now.toISOString(), org.orgId],
         },
       ]);
@@ -691,6 +708,161 @@ export async function auditForkRepositorySuite(
       ).rejects.toMatchObject({ name: 'AuditForkLimitError', reason: 'history_limit' });
       expect(alerts).toEqual(['history_limit']);
       expect((await rows('audit_chain'))[0]!.restore_pending).toBe(0);
+    });
+    async function bodyVersions() {
+      return (
+        await database.executor.all<{ sink_id: string; body_version: number }>({
+          sql: 'SELECT sink_id, body_version FROM audit_sink WHERE org_id = ? ORDER BY sink_id',
+          params: [org.orgId],
+        })
+      ).map((row) => row.body_version);
+    }
+    async function seqGap(id: string, from: number, to: number, sinkId: string | null = null) {
+      await database.executor.batch([
+        {
+          sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, sink_id, reason_code, policy, mode_generation, actor_type, created_at)
+          SELECT ?, org_id, 'gap', chain_id, epoch, ?, ?, ? - ? + 1, ?, 'seq_gap', policy, mode_generation, 'system', ? FROM audit_chain WHERE org_id = ?`,
+          params: [id, from, to, to, from, sinkId, now.toISOString(), org.orgId],
+        },
+      ]);
+    }
+    it('ignores sink-scoped seq gaps in the history', async () => {
+      await database.executor.batch([
+        {
+          sql: 'UPDATE audit_chain SET head_seq = 5, boundary_seq = 1 WHERE org_id = ?',
+          params: [org.orgId],
+        },
+      ]);
+      await seqGap('01JZZZZZZZZZZZZZZZZZZZZZZA', 2, 2, 'archive');
+      await seqGap('01JZZZZZZZZZZZZZZZZZZZZZZB', 4, 4);
+      expect((await port.read(org)).history).toEqual([
+        expect.objectContaining({ id: '01JZZZZZZZZZZZZZZZZZZZZZZB', fromSeq: 4 }),
+      ]);
+    });
+    it('carries recorded seq gaps into the new epoch so a confirmed restore does not re-fork', async () => {
+      const events = [1, 2, 3, 4, 5].map((seq) => ({
+        seq,
+        hash: String(seq).repeat(64),
+        prev: seq === 1 ? zero : String(seq - 1).repeat(64),
+      }));
+      await database.executor.batch([
+        ...events
+          .filter(({ seq }) => seq !== 3)
+          .map(({ seq, hash, prev }) => ({
+            sql: `INSERT INTO audit_event (id, org_id, seq, prev_hash, hash, created_at, actor_type, action, target_type)
+            VALUES (?, ?, ?, ?, ?, '2026-10-30T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+            params: [`event-${seq}`, org.orgId, seq, prev, hash],
+          })),
+        {
+          sql: 'UPDATE audit_chain SET head_seq = 5, head_hash = ?, boundary_seq = 1 WHERE org_id = ?',
+          params: ['5'.repeat(64), org.orgId],
+        },
+        {
+          sql: 'UPDATE audit_sink SET progress_seq = 3, progress_hash = ?, custody_seq = 2 WHERE org_id = ?',
+          params: ['3'.repeat(64), org.orgId],
+        },
+      ]);
+      await seqGap('01JZZZZZZZZZZZZZZZZZZZZZZC', 3, 3);
+      const receiver = (seq: number, epoch: number) => ({
+        id: 'archive',
+        sink: {
+          deliver: async () => {
+            throw new Error('unused');
+          },
+          frontier: async () => ({
+            chainId: (await port.read(org)).chainId,
+            epoch,
+            seq,
+            hash: String(seq).repeat(64),
+          }),
+        },
+      });
+      expect(await detectAuditFork(port, org, { ...options(), probes: [receiver(3, 0)] })).toBe(
+        'clear',
+      );
+      await database.executor.batch([
+        { sql: 'UPDATE audit_sink SET progress_seq = 6 WHERE org_id = ?', params: [org.orgId] },
+      ]);
+      expect(await detectAuditFork(port, org, options())).toBe('blocked');
+      expect((await port.read(org)).epoch).toBe(1);
+      expect(
+        await database.executor.all({
+          sql: "SELECT epoch, from_seq AS fromSeq, to_seq AS toSeq, count, sink_id AS sinkId FROM audit_ledger WHERE org_id = ? AND kind = 'gap' ORDER BY epoch",
+          params: [org.orgId],
+        }),
+      ).toEqual([
+        { epoch: 0, fromSeq: 3, toSeq: 3, count: 1, sinkId: null },
+        { epoch: 1, fromSeq: 3, toSeq: 3, count: 1, sinkId: null },
+      ]);
+      expect(
+        await confirmAuditRestore(port, org, {
+          alert: () => {},
+          generation: 2,
+          now,
+          fromSeq: 5,
+          actor: { type: 'user', id: org.orgId },
+        }),
+      ).toBe('confirmed');
+      expect((await port.read(org)).sinks[0]).toMatchObject({ progressSeq: 4, state: 'active' });
+      const before = await contents();
+      expect(await detectAuditFork(port, org, { ...options(), probes: [receiver(3, 1)] })).toBe(
+        'clear',
+      );
+      expect(await contents()).toEqual(before);
+    });
+    it('increments body_version in the fork save for detection and confirmation', async () => {
+      expect(await bodyVersions()).toEqual([0]);
+      expect(await detectAuditFork(port, org, options())).toBe('blocked');
+      expect(await bodyVersions()).toEqual([1]);
+      expect((await port.read(org)).sinks[0]!.bodyVersion).toBe(1);
+      expect(
+        await confirmAuditRestore(port, org, {
+          alert: () => {},
+          generation: 2,
+          now,
+          fromSeq: 1,
+          actor: { type: 'user', id: org.orgId },
+        }),
+      ).toBe('confirmed');
+      expect(await bodyVersions()).toEqual([2]);
+    });
+    it('increments body_version in the registry upsert', async () => {
+      const registry = createAuditSinkRepository(database.executor);
+      const expected = await registry.read(org);
+      expect(
+        await registry.save(org, expected, {
+          generation: 2,
+          sinks: expected.sinks,
+          rebinds: [],
+          now: now.toISOString(),
+        }),
+      ).toBe(true);
+      expect(await bodyVersions()).toEqual([1]);
+    });
+    it('increments body_version for any other writer of the frozen columns and keeps it monotonic', async () => {
+      await database.executor.batch([
+        {
+          sql: `UPDATE audit_sink SET inflight_repr = '{"custodyFromSeq":1,"purpose":"idle"}' WHERE org_id = ?`,
+          params: [org.orgId],
+        },
+      ]);
+      expect(await bodyVersions()).toEqual([1]);
+      await database.executor.batch([
+        {
+          sql: `UPDATE audit_sink SET inflight_repr = inflight_repr, attempt = attempt WHERE org_id = ?`,
+          params: [org.orgId],
+        },
+      ]);
+      expect(await bodyVersions()).toEqual([1]);
+      await expect(
+        database.executor.batch([
+          {
+            sql: `UPDATE audit_sink SET body_version = 0, inflight_repr = '{"custodyFromSeq":1}' WHERE org_id = ?`,
+            params: [org.orgId],
+          },
+        ]),
+      ).rejects.toThrow(/monotonic/);
+      expect(await bodyVersions()).toEqual([1]);
     });
     it('isolates foreign generation, chain, sinks, ledger, pending and verification', async () => {
       const foreign = database.orgs!.b;

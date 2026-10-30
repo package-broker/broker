@@ -5,6 +5,7 @@ import type { AuditLedgerEntry } from './ledger.js';
 import type { AuditPositionV1, AuditSink } from './plugin-api.js';
 import type { AuditSinkSnapshot } from './sinks/registry.js';
 import type { AuditExportState } from './export.js';
+import { auditDurableCoverage } from './export-state.js';
 import { auditWireMarker } from './wire.js';
 
 export const AUDIT_FRONTIER_INTERVAL_MS = 86_400_000;
@@ -13,6 +14,7 @@ export interface AuditForkSnapshot extends Omit<AuditSinkSnapshot, 'sinks'> {
   readonly headSeq: number;
   readonly headHash: string;
   readonly history?: readonly {
+    id: string;
     kind: string;
     chainId: string;
     epoch: number;
@@ -20,9 +22,9 @@ export interface AuditForkSnapshot extends Omit<AuditSinkSnapshot, 'sinks'> {
     toSeq: number;
     reasonCode: string;
   }[];
-  readonly sinks: readonly (AuditExportState & {
-    readonly retryCountForSeq?: number;
-  })[];
+  /** Incremented by every writer of inflightBody or inflightRepr; the save CAS compares it
+   * instead of the frozen bytes. */
+  readonly sinks: readonly (AuditExportState & { readonly bodyVersion: number })[];
 }
 
 export type AuditForkReason =
@@ -55,6 +57,8 @@ export interface AuditForkChange {
   readonly boundaryReason: string | null;
   readonly sinks: readonly AuditExportState[];
   readonly ledger: readonly AuditLedgerEntry[];
+  /** Recorded seq_gap rows copied into the new epoch under fresh ids, with the epoch bump. */
+  readonly carriedGaps?: readonly { readonly sourceId: string; readonly id: string }[];
   readonly event: AuditEvent | null;
   readonly now: string;
 }
@@ -64,10 +68,11 @@ export interface AuditForkPort {
   /** Read only the named organization's retained journal; null means unavailable.
    * The boundary predecessor is supplied by the snapshot instead. */
   hashAt(org: OrgContext, seq: number): Promise<string | null>;
-  /** Atomically CAS every snapshot field and the complete sink set, including frozen
-   * bytes, against expected, and require generation >= every stored sink generation.
-   * Recheck all observed journal hashes in that batch. Apply change, clear verification,
-   * append ledger via the ledger repository, and stage event together or do nothing.
+  /** Atomically CAS every snapshot field and the complete sink set, including each sink's
+   * bodyVersion, against expected, and require generation >= every stored sink generation.
+   * Recheck all observed journal hashes in that batch. Apply change, increment bodyVersion
+   * of every rewritten sink, copy carriedGaps, clear verification, append ledger via the
+   * ledger repository, and stage event together or do nothing.
    * Preserve head, boundary position, incarnation, counters and mode generation.
    * Return false on contention. No delivery may start before this succeeds. */
   save(
@@ -223,23 +228,33 @@ async function detectOnce(
         (await mismatch(sink.progressSeq, sink.progressHash)))
     )
       reason = 'local_fork';
-    let repr: { registryMarkerBody?: string };
+    let repr: { registryMarkerBody?: string; rejectionTail?: unknown };
     try {
-      repr = JSON.parse(sink.inflightRepr ?? '{}') as { registryMarkerBody?: string };
-      if (repr === null || typeof repr !== 'object' || Array.isArray(repr)) throw new Error();
+      repr = JSON.parse(sink.inflightRepr ?? '{}') as typeof repr;
+      if (
+        repr === null ||
+        typeof repr !== 'object' ||
+        Array.isArray(repr) ||
+        (repr.rejectionTail !== undefined && !Array.isArray(repr.rejectionTail))
+      )
+        throw new Error();
     } catch {
       reason = 'local_fork';
       break;
     }
+    const frozen: unknown[] = [];
     for (const body of [sink.inflightBody, repr.registryMarkerBody]) {
       if (body == null) continue;
       try {
-        const batch = JSON.parse(body) as { chainId: string; epoch: number };
-        if (batch.chainId !== snapshot.chainId || batch.epoch !== snapshot.epoch)
-          reason = 'local_fork';
+        frozen.push(JSON.parse(body));
       } catch {
         reason = 'local_fork';
       }
+    }
+    for (const batch of [...frozen, ...((repr.rejectionTail as unknown[] | undefined) ?? [])]) {
+      const identity = batch as { chainId?: unknown; epoch?: unknown } | null;
+      if (identity?.chainId !== snapshot.chainId || identity.epoch !== snapshot.epoch)
+        reason = 'local_fork';
     }
   }
   let unavailable = false;
@@ -329,6 +344,17 @@ async function detectOnce(
           : sink,
       ),
       ledger: snapshot.restorePending ? [] : [ledger(snapshot, epoch, 'epoch_bump', reason, now)],
+      carriedGaps: snapshot.restorePending
+        ? []
+        : (snapshot.history ?? [])
+            .filter(
+              (row) =>
+                row.kind === 'gap' &&
+                row.reasonCode === 'seq_gap' &&
+                row.chainId === snapshot.chainId &&
+                row.epoch === snapshot.epoch,
+            )
+            .map((row) => ({ sourceId: row.id, id: ulid() })),
       event: snapshot.restorePending ? null : control(org, epoch, 'epoch_bump', now),
       now,
     },
@@ -365,6 +391,7 @@ export async function detectAuditFork(
     return 'contended';
   } catch (error) {
     if (error instanceof AuditForkLimitError) options.alert(error.reason);
+    if (observed !== null) options.alert(observed);
     throw error;
   } finally {
     clearTimeout(timer);
@@ -424,6 +451,18 @@ export async function confirmAuditRestore(
         delete repr.registryMarkerBody;
         delete repr.registryMarkerOriginalAttempt;
         delete repr.registryMarkerOriginalErrorCode;
+        delete repr.rejectionTail;
+        delete repr.uncertainOutcome;
+        const coverage = auditDurableCoverage(sink);
+        if (
+          coverage.durableCustodySeq > from - 1 ||
+          coverage.durableAckRanges.some((range) => range.to > from - 1)
+        ) {
+          repr.durableCustodySeq = Math.min(coverage.durableCustodySeq, from - 1);
+          repr.durableAckRanges = coverage.durableAckRanges
+            .filter((range) => range.from <= from - 1)
+            .map((range) => ({ from: range.from, to: Math.min(range.to, from - 1) }));
+        }
         return {
           ...sink,
           state: sink.state === 'blocked' && sink.blockedReason === 'fork' ? 'active' : sink.state,
@@ -471,6 +510,7 @@ export async function confirmAuditRestore(
             options.actor,
           ),
         ],
+        carriedGaps: [],
         event: control(org, snapshot.epoch, 'confirm_restore', now, from, options.actor),
         now,
       },

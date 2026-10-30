@@ -210,7 +210,7 @@ export function createAuditExportRepository(executor: SqlExecutor): AuditExportP
       });
       try {
         const rows = await executor.all<{ sink_id: string }>({
-          sql: `UPDATE audit_sink SET inflight_repr = ?,
+          sql: `UPDATE audit_sink SET inflight_repr = ?, body_version = body_version + 1,
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE org_id = ? AND ${columns.map(({ column }) => `${column} IS ?`).join(' AND ')}
             AND (${highest}) = ? AND ? >= ?
@@ -387,7 +387,7 @@ export function createAuditExportRepository(executor: SqlExecutor): AuditExportP
         const [result] = await executor.batch([
           {
             sql: `UPDATE audit_sink SET ${writable.map(({ column }) => `${column} = ?`).join(', ')},
-          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          body_version = body_version + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
           WHERE org_id = ? AND ${columns.map(({ column }) => `${column} IS ?`).join(' AND ')}
           AND (${highest}) = ? AND ? >= ?
           AND EXISTS (SELECT 1 FROM audit_chain c WHERE c.org_id = ?

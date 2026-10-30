@@ -149,6 +149,47 @@ it('bumps the epoch after a manual restore and never creates a missing SQLite fi
   }
 });
 
+it('carries recorded seq gaps of the retained window into the bumped epoch', async () => {
+  expect(await runRestoreSqlite({ file, snapshot })).toBe(0);
+  const opened = openBetterSqliteExecutor(file);
+  try {
+    await opened.executor.batch([
+      { sql: 'UPDATE audit_chain SET head_seq = 6 WHERE org_id = ?', params: [orgId] },
+      ...(
+        [
+          [3, 3, null],
+          [5, 5, 'webhook'],
+        ] as const
+      ).map(([from, to, sinkId]) => ({
+        sql: `INSERT INTO audit_ledger (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count,
+        sink_id, reason_code, policy, mode_generation, actor_type, created_at)
+        SELECT org_id, ?, 'gap', chain_id, epoch, ?, ?, 1, ?, 'seq_gap', policy, mode_generation, 'system', ?
+        FROM audit_chain WHERE org_id = ?`,
+        params: [ulid(), from, to, sinkId, now, orgId],
+      })),
+    ]);
+  } finally {
+    await opened.close();
+  }
+  expect(await run(['audit', 'epoch', 'bump', '--sqlite', file])).toBe(0);
+  const reopened = openBetterSqliteExecutor(file);
+  try {
+    expect(
+      await reopened.executor.all({
+        sql: `SELECT epoch, from_seq, to_seq, count, sink_id FROM audit_ledger
+        WHERE org_id = ? AND reason_code = 'seq_gap' ORDER BY epoch, from_seq`,
+        params: [orgId],
+      }),
+    ).toEqual([
+      { epoch: 4, from_seq: 3, to_seq: 3, count: 1, sink_id: null },
+      { epoch: 4, from_seq: 5, to_seq: 5, count: 1, sink_id: 'webhook' },
+      { epoch: 5, from_seq: 3, to_seq: 3, count: 1, sink_id: null },
+    ]);
+  } finally {
+    await reopened.close();
+  }
+});
+
 it.each(['', '-wal', '-shm', '-journal'])(
   'refuses an existing target%s without altering it',
   async (suffix) => {

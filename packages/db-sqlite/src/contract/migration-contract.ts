@@ -785,6 +785,15 @@ export function describeMigrationContract(
             /CHECK|FOREIGN KEY/i,
           );
         }
+        expect(
+          String(
+            (
+              (await rejection(
+                run(executor, 'UPDATE audit_sink SET body_version = -1 WHERE org_id = ?', [ORG]),
+              )) as Error
+            ).message,
+          ),
+        ).toMatch(/CHECK|monotonic/i);
         const ledgerRow = (overrides: Record<string, ScalarSqlValue>) => {
           const values: Record<string, ScalarSqlValue> = {
             org_id: ORG,

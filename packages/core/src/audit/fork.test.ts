@@ -22,7 +22,10 @@ const now = new Date('2026-10-30T12:00:00.000Z');
 const hash = 'a'.repeat(64);
 const other = 'b'.repeat(64);
 const chainId = 'c'.repeat(32);
-function sink(overrides: Partial<AuditExportState> = {}): AuditExportState {
+const gapId = '01JZZZZZZZZZZZZZZZZZZZZZZG';
+function sink(
+  overrides: Partial<AuditExportState & { bodyVersion: number }> = {},
+): AuditExportState & { bodyVersion: number } {
   return {
     id: 'archive',
     pluginId: 'audit',
@@ -42,6 +45,7 @@ function sink(overrides: Partial<AuditExportState> = {}): AuditExportState {
     inflightTo: null,
     attempt: 0,
     retryCountForSeq: 0,
+    bodyVersion: 0,
     nextAttemptAt: null,
     lastErrorCode: null,
     ...overrides,
@@ -666,10 +670,140 @@ describe('restore replay invariants', () => {
     expect(f.alert).toHaveBeenCalledWith('local_fork');
   });
 
+  it.each([1, 2])('checks rejection tail frozen epochs: epoch=%s', async (epoch) => {
+    const f = fixture(
+      snapshot({
+        sinks: [
+          sink({
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              rejectionTail: [
+                { chainId, epoch: 2 },
+                { chainId, epoch },
+              ],
+            }),
+          }),
+        ],
+      }),
+    );
+    expect(await detectAuditFork(f.port, org, f.options)).toBe(epoch === 2 ? 'clear' : 'blocked');
+  });
+
+  it('carries current-epoch seq gaps with the epoch bump only', async () => {
+    const f = fixture(
+      snapshot({
+        sinks: [sink({ progressSeq: 6 })],
+        history: [
+          {
+            id: gapId,
+            kind: 'gap',
+            chainId,
+            epoch: 2,
+            fromSeq: 3,
+            toSeq: 3,
+            reasonCode: 'seq_gap',
+          },
+          {
+            id: '01JZZZZZZZZZZZZZZZZZZZZZZH',
+            kind: 'gap',
+            chainId,
+            epoch: 1,
+            fromSeq: 4,
+            toSeq: 4,
+            reasonCode: 'seq_gap',
+          },
+        ],
+      }),
+    );
+    expect(await detectAuditFork(f.port, org, f.options)).toBe('blocked');
+    expect(f.change()).toMatchObject({
+      epoch: 3,
+      carriedGaps: [{ sourceId: gapId, id: expect.stringMatching(/^[0-9A-Z]{26}$/) }],
+    });
+    const pending = fixture(
+      snapshot({
+        restorePending: true,
+        history: [
+          {
+            id: gapId,
+            kind: 'gap',
+            chainId,
+            epoch: 2,
+            fromSeq: 3,
+            toSeq: 3,
+            reasonCode: 'seq_gap',
+          },
+        ],
+      }),
+    );
+    expect(await detectAuditFork(pending.port, org, pending.options)).toBe('blocked');
+    expect(pending.change().carriedGaps).toEqual([]);
+  });
+
+  it('alerts the observed fork when the save is refused with an error', async () => {
+    const f = fixture(snapshot({ sinks: [sink({ progressSeq: 6 })] }));
+    f.save.mockRejectedValue(new Error('refused'));
+    await expect(detectAuditFork(f.port, org, f.options)).rejects.toThrow('refused');
+    expect(f.alert.mock.calls).toEqual([['local_fork']]);
+  });
+
+  it('drops held outcomes and rejection tails and clamps durable coverage on confirmation', async () => {
+    const f = fixture(
+      snapshot({
+        restorePending: true,
+        sinks: [
+          sink({
+            progressSeq: 5,
+            custodySeq: 5,
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              purpose: 'events',
+              uncertainOutcome: { rejectedCount: 1 },
+              rejectionTail: [{ chainId, epoch: 1 }],
+              durableCustodySeq: 5,
+              durableAckRanges: [
+                { from: 1, to: 2 },
+                { from: 4, to: 5 },
+              ],
+            }),
+          }),
+        ],
+      }),
+    );
+    expect(
+      await confirmAuditRestore(f.port, org, {
+        alert: () => {},
+        generation: 3,
+        now,
+        fromSeq: 4,
+        actor: { type: 'user', id: org.orgId },
+      }),
+    ).toBe('confirmed');
+    const repr = JSON.parse(f.change().sinks[0]!.inflightRepr!);
+    expect(repr).not.toHaveProperty('uncertainOutcome');
+    expect(repr).not.toHaveProperty('rejectionTail');
+    expect(repr).toMatchObject({
+      custodyFromSeq: 1,
+      purpose: 'idle',
+      durableCustodySeq: 3,
+      durableAckRanges: [{ from: 1, to: 2 }],
+    });
+  });
+
   it('accepts recorded seq gaps at both local and receiver positions', async () => {
     const f = fixture(
       snapshot({
-        history: [{ kind: 'gap', chainId, epoch: 2, fromSeq: 5, toSeq: 5, reasonCode: 'seq_gap' }],
+        history: [
+          {
+            id: gapId,
+            kind: 'gap',
+            chainId,
+            epoch: 2,
+            fromSeq: 5,
+            toSeq: 5,
+            reasonCode: 'seq_gap',
+          },
+        ],
       }),
     );
     f.hashAt.mockResolvedValue(null);
@@ -701,7 +835,9 @@ describe('restore replay invariants', () => {
           actor: { type: 'user', id: org.orgId },
         }),
       ).rejects.toMatchObject({ name: 'AuditForkLimitError', reason });
-      expect(f.alert).toHaveBeenCalledTimes(2);
+      // A refused save still alerts the restore observed before it.
+      if (reason === 'batch_limit') expect(f.alert).toHaveBeenCalledWith('restore_detected');
+      expect(f.alert).toHaveBeenCalledTimes(reason === 'batch_limit' ? 3 : 2);
     },
   );
   it.each(['customer', 'system'] as const)(
@@ -725,7 +861,17 @@ describe('restore replay invariants', () => {
   it('does not exempt a gap from another epoch', async () => {
     const f = fixture(
       snapshot({
-        history: [{ kind: 'gap', chainId, epoch: 1, fromSeq: 5, toSeq: 5, reasonCode: 'seq_gap' }],
+        history: [
+          {
+            id: gapId,
+            kind: 'gap',
+            chainId,
+            epoch: 1,
+            fromSeq: 5,
+            toSeq: 5,
+            reasonCode: 'seq_gap',
+          },
+        ],
       }),
     );
     f.hashAt.mockResolvedValue(null);
@@ -738,7 +884,9 @@ describe('restore replay invariants', () => {
         snapshot({
           restorePending: true,
           sinks: [sink({ progressSeq: 3 })],
-          history: [{ kind: 'gap', chainId, epoch, fromSeq: 3, toSeq: 3, reasonCode: 'seq_gap' }],
+          history: [
+            { id: gapId, kind: 'gap', chainId, epoch, fromSeq: 3, toSeq: 3, reasonCode: 'seq_gap' },
+          ],
         }),
       );
       f.hashAt.mockImplementation(async (_org, seq) => (seq === 3 ? null : hash));
@@ -764,6 +912,7 @@ describe('restore replay invariants', () => {
       snapshot({
         history: [
           {
+            id: gapId,
             kind: 'chain_reset',
             chainId: oldChain,
             epoch: 1,

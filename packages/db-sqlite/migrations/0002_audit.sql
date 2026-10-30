@@ -46,6 +46,7 @@ CREATE TABLE audit_sink (
   next_attempt_at       TEXT,
   attempt               INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
   retry_count_for_seq   INTEGER NOT NULL DEFAULT 0 CHECK (retry_count_for_seq >= 0),
+  body_version          INTEGER NOT NULL DEFAULT 0 CHECK (body_version BETWEEN 0 AND 9007199254740991),
   blocked_reason        TEXT,
   last_error_code       TEXT,
   created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -55,6 +56,22 @@ CREATE TABLE audit_sink (
   CHECK ((inflight_from IS NULL) = (inflight_to IS NULL)),
   CHECK (inflight_body IS NULL OR inflight_from IS NOT NULL)
 ) STRICT;
+
+CREATE TRIGGER audit_sink_body_version_monotonic
+BEFORE UPDATE OF body_version ON audit_sink
+WHEN NEW.body_version < OLD.body_version
+BEGIN
+  SELECT RAISE(ABORT, 'audit sink body version is monotonic');
+END;
+
+CREATE TRIGGER audit_sink_body_version_bump
+AFTER UPDATE OF inflight_body, inflight_repr ON audit_sink
+WHEN NEW.body_version = OLD.body_version
+  AND (NEW.inflight_body IS NOT OLD.inflight_body OR NEW.inflight_repr IS NOT OLD.inflight_repr)
+BEGIN
+  UPDATE audit_sink SET body_version = OLD.body_version + 1
+  WHERE org_id = NEW.org_id AND sink_id = NEW.sink_id;
+END;
 
 CREATE TABLE audit_ledger (
   org_id           TEXT NOT NULL,

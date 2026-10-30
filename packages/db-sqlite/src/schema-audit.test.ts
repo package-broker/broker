@@ -55,6 +55,7 @@ const declared: { [T in AuditTable]: Nullability<T> } = {
     next_attempt_at: 0,
     attempt: 1,
     retry_count_for_seq: 1,
+    body_version: 1,
     blocked_reason: 0,
     last_error_code: 0,
     created_at: 1,

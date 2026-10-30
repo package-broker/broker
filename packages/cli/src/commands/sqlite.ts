@@ -172,6 +172,17 @@ async function restoreMarkStatements(
   });
   if (!chain) throw new RestoreError('chain_missing');
   const epoch = chain.epoch + 1;
+  const recordedGaps = `audit_ledger g JOIN audit_chain c ON c.org_id = g.org_id
+    WHERE g.org_id = ? AND g.kind = 'gap' AND g.reason_code = 'seq_gap' AND g.sink_id IS NULL
+      AND g.superseded_by IS NULL AND g.chain_id = c.chain_id AND g.epoch = c.epoch
+      AND g.to_seq >= c.boundary_seq - 1 AND g.from_seq <= c.head_seq`;
+  const carried = (
+    await executor.all<{ id: string }>({
+      sql: `SELECT g.id FROM ${recordedGaps} ORDER BY g.id`,
+      params: [orgId],
+    })
+  ).map(({ id }) => ({ sourceId: id, id: ulid() }));
+  const carriedJson = JSON.stringify(carried);
   const now = isoTimestamp(systemClock.now());
   const event = auditEvent({
     id: ulid(),
@@ -199,6 +210,24 @@ async function restoreMarkStatements(
           .where('mode_generation', '=', chain.modeGeneration),
       ),
     ),
+    {
+      sql: `INSERT INTO access_mutation_guard (key) SELECT ? FROM (SELECT 1 UNION ALL SELECT 2)
+        WHERE EXISTS (SELECT 1 FROM ${recordedGaps}
+          AND g.id NOT IN (SELECT json_extract(value, '$.sourceId') FROM json_each(?)))`,
+      params: [ulid(), orgId, carriedJson],
+    },
+    ...(carried.length === 0
+      ? []
+      : [
+          {
+            sql: `INSERT INTO audit_ledger (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count,
+              sink_id, reason_code, policy, mode_generation, actor_type, actor_id, created_at)
+            SELECT g.org_id, json_extract(m.value, '$.id'), 'gap', g.chain_id, g.epoch + 1, g.from_seq,
+              g.to_seq, g.count, NULL, 'seq_gap', g.policy, g.mode_generation, 'system', NULL, ?
+            FROM json_each(?) m JOIN ${recordedGaps} AND g.id = json_extract(m.value, '$.sourceId')`,
+            params: [now, carriedJson, orgId],
+          },
+        ]),
     {
       sql: `UPDATE audit_chain SET restore_pending = 1, incarnation = incarnation + 1,
         epoch = epoch + 1, verified_from_seq = NULL, verified_through_seq = NULL,

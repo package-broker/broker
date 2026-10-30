@@ -1370,3 +1370,81 @@ it('skips the eager build lookup for a non-VCS npm source', async () => {
   expect(existingVersions).not.toHaveBeenCalled();
   expect(target).not.toHaveBeenCalled();
 });
+
+it.each(['node', 'cloudflare'] as const)(
+  'probes claims before a proxy is stored on %s',
+  async (runtime) => {
+    const h = harness();
+    h.deps = {
+      ...h.deps,
+      runtime,
+      policyFetch: vi.fn(h.deps.policyFetch),
+      catalogue: { ...h.deps.catalogue, sources: { get: vi.fn().mockResolvedValue(null) } },
+    };
+    expect(
+      await h
+        .module()
+        .probePackage(
+          org,
+          { type: 'new_npmjs_proxy', userAgent: 'custom-agent' },
+          'widget',
+          new AbortController().signal,
+          'claim',
+        ),
+    ).toBe('found');
+    expect(h.policyFetch).toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'HEAD', url: 'https://registry.npmjs.org/widget' }),
+    );
+    expect(h.deps.catalogue.sources.get).not.toHaveBeenCalled();
+    expect(h.deps.policyFetch).toHaveBeenCalledWith('custom-agent', {});
+  },
+);
+
+it.each(['node', 'cloudflare'] as const)(
+  'applies the creation egress policy and user agent without a stored source on %s',
+  async (runtime) => {
+    for (const blocked of [false, true]) {
+      const h = harness();
+      const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 404 }));
+      h.deps = {
+        ...h.deps,
+        runtime,
+        outboundPolicy: {
+          runtime,
+          allowPrivateHosts: [],
+          selfOrigins: blocked ? ['https://registry.npmjs.org'] : [],
+        },
+        policyFetch: (userAgent) =>
+          createPolicyFetch({ policy: h.deps.outboundPolicy, userAgent, fetchImpl }),
+      };
+      expect(
+        await h
+          .module()
+          .probePackage(
+            org,
+            { type: 'new_npmjs_proxy', userAgent: 'creation-agent' },
+            'widget',
+            new AbortController().signal,
+            'claim',
+          ),
+      ).toBe(blocked ? 'unavailable' : 'not_found');
+      expect(fetchImpl).toHaveBeenCalledTimes(blocked ? 0 : 1);
+      if (!blocked)
+        expect(new Headers(fetchImpl.mock.calls[0]![1]?.headers).get('user-agent')).toBe(
+          'creation-agent',
+        );
+    }
+  },
+);
+
+it('refuses a missing stored proxy in claim mode', async () => {
+  const h = harness();
+  h.deps = {
+    ...h.deps,
+    catalogue: { ...h.deps.catalogue, sources: { get: vi.fn().mockResolvedValue(null) } },
+  };
+  expect(
+    await h.module().probePackage(org, 'missing', 'widget', new AbortController().signal, 'claim'),
+  ).toBe('unavailable');
+  expect(h.policyFetch).not.toHaveBeenCalled();
+});

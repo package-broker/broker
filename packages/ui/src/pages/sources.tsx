@@ -1,3 +1,4 @@
+import { MAX_NPM_NAME_LENGTH, MAX_PATTERN_BYTES } from '../package-limits.js';
 import { mirrorOutcome, sourceSyncResponse, SYNC_REQUESTED } from './sources/sync-copy.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { pollSync, syncPollResult } from './sources/sync-poll.js';
@@ -38,8 +39,6 @@ import {
   type SourceChanges,
   type VcsProvider,
 } from './sources/source-form.js';
-
-const MAX_NPM_NAME_LENGTH = 214;
 
 type ResponseBody<K extends keyof operations> = operations[K] extends {
   responses: { 200: { content: { 'application/json': infer T } } };
@@ -931,7 +930,9 @@ export function createSourcesModel(
     },
     addName(source: string, pattern: string) {
       const maxLength =
-        state.items.find((item) => item.id === source)?.ecosystem === 'npm' ? 214 : 50;
+        state.items.find((item) => item.id === source)?.ecosystem === 'npm'
+          ? MAX_NPM_NAME_LENGTH
+          : MAX_PATTERN_BYTES;
       if (
         pattern.length === 0 ||
         pattern.length > maxLength ||
@@ -964,8 +965,10 @@ export function createSourcesModel(
     async resolve(name: string) {
       const version = ++previewVersion;
       set({ preview: null, error: null });
-      if (project === null || name.length === 0 || name.length > 214) {
-        set({ error: 'Choose a project and enter a package name of 1 to 214 characters.' });
+      if (project === null || name.length === 0 || name.length > MAX_NPM_NAME_LENGTH) {
+        set({
+          error: `Choose a project and enter a package name of 1 to ${MAX_NPM_NAME_LENGTH} characters.`,
+        });
         return;
       }
       const result = await client.request('get', '/_pb/projects/{project}/resolve', {
@@ -1770,7 +1773,11 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   key={`${state.names.source}:${state.names.items.map((item) => item.pattern).join(',')}`}
                   id="registered-pattern"
                   name="pattern"
-                  maxLength={MAX_NPM_NAME_LENGTH}
+                  maxLength={
+                    state.items.find((item) => item.id === state.names?.source)?.ecosystem === 'npm'
+                      ? MAX_NPM_NAME_LENGTH
+                      : MAX_PATTERN_BYTES
+                  }
                   required
                   defaultValue={scopePatterns[0] ?? ''}
                 />

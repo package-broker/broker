@@ -1,3 +1,4 @@
+import { proxyClaimsVerified } from './proxy-claims.js';
 import { sql, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
 import type { VisibilityStore, VisibilityWriteResult } from '@package-broker/core/db/catalogue';
@@ -239,7 +240,10 @@ export function createVisibilityAttachRepository(
         ctx,
         fence,
         authority,
-        sourceServes(ctx, input.sourceId, found.owner, input.projectId),
+        allOf(
+          sourceServes(ctx, input.sourceId, found.owner, input.projectId),
+          sql<SqlBool>`(not exists (select 1 from source as attaching_proxy where attaching_proxy.org_id = ${ctx.orgId} and attaching_proxy.id = ${input.sourceId} and attaching_proxy.type = 'npmjs_proxy') or ${proxyClaimsVerified(ctx, input.verifiedClaims)})`,
+        ),
         [
           projectRevision(ctx, input.projectId, changed),
           compile(insert),

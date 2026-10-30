@@ -1,3 +1,5 @@
+import { proxyClaimConflict } from './routes/proxy-claims-schema.js';
+import type { ErrorEnvelope } from '../envelope.js';
 import { type $ZodType, type output } from 'zod/v4/core';
 import { routeApiProblems } from '../kernel/routes.js';
 import type { ApiSlot, RequestContext, RouteBoundary, RouteDefinition } from '../plugin.js';
@@ -28,7 +30,8 @@ export interface ApiRouteSpec {
 
 export type ApiOutcome =
   | { readonly status: number; readonly body?: unknown; readonly etag?: number }
-  | { readonly error: ApiErrorCode; readonly details?: readonly ValidationDetail[] };
+  | { readonly error: ApiErrorCode; readonly details?: readonly ValidationDetail[] }
+  | { readonly error: 'conflict'; readonly conflictingClaims: readonly string[] };
 
 type ServiceFamily = keyof typeof SERVICE_ERROR_TABLE;
 
@@ -222,6 +225,18 @@ export function apiRoute<const S extends ApiRouteSpec>(
       }
 
       if ('error' in outcome) {
+        if ('conflictingClaims' in outcome) {
+          if (spec.api.responses[409] !== proxyClaimConflict)
+            throw new TypeError('API handler returned undeclared claim conflicts');
+          const response = fail('conflict');
+          return new Response(
+            JSON.stringify({
+              ...((await response.json()) as ErrorEnvelope),
+              conflictingClaims: outcome.conflictingClaims,
+            }),
+            { status: response.status, headers: response.headers },
+          );
+        }
         if (outcome.error === 'conflict' && concurrency !== undefined) {
           return fail('precondition_failed');
         }

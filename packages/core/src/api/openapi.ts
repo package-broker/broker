@@ -1,3 +1,4 @@
+import { proxyClaimConflict } from './routes/proxy-claims-schema.js';
 import { toJSONSchema, type $ZodType } from 'zod/v4/core';
 import { PUBLISH_SCHEMAS } from './routes/publishes-schemas.js';
 import { PACKAGE_ACCESS_REQUEST_SCHEMAS } from './routes/package-access-requests-schemas.js';
@@ -152,7 +153,8 @@ export function generateOpenApi(
     };
     for (const [status, schema] of Object.entries(api.responses)) {
       if (Number(status) >= 400) {
-        if (schema !== null) throw new TypeError(`${label}: error response ${status} must be null`);
+        if (schema !== null && (Number(status) !== 409 || schema !== proxyClaimConflict))
+          throw new TypeError(`${label}: error response ${status} must be null`);
         const messages = [
           ...new Set(
             Object.entries(API_ERROR_CODES)
@@ -165,6 +167,15 @@ export function generateOpenApi(
           ),
         ];
         error(Number(status), messages.length > 0 ? messages.join('; ') : 'Error');
+        if (schema !== null) {
+          (responses[status] as JsonObject).content = jsonContent({
+            ...ERROR_ENVELOPE,
+            properties: {
+              ...(ERROR_ENVELOPE.properties as JsonObject),
+              conflictingClaims: toJsonSchema(proxyClaimConflict.shape.conflictingClaims, 'output'),
+            },
+          });
+        }
       } else {
         responses[status] = {
           description: schema === null ? 'No content' : 'Response',

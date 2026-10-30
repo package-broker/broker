@@ -1,9 +1,9 @@
 import * as z from 'zod';
-import { packageKey } from '../../catalogue/names.js';
+import { MAX_NPM_NAME_LENGTH, packageKey } from '../../catalogue/names.js';
 const npmName = z
   .string()
   .min(1)
-  .max(214)
+  .max(MAX_NPM_NAME_LENGTH)
   .refine((name) => {
     try {
       packageKey(name, { ecosystem: 'npm' });

@@ -3004,3 +3004,15 @@ it('offers no upstream sync action for hosted packages', () => {
   );
   expect(html).not.toContain('Sync now');
 });
+
+it.each([
+  ['npm', 214],
+  ['composer', 50],
+] as const)('uses the %s registered pattern input limit', async (ecosystem, limit) => {
+  const { model, fetch, html } = setup();
+  fetch.mockResolvedValueOnce(json({ items: [{ ...source, ecosystem }], next: null }));
+  await model.load();
+  fetch.mockResolvedValueOnce(json({ items: [], next: null }));
+  await model.names(SOURCE);
+  expect(html()).toMatch(new RegExp(`id="registered-pattern"[^>]*maxLength="${limit}"`));
+});

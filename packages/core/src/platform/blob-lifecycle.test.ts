@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { orgContext } from '../db/port.js';
+import { type OrgContext, orgContext } from '../db/port.js';
 import {
   blobStorageKey,
   createBlobStore,
@@ -20,7 +20,11 @@ const input = { removedAt: '2026-10-17T00:00:00.000Z' };
 const delegates = ['softDelete', 'claimPurge', 'markDeleted', 'cancelPurge', 'unschedule'] as const;
 function fixture() {
   const metadata = {
-    inspect: vi.fn(async () => null),
+    inspect: vi.fn(async (org: OrgContext) => ({
+      info: { generation, sha256: key, size: 0, mediaType: 'application/zip', purgeAfter: null },
+      purging: false,
+      storageKey: `npm-publish/${blobStorageKey(org.orgId, key)}`,
+    })),
     softDelete: vi.fn(async () => true),
     claimPurge: vi.fn(async (): Promise<PurgeGeneration | null> => generation),
     canStartRemove: vi.fn(async () => true),
@@ -513,7 +517,14 @@ it('Round 3 preserves a real re-publication while the old npm removal is stalled
     },
   };
   f.metadata.canStartRemove.mockImplementation(async () => current === generation && !leaseExpired);
-  const lifecycle = createBlobLifecycle({ ...f.options, store: bytes });
+  const lifecycle = createBlobLifecycle({
+    ...f.options,
+    store: bytes,
+    metadata: {
+      ...f.metadata,
+      inspect: async () => ({ info: info(), purging: true, storageKey: npm }),
+    },
+  });
   const result = lifecycle.purgeBytes(ctx, digest, generation);
   await vi.advanceTimersByTimeAsync(1000);
   expect(await result).toBe('timeout');
@@ -565,3 +576,31 @@ it('Round 4 inner removal refusal emits the refused counter', async () => {
   expect(f.observability.counter).toHaveBeenCalledWith('pb.blob.purge', { outcome: 'refused' });
   expect(f.remove).not.toHaveBeenCalled();
 });
+
+it.each([undefined, 'canonical', 'unrelated'])(
+  'purges only the canonical key for storage key %s',
+  async (kind) => {
+    const canonical = blobStorageKey(ctx.orgId, key);
+    const metadata = {
+      ...f.metadata,
+      inspect: async () =>
+        kind === undefined
+          ? null
+          : {
+              info: {
+                generation,
+                sha256: key,
+                size: 0,
+                mediaType: 'application/zip',
+                purgeAfter: null,
+              },
+              purging: false,
+              storageKey: kind === 'canonical' ? canonical : 'other/key',
+            },
+    };
+    const service = createBlobLifecycle({ ...f.options, metadata });
+    expect(await service.purgeBytes(ctx, key, generation)).toBe('removed');
+    expect(f.remove.mock.calls).toEqual([[canonical]]);
+    expect(f.metadata.canStartRemove).toHaveBeenCalledTimes(2);
+  },
+);

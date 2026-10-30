@@ -699,7 +699,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(42);
+    expect(missing).toHaveLength(43);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 
@@ -897,4 +897,28 @@ describe('log level filtering', () => {
     expect(logs(records).map((record) => record['level'])).toEqual(expected);
     expect(records.filter((record) => record.kind !== 'log')).toEqual([counter, histogram]);
   });
+});
+
+it.each(['list', 'discard'] as const)('Round 2 preserves the fixed sweep stage %s', (stage) => {
+  const record = { level: 'warn' as const, event: 'staged_blob_sweep_failed', stage };
+  expect(safeRecord(record)).toEqual(record);
+  expect(metricLabelValueAllowed('stage', stage, new Set())).toBe(true);
+  const { sink, records } = collector();
+  const obs = createObservability(sink, scope(), { ...REGISTRY, events: new Set([record.event]) });
+  obs.log(record);
+  obs.counter('pb.blob.staging_sweep', { outcome: 'error', stage });
+  expect(records).toEqual([
+    { kind: 'log', record: expect.objectContaining(record) },
+    {
+      kind: 'counter',
+      name: 'pb.blob.staging_sweep',
+      labels: { outcome: 'error', stage },
+      value: 1,
+    },
+  ]);
+});
+it('Round 2 drops request-derived sweep stages', () => {
+  const record = { level: 'warn' as const, event: 'staged_blob_sweep_failed' };
+  expect(safeRecord({ ...record, stage: 'private_request_data' })).toEqual(record);
+  expect(metricLabelValueAllowed('stage', 'private_request_data', new Set())).toBe(false);
 });

@@ -9,6 +9,7 @@ import {
   BlobSizeMismatchError,
   BlobValidationError,
   parseSha256,
+  blobStorageKey,
   stagedStorageKey,
 } from '@package-broker/core/platform/blob';
 import type {
@@ -1041,7 +1042,7 @@ export function describeBlobLifecycleContract(
       const generation = await f.lifecycle.claimPurge(org, key);
       expect(generation).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
     });
 
     it('lifecycle 2: a reference added after the claim stops the removal and the purge is cancelled', async () => {
@@ -1074,7 +1075,7 @@ export function describeBlobLifecycleContract(
       expect(f.removeCalls()).toBe(0);
       await f.setVersionStatus(org, key, 'removed_upstream');
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
     });
 
     it('lifecycle 3: a reactivation after the claim behaves like a late reference', async () => {
@@ -1098,7 +1099,7 @@ export function describeBlobLifecycleContract(
       const generation = await f.lifecycle.claimPurge(org, key);
       expect(generation).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
     });
 
     it('lifecycle 4: a lease with less than the margin left refuses the removal', async () => {
@@ -1123,7 +1124,7 @@ export function describeBlobLifecycleContract(
       const generation = (await f.lifecycle.claimPurge(org, key))!;
       await f.shortenLease(org, key, f.leaseMarginMs() + 5_000);
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
     });
 
     it('lifecycle 5: a generation bump makes the old claim remove and mark nothing', async () => {
@@ -1177,7 +1178,7 @@ export function describeBlobLifecycleContract(
       await f.expireRetention(org, key);
       const current = (await f.lifecycle.claimPurge(org, key))!;
       expect(await f.lifecycle.recheckAndRemove(org, key, current)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
     });
 
     it('lifecycle 6: a crash after the remove recovers on the next claim and a repeat marks nothing', async () => {
@@ -1195,7 +1196,7 @@ export function describeBlobLifecycleContract(
       expect(recovered).not.toBeNull();
       expect(recovered).not.toBe(first);
       expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
       expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
       expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
       expect(await f.store.head(org, key)).toBeNull();
@@ -1213,7 +1214,7 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
       expect(await f.lifecycle.markDeleted(org, key, generation)).toBe(true);
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(1);
     });
 
     async function due(f: BlobLifecycleFixture, label: string, old = true) {
@@ -1256,7 +1257,7 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
     }, 5_000);
 
-    it('lifecycle 8 negative: expiry recovers a failed remove in three calls', async () => {
+    it('lifecycle 8 negative: expiry recovers a failed remove in two calls', async () => {
       const f = await readyLifecycle(make);
       const { org, key } = await due(f, 'retry failure');
       const first = (await f.lifecycle.claimPurge(org, key))!;
@@ -1268,7 +1269,7 @@ export function describeBlobLifecycleContract(
       expect(next).not.toBe(first);
       expect(await f.lifecycle.recheckAndRemove(org, key, next)).toBe(true);
       expect(await f.lifecycle.markDeleted(org, key, next)).toBe(true);
-      expect(f.removeCalls()).toBe(3);
+      expect(f.removeCalls()).toBe(2);
     }, 5_000);
 
     it('lifecycle 9: orphan grace blocks a new blob and a re-put after an old claim', async () => {
@@ -1437,6 +1438,46 @@ export function describeBlobStagingContract(
   make: () => Promise<BlobLifecycleFixture>,
 ): void {
   describe(`blob staging contract: ${name}`, () => {
+    it.each(['npm', 'canonical'] as const)(
+      'Round 2 purges exactly the physical keys for a %s row',
+      async (kind) => {
+        const f = await make();
+        const org = await f.seed(nextOrg());
+        const data = bytes('two physical keys');
+        const key = await digestOf(data);
+        const canonical = blobStorageKey(org.orgId, key);
+        let storedKey = canonical;
+        if (kind === 'npm') {
+          const staged = await f.store.stage(org, streamOf(data), {
+            maxBytes: 1024,
+            mediaType: 'application/gzip',
+          });
+          await f.store.promote(org, staged, { refetchable: false });
+          storedKey = stagedStorageKey(staged.handle, key);
+        } else {
+          await f.store.put(org, key, streamOf(data), {
+            size: data.length,
+            mediaType: 'application/gzip',
+            refetchable: true,
+          });
+        }
+        await f.byteStore.putVerified(canonical, streamOf(data), {
+          sha256: key,
+          size: data.length,
+          mediaType: 'application/gzip',
+        });
+        await f.makeEligible(org, key);
+        await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+        await f.expireRetention(org, key);
+        const generation = await f.lifecycle.claimPurge(org, key);
+        expect(generation).not.toBeNull();
+        const before = f.removeCalls();
+        expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
+        expect(f.removeCalls() - before).toBe(kind === 'npm' ? 2 : 1);
+        expect(await f.byteStore.head(storedKey)).toBeNull();
+        expect(await f.byteStore.head(canonical)).toBeNull();
+      },
+    );
     it('Round 5 removes promoted bytes when metadata publication fails', async () => {
       const f = await make();
       const org = await f.seed(nextOrg());
@@ -1594,7 +1635,7 @@ export function describeBlobStagingContract(
       await expect(f.store.openStaged(org, staged)).rejects.toBeInstanceOf(BlobValidationError);
     });
     it.each(['success', 'failed catalogue'])(
-      'Round 3 cached dedup preserves refetchability with catalogue %s',
+      'Round 3 cached dedup narrows refetchability with catalogue %s',
       async (outcome) => {
         const f = await make();
         const org = await f.seed('01J0STAGED00000000000000A');
@@ -1612,19 +1653,14 @@ export function describeBlobStagingContract(
         const dedup = await f.store.promote(org, staged, { refetchable: false });
         expect(dedup).toEqual({ ...info, generation: dedup.generation });
         expect(dedup.generation).not.toBe(info.generation);
-        expect(await f.refetchableOf(org, key)).toBe(true);
+        expect(await f.refetchableOf(org, key)).toBe(false);
         expect(await f.stagedObjects()).toBe(0);
         await f.ageBlob(org, key, 8);
         if (outcome === 'success') await f.addReference(org, key, 'active');
         await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
         await f.expireRetention(org, key);
-        if (outcome === 'success') {
-          expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
-          return;
-        }
-        const generation = await f.lifecycle.claimPurge(org, key);
-        expect(generation).not.toBeNull();
-        expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
+        expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+        expect(await f.store.head(org, key)).not.toBeNull();
       },
     );
 

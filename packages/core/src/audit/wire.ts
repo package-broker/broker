@@ -1,6 +1,11 @@
 import { isUlid } from '../ids.js';
 import { sha256Hex } from '../auth/primitives.js';
-import { auditEvent, type AuditAction, type AuditEventInput } from './actions.js';
+import {
+  auditEnvelopeRefusal,
+  auditEvent,
+  type AuditAction,
+  type AuditEventInput,
+} from './actions.js';
 import type { AuditRow } from './chain.js';
 import type { AuditJournalItemV1, AuditMarkerV1, AuditRecordV1 } from './plugin-api.js';
 import { redactValue } from './redact.js';
@@ -58,24 +63,26 @@ function chainFields(row: Record<string, unknown>): void {
 }
 
 function validEnvelope(row: Record<string, unknown>): boolean {
-  return auditEvent({
-    id: row['id'] as string,
-    now: row['createdAt'] as string,
-    actor: {
-      type: row['actorType'] as AuditEventInput['actor']['type'],
-      id: row['actorId'] as string | null,
-    },
-    action: row['action'] as AuditAction,
-    target: { type: row['targetType'] as string, id: row['targetId'] as string | null },
-    projectId: row['projectId'] as string | null,
-    context: {
-      opId: '00000000000000000000000000',
-      requestId: '00000000000000000000000000',
-      tokenSelector: (Object.hasOwn(row, 'tokenSelector') ? row['tokenSelector'] : null) as
-        string | null,
-      sourceIp: (Object.hasOwn(row, 'sourceIp') ? row['sourceIp'] : null) as string | null,
-    },
-  }).ok;
+  return (
+    auditEnvelopeRefusal({
+      id: row['id'] as string,
+      now: row['createdAt'] as string,
+      actor: {
+        type: row['actorType'] as AuditEventInput['actor']['type'],
+        id: row['actorId'] as string | null,
+      },
+      action: row['action'] as AuditAction,
+      target: { type: row['targetType'] as string, id: row['targetId'] as string | null },
+      projectId: row['projectId'] as string | null,
+      context: {
+        opId: '00000000000000000000000000',
+        requestId: '00000000000000000000000000',
+        tokenSelector: (Object.hasOwn(row, 'tokenSelector') ? row['tokenSelector'] : null) as
+          string | null,
+        sourceIp: (Object.hasOwn(row, 'sourceIp') ? row['sourceIp'] : null) as string | null,
+      },
+    }) === null
+  );
 }
 
 function safeFields(row: Record<string, unknown>): void {

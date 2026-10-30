@@ -1,3 +1,4 @@
+import { PERMISSIONS } from '../authz/permissions.js';
 import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
 import { isUlid } from '../ids.js';
@@ -5,6 +6,8 @@ import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
   'session.login',
+  'session.login_failed',
+  'access.denied',
   'session.logout',
   'session.reauth',
   'setup.complete',
@@ -83,6 +86,8 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'session.login': [],
+  'session.login_failed': ['method', 'reason', 'count', 'window_start'],
+  'access.denied': ['permission', 'boundary', 'count', 'window_start'],
   'session.logout': [],
   'session.reauth': [],
   'setup.complete': [],
@@ -324,6 +329,45 @@ function cleanAuditControlValue(value: unknown, field: string): Cleaned {
   return cleanValue(value, field);
 }
 
+export const LOGIN_FAILURE_METHODS = ['local', 'oidc', 'cloudflare_access', 'reauth'] as const;
+export const LOGIN_FAILURE_REASONS = [
+  'bad_credentials',
+  'unknown_account',
+  'blocked',
+  'suspended',
+  'provider_error',
+  'state_mismatch',
+  'expired',
+] as const;
+
+function cleanFailureValue(value: unknown, field: string): Cleaned {
+  const enums: Record<string, readonly string[]> = {
+    method: LOGIN_FAILURE_METHODS,
+    reason: LOGIN_FAILURE_REASONS,
+    boundary: ['organization', 'project', 'authenticated'],
+    permission: PERMISSIONS.map(({ name }) => name),
+  };
+  if (field === 'count') {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (field === 'window_start') {
+    return typeof value === 'string' &&
+      isUtcTimestamp(value) &&
+      new Date(value).toISOString() === value
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  return typeof value === 'string' && (enums[field]?.includes(value) ?? false)
+    ? { ok: true, value }
+    : { ok: false, reason: 'bad_value' };
+}
+
+function isFailureAction(action: AuditAction): boolean {
+  return action === 'session.login_failed' || action === 'access.denied';
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -419,10 +463,12 @@ function cleanChanges(
     if (!isPlainObject(entry)) return { ok: false, reason: 'bad_value' };
     const cleanedEntry: Record<string, AuditValue> = {};
     for (const key of Object.keys(entry)) {
-      if (!CHANGE_KEYS.has(key)) return { ok: false, reason: 'bad_value' };
+      if (!CHANGE_KEYS.has(key) || (isFailureAction(action) && key === 'old'))
+        return { ok: false, reason: 'bad_value' };
       if (entry[key] === undefined) continue;
-      const cleaned =
-        field === 'provider' && IDENTITY_ACTIONS.has(action)
+      const cleaned = isFailureAction(action)
+        ? cleanFailureValue(entry[key], field)
+        : field === 'provider' && IDENTITY_ACTIONS.has(action)
           ? cleanProviderId(entry[key])
           : AUDIT_CONTROL_ACTIONS.has(action)
             ? cleanAuditControlValue(entry[key], field)
@@ -436,13 +482,60 @@ function cleanChanges(
   return { ok: true, value: out };
 }
 
-export function auditEvent(input: AuditEventInput): AuditEventResult {
+export function auditEnvelopeRefusal(input: AuditEventInput): AuditRefusal | null {
   const action: unknown = input.action;
   if (typeof action !== 'string' || !(AUDIT_ACTIONS as readonly string[]).includes(action)) {
-    return { ok: false, reason: 'unknown_action' };
+    return 'unknown_action';
   }
   const envelope = checkEnvelope(input);
+  if (envelope !== null) return envelope;
+  if (isFailureAction(input.action)) {
+    if (
+      !isUlid(input.id) ||
+      input.context.tokenSelector !== null ||
+      (input.actor.id !== null && !isUlid(input.actor.id)) ||
+      (input.projectId != null && !isUlid(input.projectId))
+    ) {
+      return 'bad_value';
+    }
+    if (input.action === 'session.login_failed') {
+      if (
+        input.target.type !== 'session' ||
+        input.target.id !== null ||
+        !(
+          (input.actor.type === 'system' && input.actor.id === null) ||
+          (input.actor.type === 'user' && input.actor.id !== null)
+        )
+      ) {
+        return 'bad_value';
+      }
+    } else if (
+      input.actor.type === 'system' ||
+      input.actor.id === null ||
+      input.target.type !== 'route' ||
+      typeof input.target.id !== 'string' ||
+      (input.target.id !== '/' &&
+        !/^\/(?:[A-Za-z0-9._~-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[A-Za-z0-9._~-]+|:[A-Za-z][A-Za-z0-9]*))*$/.test(
+          input.target.id,
+        ))
+    ) {
+      return 'bad_value';
+    }
+  }
+  return null;
+}
+
+export function auditEvent(input: AuditEventInput): AuditEventResult {
+  const envelope = auditEnvelopeRefusal(input);
   if (envelope !== null) return { ok: false, reason: envelope };
+  if (isFailureAction(input.action)) {
+    if (
+      input.changes === undefined ||
+      !AUDIT_FIELDS[input.action].every((field) => input.changes?.[field]?.new !== undefined)
+    ) {
+      return { ok: false, reason: 'bad_value' };
+    }
+  }
   const payload: Record<string, unknown> = {
     op_id: input.context.opId,
     request_id: input.context.requestId,

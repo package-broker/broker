@@ -38,6 +38,15 @@ interface CoverageEntry {
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
+    actions: ['session.login_failed', 'access.denied'],
+    callers: ['core/src/audit/failure-events.ts'],
+    repository: 'audit-failure',
+    batchGuard: 'executor.batch; single auditPendingStatement without a business mutation',
+    cardinality:
+      '0 or 1 per attempt: thresholds 1/10/100/1000 per key per minute, capped at 600 per organization; auth wiring belongs to G43/G44',
+    stagingCalls: 1,
+  },
+  {
     actions: ['audit.sink_admin'],
     callers: ['core/src/audit/sinks/registry.ts'],
     repository: 'audit-sink',

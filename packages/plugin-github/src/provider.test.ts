@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { orgContext } from '@package-broker/core/db/port';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import type { ProviderContext, ProviderSource } from '@package-broker/core/sources/provider';
 import { lsRefs } from '@package-broker/core/sources/git/refs';
 import { GitFetchError, readFileAtRefs } from '@package-broker/core/sources/git/fetch';
 import { InstallationTokenError, type InstallationTokens } from './installation-token.js';
-import { createGithubProvider, RateLimited } from './provider.js';
+import { checkRepository, createGithubProvider, RateLimited } from './provider.js';
 
 vi.mock('@package-broker/core/sources/git/refs', () => ({ lsRefs: vi.fn() }));
 vi.mock('@package-broker/core/sources/git/fetch', async (original) => ({
@@ -28,7 +29,11 @@ const source = {
 function setup(
   status = 200,
   headers: Record<string, string> = {},
-  metadata = { archived: true, default_branch: 'main', full_name: 'owner/repo' },
+  metadata: { id?: number; archived: boolean; default_branch: string; full_name: string } = {
+    archived: true,
+    default_branch: 'main',
+    full_name: 'owner/repo',
+  },
   redirect = `https://codeload.github.com/owner/repo/legacy.zip/${sha}`,
 ) {
   const hops: { url: string; headers: Headers }[] = [];
@@ -52,6 +57,12 @@ function setup(
     },
   });
   const tokens: InstallationTokens = {
+    forRepositoryIds: vi.fn(async () => ({
+      value: 'fixture-token',
+      expiresAt: 1e15,
+      repositories: [],
+      repositoryIds: [7],
+    })),
     forRepositories: vi.fn(async () => ({
       value: 'fixture-token',
       expiresAt: 1e15,
@@ -59,9 +70,11 @@ function setup(
     })),
     forListing: vi.fn(),
     observe: vi.fn(),
+    retryAfterSeconds: vi.fn(),
     rateLimit: vi.fn(),
   };
   const ctx = {
+    org: orgContext('test-org'),
     fetch,
     signal: new AbortController().signal,
     credential: null,
@@ -87,6 +100,110 @@ beforeEach(() => {
     ]);
 });
 describe('GitHub provider', () => {
+  it.each(['not_found', 'unprocessable', 'rate_limited'] as const)(
+    'preserves managed installation error %s for reconciliation',
+    async (code) => {
+      const { provider, ctx, tokens } = setup();
+      const error = new InstallationTokenError(code);
+      vi.mocked(tokens.forRepositoryIds).mockRejectedValue(error);
+      await expect(
+        provider.describe(
+          ctx,
+          { ...source, config: { ...source.config, repositoryId: 7 } },
+          'vendor/package',
+          {},
+        ),
+      ).rejects.toBe(error);
+    },
+  );
+
+  it.each([200, 403, 404, 429])(
+    'observes identity response headers for status %i',
+    async (status) => {
+      const { ctx, tokens } = setup(
+        status,
+        { 'retry-after': '29' },
+        { id: 7, archived: false, default_branch: 'main', full_name: 'owner/repo' },
+      );
+      const token = await tokens.forRepositoryIds('12', [7]);
+      const fetch = vi.fn(ctx.fetch);
+      const result = checkRepository(
+        { ...source, config: { ...source.config, repositoryId: 7 } },
+        token,
+        tokens,
+        fetch,
+      );
+      if (status === 200) await expect(result).resolves.toBeUndefined();
+      else await expect(result).rejects.toMatchObject({ code: 'http_status', status });
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(tokens.observe).toHaveBeenCalledWith('12', expect.any(Headers));
+      expect(vi.mocked(tokens.observe).mock.calls[0]![1].get('retry-after')).toBe('29');
+    },
+  );
+
+  it.each([
+    [8, 'owner/repo', 'repository_mismatch'],
+    [7, 'owner/renamed', 'repository_renamed'],
+  ])(
+    'stops managed describe before manifests for id %i and name %s',
+    async (id, full_name, code) => {
+      const { provider, ctx, tokens, hops } = setup(
+        200,
+        {},
+        { id, full_name, archived: false, default_branch: 'main' },
+      );
+      const managed = { ...source, config: { ...source.config, repositoryId: 7 } };
+      await expect(provider.describe(ctx, managed, 'vendor/package', {})).rejects.toMatchObject({
+        code,
+      });
+      expect(tokens.forRepositoryIds).toHaveBeenCalledWith('12', [7]);
+      expect(tokens.forRepositories).not.toHaveBeenCalled();
+      expect(hops).toHaveLength(1);
+      expect(hops[0]!.url).toBe('https://api.github.com/repositories/7');
+      expect(lsRefs).not.toHaveBeenCalled();
+      expect(readFileAtRefs).not.toHaveBeenCalled();
+    },
+  );
+
+  it('describes a managed repository only after its id matches', async () => {
+    const { provider, ctx, tokens } = setup(
+      200,
+      {},
+      { id: 7, full_name: 'owner/repo', archived: false, default_branch: 'main' },
+    );
+    await provider.describe(
+      ctx,
+      { ...source, config: { ...source.config, repositoryId: 7 } },
+      'vendor/package',
+      {},
+    );
+    expect(tokens.forRepositoryIds).toHaveBeenCalledWith('12', [7]);
+    expect(lsRefs).toHaveBeenCalledOnce();
+  });
+
+  it('fetches current dist URL for a stored alias scoped to repository identity', async () => {
+    const { provider, ctx, hops } = setup();
+    const aliases = vi.fn(async () => ['owner/old']);
+    const managed = { ...source, config: { ...source.config, repositoryId: 7 } };
+    const target = {
+      distType: 'zip' as const,
+      packageName: 'vendor/package',
+      version: '1.0.0',
+      sourceRef: sha,
+      url: `https://api.github.com/repos/owner/old/zipball/${sha}`,
+    };
+    const scoped = { ...ctx, repositoryAliases: aliases };
+    await provider.openDist(scoped, managed, target);
+    expect(aliases).toHaveBeenCalledWith(ctx.org, 'https://api.github.com', 7);
+    expect(hops[0]!.url).toBe(`https://api.github.com/repos/owner/repo/zipball/${sha}`);
+    await expect(
+      provider.openDist(scoped, managed, {
+        ...target,
+        url: `https://api.github.com/repos/owner/stranger/zipball/${sha}`,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+
   it('narrows tokens to one repository and binds Basic Git auth to github.com', async () => {
     const { provider, ctx, tokens } = setup();
     await provider.describe(ctx, source, 'vendor/package', {});

@@ -1,7 +1,7 @@
 import type { PlanEntry } from '@package-broker/core/plugin';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DiscoveryError,
   PAGE_SIZE,
@@ -44,6 +44,7 @@ function setup(repos: readonly Repo[], files: Files, total = repos.length) {
   const mintIds: string[] = [];
   const observed: { id: string; headers: Headers }[] = [];
   const tokens: InstallationTokens = {
+    forRepositoryIds: vi.fn(),
     forListing: async () => {
       minted.push(null);
       return token(LISTING_TOKEN, null);
@@ -56,6 +57,7 @@ function setup(repos: readonly Repo[], files: Files, total = repos.length) {
     observe: (id, headers) => {
       observed.push({ id, headers });
     },
+    retryAfterSeconds: () => undefined,
     rateLimit: () => undefined,
   };
   const fetch = createPolicyFetch({

@@ -19,6 +19,7 @@ import {
   InstallationTokenError,
   parseRateLimit,
   type InstallationTokens,
+  type InstallationToken,
 } from './installation-token.js';
 
 import { meteredFetch, tokenRest, type ManifestFile, type TokenRestBudget } from './token-rest.js';
@@ -38,7 +39,13 @@ export { RateLimited } from './rate-limited.js';
 
 export class GithubProviderError extends Error {
   constructor(
-    readonly code: 'invalid_request' | 'invalid_response' | 'skipped' | 'snapshot_changed',
+    readonly code:
+      | 'invalid_request'
+      | 'invalid_response'
+      | 'skipped'
+      | 'snapshot_changed'
+      | 'repository_mismatch'
+      | 'repository_renamed',
     readonly status?: number,
   ) {
     super(`GitHub provider ${code}`);
@@ -52,6 +59,7 @@ export interface GithubProviderOptions {
     source: ProviderSource,
   ) => InstallationTokens | null | Promise<InstallationTokens | null>;
   readonly runtime: 'docker' | 'cloudflare';
+  readonly repositoryAliases?: ProviderContext['repositoryAliases'];
   /** Test-only override of TOKEN_DESCRIBE_BUDGET; production wiring never sets it. */
   readonly budget?: TokenRestBudget;
 }
@@ -73,6 +81,10 @@ function repository(source: ProviderSource) {
   if (
     !/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/.test(config.repository) ||
     ['.', '..'].includes(config.repository.split('/')[1]!) ||
+    (config.repositoryId !== undefined &&
+      (!Number.isSafeInteger(config.repositoryId) ||
+        config.repositoryId <= 0 ||
+        config.installationId === undefined)) ||
     (config.installationId !== undefined &&
       (!Number.isSafeInteger(config.installationId) || config.installationId <= 0))
   ) {
@@ -119,9 +131,14 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
     let value = '';
     try {
       if (tokens !== null)
-        value = (await tokens.forRepositories(repo.installationId, [repo.name])).value;
+        value = (
+          repo.config.repositoryId === undefined
+            ? await tokens.forRepositories(repo.installationId, [repo.name])
+            : await tokens.forRepositoryIds(repo.installationId, [repo.config.repositoryId])
+        ).value;
     } catch (error) {
       if (error instanceof InstallationTokenError) {
+        if (repo.config.repositoryId !== undefined) throw error;
         if (error.code === 'not_found' || error.code === 'unprocessable') {
           throw new GithubProviderError('skipped', error.status);
         }
@@ -239,7 +256,11 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       const budget = options.budget ?? TOKEN_DESCRIBE_BUDGET[options.runtime];
       const metered = s.tokenMode ? meteredFetch(s.fetch, budget.requests) : null;
       const response = await (metered?.fetch ?? s.fetch)({
-        url: `${API}/repos/${s.repo}`,
+        url:
+          s.config.repositoryId === undefined
+            ? `${API}/repos/${s.repo}`
+            : `${API}/repositories/${s.config.repositoryId}`,
+        ...(s.config.repositoryId === undefined ? {} : { redirects: 'error' as const }),
         method: 'GET',
         purpose: 'api',
         headers: {
@@ -265,11 +286,15 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       ) {
         throw new GithubProviderError('invalid_response');
       }
+      if (s.config.repositoryId !== undefined && metadata.id !== s.config.repositoryId)
+        throw new GithubProviderError('repository_mismatch');
       if (
         typeof metadata.full_name !== 'string' ||
         metadata.full_name.toLowerCase() !== s.repo.toLowerCase()
       ) {
-        throw new GithubProviderError('skipped');
+        throw new GithubProviderError(
+          s.config.repositoryId === undefined ? 'skipped' : 'repository_renamed',
+        );
       }
       const rest = s.tokenMode
         ? tokenRest(metered!.fetch, s.apiCredential, s.repo, s.resetAt, {
@@ -448,8 +473,25 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         throw new GithubProviderError('invalid_request');
       }
       const url = `${API}/repos/${repo.repo}/zipball/${target.sourceRef}`;
-      if (target.url !== null && target.url !== url)
-        throw new GithubProviderError('invalid_request');
+      if (target.url !== null && target.url !== url) {
+        const aliases =
+          repo.config.repositoryId === undefined
+            ? []
+            : ((await (options.repositoryAliases ?? ctx.repositoryAliases)?.(
+                ctx.org,
+                API,
+                repo.config.repositoryId,
+              )) ?? []);
+        if (
+          !aliases.some(
+            (alias) =>
+              /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/.test(alias) &&
+              !['.', '..'].includes(alias.split('/')[1]!) &&
+              target.url === `${API}/repos/${alias}/zipball/${target.sourceRef}`,
+          )
+        )
+          throw new GithubProviderError('invalid_request');
+      }
       const s = await session(ctx, source);
       const response = await s.fetch({
         url,
@@ -486,4 +528,40 @@ async function branches(rest: ReturnType<typeof tokenRest>, names: readonly stri
     }),
   );
   return results;
+}
+
+export async function checkRepository(
+  source: ProviderSource,
+  token: InstallationToken,
+  tokens: InstallationTokens,
+  fetch: PolicyFetch,
+): Promise<void> {
+  const repo = repository(source);
+  const response = await fetch({
+    url: `${API}/repositories/${repo.config.repositoryId}`,
+    method: 'GET',
+    purpose: 'api',
+    headers: { accept: 'application/vnd.github+json', 'x-github-api-version': GITHUB_API_VERSION },
+    credential: credential(API, `Bearer ${token.value}`),
+    destinations: [API],
+    redirects: 'error',
+    maxBytes: MIB,
+    timeoutMs: 30_000,
+  });
+  tokens.observe(repo.installationId, response.headers);
+  if (response.status !== 200) {
+    cancel(response);
+    throw new UpstreamError('http_status', response.status);
+  }
+  let metadata: unknown;
+  try {
+    metadata = await new Response(response.body).json();
+  } catch {
+    throw new GithubProviderError('invalid_response');
+  }
+  if (!record(metadata) || metadata.id !== repo.config.repositoryId)
+    throw new GithubProviderError('repository_mismatch');
+  if (typeof metadata.full_name !== 'string') throw new GithubProviderError('invalid_response');
+  if (metadata.full_name.toLowerCase() !== repo.repo.toLowerCase())
+    throw new GithubProviderError('repository_renamed');
 }

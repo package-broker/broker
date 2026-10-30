@@ -72,6 +72,12 @@ export type PortName =
 export const PLUGIN_BINDABLE_PORTS = ['source', 'identity'] as const satisfies readonly PortName[];
 
 export interface SourceProviderContext {
+  /** Historical names belonging to this organization, API origin and repository id. */
+  repositoryAliases?(
+    org: OrgContext,
+    apiOrigin: string,
+    repositoryId: number,
+  ): Promise<readonly string[]>;
   readonly runtime: 'docker' | 'cloudflare';
   /** Opens an opaque, organization-scoped App binding for discovery before a source exists. */
   discoveryCredential?(

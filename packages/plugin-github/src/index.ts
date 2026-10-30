@@ -14,11 +14,17 @@ import {
 import {
   createInstallationTokens,
   parseRateLimit,
+  retryAfterSeconds,
   type InstallationToken,
   type InstallationTokens,
   type RateLimit,
 } from './installation-token.js';
-import { createGithubProvider, GithubProviderError, RateLimited } from './provider.js';
+import {
+  checkRepository,
+  createGithubProvider,
+  GithubProviderError,
+  RateLimited,
+} from './provider.js';
 import { GithubRestError } from './token-rest.js';
 import { githubWebhookVerifier } from './webhook.js';
 import { listRepositories, DiscoveryError } from './discovery.js';
@@ -40,6 +46,7 @@ export default function github() {
           tokens: Map<string, InstallationToken>;
           inflight: Map<string, Promise<InstallationToken>>;
           limit: RateLimit | undefined;
+          retry: number | undefined;
         }
       >();
       const tokensFor = (
@@ -54,16 +61,30 @@ export default function github() {
             state.appId !== app.appId ||
             state.privateKeyPem !== app.privateKeyPem
           ) {
-            state = { ...app, tokens: new Map(), inflight: new Map(), limit: undefined };
+            state = {
+              ...app,
+              tokens: new Map(),
+              inflight: new Map(),
+              limit: undefined,
+              retry: undefined,
+            };
             cache.delete(key);
             if (cache.size >= 256) cache.delete(cache.keys().next().value!);
             cache.set(key, state);
           }
           const shared = state;
+          const observe = (_id: string, headers: Headers) => {
+            shared.limit = parseRateLimit(headers) ?? shared.limit;
+            shared.retry = retryAfterSeconds(headers) ?? shared.retry;
+          };
           // A caller's cancellation must not abort a token mint shared with other requests.
           const service = createInstallationTokens({
             app,
-            fetch: ctx.fetch,
+            fetch: async (request) => {
+              const response = await ctx.fetch(request);
+              observe(installationId, response.headers);
+              return response;
+            },
             now: () => ctx.clock.now().getTime(),
           });
           const lookup = (grant: string, mint: () => Promise<InstallationToken>) => {
@@ -87,6 +108,10 @@ export default function github() {
             return pending;
           };
           const tokens: InstallationTokens = {
+            forRepositoryIds: (id, ids) =>
+              lookup(JSON.stringify([id, 'ids', [...new Set(ids)].sort((a, b) => a - b)]), () =>
+                service.forRepositoryIds(id, ids),
+              ),
             forRepositories: (id, repositories) =>
               lookup(
                 JSON.stringify([
@@ -96,10 +121,9 @@ export default function github() {
                 () => service.forRepositories(id, repositories),
               ),
             forListing: (id) => lookup(JSON.stringify([id, '*']), () => service.forListing(id)),
-            observe: (_id, headers) => {
-              shared.limit = parseRateLimit(headers) ?? shared.limit;
-            },
+            observe,
             rateLimit: () => shared.limit,
+            retryAfterSeconds: () => shared.retry,
           };
           return { installationId, tokens };
         }) ?? Promise.resolve(null);
@@ -107,6 +131,9 @@ export default function github() {
       const provider = (ctx: ProviderContext) =>
         createGithubProvider({
           runtime: context?.runtime ?? 'docker',
+          ...(context?.repositoryAliases === undefined
+            ? {}
+            : { repositoryAliases: context.repositoryAliases }),
           tokensFor: async (source) => (await tokensFor(ctx, source))?.tokens ?? null,
         });
       return [
@@ -140,11 +167,27 @@ export default function github() {
               throw new DiscoveryError('invalid_request');
             const binding = await tokensFor(ctx, source);
             if (binding === null) throw new DiscoveryError('invalid_request');
+            if (
+              source.config.repositoryId !== undefined &&
+              source.config.packageName !== undefined
+            ) {
+              const token = await binding.tokens.forRepositoryIds(binding.installationId, [
+                source.config.repositoryId,
+              ]);
+              await checkRepository(source, token, binding.tokens, fetchFor(ctx));
+            }
             let name = source.config.packageName;
             if (name === undefined) {
-              const token = await binding.tokens.forRepositories(binding.installationId, [
-                repository.split('/')[1]!,
-              ]);
+              const token =
+                source.config.repositoryId === undefined
+                  ? await binding.tokens.forRepositories(binding.installationId, [
+                      repository.split('/')[1]!,
+                    ])
+                  : await binding.tokens.forRepositoryIds(binding.installationId, [
+                      source.config.repositoryId,
+                    ]);
+              if (source.config.repositoryId !== undefined)
+                await checkRepository(source, token, binding.tokens, fetchFor(ctx));
               const origin = 'https://api.github.com';
               const response = await fetchFor(ctx)({
                 url: `${origin}/repos/${repository}/contents/composer.json`,
@@ -164,6 +207,9 @@ export default function github() {
                   },
                 },
                 destinations: [origin],
+                ...(source.config.repositoryId === undefined
+                  ? {}
+                  : { redirects: 'error' as const }),
                 maxBytes: 1024 * 1024,
                 timeoutMs: 30_000,
               });

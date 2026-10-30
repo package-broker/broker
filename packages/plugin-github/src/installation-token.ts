@@ -63,6 +63,8 @@ export interface InstallationToken {
   readonly value: string;
   readonly expiresAt: number;
   readonly repositories: readonly string[] | null;
+  /** Authoritative repository scope for id-narrowed tokens; repositories is then empty. */
+  readonly repositoryIds?: readonly number[];
 }
 
 export interface GithubAppKey {
@@ -79,6 +81,10 @@ export interface InstallationTokensOptions {
 }
 
 export interface InstallationTokens {
+  forRepositoryIds(
+    installationId: string,
+    repositoryIds: readonly number[],
+  ): Promise<InstallationToken>;
   forRepositories(
     installationId: string,
     repositories: readonly string[],
@@ -86,6 +92,7 @@ export interface InstallationTokens {
   forListing(installationId: string): Promise<InstallationToken>;
   observe(installationId: string, headers: Headers): void;
   rateLimit(installationId: string): RateLimit | undefined;
+  retryAfterSeconds(installationId: string): number | undefined;
 }
 
 const REFRESH_MARGIN_MS = 10 * 60_000;
@@ -110,11 +117,18 @@ export function parseRateLimit(headers: Headers): RateLimit | undefined {
   return { limit, remaining, reset };
 }
 
-function redactedToken(value: string, expiresAt: number, repositories: readonly string[] | null) {
-  const token = { expiresAt, repositories };
+function redactedToken(
+  value: string,
+  expiresAt: number,
+  repositories: readonly (string | number)[] | null,
+) {
+  const token: Omit<InstallationToken, 'value'> =
+    typeof repositories?.[0] === 'number'
+      ? { expiresAt, repositories: [], repositoryIds: repositories as readonly number[] }
+      : { expiresAt, repositories: repositories as readonly string[] | null };
   Object.defineProperties(token, {
     value: { value, enumerable: false },
-    toJSON: { value: () => ({ expiresAt, repositories, value: REDACTED }), enumerable: false },
+    toJSON: { value: () => ({ ...token, value: REDACTED }), enumerable: false },
     toString: { value: () => REDACTED, enumerable: false },
     [INSPECT]: { value: () => `InstallationToken ${REDACTED}`, enumerable: false },
   });
@@ -161,7 +175,7 @@ function normaliseOrigin(text: string): string {
   return url.origin;
 }
 
-function retryAfterSeconds(headers: Headers): number | undefined {
+export function retryAfterSeconds(headers: Headers): number | undefined {
   const value = headers.get('retry-after')?.trim();
   return value !== undefined && UNSIGNED.test(value) ? Number(value) : undefined;
 }
@@ -173,22 +187,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function grantMatches(
   record: Record<string, unknown>,
   requested: Readonly<Record<string, string>>,
-  repositories: readonly string[] | null,
+  repositories: readonly (string | number)[] | null,
 ): boolean {
   const permissions = record.permissions;
   if (!isRecord(permissions)) return false;
   for (const [name, level] of Object.entries(permissions)) {
-    if (!(name in requested) || level !== 'read') return false;
+    if (!Object.hasOwn(requested, name) || level !== 'read') return false;
   }
+  if (!Object.keys(requested).every((name) => permissions[name] === 'read')) return false;
   if (repositories === null) return true;
   const granted = record.repositories;
   if (!Array.isArray(granted)) return false;
+  if (typeof repositories[0] === 'number') {
+    const ids = new Set<number>();
+    for (const entry of granted) {
+      if (!isRecord(entry) || !Number.isSafeInteger(entry.id) || Number(entry.id) <= 0)
+        return false;
+      ids.add(entry.id as number);
+    }
+    return ids.size === repositories.length && repositories.every((id) => ids.has(id as number));
+  }
   const names = new Set<string>();
   for (const entry of granted) {
     if (!isRecord(entry) || typeof entry.name !== 'string') return false;
     names.add(entry.name.toLowerCase());
   }
-  return names.size === repositories.length && repositories.every((name) => names.has(name));
+  return (
+    names.size === repositories.length && repositories.every((name) => names.has(name as string))
+  );
 }
 
 export function createInstallationTokens(options: InstallationTokensOptions): InstallationTokens {
@@ -199,6 +225,17 @@ export function createInstallationTokens(options: InstallationTokensOptions): In
   const tokens = new Map<string, InstallationToken>();
   const inflight = new Map<string, Promise<InstallationToken>>();
   const limits = new Map<string, RateLimit>();
+  const retries = new Map<string, number>();
+
+  function observe(installationId: string, headers: Headers): void {
+    checkInstallation(installationId);
+    remember(installationId, parseRateLimit(headers));
+    const retry = retryAfterSeconds(headers);
+    if (retry === undefined) return;
+    retries.delete(installationId);
+    if (retries.size >= MAX_RATE_LIMIT_ENTRIES) retries.delete(retries.keys().next().value!);
+    retries.set(installationId, retry);
+  }
 
   function remember(installationId: string, rateLimit: RateLimit | undefined): void {
     if (rateLimit === undefined) return;
@@ -223,11 +260,16 @@ export function createInstallationTokens(options: InstallationTokensOptions): In
 
   async function mint(
     installationId: string,
-    repositories: readonly string[] | null,
+    repositories: readonly (string | number)[] | null,
   ): Promise<InstallationToken> {
     const permissions: Readonly<Record<string, string>> =
       repositories === null ? { metadata: 'read' } : { contents: 'read', metadata: 'read' };
-    const payload = repositories === null ? { permissions } : { repositories, permissions };
+    const payload =
+      repositories === null
+        ? { permissions }
+        : typeof repositories[0] === 'number'
+          ? { repository_ids: repositories, permissions }
+          : { repositories, permissions };
     const jwt = await createAppJwt(app.privateKeyPem, app.appId, Math.floor(now() / 1000));
     const response = await fetch({
       url: `${apiOrigin}/app/installations/${installationId}/access_tokens`,
@@ -244,6 +286,7 @@ export function createInstallationTokens(options: InstallationTokensOptions): In
       maxBytes: MAX_RESPONSE_BYTES,
       timeoutMs,
     });
+    observe(installationId, response.headers);
     const rateLimit = parseRateLimit(response.headers);
     if (response.status !== 201 && response.status !== 200) {
       void response.body?.cancel().catch(() => undefined);
@@ -286,9 +329,9 @@ export function createInstallationTokens(options: InstallationTokensOptions): In
 
   function lookup(
     installationId: string,
-    repositories: readonly string[] | null,
+    repositories: readonly (string | number)[] | null,
   ): Promise<InstallationToken> {
-    const key = `${installationId}\n${repositories === null ? '*' : repositories.join('/')}`;
+    const key = `${installationId}\n${repositories === null ? '*' : `${typeof repositories[0]}:${repositories.join('/')}`}`;
     const hit = tokens.get(key);
     if (hit !== undefined && fresh(hit)) return Promise.resolve(hit);
     for (const [other, token] of tokens) if (!fresh(token)) tokens.delete(other);
@@ -311,6 +354,18 @@ export function createInstallationTokens(options: InstallationTokensOptions): In
   }
 
   return {
+    async forRepositoryIds(installationId, repositoryIds) {
+      checkInstallation(installationId);
+      if (
+        !Array.isArray(repositoryIds) ||
+        !repositoryIds.every((id) => Number.isSafeInteger(id) && id > 0)
+      )
+        throw new InstallationTokenError('invalid_request');
+      const ids = [...new Set(repositoryIds)].sort((a, b) => a - b);
+      if (ids.length === 0 || ids.length > MAX_REPOSITORIES)
+        throw new InstallationTokenError('invalid_request');
+      return lookup(installationId, Object.freeze(ids));
+    },
     async forRepositories(installationId, repositories) {
       checkInstallation(installationId);
       if (!Array.isArray(repositories)) throw new InstallationTokenError('invalid_request');
@@ -331,9 +386,9 @@ export function createInstallationTokens(options: InstallationTokensOptions): In
       checkInstallation(installationId);
       return lookup(installationId, null);
     },
-    observe(installationId, headers) {
-      checkInstallation(installationId);
-      remember(installationId, parseRateLimit(headers));
+    observe,
+    retryAfterSeconds(installationId) {
+      return retries.get(installationId);
     },
     rateLimit(installationId) {
       return limits.get(installationId);

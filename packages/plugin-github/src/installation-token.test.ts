@@ -187,6 +187,64 @@ function setup(replies: Reply[], extra: Partial<InstallationTokensOptions> = {})
 }
 
 describe('createInstallationTokens', () => {
+  it('narrows by sorted repository ids and isolates name and id caches', async () => {
+    const { calls, tokens } = setup([
+      tokenReply(TOKEN, T0 + HOUR, {
+        repositories: [repository('renamed', 8), repository('other', 2)],
+      }),
+      tokenReply(OTHER, T0 + HOUR),
+    ]);
+    const token = await tokens.forRepositoryIds('42', [8, 2, 8]);
+    expect(token.repositoryIds).toEqual([2, 8]);
+    expect(token.repositories).toEqual([]);
+    expect(bodyOf(calls[0]!)).toEqual({
+      repository_ids: [2, 8],
+      permissions: { contents: 'read', metadata: 'read' },
+    });
+    expect(await tokens.forRepositoryIds('42', [2, 8])).toBe(token);
+    await tokens.forRepositories('42', ['2', '8']);
+    expect(calls).toHaveLength(2);
+    expect(JSON.stringify(token)).not.toContain(TOKEN);
+    expect(inspect(token, { showHidden: true })).not.toContain(TOKEN);
+  });
+
+  it.each<Record<string, unknown>>([
+    { permissions: { metadata: 'read' } },
+    { permissions: { contents: 'read' } },
+    { permissions: {} },
+    { permissions: { contents: 'write', metadata: 'read' } },
+    { permissions: { contents: 'read', metadata: 'read', issues: 'read' } },
+    { permissions: { contents: 'read', metadata: 'read', toString: 'read' } },
+    { repositories: [repository('same-name', 9)] },
+    { repositories: [repository('same-name', 8), repository('extra', 9)] },
+    { repositories: [{ name: 'same-name' }] },
+  ])('refuses unusable id grants and retries without caching %#', async (override) => {
+    const { calls, tokens } = setup([
+      tokenReply(TOKEN, T0 + HOUR, { repositories: [repository('same-name', 8)], ...override }),
+      tokenReply(OTHER, T0 + HOUR, { repositories: [repository('renamed', 8)] }),
+    ]);
+    await expect(tokens.forRepositoryIds('42', [8])).rejects.toMatchObject({
+      code: 'invalid_response',
+    });
+    expect((await tokens.forRepositoryIds('42', [8])).value).toBe(OTHER);
+    expect(calls).toHaveLength(2);
+  });
+
+  it.each([
+    { ids: [] },
+    { ids: [0] },
+    { ids: [-1] },
+    { ids: [1.5] },
+    { ids: [Number.MAX_SAFE_INTEGER + 1] },
+    { ids: Array.from({ length: 501 }, (_, i) => i + 1) },
+  ])('rejects invalid repository ids before sending %#', async ({ ids }) => {
+    const { calls, tokens } = setup([]);
+    await expect(tokens.forRepositoryIds('42', ids)).rejects.toMatchObject({
+      code: 'invalid_request',
+    });
+    expect(calls).toHaveLength(0);
+  });
+
   it('requests exactly the sorted, deduplicated repositories with read permissions', async () => {
     const { calls, tokens } = setup([tokenReply(TOKEN, T0 + HOUR)]);
     const token = await tokens.forRepositories('42', ['zeta', 'alpha', 'zeta']);
@@ -479,6 +537,8 @@ describe('createInstallationTokens', () => {
     ['extra permission', { permissions: { contents: 'read', metadata: 'read', issues: 'read' } }],
     ['write permission', { permissions: { contents: 'write', metadata: 'read' } }],
     ['missing permissions', { permissions: undefined }],
+    ['missing contents permission', { permissions: { metadata: 'read' } }],
+    ['empty permissions', { permissions: {} }],
     ['missing repository', { repositories: [repository('a', 1)] }],
     ['extra repository', { repositories: ['a', 'b', 'c'].map((n, i) => repository(n, i)) }],
     ['missing repositories', { repositories: undefined }],
@@ -559,6 +619,27 @@ describe('createInstallationTokens', () => {
     await tokens.forRepositories('42', ['a']).catch(() => undefined);
     expect(tokens.rateLimit('42')).toEqual({ limit: 7750, remaining: 7749, reset: 1792152000 });
     expect(tokens.rateLimit('43')).toBeUndefined();
+  });
+
+  it('retains retry-after independently of rate-limit counters and installation', async () => {
+    const { tokens } = setup([]);
+    tokens.observe('42', new Headers({ 'retry-after': '37' }));
+    tokens.observe('42', new Headers({ 'retry-after': 'invalid' }));
+    tokens.observe('42', new Headers());
+    expect(tokens.retryAfterSeconds('42')).toBe(37);
+    expect(tokens.retryAfterSeconds('43')).toBeUndefined();
+    expect(tokens.rateLimit('42')).toBeUndefined();
+  });
+
+  it('retains retry-after from a rate-limited mint', async () => {
+    const { tokens } = setup([
+      () => new Response(null, { status: 429, headers: { 'retry-after': '19' } }),
+    ]);
+    await expect(tokens.forRepositoryIds('42', [7])).rejects.toMatchObject({
+      code: 'rate_limited',
+      retryAfter: 19,
+    });
+    expect(tokens.retryAfterSeconds('42')).toBe(19);
   });
 
   it('records the rate limit observed on API responses per installation', async () => {

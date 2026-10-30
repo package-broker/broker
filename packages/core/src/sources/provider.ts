@@ -41,6 +41,12 @@ export function assertSnapshotRef(ref: SnapshotRef): void {
 }
 
 export interface ProviderContext {
+  /** Historical names belonging to this organization, API origin and repository id. */
+  repositoryAliases?(
+    org: OrgContext,
+    apiOrigin: string,
+    repositoryId: number,
+  ): Promise<readonly string[]>;
   readonly org: OrgContext;
   readonly fetch: PolicyFetch;
   readonly credential: UpstreamCredential | null;

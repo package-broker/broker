@@ -54,6 +54,71 @@ const source: ProviderSource = {
 const sha = 'a'.repeat(40);
 
 describe('GitHub plugin wiring', () => {
+  it.each([
+    [7, 'acme/lib', undefined],
+    [8, 'acme/lib', 'repository_mismatch'],
+    [7, 'acme/renamed', 'repository_renamed'],
+  ] as const)(
+    'checks managed listing identity before the manifest (%i, %s)',
+    async (id, full_name, code) => {
+      const app = await fixtureApp();
+      const provider = github().sourceProviders({
+        runtime: 'docker',
+        tokensFor: async (_org, _source, create) => create(app, '42'),
+      })[0]!;
+      if (source.type !== 'vcs') throw new Error('expected vcs');
+      const managed = { ...source, config: { ...source.config, repositoryId: 7 } };
+      const urls: string[] = [];
+      const ctx = invocation(async (request) => {
+        urls.push(request.url);
+        if (request.url.endsWith('/access_tokens')) {
+          expect(JSON.parse(new TextDecoder().decode(request.body))).toEqual({
+            repository_ids: [7],
+            permissions: { contents: 'read', metadata: 'read' },
+          });
+          return upstreamResponse(
+            Response.json(
+              {
+                token: 'fixture-token',
+                expires_at: '2030-01-01T01:00:00Z',
+                permissions: { contents: 'read', metadata: 'read' },
+                repositories: [{ id: 7, name: 'lib' }],
+              },
+              { status: 201 },
+            ),
+          );
+        }
+        if (request.url.endsWith('/repositories/7')) {
+          expect(request.redirects).toBe('error');
+          expect(request.signal).toBe(ctx.signal);
+          return upstreamResponse(Response.json({ id, full_name }));
+        }
+        expect(request.url).toBe('https://api.github.com/repos/acme/lib/contents/composer.json');
+        expect(request.redirects).toBe('error');
+        return upstreamResponse(Response.json({ name: 'vendor/package' }));
+      });
+      if (code === undefined) {
+        expect((await provider.listPackages!(ctx, managed, null)).names).toEqual([
+          'vendor/package',
+        ]);
+        expect(urls).toHaveLength(3);
+        await provider.listPackages!(ctx, managed, null);
+        expect(urls.filter((url) => url.endsWith('/access_tokens'))).toHaveLength(1);
+      } else {
+        await expect(provider.listPackages!(ctx, managed, null)).rejects.toMatchObject({ code });
+        expect(urls).toHaveLength(2);
+        await expect(
+          provider.listPackages!(
+            ctx,
+            { ...managed, config: { ...managed.config, packageName: 'vendor/package' } },
+            null,
+          ),
+        ).rejects.toMatchObject({ code });
+        expect(urls).toHaveLength(3);
+      }
+    },
+  );
+
   it('registers a provider without runtime capabilities for build-time validation', () => {
     expect(collectRegistrations([github()]).sourceProviders.get('github')?.webhookVerifier).toBe(
       githubWebhookVerifier,

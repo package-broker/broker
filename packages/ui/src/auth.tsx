@@ -572,6 +572,87 @@ function AvailabilityMessage(props: {
   return null;
 }
 
+const SSO_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
+  state_invalid: 'The sign-in request expired or could not be verified. Start sign-in again.',
+  state_mismatch: 'The sign-in response did not match your request. Start sign-in again.',
+  no_session: 'Your session ended. Sign in again, then retry the action within 10 minutes.',
+  session_inactive: 'Your session ended. Sign in again, then retry the action within 10 minutes.',
+  no_auth_time:
+    'Your provider did not confirm a fresh sign-in. Sign out and sign in again, then retry the action within 10 minutes.',
+  stale_auth_time:
+    'Your provider returned an older sign-in. Sign out and sign in again, then retry the action within 10 minutes.',
+  not_supported:
+    'Your provider cannot confirm a fresh sign-in. Sign out and sign in again, then retry the action within 10 minutes.',
+  not_sso_session:
+    'Use the sign-in method associated with your current session to confirm this action.',
+  identity_mismatch: 'Sign in with the same account used for your current session.',
+  anchor_mismatch: 'Your sign-in provider configuration changed. Contact your administrator.',
+  provider_rebound: 'Your sign-in provider configuration changed. Contact your administrator.',
+  provider_error: 'The sign-in provider could not complete the request. Try signing in again.',
+  missing_credentials: 'The provider did not return a sign-in response. Start sign-in again.',
+  invalid_token: 'The provider response could not be verified. Start sign-in again.',
+  email_missing:
+    'Your provider did not supply the account details needed to sign in. Contact your administrator.',
+  email_unverified:
+    'Your provider has not verified your account address. Contact your administrator.',
+  domain_not_verified:
+    'Your account domain is not approved for this organization. Contact your administrator.',
+  not_invited: 'Your account has not been granted access. Contact your administrator.',
+  user_suspended: 'Your account is suspended. Contact your administrator.',
+  hook_denied: 'Organization policy refused this sign-in. Contact your administrator.',
+  policy: 'Organization policy refused confirmation. Contact your administrator.',
+  too_many_groups: 'Your provider returned more groups than allowed. Contact your administrator.',
+  already_linked: 'This provider account is already linked. Contact your administrator.',
+  link_requires_admin: 'An administrator needs to link your provider account.',
+  invalid_identity:
+    'Your provider returned account details that could not be verified. Contact your administrator.',
+  email_changed: 'Your provider account details changed. Contact your administrator.',
+  conflict: 'Your account changed during sign-in. Start sign-in again.',
+  not_updated: 'Confirmation could not be saved. Try again.',
+  direct_reauth:
+    'Your provider cannot complete confirmation. Sign out and sign in again, then retry within 10 minutes.',
+  reauth_refused: 'Confirmation was refused. Try again or contact your administrator.',
+  login_refused: 'Sign-in could not be completed. Try again or contact your administrator.',
+};
+
+export function ssoFailureMessage(reason: string | null): string {
+  return (
+    (reason !== null && Object.hasOwn(SSO_FAILURE_MESSAGES, reason)
+      ? SSO_FAILURE_MESSAGES[reason]
+      : undefined) ?? SSO_FAILURE_MESSAGES['login_refused']!
+  );
+}
+
+export function SigninFailedView(props: {
+  reason: string | null;
+  signedIn: boolean;
+  hash?: string;
+}) {
+  return (
+    <Card className="mx-auto mt-12 max-w-md">
+      <CardHeader>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
+          Sign-in failed
+        </h1>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <Alert variant="destructive">
+          <AlertDescription>{ssoFailureMessage(props.reason)}</AlertDescription>
+        </Alert>
+        <a
+          href={
+            props.signedIn
+              ? `#/reauth?return=${encodeURIComponent(reauthReturnHash(props.hash ?? '').slice(1))}`
+              : '#/login'
+          }
+        >
+          {props.signedIn ? 'Return to confirmation' : 'Return to sign in'}
+        </a>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function LoginView(props: {
   state: LoginState;
   providers: readonly AuthProvider[];
@@ -714,6 +795,13 @@ export function ReauthView(props: {
               Confirm
             </Button>
           </form>
+        ) : null}
+        {props.providers.some((provider) => !provider.supportsReauth) ? (
+          <p role="status">
+            Your sign-in provider cannot confirm a fresh sign-in. Sign out and sign in again, then
+            retry this action within 10 minutes.
+            {props.local ? ' You can also use the local sign-in form to confirm.' : ''}
+          </p>
         ) : null}
         <SsoButtons
           providers={providers}

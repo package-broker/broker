@@ -1081,3 +1081,29 @@ describe('reauthenticateWithIdentity', () => {
     });
   });
 });
+
+it('requires auth_time even when the provider explicitly advertises reauthentication', async () => {
+  const fixture = setup();
+  const result = await run(
+    fixture.deps,
+    CTX,
+    sessionOf(),
+    providerOf({ supportsReauth: true, reauthCapability: async () => true }),
+    verified({ issuedAt: NOW.toISOString(), authTime: null }),
+  );
+  expect(result).toEqual({ ok: false, reason: 'no_auth_time' });
+  expect(fixture.mark).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  'uses resolved capability %s despite the opposite static flag',
+  async (resolved) => {
+    const fixture = setup();
+    const reauthCapability = vi.fn(async () => resolved);
+    const provider = providerOf({ supportsReauth: !resolved, reauthCapability });
+    const result = await run(fixture.deps, CTX, sessionOf(), provider, verified());
+    expect(result).toEqual(resolved ? { ok: true } : { ok: false, reason: 'not_supported' });
+    expect(fixture.mark).toHaveBeenCalledTimes(resolved ? 1 : 0);
+    expect(reauthCapability).toHaveBeenCalledTimes(1);
+  },
+);

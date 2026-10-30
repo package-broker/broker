@@ -1,6 +1,11 @@
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
-import { parseSha256, type BlobLifecycle, type BlobStore, type Sha256 } from '../platform/blob.js';
+import {
+  parseSha256,
+  type BlobLifecycle,
+  type CoreBlobStore as BlobStore,
+  type Sha256,
+} from '../platform/blob.js';
 import type { Codecs } from '../platform/codec.js';
 import { assertSnapshotRef, snapshotRef, type SnapshotRef } from '../sources/provider.js';
 import { twoPassPut, type TwoPassOptions } from './two-pass-put.js';

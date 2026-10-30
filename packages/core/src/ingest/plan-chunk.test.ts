@@ -79,6 +79,7 @@ function withA6(overrides: Partial<Record<CatalogueWriteMethod, number>> = {}): 
   return {
     sessionStatements: 3,
     statementBudget: {
+      publishVersion: 40,
       syncPackage: 120,
       attachDist: 4,
       openListing: 3,

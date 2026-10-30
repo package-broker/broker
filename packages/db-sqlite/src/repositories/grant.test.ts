@@ -3151,6 +3151,7 @@ describe('fenced grant mutators', () => {
         roleIds: {
           organization_admin: ADMIN,
           organization_auditor: 'bootstrap-auditor',
+          organization_publisher: 'bootstrap-publisher',
           project_owner: 'bootstrap-owner',
           project_developer: 'bootstrap-developer',
           project_auditor: 'bootstrap-project-auditor',

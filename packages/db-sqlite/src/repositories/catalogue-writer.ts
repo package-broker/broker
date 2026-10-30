@@ -135,7 +135,11 @@ export function createCatalogueWriter(
   const reconcile = createCatalogueReconciler(bounded, { ...options, countUnseen: true });
   return {
     ...reconcile,
+    async publishVersion() {
+      throw new Error('not_implemented');
+    },
     statementBudget: {
+      publishVersion: 40,
       syncPackage: D1_STATEMENTS_PER_INVOCATION,
       attachDist: 4,
       openListing: 3,

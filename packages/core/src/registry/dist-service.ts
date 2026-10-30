@@ -16,7 +16,7 @@ import {
   type DistFetchOutcome,
 } from '../ingest/dist-fetch.js';
 import type { Clock } from '../ids.js';
-import type { BlobRead, BlobStore, Sha256 } from '../platform/blob.js';
+import type { BlobRead, CoreBlobStore as BlobStore, Sha256 } from '../platform/blob.js';
 import type { Observability } from '../platform/observability.js';
 import { ProviderBusyError } from '../sources/provider.js';
 import {

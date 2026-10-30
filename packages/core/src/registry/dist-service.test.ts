@@ -12,7 +12,7 @@ import {
   BlobSizeMismatchError,
   parseSha256,
   type BlobInfo,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
   type Sha256,
 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
@@ -140,6 +140,19 @@ function rig(options: Options = {}) {
   let throwOnHead = options.throwOnGet ?? false;
   let onAcquire = () => undefined as void;
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
+
     async put(_ctx, key, body, input): Promise<BlobInfo> {
       const got = await drain(body);
       const actual = createHash('sha256').update(got).digest('hex');

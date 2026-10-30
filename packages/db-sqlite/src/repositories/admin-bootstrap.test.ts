@@ -36,6 +36,7 @@ const EMAIL = 'admin@example.test';
 const OTHER_EMAIL = 'other@example.test';
 
 const ROLE_IDS: Readonly<Record<DefaultRoleKey, string>> = {
+  organization_publisher: '01J0ROLEPUBLS00000000000R1',
   organization_admin: '01J0ROLEADMIN00000000000R1',
   organization_auditor: '01J0ROLEORGAUDITOR00000R2',
   project_owner: '01J0ROLEPROJOWNER00000000R3',
@@ -63,6 +64,7 @@ function input(overrides: Partial<BootstrapAdminInput> = {}): BootstrapAdminInpu
 }
 
 const ROLE_IDS_B: Readonly<Record<DefaultRoleKey, string>> = {
+  organization_publisher: '01J0ROLEPUBLSB0000000000R1',
   organization_admin: '01J0ROLEADMINB0000000000R1',
   organization_auditor: '01J0ROLEORGAUDITORB0000R2',
   project_owner: '01J0ROLEPROJOWNERB0000000R3',
@@ -182,6 +184,7 @@ describe('bootstrapAdmin', () => {
     expect(roles.map((role) => role.key)).toEqual([
       'organization_admin',
       'organization_auditor',
+      'organization_publisher',
       'project_auditor',
       'project_developer',
       'project_owner',
@@ -251,6 +254,7 @@ describe('bootstrapAdmin', () => {
 
   it('2: uses the stored admin role when the roles were seeded under other ids', async () => {
     const earlier: Record<DefaultRoleKey, string> = {
+      organization_publisher: '01J0EARLIERPUBLS000000000E1',
       organization_admin: '01J0EARLIERADMIN000000000E1',
       organization_auditor: '01J0EARLIERORGAUD00000000E2',
       project_owner: '01J0EARLIERPROJOWN00000000E3',
@@ -262,7 +266,7 @@ describe('bootstrapAdmin', () => {
     expect(await bootstrapAdmin(executor, a, input())).toBe('created');
 
     const roles = await rows<{ id: string }>('SELECT id FROM role WHERE org_id = ?', a.orgId);
-    expect(roles).toHaveLength(5);
+    expect(roles).toHaveLength(6);
     const grants = await rows<{ role_id: string }>(
       'SELECT role_id FROM access_grant WHERE org_id = ?',
       a.orgId,
@@ -615,7 +619,7 @@ describe('bootstrapAdmin organization_admin top-up', () => {
     const epoch = await epochOf(a);
     const epochB = await epochOf(b);
     const others = await otherRoles(a);
-    expect(others.roles).toHaveLength(4);
+    expect(others.roles).toHaveLength(5);
     expect(others.permissions.length).toBeGreaterThan(0);
 
     expect(await bootstrapAdminWithTopUp(executor, a, second())).toEqual({
@@ -1075,6 +1079,7 @@ describe('two connections', () => {
       opId: `01J0OPCONCURRENT00000000000O${n}`,
       setupHash: hash,
       roleIds: {
+        organization_publisher: `01J0ROLEPUBLS0000000000${n}R1`,
         organization_admin: `01J0ROLEADMIN0000000000${n}R1`,
         organization_auditor: `01J0ROLEORGAUDITOR00000${n}R2`,
         project_owner: `01J0ROLEPROJOWNER0000000${n}R3`,
@@ -1095,7 +1100,7 @@ describe('two connections', () => {
     expect(await count('user_account')).toBe(1);
     expect(await count('local_login')).toBe(1);
     expect(await count('access_grant')).toBe(1);
-    expect(await count('role')).toBe(5);
+    expect(await count('role')).toBe(6);
     const refreshedHash = outcomes[0] === 'refreshed' ? HASH_1 : HASH_2;
     const stored = await first.all<{ setup_hash: string }>({
       sql: 'SELECT setup_hash FROM local_login',

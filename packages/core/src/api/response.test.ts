@@ -17,6 +17,33 @@ import {
 } from './response.js';
 
 const statuses = {
+  invalid_version: 400,
+  invalid_attachments: 400,
+  invalid_attachment: 400,
+  provenance_unsupported: 400,
+  integrity_mismatch: 400,
+  invalid_tarball: 400,
+  manifest_mismatch: 400,
+  license_missing: 400,
+  too_many_tags: 400,
+  token_required: 401,
+  scope: 403,
+  not_admitted: 403,
+  self_approval: 403,
+  package_binding: 403,
+  no_trusted_publisher: 403,
+  claim_overlap: 409,
+  name_public: 409,
+  name_public_unverified: 409,
+  name_not_claimed: 409,
+  version_exists: 409,
+  publish_gate: 409,
+  too_many_sessions: 409,
+  ambiguous_trusted_publisher: 409,
+  manifest_too_large: 413,
+  tarball_too_large: 413,
+  write_unsupported: 405,
+  busy: 503,
   unsupported_package: 400,
   unsupported_source_kind: 400,
   package_not_found: 404,
@@ -453,5 +480,20 @@ describe('VisibilityError', () => {
       expect(SERVICE_ERROR_TABLE.VisibilityError[member]).toEqual({ code, status: statuses[code] });
       expect(Object.hasOwn(API_ERROR_CODES, code)).toBe(true);
     }
+  });
+});
+
+describe('npm error messages', () => {
+  it('appends new error codes after the existing catalogue', () => {
+    const codes = Object.keys(API_ERROR_CODES);
+    expect(codes[0]).toBe('unsupported_package');
+    expect(codes.indexOf('invalid_version')).toBe(codes.indexOf('unavailable') + 1);
+    expect(API_ERROR_CODES.claim_overlap.message).toBe(
+      'This package name is already published or proxied',
+    );
+    expect(API_ERROR_CODES.token_required.message).toBe('A token is required to publish');
+    expect(API_ERROR_CODES.publish_gate.message).toBe(
+      'Approval is required before this version can be released',
+    );
   });
 });

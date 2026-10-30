@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import { AUDIT_EVENTS, KERNEL_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-codes.js';
 import { registerCoreJob } from '../runtime/core-jobs.js';
-import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
+import { JobError, type JobContext, type CoreJobs as Jobs } from '../platform/jobs.js';
 import { createObservability, type ObsRecord } from '../platform/observability.js';
 import { auditSealJob, requestAuditSeal, type SealOutcome } from './sealer.js';
 
@@ -24,6 +24,10 @@ function context(signal = new AbortController().signal, orgId = 'org-a'): JobCon
 
 function jobs() {
   return {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     enqueue: vi.fn<Jobs['enqueue']>().mockResolvedValue({ id: 'job-a', created: true }),
     get: vi.fn<Jobs['get']>(),
   };

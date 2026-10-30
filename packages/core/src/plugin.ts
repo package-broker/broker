@@ -128,11 +128,31 @@ export interface PluginDefinition extends PluginApi {
   readonly identityDescriptor?: IdentityDescriptor;
   /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
   readonly sourceProviders?: SourceProviderFactory;
+  readonly publishPolicy?: PublishPolicyDefinition;
   readonly migrations?: { readonly dir: string };
   /** Synchronous and pure: declares routes, hooks and jobs. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;
   /** Runs once per kernel after every plugin registered. Receives ports, never adapters. */
   readonly init?: (ports: PluginPorts) => void | Promise<void>;
+}
+
+export interface PublishInspection {
+  readonly name: string;
+  readonly version: string;
+  readonly manifest: Readonly<Record<string, unknown>>;
+  readonly integrity: string;
+  readonly sizeBytes: number;
+  openTarball(): Promise<ReadableStream<Uint8Array>>;
+}
+
+export interface PublishPolicyVerdict {
+  readonly verdict: 'allow' | 'deny';
+  readonly reason?: string;
+}
+
+export interface PublishPolicyDefinition {
+  readonly id: string;
+  inspect(ctx: OrgContext, input: PublishInspection): Promise<PublishPolicyVerdict>;
 }
 
 export interface PluginRegistry {

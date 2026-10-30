@@ -21,8 +21,10 @@ import type { MigrationSource } from '@package-broker/db-sqlite/migrations/sourc
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import * as vulnerabilityModule from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import type { R2BucketLike } from './blob/r2.js';
+import * as d1Module from './db/d1-executor.js';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
 import { createWorker, type Env, type ExecutionContextLike, type WorkerOptions } from './index.js';
 
@@ -43,7 +45,7 @@ const platformPorts: PlatformPortConfig = {
   observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
 };
 
-const slots = Array.from({ length: 24 }, (_, index) => index);
+const slots = Array.from({ length: 28 }, (_, index) => index);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
@@ -820,11 +822,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       await gate;
       return { id: 'job-1', created: true };
     });
-    const spy = vi
-      .spyOn(moduleNamespace, 'createRegistryModule')
-      .mockImplementation((deps) =>
-        original({ ...deps, ports: { ...deps.ports, jobs: { enqueue, get: async () => null } } }),
-      );
+    const spy = vi.spyOn(moduleNamespace, 'createRegistryModule').mockImplementation((deps) =>
+      original({
+        ...deps,
+        ports: {
+          ...deps.ports,
+          jobs: {
+            async enqueueStatements() {
+              throw new Error('not_implemented');
+            },
+            enqueue,
+            get: async () => null,
+          },
+        },
+      }),
+    );
     try {
       const { fetch, cookie, seed, orgId } = await boot({
         sources: [
@@ -894,11 +906,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       await gate;
       return { id: 'job-2', created: true };
     });
-    const spy = vi
-      .spyOn(moduleNamespace, 'createRegistryModule')
-      .mockImplementation((deps) =>
-        original({ ...deps, ports: { ...deps.ports, jobs: { enqueue, get: async () => null } } }),
-      );
+    const spy = vi.spyOn(moduleNamespace, 'createRegistryModule').mockImplementation((deps) =>
+      original({
+        ...deps,
+        ports: {
+          ...deps.ports,
+          jobs: {
+            async enqueueStatements() {
+              throw new Error('not_implemented');
+            },
+            enqueue,
+            get: async () => null,
+          },
+        },
+      }),
+    );
     try {
       const { fetch, cookie, seed } = await boot();
       const first = await fetch(request('/p1/npm/left-pad', { headers: { cookie } }));
@@ -1185,5 +1207,151 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('npm audit matrix', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const endpoint = '/p1/npm/-/npm/v1/security/advisories/bulk';
+  let app: Awaited<ReturnType<typeof boot>>;
+  async function audit(body: unknown) {
+    return app.fetch(
+      request(endpoint, {
+        method: 'POST',
+        headers: {
+          cookie: app.cookie,
+          origin: PUBLIC_URL,
+          'x-csrf-token': app.cookie.split('__Host-pb_csrf=')[1]!,
+          'content-type': 'application/json',
+          traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  it('forwards verified public pairs and refuses disclosure after a private claim or cap', async () => {
+    const repositorySpy = vi.spyOn(vulnerabilityModule, 'createVulnerabilityRepository');
+    let failEvidence = false;
+    const originalExecutor = d1Module.createD1Executor;
+    const executorSpy = vi.spyOn(d1Module, 'createD1Executor').mockImplementation((db) => {
+      const executor = originalExecutor(db);
+      return {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        batch: (statements) => {
+          if (
+            failEvidence &&
+            statements.some((statement) => statement.sql.includes('evidence_bytes'))
+          )
+            throw new Error('evidence unavailable');
+          return executor.batch(statements);
+        },
+      };
+    });
+    const sent: { body: unknown; headers: Headers }[] = [];
+    const remote = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).hostname !== 'registry.npmjs.org') return realFetch(input, init);
+      const request = new Request(input, init);
+      if (request.method !== 'POST') return remote(input, init);
+      sent.push({ body: await request.json(), headers: request.headers });
+      return Response.json({ 'left-pad': [{ id: 42 }], sentinel: [{ id: 43 }] });
+    });
+    app = await boot();
+    executorSpy.mockRestore();
+    expect(repositorySpy.mock.calls.length).toBeGreaterThan(0);
+    for (const call of repositorySpy.mock.calls) expect(call[1]).toBe(systemClock);
+    repositorySpy.mockRestore();
+    expect(
+      (await app.fetch(request('/p1/npm/left-pad', { headers: { cookie: app.cookie } }))).status,
+    ).toBe(200);
+    const response = await audit({ 'left-pad': ['1.0.0'], '@private/hidden': ['1.0.0'] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ 'left-pad': [{ id: 42 }] });
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(sent.map(({ body }) => body)).toEqual([{ 'left-pad': ['1.0.0'] }]);
+    for (const { headers } of sent) {
+      expect(headers.has('cookie')).toBe(false);
+      expect(headers.has('authorization')).toBe(false);
+      expect(headers.has('x-csrf-token')).toBe(false);
+      expect(headers.get('user-agent')).toBe('PackageBroker/2');
+      expect(headers.has('traceparent')).toBe(false);
+    }
+    failEvidence = true;
+    sent.length = 0;
+    const unavailable = await audit({ 'left-pad': ['1.0.0'] });
+    expect(unavailable.status).toBe(502);
+    expect(await unavailable.json()).toMatchObject({ code: 'upstream_error' });
+    expect(sent).toEqual([]);
+    failEvidence = false;
+    await app.seed(
+      "INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json) VALUES ('PRIVATE', ?, 'Private', 'npm', 'npm_registry', 'https://private.test', '{\"scopes\":[\"@private\"]}')",
+      [app.orgId],
+    );
+    await app.seed(
+      "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('HIDDEN', ?, 'PRIVATE', 'npm', 'left-pad')",
+      [app.orgId],
+    );
+    sent.length = 0;
+    const hiddenHolder = await audit({ 'left-pad': ['1.0.0'] });
+    expect(hiddenHolder.status).toBe(200);
+    expect(await hiddenHolder.json()).toEqual({});
+    expect(sent).toEqual([]);
+    await app.seed("UPDATE source SET status = 'paused' WHERE org_id = ? AND id = 'PRIVATE'", [
+      app.orgId,
+    ]);
+    const pausedHolder = await audit({ 'left-pad': ['1.0.0'] });
+    expect(pausedHolder.status).toBe(200);
+    expect(await pausedHolder.json()).toEqual({});
+    expect(sent).toEqual([]);
+    await app.seed("DELETE FROM package WHERE org_id = ? AND id = 'HIDDEN'", [app.orgId]);
+    await app.seed(
+      "INSERT INTO source (id, org_id, name, ecosystem, type, url) VALUES ('CLAIM', ?, 'Claim', 'npm', 'vcs', 'https://private.test/repo.git')",
+      [app.orgId],
+    );
+    await app.seed(
+      'INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, ?, ?)',
+      [ulid(), app.orgId, 'CLAIM', 'npm', 'left-pad'],
+    );
+    sent.length = 0;
+    const filtered = await audit({ 'left-pad': ['1.0.0'], '@private/hidden': ['1.0.0'] });
+    expect(filtered.status).toBe(200);
+    expect(await filtered.json()).toEqual({});
+    expect(sent).toEqual([]);
+    sent.length = 0;
+    const privateOnly = await audit({ '@private/hidden': ['1.0.0'] });
+    expect(privateOnly.status).toBe(200);
+    expect(await privateOnly.json()).toEqual({});
+    for (const body of [
+      Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`pkg-${i}`, ['1.0.0']])),
+      { 'left-pad': Array.from({ length: 2001 }, (_, i) => `1.0.${i}`) },
+    ]) {
+      const capped = await audit(body);
+      expect(capped.status).toBe(413);
+      expect(await capped.json()).toMatchObject({ code: 'payload_too_large' });
+    }
+    expect(sent).toEqual([]);
+    expect(JSON.stringify(app.events)).not.toMatch(/@private|admin@example|__Host-pb_session/);
+  });
+
+  it('distinguishes no attached proxy from the disabled off switch without outbound traffic', async () => {
+    const { seen } = stubUpstream();
+    app = await boot();
+    await app.seed(
+      'DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?',
+      [app.orgId, 'P1', 'NX1'],
+    );
+    const absent = await audit({ 'left-pad': ['1.0.0'] });
+    expect(absent.status).toBe(501);
+    expect(await absent.json()).toMatchObject({
+      code: 'unsupported',
+      error: 'npm audit requires an npmjs.org proxy source in this project',
+    });
+    app = await boot({ registry: { npmAudit: { enabled: false } } });
+    const disabled = await audit({ 'left-pad': ['1.0.0'] });
+    expect(disabled.status).toBe(501);
+    expect(await disabled.json()).toMatchObject({ code: 'npm_audit_disabled' });
+    expect(seen).toEqual([]);
   });
 });

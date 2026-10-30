@@ -1,5 +1,5 @@
 import type { OrgContext } from '../db/port.js';
-import { JobError, type JobDefinition, type Jobs } from '../platform/jobs.js';
+import { JobError, type JobDefinition, type CoreJobs as Jobs } from '../platform/jobs.js';
 
 export type SealOutcome =
   | {

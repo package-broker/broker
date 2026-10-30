@@ -13,6 +13,7 @@ import {
   type McpContractBroker,
 } from '@package-broker/core/mcp/contract';
 import * as mcpTools from '@package-broker/core/mcp/tools';
+import * as mcpLimit from '@package-broker/core/mcp/limit';
 import {
   loadMigrationSource,
   type MigrationSource,
@@ -90,6 +91,10 @@ runMcpContract(
             },
           }),
         );
+      const createLimiter = mcpLimit.createInProcessMcpLimiter;
+      const limiterSpy = vitest.vi
+        .spyOn(mcpLimit, 'createInProcessMcpLimiter')
+        .mockImplementationOnce((options) => createLimiter({ ...options, nowMs: () => 0 }));
       const broker = await startNode({
         plugins: [],
         mcp: { enabled: true },
@@ -101,7 +106,10 @@ runMcpContract(
           PB_MASTER_KEY: KEY,
           PB_PUBLIC_URL: ORIGIN,
         },
-      }).finally(() => toolsSpy.mockRestore());
+      }).finally(() => {
+        toolsSpy.mockRestore();
+        limiterSpy.mockRestore();
+      });
       const opened = openBetterSqliteExecutor(path);
       const close = async () => {
         await opened.close();

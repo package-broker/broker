@@ -199,7 +199,10 @@ describe('auth route api slots', () => {
         { title: 'Other', version: '1' },
       );
       expect(other.paths['/_pb/status']?.['get']?.['responses']).toMatchObject({
-        '403': { description: 'Access denied; Reauthentication required' },
+        '403': {
+          description:
+            'Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload',
+        },
       });
       expect(JSON.stringify(other)).not.toContain('Local sign-in');
     });

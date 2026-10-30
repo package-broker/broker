@@ -188,6 +188,21 @@ function proxyStore(bucketName: string, faults: Faults): ByteStore {
   };
 
   return {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     async putVerified(key, body, input) {
       const sourceFailure: { error?: unknown } = {};
       const observed = observeFailure(body, sourceFailure);

@@ -5,7 +5,7 @@ import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor } from '@package-broker/core/authz/fence';
 import type { Statement } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import {
   SUPPORTED_PLUGIN_API,
   type PluginDefinition,
@@ -165,6 +165,18 @@ async function boot(): Promise<{ database: MigratedDatabase; broker: NodeBroker 
     platformServices: {
       jobStore: createJobRepository(executor),
       blob: {
+        async stage() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discard() {
+          throw new Error('not_implemented');
+        },
         head: async () => null,
         get: async () => null,
         put: async () => {
@@ -342,6 +354,9 @@ describe('Node personal-token offboarding wiring', () => {
 
 describe('personal-token job holder', () => {
   const jobs: Jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
     enqueue: async () => ({ id: ulid(), created: true }),
     get: async () => null,
   };

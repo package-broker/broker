@@ -7,7 +7,7 @@ import type { SourceRecord } from '../../db/source.js';
 import { fixedClock } from '../../ids.js';
 import { collectRegistrations } from '../../kernel/registry.js';
 import { registerCoreJob } from '../../runtime/core-jobs.js';
-import type { BlobStore } from '../../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../../platform/blob.js';
 import type { Cache } from '../../platform/cache.js';
 import type { JobStatus } from '../../platform/jobs.js';
 import { createKernel } from '../../kernel/kernel.js';

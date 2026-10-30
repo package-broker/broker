@@ -1,5 +1,5 @@
 import type { OrgContext } from '../db/port.js';
-import type { Jobs } from '../platform/jobs.js';
+import type { CoreJobs as Jobs } from '../platform/jobs.js';
 import type { RequestContext, RouteDefinition } from '../plugin.js';
 import type { BearerMaterial, CredentialMaterial } from './credentials.js';
 import type { WebhookVerifier } from './provider.js';

@@ -1,0 +1,576 @@
+[
+  {
+    "id": "type-1",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-2",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-3",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-4",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-6",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-7",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-S",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "type-Z",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "entry_type"
+  },
+  {
+    "id": "path-outside",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-x-outside",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-g-outside",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-outside",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "path-absolute",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-x-absolute",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-g-absolute",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-absolute",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "path-drive",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-x-drive",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-g-drive",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-drive",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "path-traversal",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "override-x-traversal",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "override-g-traversal",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-traversal",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "path-empty",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "override-x-empty",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "override-g-empty",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-empty",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "path-dot",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "override-x-dot",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "override-g-dot",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-dot",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path_segments"
+  },
+  {
+    "id": "path-backslash",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-x-backslash",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "override-g-backslash",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "override-L-backslash",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "path"
+  },
+  {
+    "id": "octal-mode",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "octal"
+  },
+  {
+    "id": "octal-uid",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "octal"
+  },
+  {
+    "id": "octal-gid",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "octal"
+  },
+  {
+    "id": "octal-mtime",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "octal"
+  },
+  {
+    "id": "octal-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "octal"
+  },
+  {
+    "id": "checksum",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "checksum"
+  },
+  {
+    "id": "magic",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "tar_magic"
+  },
+  {
+    "id": "version",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "tar_version"
+  },
+  {
+    "id": "padding",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "padding"
+  },
+  {
+    "id": "negative-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "size_bounds"
+  },
+  {
+    "id": "unsafe-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "number_range"
+  },
+  {
+    "id": "nul-path",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "nul_suffix"
+  },
+  {
+    "id": "utf8-path",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "utf8"
+  },
+  {
+    "id": "link-name",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "header_linkpath"
+  },
+  {
+    "id": "duplicate",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "duplicate_path"
+  },
+  {
+    "id": "missing-manifest",
+    "code": "manifest_mismatch",
+    "options": {},
+    "reason": "manifest_identity"
+  },
+  {
+    "id": "manifest-identity",
+    "code": "manifest_mismatch",
+    "options": {},
+    "reason": "manifest_identity"
+  },
+  {
+    "id": "manifest-json",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "manifest_json"
+  },
+  {
+    "id": "manifest-array",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "manifest_shape"
+  },
+  {
+    "id": "directory-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "directory_size"
+  },
+  {
+    "id": "one-end-block",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "end_blocks"
+  },
+  {
+    "id": "no-end-block",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "end_blocks"
+  },
+  {
+    "id": "header-after-end",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "after_end"
+  },
+  {
+    "id": "nonzero-trailer",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "truncated"
+  },
+  {
+    "id": "truncated",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "truncated"
+  },
+  {
+    "id": "pax-length",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_length"
+  },
+  {
+    "id": "pax-decimal",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_length"
+  },
+  {
+    "id": "pax-equals",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_record"
+  },
+  {
+    "id": "pax-nul",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_record"
+  },
+  {
+    "id": "pax-sparse",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_sparse"
+  },
+  {
+    "id": "pax-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_size"
+  },
+  {
+    "id": "pax-negative",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_size"
+  },
+  {
+    "id": "pax-fraction",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_size"
+  },
+  {
+    "id": "pax-unsafe",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "size_bounds"
+  },
+  {
+    "id": "pax-link",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "linkpath"
+  },
+  {
+    "id": "gnu-link",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "linkpath"
+  },
+  {
+    "id": "gnu-unterminated",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "gnu_terminator"
+  },
+  {
+    "id": "dangling-extension",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "end_blocks"
+  },
+  {
+    "id": "readme-control",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "readme_control"
+  },
+  {
+    "id": "readme-utf8",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "readme_utf8"
+  },
+  {
+    "id": "entry-cap",
+    "code": "invalid_tarball",
+    "options": {
+      "maxEntries": 1
+    },
+    "reason": "entry_cap"
+  },
+  {
+    "id": "unpacked-cap",
+    "code": "invalid_tarball",
+    "options": {
+      "maxUnpackedBytes": 1024
+    },
+    "reason": "unpacked_cap"
+  },
+  {
+    "id": "path-cap",
+    "code": "invalid_tarball",
+    "options": {
+      "maxPathBytes": 4
+    },
+    "reason": "path"
+  },
+  {
+    "id": "manifest-cap",
+    "code": "invalid_tarball",
+    "options": {
+      "maxManifestBytes": 4
+    },
+    "reason": "manifest_cap"
+  },
+  {
+    "id": "extension-cap",
+    "code": "invalid_tarball",
+    "options": {
+      "maxExtensionBytes": 4
+    },
+    "reason": "extension_cap"
+  },
+  {
+    "id": "nul-suffix",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "nul_suffix"
+  },
+  {
+    "id": "number-marker",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "number_marker"
+  },
+  {
+    "id": "pax-length-grammar",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_length"
+  },
+  {
+    "id": "pax-nul-unknown",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_record"
+  },
+  {
+    "id": "unterminated-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "octal"
+  },
+  {
+    "id": "global-path-disguise",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "global-alias-duplicate",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "global_override"
+  },
+  {
+    "id": "pax-newline",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_record"
+  },
+  {
+    "id": "pax-newline-unknown",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "pax_record"
+  },
+  {
+    "id": "empty-extension",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "header_path"
+  },
+  {
+    "id": "extension-link",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "header_linkpath"
+  },
+  {
+    "id": "gnu-version",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "tar_version"
+  },
+  {
+    "id": "blank-size",
+    "code": "invalid_tarball",
+    "options": {},
+    "reason": "blank_size"
+  }
+]

@@ -1,4 +1,7 @@
-import type { $ZodType } from 'zod/v4/core';
+import { toJSONSchema, type $ZodType } from 'zod/v4/core';
+import { PUBLISH_SCHEMAS } from './routes/publishes-schemas.js';
+import { PACKAGE_ACCESS_REQUEST_SCHEMAS } from './routes/package-access-requests-schemas.js';
+import { NPM_IDENTITY_SCHEMAS } from './routes/npm-identity-schemas.js';
 import { SESSION_COOKIE } from '../auth/cookies.js';
 import { PERMISSIONS } from '../authz/permissions.js';
 import { toJsonSchema, type JsonObject, type JsonValue } from './json-schema.js';
@@ -228,7 +231,23 @@ export function generateOpenApi(
     info: { title: info.title, version: info.version },
     paths,
     components: {
-      schemas: { ErrorEnvelope: ERROR_ENVELOPE },
+      schemas: {
+        ErrorEnvelope: ERROR_ENVELOPE,
+        ...Object.fromEntries(
+          Object.entries({
+            ...PUBLISH_SCHEMAS,
+            ...PACKAGE_ACCESS_REQUEST_SCHEMAS,
+            ...NPM_IDENTITY_SCHEMAS,
+          }).map(([name, schema]) => {
+            const json = toJSONSchema(schema, {
+              target: 'draft-2020-12',
+              io: name.endsWith('Body') ? 'input' : 'output',
+            });
+            delete json.$schema;
+            return [name, json];
+          }),
+        ),
+      },
       securitySchemes: {
         session: {
           type: 'apiKey',

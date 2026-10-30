@@ -244,7 +244,12 @@ class Model {
   }
 
   readonly writer = {
+    async publishVersion() {
+      throw new Error('not_implemented');
+    },
+
     statementBudget: {
+      publishVersion: 40,
       syncPackage: 500,
       attachDist: 4,
       openListing: 3,

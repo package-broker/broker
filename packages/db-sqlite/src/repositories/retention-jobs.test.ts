@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { blobStorageKey, type ByteStore, type Sha256 } from '@package-broker/core/platform/blob';
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
-import type { JobContext, Jobs } from '@package-broker/core/platform/jobs';
+import type { JobContext, CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { fixedClock, ulid } from '@package-broker/core/ids';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';

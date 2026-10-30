@@ -1,4 +1,4 @@
-import type { OrgContext } from '../db/port.js';
+import type { OrgContext, Statement } from '../db/port.js';
 import type { PluginPorts } from '../plugin.js';
 import type { JobFences } from './job-fences.js';
 import type { Observability } from './observability.js';
@@ -134,6 +134,15 @@ export interface EnqueueInput {
   readonly idempotencyKey: string;
   readonly resourceKey?: string;
   readonly runAt?: string;
+}
+
+export interface CoreJobs extends Jobs {
+  enqueueStatements(
+    ctx: OrgContext,
+    type: string,
+    payload: unknown,
+    input: EnqueueInput,
+  ): Promise<{ readonly id: string; readonly statements: readonly Statement[] }>;
 }
 
 export interface Jobs {

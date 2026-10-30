@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.2...runtime-cloudflare-v2.0.0-rc.3) (2026-10-28)
+
+
+### Features
+
+* **ui:** load admin pages on demand ([#960](https://github.com/package-broker/broker/issues/960)) ([cf0d187](https://github.com/package-broker/broker/commit/cf0d1877f43fc5661f3c143173a34748e726dcd6))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.1...runtime-cloudflare-v2.0.0-rc.2) (2026-10-28)
 
 

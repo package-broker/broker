@@ -177,6 +177,18 @@ async function boot(options: { jobs?: boolean; mode?: 'real' | 'missing' | 'thro
       : {
           platformServices: {
             blob: {
+              async stage() {
+                throw new Error('not_implemented');
+              },
+              async openStaged() {
+                throw new Error('not_implemented');
+              },
+              async promote() {
+                throw new Error('not_implemented');
+              },
+              async discard() {
+                throw new Error('not_implemented');
+              },
               put: async () => {
                 throw new Error('unexpected blob write');
               },

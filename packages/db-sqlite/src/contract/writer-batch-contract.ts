@@ -412,8 +412,8 @@ export function describeWriterBatchContract(open: () => Promise<Fixture>): void 
             ),
           ).toEqual([{ n: items.length }]);
           if (typeof mix !== 'number') {
-            expect(sizes).toEqual([38, 1]);
-            expect(counter.batches.slice(0, 2)).toEqual([195, 15]);
+            expect(sizes).toEqual([32, 7]);
+            expect(counter.batches.slice(0, 2)).toEqual([197, 51]);
           }
         } finally {
           await fixture.close();
@@ -511,12 +511,12 @@ export function describeWriterBatchContract(open: () => Promise<Fixture>): void 
           );
           if (interrupted) {
             await expect(run()).rejects.toThrow('interrupted after commit');
-            expect(await store.appliedRefs(ctx, runId)).toHaveLength(39);
+            expect(await store.appliedRefs(ctx, runId)).toHaveLength(32);
           }
           expect(await run()).toEqual({ status: 'applied' });
-          expect(sizes).toEqual([39, 11]);
-          expect(counter.batches).toContain(200);
-          expect(counter.batches).toContain(60);
+          expect(sizes).toEqual([32, 18]);
+          expect(counter.batches).toContain(197);
+          expect(counter.batches).toContain(113);
           expect(await store.appliedRefs(ctx, runId)).toHaveLength(50);
           expect(
             await counter.executor.all(

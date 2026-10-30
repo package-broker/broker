@@ -10,13 +10,18 @@ import {
   revokeLatch,
   runAccessContract,
   type OpenedAccessDatabase,
+  type DoubleRevokeReadSource,
 } from '@package-broker/db-sqlite/contract/access-contract';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import {
   loadMigrationSource,
   type MigrationSource,
 } from '@package-broker/db-sqlite/migrations/source';
-import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
+import {
+  createD1Executor,
+  type D1DatabaseLike,
+  type D1PreparedStatementLike,
+} from './d1-executor.js';
 
 const bindings = Array.from({ length: 64 }, (_, index) => `ACDB${index}`);
 
@@ -51,14 +56,52 @@ async function loadSources(): Promise<MigrationSource[]> {
   );
 }
 
+function diagnosticSource(db: D1DatabaseLike, label: string): DoubleRevokeReadSource {
+  let summary: ReturnType<DoubleRevokeReadSource['summary']> = { fields: [] };
+  const originals = new WeakMap<D1PreparedStatementLike, D1PreparedStatementLike>();
+  const capture = (prepared: D1PreparedStatementLike): D1PreparedStatementLike => {
+    const wrapped: D1PreparedStatementLike = {
+      bind: (...params) => capture(prepared.bind(...params)),
+      async all() {
+        const result = await prepared.all();
+        const meta = result.meta as { rows_read?: unknown } | undefined;
+        summary = {
+          fields: Object.keys(result),
+          ...(typeof meta?.rows_read === 'number' ? { rows_read: meta.rows_read } : {}),
+        };
+        return result;
+      },
+    };
+    originals.set(wrapped, prepared);
+    return wrapped;
+  };
+  const executor = createD1Executor({
+    prepare: (sql) => {
+      const prepared = db.prepare(sql);
+      return sql === "SELECT revoked_at, last_op_id FROM token WHERE id = 'victim'"
+        ? capture(prepared)
+        : prepared;
+    },
+    batch: (statements) =>
+      db.batch(statements.map((statement) => originals.get(statement) ?? statement)),
+  });
+  return { executor, label, summary: () => summary };
+}
+
 async function openMigrated(): Promise<OpenedAccessDatabase> {
   const binding = bindings[next];
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
   const db = (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
-  const executor = createD1Executor(db);
+  const primary = diagnosticSource(db, `primary seed/revoke/read binding ${binding}`);
+  const executor = primary.executor;
   await migrate(executor, await loadSources(), { holder: 'access-contract' });
-  return { executor, second: async () => createD1Executor(db), close: async () => {} };
+  return {
+    executor,
+    second: async () => createD1Executor(db),
+    doubleRevokeRead: { primary },
+    close: async () => {},
+  };
 }
 
 describeAccessContract('d1', openMigrated);

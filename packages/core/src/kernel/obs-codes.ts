@@ -27,6 +27,7 @@ export const AUDIT_EVENTS = frozenSet([
   'audit.failure_event_failed',
   'audit.failure_events_cap',
   'audit.sealed',
+  'audit.delivery_partial_success',
   'audit.chain_integrity',
   'audit.seal_repaired',
   'audit.seal.contended',
@@ -63,6 +64,7 @@ const REASON_CODES = [
   'health.not_ready',
   'request.aborted',
   'http.handler_status',
+  'audit.partial_success',
 ] as const;
 
 export type KernelReasonCode = (typeof REASON_CODES)[number];

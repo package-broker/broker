@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fenceKind } from '../authz/fence.js';
-import { jobFences, jobLeaseOf } from './job-fences.js';
+import { auditExportFence, jobFences, jobLeaseOf } from './job-fences.js';
 
 const guard = { id: '01J0000000000000000000JOB1', owner: '01J0000000000000000000OWN1', fence: 3 };
 
@@ -82,4 +82,17 @@ describe('jobLeaseOf', () => {
     const wrapped = { ...context, observability: 'b' };
     expect(jobLeaseOf(wrapped)).toEqual(guard);
   });
+});
+
+it('issues an export fence only from a captured job lease', () => {
+  const mutable = { ...guard };
+  const context = { fences: jobFences(mutable) };
+  mutable.fence = 999;
+  const fence = auditExportFence(context)!;
+  expect(fenceKind(fence)).toBe('system');
+  expect(fence.writer).toBe('audit-export');
+  expect(fence.job).toEqual(guard);
+  expect(fence.expected).toEqual({});
+  expect(auditExportFence({})).toBeNull();
+  expect(auditExportFence({ fences: { ...context.fences } })).toBeNull();
 });

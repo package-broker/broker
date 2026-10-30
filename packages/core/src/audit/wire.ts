@@ -10,6 +10,8 @@ import type { AuditRow } from './chain.js';
 import type { AuditJournalItemV1, AuditMarkerV1, AuditRecordV1 } from './plugin-api.js';
 import { redactValue } from './redact.js';
 
+export const AUDIT_SANITIZER_VERSION = 1;
+
 export interface AuditWireIdentity {
   readonly chainId: string;
   readonly epoch: number;

@@ -37,6 +37,7 @@ const SYSTEM_WRITER_NAMES = [
   'ingest-finalize',
   'purge',
   'audit-seal',
+  'audit-export',
   'audit-verify',
   'verifier',
 ] as const;

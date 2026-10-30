@@ -1450,3 +1450,183 @@ describe('completeIdentityLogin: login audit', () => {
     expect(second.audit.target.id).toBe(second.session.id);
   });
 });
+
+describe('identity login failure capture', () => {
+  it.each([
+    ['email_missing', 'provider_error', null, identity({ email: '' }), lookup()],
+    ['email_unverified', 'blocked', null, identity({ emailVerified: false }), lookup()],
+    ['domain_not_verified', 'blocked', null, identity({ email: 'ada@other.test' }), lookup()],
+    ['not_invited', 'unknown_account', null, identity(), lookup()],
+    ['invalid_identity', 'provider_error', null, identity({ subject: '' }), lookup()],
+    ['too_many_groups', 'blocked', null, identity({ groups: Array(5001).fill('staff') }), lookup()],
+    [
+      'user_suspended',
+      'suspended',
+      KNOWN_USER,
+      identity(),
+      knownLookup({ identityUser: { id: KNOWN_USER, email: EMAIL, status: 'suspended' } }),
+    ],
+    [
+      'provider_rebound',
+      'state_mismatch',
+      KNOWN_USER,
+      identity(),
+      knownLookup({ boundAnchor: 'oidc:https://other.test' }),
+    ],
+    [
+      'email_changed',
+      'state_mismatch',
+      KNOWN_USER,
+      identity(),
+      knownLookup({
+        identityUser: { id: KNOWN_USER, email: 'other@example.test', status: 'active' },
+      }),
+    ],
+    [
+      'already_linked',
+      'blocked',
+      null,
+      identity(),
+      lookup({ userByEmail: { id: KNOWN_USER, status: 'active', linkedAtProvider: true } }),
+    ],
+    [
+      'link_requires_admin',
+      'blocked',
+      null,
+      identity(),
+      lookup({ userByEmail: { id: KNOWN_USER, status: 'active', linkedAtProvider: false } }),
+    ],
+  ] as const)(
+    'records %s without submitted identifiers',
+    async (refusal, reason, userId, evidence, found) => {
+      const h = harness({ lookups: [found] });
+      const recordFailure = vi.fn();
+      const result = await completeIdentityLogin(
+        { ...h.deps, recordFailure },
+        ctx,
+        provider(),
+        evidence,
+        meta,
+      );
+      expect(result).toEqual({ ok: false, reason: refusal });
+      expect(recordFailure).toHaveBeenCalledExactlyOnceWith(ctx, {
+        action: 'session.login_failed',
+        method: 'oidc',
+        reason,
+        userId,
+        context: {
+          sourceIp: meta.ip,
+        },
+      });
+      expect(JSON.stringify(recordFailure.mock.calls)).not.toContain(EMAIL);
+      expect(JSON.stringify(recordFailure.mock.calls)).not.toContain('sub-1');
+    },
+  );
+
+  it('uses the snapshotted method for an early identity refusal', async () => {
+    const h = harness();
+    const recordFailure = vi.fn();
+    expect(
+      await completeIdentityLogin(
+        { ...h.deps, recordFailure },
+        ctx,
+        provider({ kind: 'cloudflare-access' }),
+        identity({ email: '' }),
+        meta,
+      ),
+    ).toEqual({ ok: false, reason: 'email_missing' });
+    expect(recordFailure).toHaveBeenCalledWith(
+      ctx,
+      expect.objectContaining({ method: 'cloudflare_access' }),
+    );
+  });
+
+  it('reads the login method from the provider snapshot once', async () => {
+    const kindReads = vi.fn();
+    const input = new Proxy(provider({ kind: 'cloudflare-access' }), {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === 'kind') kindReads();
+        return Object.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const h = harness({ lookups: [knownLookup()], resolve: () => ({ deny: true }) });
+    const recordFailure = vi.fn();
+    expect(
+      await completeIdentityLogin({ ...h.deps, recordFailure }, ctx, input, identity(), meta),
+    ).toEqual({ ok: false, reason: 'hook_denied' });
+    expect(kindReads).toHaveBeenCalledOnce();
+    expect(recordFailure).toHaveBeenCalledWith(
+      ctx,
+      expect.objectContaining({ method: 'cloudflare_access' }),
+    );
+  });
+
+  it.each([false, true])(
+    'records a hook denial only with an existing account (new user: %s)',
+    async (newUser) => {
+      const h = harness({
+        lookups: [newUser ? lookup({ invited: true }) : knownLookup()],
+        resolve: () => ({ deny: true, reason: HOOK_REASON_TEXT }),
+      });
+      const recordFailure = vi.fn();
+      expect(
+        await completeIdentityLogin(
+          { ...h.deps, recordFailure },
+          ctx,
+          provider({ kind: 'cloudflare-access' }),
+          identity(),
+          meta,
+        ),
+      ).toEqual({ ok: false, reason: 'hook_denied' });
+      expect(recordFailure).toHaveBeenCalledExactlyOnceWith(
+        ctx,
+        expect.objectContaining({
+          method: 'cloudflare_access',
+          reason: 'blocked',
+          userId: newUser ? null : KNOWN_USER,
+        }),
+      );
+      expect(JSON.stringify(recordFailure.mock.calls)).not.toContain(HOOK_REASON_TEXT);
+    },
+  );
+
+  it('records the final race refusal once using the last resolved account', async () => {
+    const h = harness({
+      lookups: [knownLookup(), lookup({ invited: true })],
+      commits: ['refused'],
+    });
+    const recordFailure = vi.fn();
+    expect(
+      await completeIdentityLogin({ ...h.deps, recordFailure }, ctx, provider(), identity(), meta),
+    ).toEqual({ ok: false, reason: 'conflict' });
+    expect(recordFailure).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      expect.objectContaining({ reason: 'state_mismatch', userId: null }),
+    );
+  });
+
+  it('records thrown provider failures without changing the error or exposing its text', async () => {
+    const h = harness();
+    const error = new Error(HOOK_REASON_TEXT);
+    h.lookupForLogin.mockRejectedValue(error);
+    const recordFailure = vi.fn();
+    await expect(
+      completeIdentityLogin({ ...h.deps, recordFailure }, ctx, provider(), identity(), meta),
+    ).rejects.toBe(error);
+    expect(recordFailure).toHaveBeenCalledExactlyOnceWith(
+      ctx,
+      expect.objectContaining({ reason: 'provider_error', userId: null }),
+    );
+    expect(JSON.stringify(recordFailure.mock.calls)).not.toContain(HOOK_REASON_TEXT);
+  });
+
+  it('does not record a successful login', async () => {
+    const h = harness({ lookups: [knownLookup()] });
+    const recordFailure = vi.fn();
+    expect(
+      (await completeIdentityLogin({ ...h.deps, recordFailure }, ctx, provider(), identity(), meta))
+        .ok,
+    ).toBe(true);
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+});

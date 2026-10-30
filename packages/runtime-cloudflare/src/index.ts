@@ -1,3 +1,5 @@
+import { createFailureEvents } from '@package-broker/core/audit/failure-events';
+import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
@@ -423,6 +425,7 @@ async function buildAuth(
   dispatch: (run: () => Promise<void>) => void,
   collectRegistration: () => Registration,
   tokens: TokenWiring,
+  failureEvents: NonNullable<Parameters<typeof createAccessServices>[0]['failureEvents']>,
 ): Promise<{
   assembly: AccessAssembly;
   auth: AuthModule;
@@ -457,6 +460,7 @@ async function buildAuth(
     ids: { ulid },
     log,
     dispatch,
+    failureEvents,
     clientIp: clientIpOf,
     registration,
     tokens,
@@ -1298,6 +1302,7 @@ export function createWorker(
       : options.cacheStorage;
   const applications = new Map<string, { pending: Promise<Application>; failedUntil?: number }>();
   const scopes = createRequestScopes();
+  const failureRecorder = createFailureEvents();
   const identities = new WeakMap<object, number>();
   let nextIdentity = 0;
 
@@ -1769,6 +1774,25 @@ export function createWorker(
                     ]),
               ],
       });
+    const failureRouteTemplates = new Set<string>();
+    const fallbackObservability = createObservability(
+      {
+        emit: (record) => {
+          if (record.kind === 'log') log({ ...record.record });
+        },
+      },
+      {
+        deploymentId: bound?.deploymentId ?? 'unconfigured',
+        runtime: 'cloudflare',
+        requestId: null,
+        plugin: 'core',
+      },
+      {
+        events: AUDIT_EVENTS,
+        reasonCodes: KERNEL_REASON_CODES,
+        routeTemplates: failureRouteTemplates,
+      },
+    );
     const built =
       db === undefined
         ? undefined
@@ -1780,6 +1804,18 @@ export function createWorker(
             dispatch,
             collectRegistration,
             tokenWiring(lifetime, patJobs, config !== null),
+            {
+              recorder: failureRecorder,
+              binding: {
+                deploymentId: bound?.deploymentId ?? 'unconfigured',
+                staging: createAuditFailureRepository(executor as SqlExecutor),
+                routeTemplates: failureRouteTemplates,
+                now: () => systemClock.now(),
+                observability: delegatingObservability(
+                  (): Observability => services?.observability ?? fallbackObservability,
+                ),
+              },
+            },
           );
     const registration = built?.registration ?? collectRegistration();
     const auth = built?.auth;
@@ -1977,6 +2013,7 @@ export function createWorker(
               },
             }),
       });
+      for (const template of kernel.routeTemplates) failureRouteTemplates.add(template);
       if (services === undefined)
         return {
           kernel,

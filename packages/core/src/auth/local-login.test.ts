@@ -971,3 +971,89 @@ describe('local authentication audit', () => {
     },
   );
 });
+
+describe('local failure capture', () => {
+  it.each([
+    ['unknown account', { snapshot: null }, 'unknown_account', null],
+    ['suspended account', { snapshot: { userActive: false } }, 'suspended', USER_ID],
+    ['ineligible account', { snapshot: { adminEligible: false } }, 'blocked', USER_ID],
+    ['locked account', { reservation: { reserved: false, reason: 'locked' } }, 'blocked', USER_ID],
+    [
+      'lost reservation',
+      { reservation: { reserved: false, reason: 'missing' } },
+      'state_mismatch',
+      USER_ID,
+    ],
+    ['wrong password', {}, 'bad_credentials', USER_ID],
+  ] as const)(
+    'records %s after the same credential work',
+    async (_label, options, reason, userId) => {
+      const h = await build(options);
+      const recordFailure = vi.fn();
+      const service = createLocalLoginService({ ...h.deps, recordFailure });
+      const input = { email: EMAIL, password: 'wrong password', code: h.code };
+      const baseline = await counted(null, () => h.service.login(ORG, input, META));
+      const captured = await counted(null, () => service.login(ORG, input, META));
+      expect(captured).toEqual(baseline);
+      expect(captured.value).toEqual({ ok: false });
+      expect(recordFailure).toHaveBeenCalledExactlyOnceWith(
+        ORG,
+        expect.objectContaining({ method: 'local', reason, userId }),
+      );
+      const text = JSON.stringify(recordFailure.mock.calls);
+      for (const secret of [EMAIL, input.password, h.code]) expect(text).not.toContain(secret);
+    },
+  );
+
+  it('records a lost success write as a state mismatch', async () => {
+    const h = await build({ succeed: false });
+    const recordFailure = vi.fn();
+    const service = createLocalLoginService({ ...h.deps, recordFailure });
+    expect(
+      await service.login(ORG, { email: EMAIL, password: PASSWORD, code: h.code }, META),
+    ).toEqual({ ok: false });
+    expect(recordFailure).toHaveBeenCalledExactlyOnceWith(
+      ORG,
+      expect.objectContaining({ reason: 'state_mismatch', userId: USER_ID }),
+    );
+  });
+
+  it('records malformed inputs and invalid emails without identifying an account', async () => {
+    const h = await build();
+    const recordFailure = vi.fn();
+    const service = createLocalLoginService({ ...h.deps, recordFailure });
+    expect(await service.login(ORG, null as never, META)).toEqual({ ok: false });
+    expect(recordFailure).toHaveBeenLastCalledWith(
+      ORG,
+      expect.objectContaining({ reason: 'bad_credentials', userId: null }),
+    );
+    expect(
+      await service.login(ORG, { email: 'invalid', password: PASSWORD, code: h.code }, META),
+    ).toEqual({ ok: false });
+    expect(recordFailure).toHaveBeenLastCalledWith(
+      ORG,
+      expect.objectContaining({ reason: 'unknown_account', userId: null }),
+    );
+  });
+
+  it('keeps the resolved session actor for local reauthentication failures', async () => {
+    const h = await build();
+    const recordFailure = vi.fn();
+    const service = createLocalLoginService({ ...h.deps, recordFailure });
+    const input = { password: 'wrong password', code: h.code };
+    expect(await service.reauth(ORG, activeSession(), input, META)).toEqual({ ok: false });
+    expect(recordFailure).toHaveBeenLastCalledWith(
+      ORG,
+      expect.objectContaining({ method: 'reauth', reason: 'bad_credentials', userId: USER_ID }),
+    );
+    h.findActiveById.mockResolvedValue(null);
+    expect(await service.reauth(ORG, activeSession(), input, META)).toEqual({
+      ok: false,
+      reason: 'session_inactive',
+    });
+    expect(recordFailure).toHaveBeenLastCalledWith(
+      ORG,
+      expect.objectContaining({ method: 'reauth', reason: 'expired', userId: USER_ID }),
+    );
+  });
+});

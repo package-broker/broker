@@ -74,10 +74,7 @@ function login(userId: string | null = null): FailureAttempt {
     method: 'local',
     reason: 'bad_credentials',
     context: {
-      opId: 'submitted@example.invalid',
-      requestId: 'Bearer hidden',
       sourceIp: '203.0.113.7',
-      tokenSelector: 'submitted-secret',
     },
   };
 }
@@ -519,4 +516,50 @@ describe('failure action validation', () => {
       auditEvent({ ...event, context: { ...event.context, tokenSelector: 'abcdefghijkl' } }).ok,
     ).toBe(false);
   });
+});
+
+it('binds staging, deployment, clock and observability to each queued application call', async () => {
+  const recorder = createFailureEvents();
+  const firstStage = vi.fn().mockResolvedValue(undefined);
+  const secondStage = vi.fn().mockRejectedValue(new Error('staging unavailable'));
+  const first = {
+    staging: { stage: firstStage },
+    observability: { log: vi.fn(), counter: vi.fn(), histogram: vi.fn() },
+    deploymentId: 'first',
+    routeTemplates: new Set<string>(),
+    now: () => at,
+  };
+  const second = {
+    staging: { stage: secondStage },
+    observability: { log: vi.fn(), counter: vi.fn(), histogram: vi.fn() },
+    deploymentId: 'second',
+    routeTemplates: new Set<string>(),
+    now: () => new Date(at.getTime() + 60_000),
+  };
+  await recorder.record(ctx, login(), first);
+  await recorder.record(ctx, login(), second);
+  await recorder.drain(ctx);
+  expect(firstStage).toHaveBeenCalledOnce();
+  expect(secondStage).toHaveBeenCalledOnce();
+  expect(firstStage.mock.calls[0]![1].occurredAt).toBe(at.toISOString());
+  expect(secondStage.mock.calls[0]![1].occurredAt).toBe(second.now().toISOString());
+  expect(first.observability.log).not.toHaveBeenCalled();
+  expect(second.observability.log).toHaveBeenCalledWith({
+    level: 'error',
+    event: 'audit.failure_event_failed',
+  });
+  // Same clock and actor still start a new counter for a different deployment.
+  const third = {
+    ...second,
+    now: first.now,
+    staging: { stage: vi.fn().mockResolvedValue(undefined) },
+  };
+  await recorder.record(ctx, login(), third);
+  await recorder.drain(ctx);
+  expect(third.staging.stage).toHaveBeenCalledOnce();
+  await recorder.record(ctx, login(), third);
+  await recorder.drain(ctx);
+  expect(third.staging.stage).toHaveBeenCalledOnce();
+  expect(second.observability.counter).toHaveBeenCalledWith('pb.audit.failure_events_suppressed');
+  expect(first.observability.counter).not.toHaveBeenCalled();
 });

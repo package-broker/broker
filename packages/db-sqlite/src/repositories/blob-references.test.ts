@@ -667,3 +667,32 @@ describe('blobOrphanCondition', () => {
     }
   });
 });
+
+it('only collects old unreferenced non-refetchable npm publish objects', async () => {
+  await blob(
+    a,
+    1,
+    "refetchable = 0, storage_key = 'npm-publish/sha256/61/00/digest', published_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 days')",
+  );
+  await blob(
+    a,
+    2,
+    "refetchable = 0, storage_key = 'imports/manifest', published_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 days')",
+  );
+  await blob(
+    a,
+    3,
+    "refetchable = 0, storage_key = 'npm-publish/fresh', published_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-6 days')",
+  );
+  await blob(
+    b,
+    4,
+    "refetchable = 0, storage_key = 'npm-publish/other-org', published_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 days')",
+  );
+  expect(await shas()).toEqual([digest(1)]);
+  expect(await reader.stillEligible(b, digest(1))).toBe(false);
+  await source(a, 'hosted', 'hosted');
+  await pkg(a, 'pkg', 'hosted');
+  await version(a, 'pkg', blobId(1));
+  expect(await shas()).toEqual([]);
+});

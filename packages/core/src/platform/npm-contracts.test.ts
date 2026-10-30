@@ -7,6 +7,7 @@ import type {
 } from '../db/catalogue.js';
 import { fixedClock } from '../ids.js';
 import {
+  BlobValidationError,
   createBlobStore,
   createBlobUploadAdmission,
   type BlobMetadataPort,
@@ -63,7 +64,7 @@ describe('npm platform contracts', () => {
   });
 
   it.each(['stage', 'openStaged', 'promote', 'discard'] as const)(
-    'refuses unimplemented blob %s without consuming bytes',
+    'refuses invalid blob %s before storage access',
     async (method) => {
       const blob = createBlobStore({} as ByteStore, {} as BlobMetadataPort, {
         admission: createBlobUploadAdmission(),
@@ -71,12 +72,12 @@ describe('npm platform contracts', () => {
       const staged = {} as StagedBlob;
       const calls = {
         stage: () =>
-          blob.stage(ctx, new ReadableStream(), { maxBytes: 1, mediaType: 'application/gzip' }),
+          blob.stage(ctx, new ReadableStream(), { maxBytes: -1, mediaType: 'application/gzip' }),
         openStaged: () => blob.openStaged(ctx, staged),
         promote: () => blob.promote(ctx, staged, { refetchable: false }),
         discard: () => blob.discard(ctx, staged),
       };
-      await expect(calls[method]()).rejects.toThrow('not_implemented');
+      await expect(calls[method]()).rejects.toBeInstanceOf(BlobValidationError);
     },
   );
 

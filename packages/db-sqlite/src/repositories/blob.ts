@@ -6,6 +6,7 @@ import {
   BlobConflictError,
   BlobValidationError,
   blobStorageKey,
+  stagedStorageKey,
   parseSha256,
   type BlobInfo,
   type BlobMetadataPort,
@@ -193,7 +194,10 @@ export function createBlobRepository(
           org_id: ctx.orgId,
           sha256,
           size_bytes: input.size,
-          storage_key: blobStorageKey(ctx.orgId, sha256),
+          storage_key:
+            input.npmPublishHandle === undefined
+              ? blobStorageKey(ctx.orgId, sha256)
+              : stagedStorageKey(input.npmPublishHandle, sha256),
           media_type: input.mediaType,
           refetchable: input.refetchable ? 1 : 0,
           purge_generation: input.generation,
@@ -248,18 +252,25 @@ export function createBlobRepository(
 
     async find(ctx, key) {
       const sha256 = parseSha256(key);
-      const rows = await executor.all<InfoRow>(
+      const rows = await executor.all<InfoRow & { storage_key: string }>(
         statement(
           db
             .selectFrom('blob')
-            .select(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation'])
+            .select([
+              'sha256',
+              'size_bytes',
+              'media_type',
+              'purge_after',
+              'purge_generation',
+              'storage_key',
+            ])
             .where('org_id', '=', ctx.orgId)
             .where('sha256', '=', sha256)
             .where('deleted_at', 'is', null)
             .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`),
         ),
       );
-      return rows[0] === undefined ? null : info(rows[0]);
+      return rows[0] === undefined ? null : { ...info(rows[0]), storageKey: rows[0].storage_key };
     },
 
     async narrowRefetchable(ctx, input) {
@@ -293,11 +304,18 @@ export function createBlobRepository(
 
     async inspect(ctx, key) {
       const sha256 = parseSha256(key);
-      const rows = await executor.all<InfoRow & { purging: number }>(
+      const rows = await executor.all<InfoRow & { purging: number; storage_key: string }>(
         statement(
           db
             .selectFrom('blob')
-            .select(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation'])
+            .select([
+              'sha256',
+              'size_bytes',
+              'media_type',
+              'purge_after',
+              'purge_generation',
+              'storage_key',
+            ])
             .select(leaseLive('purge_lease_until').as('purging'))
             .where('org_id', '=', ctx.orgId)
             .where('sha256', '=', sha256)
@@ -305,7 +323,9 @@ export function createBlobRepository(
         ),
       );
       const row = rows[0];
-      return row === undefined ? null : { info: info(row), purging: row.purging === 1 };
+      return row === undefined
+        ? null
+        : { info: info(row), storageKey: row.storage_key, purging: row.purging === 1 };
     },
 
     async softDelete(ctx, key, input) {

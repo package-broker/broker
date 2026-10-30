@@ -4,6 +4,7 @@ import {
   blobStorageKey,
   parseSha256,
   type BlobLifecycle,
+  type BlobMetadataPort,
   type ByteStore,
   type PurgeGeneration,
   type Sha256,
@@ -20,6 +21,7 @@ const DUE_PAGE_MAX = 100;
 const MAX_RETENTION_DAYS = 36_500;
 
 export interface BlobLifecycleMetadataPort {
+  inspect: BlobMetadataPort['inspect'];
   softDelete(
     ctx: OrgContext,
     key: Sha256,
@@ -100,18 +102,32 @@ export function createBlobLifecycle({
   const attemptRemove = async (
     ctx: OrgContext,
     key: Sha256,
-  ): Promise<'removed' | 'timeout' | 'error'> => {
+    generation: PurgeGeneration,
+  ): Promise<'removed' | 'timeout' | 'error' | 'stale'> => {
     const storageKey = blobStorageKey(ctx.orgId, key);
     const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let outcome: 'removed' | 'timeout' | 'error';
+    let outcome: 'removed' | 'timeout' | 'error' | 'stale';
     try {
       const timeout = new Promise<'timeout'>((resolve) => {
         timer = setTimeout(() => resolve('timeout'), deleteTimeoutMs);
       });
       // Promise.race also handles a removal rejection arriving after the timeout.
       outcome = await Promise.race([
-        store.remove(storageKey).then(() => 'removed' as const),
+        (async () => {
+          const row = await metadata.inspect(ctx, key);
+          const npmKey =
+            row?.storageKey?.startsWith('npm-publish/') === true
+              ? row.storageKey
+              : `npm-publish/${storageKey}`;
+          for (const physicalKey of [npmKey, storageKey]) {
+            if (performance.now() - startedAt >= deleteTimeoutMs) return 'timeout' as const;
+            if (!(await recheck(ctx, key, generation))) return 'stale' as const;
+            if (performance.now() - startedAt >= deleteTimeoutMs) return 'timeout' as const;
+            await store.remove(physicalKey);
+          }
+          return 'removed' as const;
+        })(),
         timeout,
       ]);
     } catch {
@@ -141,7 +157,7 @@ export function createBlobLifecycle({
         );
         return 'queued';
       }
-      const removal = await attemptRemove(ctx, key);
+      const removal = await attemptRemove(ctx, key, generation);
       if (removal !== 'removed') return removal;
       return (await metadata.markDeleted(ctx, key, generation)) ? 'removed' : 'stale';
     },
@@ -211,7 +227,7 @@ export function createBlobLifecycle({
       parseSha256(key);
       validateGeneration(generation);
       if (!(await recheck(ctx, key, generation))) return false;
-      return (await attemptRemove(ctx, key)) === 'removed';
+      return (await attemptRemove(ctx, key, generation)) === 'removed';
     },
   };
 }

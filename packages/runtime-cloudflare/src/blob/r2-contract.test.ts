@@ -19,6 +19,7 @@ import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycl
 import { noopObservability } from '@package-broker/core/platform/observability';
 import {
   describeBlobContract,
+  describeBlobStagingContract,
   describeBlobLifecycleContract,
   describeBlobReserveContract,
   executorExpiringLeaseAfterFirstStatement,
@@ -84,6 +85,11 @@ export default {
           },
         });
       }
+      if (url.pathname === '/stage') return Response.json(await store.putStaged(key, request.body, Number(request.headers.get('x-cap')), request.headers.get('x-media-type')));
+      if (url.pathname === '/open-staged') return new Response(await store.openStaged(key));
+      if (url.pathname === '/promote') { await store.promote(key, request.headers.get('x-sha256'), Number(request.headers.get('x-size')), request.headers.get('x-media-type')); return Response.json(null); }
+      if (url.pathname === '/discard-staged') { await store.discardStaged(key); return Response.json(null); }
+      if (url.pathname === '/list-staged') return Response.json(await store.listStaged(key));
       if (url.pathname === '/head') return Response.json(await store.head(key));
       if (url.pathname === '/remove') {
         await store.remove(key);
@@ -188,20 +194,34 @@ function proxyStore(bucketName: string, faults: Faults): ByteStore {
   };
 
   return {
-    async putStaged() {
-      throw new Error('not_implemented');
+    async putStaged(handle, body, maxBytes, mediaType) {
+      const response = await call('stage', handle, {
+        headers: headers({ 'x-cap': String(maxBytes), 'x-media-type': mediaType }),
+        body,
+        duplex: 'half',
+      });
+      if (!response.ok) throw await failure(response);
+      return (await response.json()) as Awaited<ReturnType<ByteStore['putStaged']>>;
     },
-    async openStaged() {
-      throw new Error('not_implemented');
+    async openStaged(handle) {
+      const response = await call('open-staged', handle, { headers: headers() });
+      if (!response.ok || response.body === null) throw await failure(response);
+      return response.body;
     },
-    async promote() {
-      throw new Error('not_implemented');
+    async promote(handle, sha256, size, mediaType) {
+      const response = await call('promote', handle, {
+        headers: headers({ 'x-sha256': sha256, 'x-size': String(size), 'x-media-type': mediaType }),
+      });
+      if (!response.ok) throw await failure(response);
     },
-    async discardStaged() {
-      throw new Error('not_implemented');
+    async discardStaged(handle) {
+      const response = await call('discard-staged', handle, { headers: headers() });
+      if (!response.ok) throw await failure(response);
     },
-    async listStaged() {
-      throw new Error('not_implemented');
+    async listStaged(olderThan) {
+      const response = await call('list-staged', olderThan, { headers: headers() });
+      if (!response.ok) throw await failure(response);
+      return (await response.json()) as Awaited<ReturnType<ByteStore['listStaged']>>;
     },
     async putVerified(key, body, input) {
       const sourceFailure: { error?: unknown } = {};
@@ -348,6 +368,7 @@ async function r2Fixture(backdatePublished = true): Promise<R2LifecycleFixture> 
     bucket,
     lifecycle,
     inspect: (ctx, key) => repository.inspect(ctx, key),
+    byteStore,
     store: createBlobStore(byteStore, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
@@ -576,8 +597,10 @@ describe('r2 lifecycle fixture', () => {
       expect(next).not.toBeNull();
       expect(next).not.toBe(first);
       expect(await f.lifecycle.recheckAndRemove(org, key, next)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(3);
       await expect.poll(() => f.bucket.head(storageKey)).toBeNull();
     },
   );
 });
+
+describeBlobStagingContract('lifecycleFixture', lifecycleFixture);

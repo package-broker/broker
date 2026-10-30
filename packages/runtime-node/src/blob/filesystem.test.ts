@@ -23,6 +23,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
 import {
+  BlobTooLargeError,
   BlobBusyError,
   BlobRangeError,
   BlobSizeMismatchError,
@@ -31,6 +32,7 @@ import {
   createBlobStore,
   createBlobUploadAdmission,
   parseSha256,
+  stagedStorageKey,
 } from '@package-broker/core/platform/blob';
 import type { BlobMetadataPort, ByteStore, Sha256 } from '@package-broker/core/platform/blob';
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
@@ -38,6 +40,7 @@ import { noopObservability } from '@package-broker/core/platform/observability';
 import type { FileHandle } from 'node:fs/promises';
 import {
   describeBlobContract,
+  describeBlobStagingContract,
   describeBlobLifecycleContract,
   requireBlobLifecycleFixtureHooks,
   type BlobLifecycleFixture,
@@ -54,6 +57,8 @@ import {
 } from './filesystem.js';
 
 const fsHooks = vi.hoisted(() => ({
+  lstat: null as
+    null | ((path: string, real: () => ReturnType<typeof lstat>) => ReturnType<typeof lstat>),
   link: null as
     | null
     | ((from: string, to: string, real: (a: string, b: string) => Promise<void>) => Promise<void>),
@@ -67,6 +72,8 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    lstat: (path: string) =>
+      fsHooks.lstat === null ? actual.lstat(path) : fsHooks.lstat(path, () => actual.lstat(path)),
     link: (from: string, to: string) =>
       fsHooks.link === null ? actual.link(from, to) : fsHooks.link(from, to, actual.link),
     rename: (from: string, to: string) =>
@@ -158,7 +165,7 @@ async function fsFixture(): Promise<
   BlobLifecycleFixture & { pathOf(ctx: OrgContext, key: Sha256): string }
 > {
   const root = await tempRoot();
-  const byteStore = await openFilesystemByteStore({ root });
+  const byteStore = { ...(await openFilesystemByteStore({ root })) };
   const directory = await tempRoot();
   const opened = openBetterSqliteExecutor(join(directory, 'meta.sqlite'));
   cleanups.push(() => opened.close());
@@ -184,21 +191,11 @@ async function fsFixture(): Promise<
   };
 
   const guarded: ByteStore = {
-    async putStaged() {
-      throw new Error('not_implemented');
-    },
-    async openStaged() {
-      throw new Error('not_implemented');
-    },
-    async promote() {
-      throw new Error('not_implemented');
-    },
-    async discardStaged() {
-      throw new Error('not_implemented');
-    },
-    async listStaged() {
-      throw new Error('not_implemented');
-    },
+    putStaged: (...args) => byteStore.putStaged(...args),
+    openStaged: (...args) => byteStore.openStaged(...args),
+    promote: (...args) => byteStore.promote(...args),
+    discardStaged: (...args) => byteStore.discardStaged(...args),
+    listStaged: (...args) => byteStore.listStaged(...args),
     putVerified: (key, body, input) => byteStore.putVerified(key, body, input),
     async get(key, range) {
       if (state.failRead) {
@@ -264,6 +261,7 @@ async function fsFixture(): Promise<
     }),
     inspect: (ctx, key) => repository.inspect(ctx, key),
     pathOf,
+    byteStore,
     store: createBlobStore(guarded, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
@@ -462,7 +460,7 @@ describe('filesystem bytes with sqlite metadata lifecycle wiring', () => {
       const retry = (await f.lifecycle.claimPurge(org, key))!;
       expect(retry).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, retry)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(3);
       expect(await f.lifecycle.markDeleted(org, key, retry)).toBe(true);
       await expect(stat(f.pathOf(org, key))).rejects.toMatchObject({ code: 'ENOENT' });
     },
@@ -478,7 +476,7 @@ describe('filesystem bytes with sqlite metadata lifecycle wiring', () => {
     expect(recovered).not.toBeNull();
     expect(recovered).not.toBe(first);
     expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
-    expect(f.removeCalls()).toBe(1);
+    expect(f.removeCalls()).toBe(2);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
     expect(await f.store.head(org, key)).toBeNull();
@@ -1310,3 +1308,190 @@ describe('filesystem byte store', () => {
     expect(await stagedIn(root)).toBe(0);
   });
 });
+
+it('stages a filesystem blob until explicit promotion and preserves it across store instances', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pb-staging-')));
+  try {
+    const store = await openFilesystemByteStore({ root });
+    const handle = 'staging/61/01J00000000000000000000001' as never;
+    const data = new TextEncoder().encode('staged bytes');
+    const source = () =>
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(data);
+          c.close();
+        },
+      });
+    const result = await store.putStaged(handle, source(), data.length, 'application/gzip');
+    expect(result).toEqual({
+      sha256: parseSha256(createHash('sha256').update(data).digest('hex')),
+      size: data.length,
+    });
+    const key = stagedStorageKey(handle, result.sha256);
+    expect(await store.head(key)).toBeNull();
+    const reopened = await openFilesystemByteStore({ root });
+    expect(
+      new Uint8Array(await new Response(await reopened.openStaged(handle)).arrayBuffer()),
+    ).toEqual(data);
+    expect(await reopened.listStaged('2099-01-01T00:00:00.000Z')).toHaveLength(1);
+    await reopened.promote(handle, result.sha256, result.size, 'application/gzip');
+    await expect(stat(join(root, handle + '.media'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await reopened.head(key)).toEqual({ size: data.length, mediaType: 'application/gzip' });
+    await reopened.discardStaged(handle);
+    expect(await reopened.listStaged('2099-01-01T00:00:00.000Z')).toEqual([]);
+    await expect(reopened.openStaged(handle)).rejects.toBeInstanceOf(BlobValidationError);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+describeBlobStagingContract('fsFixture', fsFixture);
+
+it('bounds completed filesystem staging listings to fifty objects per organization', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pb-stage-list-')));
+  try {
+    const store = await openFilesystemByteStore({ root });
+    await mkdir(join(root, 'staging', '61'), { recursive: true });
+    for (let n = 0; n < 51; n++)
+      await writeFile(
+        join(root, 'staging', '61', `01J000000000000000000${String(n).padStart(5, '0')}`),
+        'x',
+      );
+    expect(await store.listStaged('2099-01-01T00:00:00.000Z', 'staging/61/')).toHaveLength(50);
+    expect(await store.listStaged('2099-01-01T00:00:00.000Z', 'staging/62/')).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('cancels an oversized filesystem staged source and removes temporary bytes', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pb-stage-cap-')));
+  try {
+    const store = await openFilesystemByteStore({ root });
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>(
+      {
+        start(c) {
+          c.enqueue(new Uint8Array(3));
+        },
+        pull(c) {
+          c.close();
+        },
+        cancel,
+      },
+      { highWaterMark: 0 },
+    );
+    await expect(
+      store.putStaged(
+        'staging/61/01J00000000000000000000001' as never,
+        body,
+        2,
+        'application/gzip',
+      ),
+    ).rejects.toBeInstanceOf(BlobTooLargeError);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(await stagedIn(root)).toBe(0);
+    expect(await store.listStaged('2099-01-01T00:00:00.000Z')).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each(['size', 'digest'])(
+  'refuses filesystem staged promotion with altered %s',
+  async (field) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'pb-stage-integrity-')));
+    try {
+      const store = await openFilesystemByteStore({ root });
+      const handle = 'staging/61/01J00000000000000000000001' as never;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new Uint8Array([1, 2]));
+          c.close();
+        },
+      });
+      const staged = await store.putStaged(handle, body, 2, 'application/gzip');
+      await expect(
+        store.promote(
+          handle,
+          field === 'digest' ? parseSha256('a'.repeat(64)) : staged.sha256,
+          field === 'size' ? 3 : 2,
+          'application/gzip',
+        ),
+      ).rejects.toBeInstanceOf(FilesystemIntegrityError);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each([-1, 0.5, NaN])('refuses invalid filesystem staged cap %s', async (cap) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pb-stage-validation-')));
+  try {
+    const store = await openFilesystemByteStore({ root });
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
+    await expect(
+      store.putStaged(
+        'staging/61/01J00000000000000000000001' as never,
+        body,
+        cap,
+        'application/gzip',
+      ),
+    ).rejects.toBeInstanceOf(BlobValidationError);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('omits fresh and malformed filesystem staging entries', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pb-stage-age-')));
+  try {
+    const store = await openFilesystemByteStore({ root });
+    const directory = join(root, 'staging', '61');
+    await mkdir(directory, { recursive: true });
+    const valid = join(directory, '01J00000000000000000000001');
+    await writeFile(valid, 'fresh');
+    await utimes(valid, new Date('2099-01-01'), new Date('2099-01-01'));
+    const invalid = join(directory, 'invalid');
+    await writeFile(invalid, 'old');
+    await utimes(invalid, new Date('2020-01-01'), new Date('2020-01-01'));
+    expect(await store.listStaged('2026-01-01T00:00:00.000Z')).toEqual([]);
+    await expect(store.listStaged('invalid')).rejects.toBeInstanceOf(BlobValidationError);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each(['ENOENT', 'EACCES'])(
+  'Round 5 staged listing handles concurrent lstat %s',
+  async (errorCode) => {
+    const root = await tempRoot();
+    const store = await openFilesystemByteStore({ root });
+    const handle = 'staging/61/01J00000000000000000000001' as never;
+    await store.putStaged(handle, streamOf(bytes('listing race')), 1024, 'application/gzip');
+    let intercepted = false;
+    fsHooks.lstat = async (path, real) => {
+      if (path === join(root, handle)) {
+        intercepted = true;
+        if (errorCode === 'ENOENT') {
+          await rm(path);
+          return real();
+        }
+        throw Object.assign(new Error('listing refused'), { code: errorCode });
+      }
+      return real();
+    };
+    try {
+      const listing = store.listStaged('2099-01-01T00:00:00.000Z');
+      if (errorCode === 'ENOENT') await expect(listing).resolves.toEqual([]);
+      else await expect(listing).rejects.toMatchObject({ code: 'EACCES' });
+      expect(intercepted).toBe(true);
+    } finally {
+      fsHooks.lstat = null;
+    }
+  },
+);

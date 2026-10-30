@@ -16,6 +16,7 @@ import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycl
 import { noopObservability } from '@package-broker/core/platform/observability';
 import {
   describeBlobContract,
+  describeBlobStagingContract,
   describeBlobLifecycleContract,
   requireBlobLifecycleFixtureHooks,
   type BlobLifecycleFixture,
@@ -79,31 +80,23 @@ async function s3Fixture(): Promise<BlobLifecycleFixture> {
     return fake.fetch(request);
   };
 
-  const byteStore = createS3ByteStore({
-    endpoint: S3_FAKE_ENDPOINT,
-    region: REGION,
-    bucket: BUCKET,
-    ...S3_FAKE_DEFAULT_CREDENTIALS,
-    pathStyle: true,
-    fetch: fakeFetch,
-  });
+  const byteStore = {
+    ...createS3ByteStore({
+      endpoint: S3_FAKE_ENDPOINT,
+      region: REGION,
+      bucket: BUCKET,
+      ...S3_FAKE_DEFAULT_CREDENTIALS,
+      pathStyle: true,
+      fetch: fakeFetch,
+    }),
+  };
 
   const guarded: ByteStore = {
-    async putStaged() {
-      throw new Error('not_implemented');
-    },
-    async openStaged() {
-      throw new Error('not_implemented');
-    },
-    async promote() {
-      throw new Error('not_implemented');
-    },
-    async discardStaged() {
-      throw new Error('not_implemented');
-    },
-    async listStaged() {
-      throw new Error('not_implemented');
-    },
+    putStaged: (...args) => byteStore.putStaged(...args),
+    openStaged: (...args) => byteStore.openStaged(...args),
+    promote: (...args) => byteStore.promote(...args),
+    discardStaged: (...args) => byteStore.discardStaged(...args),
+    listStaged: (...args) => byteStore.listStaged(...args),
     putVerified: (key, body, input) => byteStore.putVerified(key, body, input),
     async get(key, range) {
       if (state.failRead) {
@@ -185,6 +178,7 @@ async function s3Fixture(): Promise<BlobLifecycleFixture> {
       observability: noopObservability,
     }),
     inspect: (ctx, key) => repository.inspect(ctx, key),
+    byteStore,
     store: createBlobStore(guarded, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
@@ -400,7 +394,7 @@ describe('s3-fake lifecycle wiring', () => {
       const retry = (await f.lifecycle.claimPurge(org, key))!;
       expect(retry).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, retry)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(3);
       expect(await f.lifecycle.markDeleted(org, key, retry)).toBe(true);
     },
   );
@@ -415,7 +409,7 @@ describe('s3-fake lifecycle wiring', () => {
     expect(recovered).not.toBeNull();
     expect(recovered).not.toBe(first);
     expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
-    expect(f.removeCalls()).toBe(1);
+    expect(f.removeCalls()).toBe(2);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
     expect(await f.store.head(org, key)).toBeNull();
@@ -437,3 +431,5 @@ describe('s3 contract wiring', () => {
     expect(typeof fixture.failNextPublish).toBe('function');
   });
 });
+
+describeBlobStagingContract('s3Fixture', s3Fixture);

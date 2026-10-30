@@ -3,6 +3,8 @@ import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
 import {
   BlobSizeMismatchError,
+  BlobTooLargeError,
+  stagedStorageKey,
   BlobValidationError,
   blobStorageKey,
   createBlobStore,
@@ -15,6 +17,7 @@ import { createBlobRepository } from '../repositories/blob.js';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import {
   describeBlobContract,
+  describeBlobStagingContract,
   describeBlobLifecycleContract,
   describeBlobReserveContract,
   executorExpiringLeaseAfterFirstStatement,
@@ -105,20 +108,38 @@ async function sqliteFixture(): Promise<SqliteFixture> {
   let referenceCounter = 0;
 
   const byteStore: ByteStore = {
-    async putStaged() {
-      throw new Error('not_implemented');
+    async putStaged(handle, body, maxBytes, mediaType) {
+      const data = await drain(body);
+      if (data.length > maxBytes) throw new BlobTooLargeError();
+      objects.set(handle, { data, mediaType });
+      return {
+        sha256: hex(await crypto.subtle.digest('SHA-256', data)) as Sha256,
+        size: data.length,
+      };
     },
-    async openStaged() {
-      throw new Error('not_implemented');
+    async openStaged(handle) {
+      const found = objects.get(handle);
+      if (found === undefined) throw new BlobValidationError();
+      return new ReadableStream({
+        start(c) {
+          c.enqueue(found.data);
+          c.close();
+        },
+      });
     },
-    async promote() {
-      throw new Error('not_implemented');
+    async promote(handle, sha256, size, mediaType) {
+      await byteStore.putVerified(
+        stagedStorageKey(handle, sha256),
+        await byteStore.openStaged(handle),
+        { sha256, size, mediaType },
+      );
+      objects.delete(handle);
     },
-    async discardStaged() {
-      throw new Error('not_implemented');
+    async discardStaged(handle) {
+      objects.delete(handle);
     },
     async listStaged() {
-      throw new Error('not_implemented');
+      return [];
     },
     async putVerified(storageKey, body, input) {
       state.staged += 1;
@@ -220,6 +241,7 @@ async function sqliteFixture(): Promise<SqliteFixture> {
   const seeded = new Set<string>();
 
   return {
+    byteStore,
     store: createBlobStore(byteStore, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
@@ -595,7 +617,7 @@ describe('blob lifecycle fixture hooks', () => {
     expect(f.removeCalls()).toBe(0);
     const { org, key, generation } = await claimed(f, 'counted');
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-    expect(f.removeCalls()).toBe(1);
+    expect(f.removeCalls()).toBe(2);
   });
 
   it('failNextRemove fails exactly the next remove', async () => {
@@ -605,7 +627,7 @@ describe('blob lifecycle fixture hooks', () => {
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
     expect(f.removeCalls()).toBe(1);
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-    expect(f.removeCalls()).toBe(2);
+    expect(f.removeCalls()).toBe(3);
   });
 
   it('stallNextRemove stalls exactly the next remove', async () => {
@@ -617,7 +639,7 @@ describe('blob lifecycle fixture hooks', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
     expect(f.removeCalls()).toBe(1);
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-    expect(f.removeCalls()).toBe(2);
+    expect(f.removeCalls()).toBe(3);
   });
 
   it('a stalled remove leaves the bytes in place', async () => {
@@ -629,3 +651,5 @@ describe('blob lifecycle fixture hooks', () => {
     expect(await f.store.head(org, key)).not.toBeNull();
   });
 });
+
+describeBlobStagingContract('sqliteFixture', sqliteFixture);

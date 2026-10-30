@@ -11,6 +11,7 @@ import {
   runGenerateMasterKey,
   type AdminTarget,
 } from './commands/admin.js';
+import { runAuditSink } from './commands/audit-sink.js';
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
 import { readProvidersOption, type ProvidersOption } from './commands/cloudflare/providers-file.js';
@@ -42,6 +43,8 @@ const USAGE =
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
   '       pb sqlite restore --sqlite <file> --snapshot <file> [--out <build>]\n' +
+  '       pb audit sink list|rebind|retire|unblock|skip|replay|resolve|confirm-restore [<sink>] (--sqlite <file> | --cloudflare --database-id <id>) --generation <n> --actor-type user|service_principal --actor-id <id> [--from <seq> | --seq <seq> | --confirm <sink:from-to> | --ledger-id <id>]\n' +
+  '       pb audit policy set required|availability (same target and actor flags)\n' +
   '       pb audit epoch bump --sqlite <file> (or --cloudflare --database-id <id>)\n' +
   '       pb cloudflare setup [--workers-paid] [--prebuilt] [--providers <file|none>] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
   '       pb cloudflare provision [--prebuilt] --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
@@ -406,6 +409,8 @@ export async function run(argv: readonly string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
+  if (argv[0] === 'audit' && (argv[1] === 'sink' || argv[1] === 'policy'))
+    return runAuditSink(argv.slice(1));
   const parsed = parseCliArgs([...argv]);
   const usageError = () => {
     const cloudflareIndex = argv.findIndex(

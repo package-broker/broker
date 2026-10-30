@@ -18,7 +18,7 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
-  it('has exactly the 14 audit events', () => {
+  it('has exactly the 15 audit events', () => {
     expect([...AUDIT_EVENTS].sort()).toEqual([
       'audit.chain_broken',
       'audit.chain_integrity',
@@ -31,6 +31,7 @@ describe('vocabularies', () => {
       'audit.seal.contended',
       'audit.seal_repaired',
       'audit.sealed',
+      'audit.sink_admin_refused',
       'audit.verified',
       'audit.verify_continued',
       'audit.verify_partial',
@@ -40,7 +41,7 @@ describe('vocabularies', () => {
     expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
-    expect(AUDIT_EVENTS.size).toBe(14);
+    expect(AUDIT_EVENTS.size).toBe(15);
   });
 
   it('has exactly the 5 kernel events', () => {
@@ -49,7 +50,7 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 35 reason codes', () => {
+  it('has exactly the 40 reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
         'no_ip_key_saturated',
@@ -78,6 +79,11 @@ describe('vocabularies', () => {
         'health.not_ready',
         'request.aborted',
         'http.handler_status',
+        'audit.restore_detected',
+        'audit.local_fork',
+        'audit.receiver_fork',
+        'audit.history_limit',
+        'audit.batch_limit',
         'audit.partial_success',
         'audit.skipped',
         'audit.marker_rejected',
@@ -89,7 +95,7 @@ describe('vocabularies', () => {
         'audit.prune_anchor',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(35);
+    expect(KERNEL_REASON_CODES.size).toBe(40);
   });
 
   it('matches the port CODE pattern for every value', () => {

@@ -25,6 +25,8 @@ it('lists only working commands in --help', async () => {
       'migrate',
       'bootstrap',
       'sqlite restore',
+      'audit sink list|rebind|retire|unblock|skip|replay|resolve|confirm-restore',
+      'audit policy set required|availability (same target and actor flags)',
       'audit epoch bump',
       'cloudflare setup',
       'cloudflare provision',

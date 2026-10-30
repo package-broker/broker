@@ -1144,3 +1144,74 @@ it('evicts nothing when the budget is raised during an unfinished cycle', async 
     capacity_evict_to: null,
   });
 });
+
+it.each(['withheld', 'uncertain'] as const)(
+  'referenced durable resolution releases global and sink %s holds',
+  async (kind) => {
+    await seed();
+    await run("UPDATE audit_chain SET policy = 'required' WHERE org_id = ?", org.orgId);
+    const globalId = ulid();
+    const sinkId = ulid();
+    await disposition(kind, null, { id: globalId });
+    await disposition(kind, 'archive', { id: sinkId });
+    expect(await prune()).toEqual({ outcome: 'retained' });
+    await disposition('replay', 'archive', { resolvesId: globalId });
+    expect(await prune()).toEqual({ outcome: 'retained' });
+    await disposition('replay', 'archive', { resolvesId: sinkId });
+    expect(await prune()).toMatchObject({ outcome: 'pruned', pruned: 3 });
+  },
+);
+
+it.each(['withheld', 'uncertain'] as const)(
+  'keeps a second sink %s hold after an unrelated replay',
+  async (kind) => {
+    await seed();
+    await run(
+      `INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint,
+    durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq, inflight_repr)
+    SELECT org_id, 'backup', plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source,
+    state, progress_seq, progress_hash, custody_seq, inflight_repr FROM audit_sink WHERE org_id = ? AND sink_id = 'archive'`,
+      org.orgId,
+    );
+    await run("UPDATE audit_chain SET policy = 'required' WHERE org_id = ?", org.orgId);
+    const id = ulid();
+    await disposition(kind, 'backup', { id });
+    // Only the backup sink can provide the durable prune witness.
+    await run(
+      "UPDATE audit_sink SET durable_ack = 0 WHERE org_id = ? AND sink_id = 'archive'",
+      org.orgId,
+    );
+    await disposition('replay', 'archive');
+    expect(await prune()).toEqual({ outcome: 'retained' });
+    await expect(disposition('replay', 'archive', { resolvesId: id })).rejects.toThrow();
+    expect(await prune()).toEqual({ outcome: 'retained' });
+    await disposition('replay', 'backup', { resolvesId: id });
+    expect(await prune()).toMatchObject({ outcome: 'pruned', pruned: 3 });
+  },
+);
+
+it.each(['withheld', 'uncertain'] as const)(
+  'one durable witness releases a resolved global %s hold with multiple sinks',
+  async (kind) => {
+    await seed();
+    await run(
+      `INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint,
+      durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq, inflight_repr)
+      SELECT org_id, 'backup', plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source,
+      state, progress_seq, progress_hash, custody_seq, '{"custodyFromSeq":1}' FROM audit_sink
+      WHERE org_id = ? AND sink_id = 'archive'`,
+      org.orgId,
+    );
+    await run("UPDATE audit_chain SET policy = 'required' WHERE org_id = ?", org.orgId);
+    const id = ulid();
+    await disposition(kind, null, { id });
+    const pruneBoth = () =>
+      createAuditPruneRepository(executor).prune(org, {
+        ...options,
+        configuredSinkIds: ['archive', 'backup'],
+      });
+    expect(await pruneBoth()).toEqual({ outcome: 'retained' });
+    await disposition('replay', 'archive', { resolvesId: id });
+    expect(await pruneBoth()).toMatchObject({ outcome: 'pruned', pruned: 3 });
+  },
+);

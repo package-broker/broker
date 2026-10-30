@@ -52,6 +52,7 @@ function isGap(snapshot: AuditForkSnapshot, seq: number): boolean {
 }
 
 export interface AuditForkChange {
+  readonly policy?: 'availability' | 'required';
   readonly epoch: number;
   readonly restorePending: boolean;
   readonly boundaryReason: string | null;

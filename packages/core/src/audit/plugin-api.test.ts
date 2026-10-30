@@ -229,7 +229,13 @@ describe('public audit plugin contract', () => {
     >();
     expectTypeOf<keyof AuditTrail>().toEqualTypeOf<never>();
     expectTypeOf<keyof AuditSink>().toEqualTypeOf<'deliver' | 'frontier'>();
-    expectTypeOf<keyof AuditSinkContext>().toEqualTypeOf<'runtime' | 'env' | 'fetch' | 'clock'>();
+    expectTypeOf<keyof AuditSinkContext>().toEqualTypeOf<
+      'runtime' | 'env' | 'fetch' | 'clock' | 'deploymentId'
+    >();
+    expectTypeOf<Parameters<NonNullable<AuditSink['frontier']>>>().toEqualTypeOf<
+      [identity: Pick<AuditBatchV1, 'chainId' | 'epoch' | 'orgId'>, signal: AbortSignal]
+    >();
+    expectTypeOf<AuditSinkContext['deploymentId']>().toEqualTypeOf<string>();
     expectTypeOf<keyof Parameters<AuditBoundFetch>[0]>().toEqualTypeOf<
       'body' | 'contentType' | 'signal'
     >();
@@ -337,6 +343,7 @@ describe('public audit plugin contract', () => {
     expect(requestedOrg).toBe(org);
     const sink = plugin.auditSinks[0].create({
       runtime: 'docker',
+      deploymentId: 'test-deployment',
       clock: fixedClock('2026-10-28T00:00:00Z'),
       env: () => undefined,
       fetch: async (request) => {

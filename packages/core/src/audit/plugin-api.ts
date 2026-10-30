@@ -219,6 +219,7 @@ export type AuditBoundFetch = (request: {
 }>;
 
 export interface AuditSinkContext {
+  readonly deploymentId: string;
   readonly runtime: 'docker' | 'cloudflare';
   readonly fetch: AuditBoundFetch;
   /** Only declared non-destination envNames are readable. */
@@ -228,7 +229,10 @@ export interface AuditSinkContext {
 
 export interface AuditSink {
   deliver(batch: AuditBatchV1, signal: AbortSignal): Promise<AuditDelivery>;
-  frontier?(signal: AbortSignal): Promise<AuditPositionV1 | null>;
+  frontier?(
+    identity: Pick<AuditBatchV1, 'chainId' | 'epoch' | 'orgId'>,
+    signal: AbortSignal,
+  ): Promise<AuditPositionV1 | null>;
 }
 
 export interface AuditPositionV1 {

@@ -46,7 +46,7 @@ function adapter(
       } as const;
       let result: AuditDelivery = ack;
       if (reply === 'wrong_epoch') result = { ...ack, epoch: batch.epoch + 1 };
-      if (reply === 'partial')
+      if (reply === 'partial' && partialOutcome !== 'unsupported')
         result =
           partialOutcome === 'uncertain'
             ? {
@@ -123,9 +123,13 @@ function adapter(
             return { outcome: 'retry', code: 'bad_response' };
           }
         },
-        frontier: async (signal) => {
+        frontier: async (identity, signal) => {
           const response = await ctx.fetch({
-            body: '{"probe":"frontier"}',
+            body: JSON.stringify({
+              probe: 'frontier',
+              chain_id: identity.chainId,
+              org_id: identity.orgId,
+            }),
             contentType: 'application/json',
             signal,
           });
@@ -185,7 +189,7 @@ describe('published audit-chain/1 vectors', () => {
 });
 
 describe('sink fixture runner', () => {
-  it.each(['uncertain', 'accepted_with_warning'] as const)(
+  it.each(['uncertain', 'accepted_with_warning', 'unsupported'] as const)(
     'runs all scenarios for partial outcome %s',
     async (outcome) => {
       const result = await runAuditSinkConformance(adapter(undefined, outcome));
@@ -196,6 +200,95 @@ describe('sink fixture runner', () => {
       expect(result.passed).toHaveLength(15);
     },
   );
+
+  it.each(['uncertain', 'accepted_with_warning'] as const)(
+    'rejects %s from a sink declaring partial outcomes unsupported',
+    async (outcome) => {
+      const base = adapter(undefined, outcome);
+      await expect(
+        runAuditSinkConformance({ ...base, partialOutcome: 'unsupported' }),
+      ).rejects.toMatchObject({ fixture: 'partial-success' });
+    },
+  );
+
+  it.each(['chainId', 'epoch', 'throughSeq', 'throughHash'] as const)(
+    'rejects an unsupported partial fixture with a mismatched %s ACK',
+    async (field) => {
+      const base = adapter(undefined, 'unsupported');
+      await expect(
+        runAuditSinkConformance({
+          ...base,
+          respond: (reply, batch, options) => {
+            const response = base.respond(reply, batch, options);
+            return reply === 'partial'
+              ? {
+                  ...response,
+                  body: JSON.stringify({
+                    ...JSON.parse(response.body),
+                    [field]: field === 'epoch' || field === 'throughSeq' ? -1 : 'wrong',
+                  }),
+                }
+              : response;
+          },
+        }),
+      ).rejects.toMatchObject({ fixture: 'partial-success' });
+    },
+  );
+
+  it.each(['wrong_epoch', 'accepted'] as const)(
+    'rejects partial_success outside the partial fixture (%s) for unsupported sinks',
+    async (target) => {
+      const base = adapter(undefined, 'unsupported');
+      await expect(
+        runAuditSinkConformance({
+          ...base,
+          respond: (reply, batch, options) => {
+            const response = base.respond(reply, batch, options);
+            return reply === target
+              ? {
+                  ...response,
+                  body: JSON.stringify({
+                    ...JSON.parse(response.body),
+                    outcome: 'accepted_with_warning',
+                    code: 'partial_success',
+                  }),
+                }
+              : response;
+          },
+        }),
+      ).rejects.toMatchObject({
+        fixture: target === 'wrong_epoch' ? 'wrong-epoch-ack' : 'canonical-vectors',
+      });
+    },
+  );
+
+  it.each(['retry', 'rejected'] as const)(
+    'allows %s for unsupported partial fixtures',
+    async (outcome) => {
+      const base = adapter(undefined, 'unsupported');
+      const result = await runAuditSinkConformance({
+        ...base,
+        respond: (reply, batch, options) => {
+          const response = base.respond(reply, batch, options);
+          return reply === 'partial'
+            ? { ...response, body: JSON.stringify({ outcome, code: 'http_status' }) }
+            : response;
+        },
+      });
+      expect(result.passed).toHaveLength(15);
+    },
+  );
+
+  it('keeps rejection checks for sinks without partial outcomes', async () => {
+    const base = adapter(undefined, 'unsupported');
+    await expect(
+      runAuditSinkConformance({
+        ...base,
+        respond: (reply, batch, options) =>
+          base.respond(reply === 'rejected' ? 'accepted' : reply, batch, options),
+      }),
+    ).rejects.toMatchObject({ fixture: 'permanent-rejection' });
+  });
 
   it('rejects the reviewer sink that wraps camelCase records and accepts non-errors', async () => {
     const base = adapter();
@@ -644,6 +737,32 @@ describe('sink fixture runner', () => {
       },
     }));
     expect((await runAuditSinkConformance(strict)).passed).toHaveLength(15);
+  });
+
+  it.each(['chainId', 'orgId'] as const)('refuses a probe that ignores %s', async (field) => {
+    const broken = adapter((sink) => ({
+      ...sink,
+      frontier: (identity, signal) => sink.frontier!({ ...identity, [field]: 'wrong' }, signal),
+    }));
+    await expect(runAuditSinkConformance(broken)).rejects.toMatchObject({
+      fixture: 'restore-chain-and-cursor',
+    });
+  });
+
+  it.each(['chainId', 'orgId'] as const)('refuses a probe that caches %s', async (field) => {
+    const broken = adapter((sink) => {
+      let cached: string | undefined;
+      return {
+        ...sink,
+        frontier: (identity, signal) => {
+          cached ??= identity[field];
+          return sink.frontier!({ ...identity, [field]: cached }, signal);
+        },
+      };
+    });
+    await expect(runAuditSinkConformance(broken)).rejects.toMatchObject({
+      fixture: 'restore-chain-and-cursor',
+    });
   });
 
   it('refuses a frontier probe that hides a receiver ahead of the restored broker', async () => {

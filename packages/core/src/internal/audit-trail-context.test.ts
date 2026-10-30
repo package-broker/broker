@@ -213,6 +213,7 @@ describe('organization-bound audit composition', () => {
       });
       expect(transport).not.toBeNull();
       const sink = definition.create({
+        deploymentId: 'test-deployment',
         runtime: 'docker',
         fetch: transport!.fetch,
         env: () => undefined,

@@ -97,7 +97,10 @@ describe('restore and fork detection', () => {
         probes: [{ id: 'archive', sink: receiver }],
       }),
     ).toBe('clear');
-    expect(receiver.frontier).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(receiver.frontier).toHaveBeenCalledWith(
+      { chainId, epoch: 2, orgId: org.orgId },
+      expect.any(AbortSignal),
+    );
     expect(f.save).not.toHaveBeenCalled();
     expect(f.alert).not.toHaveBeenCalled();
   });

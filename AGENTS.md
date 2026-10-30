@@ -23,7 +23,7 @@ If you are changing something in the first column, read its role in the second f
 | `packages/plugin-sso-oidc`      | Generic OIDC single sign-on plugin (stub)                                        |
 | `packages/plugin-audit-trail`   | Audit trail plugin (stub)                                                        |
 | `packages/plugin-audit-otlp`    | OpenTelemetry audit export plugin (stub)                                         |
-| `packages/plugin-audit-webhook` | Audit webhook export plugin (stub)                                               |
+| `packages/plugin-audit-webhook` | Audit webhook export plugin                                                      |
 | `broker.config.ts`              | Root build configuration consumed by `pnpm bundle`                               |
 | `fixtures/`                     | Minimal config used by checks and tests                                          |
 | `scripts/`                      | Repository checks: pack, tree-shake, client matrix, Node bundle smoke            |

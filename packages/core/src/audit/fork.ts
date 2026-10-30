@@ -288,6 +288,7 @@ function validPosition(position: AuditPositionV1): boolean {
 
 async function receiverFrontier(
   sink: AuditSink,
+  identity: Parameters<NonNullable<AuditSink['frontier']>>[0],
   signal: AbortSignal,
 ): Promise<AuditPositionV1 | null> {
   const controller = new AbortController();
@@ -303,7 +304,7 @@ async function receiverFrontier(
     if (signal.aborted) abort();
     return await Promise.race([
       Promise.resolve().then(() =>
-        controller.signal.aborted ? aborted : sink.frontier!(controller.signal),
+        controller.signal.aborted ? aborted : sink.frontier!(identity, controller.signal),
       ),
       aborted,
     ]);
@@ -384,7 +385,11 @@ async function detectOnce(
               frontier:
                 probe.sink.frontier === undefined
                   ? null
-                  : await receiverFrontier(probe.sink, options.signal),
+                  : await receiverFrontier(
+                      probe.sink,
+                      { chainId: snapshot.chainId, epoch: snapshot.epoch, orgId: org.orgId },
+                      options.signal,
+                    ),
               failed: false,
             };
           } catch {

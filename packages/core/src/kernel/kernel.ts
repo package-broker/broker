@@ -1,3 +1,4 @@
+import type { AuditSinkContext } from '../audit/plugin-api.js';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '../ingest/finalize-guard.js';
 import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
@@ -401,6 +402,26 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const deploymentId = options.observability?.deploymentId ?? UNCONFIGURED_DEPLOYMENT;
   if (!portAccepts('deployment_id', deploymentId)) {
     throw new KernelConfigError(['observability.deploymentId does not match the port pattern']);
+  }
+  if (registration.audit.sinks.length > 0) {
+    registration = Object.freeze({
+      ...registration,
+      audit: Object.freeze({
+        ...registration.audit,
+        sinks: Object.freeze(
+          registration.audit.sinks.map((sink) =>
+            Object.freeze({
+              ...sink,
+              definition: Object.freeze({
+                ...sink.definition,
+                create: (ctx: AuditSinkContext) =>
+                  sink.definition.create(Object.freeze({ ...ctx, deploymentId })),
+              }),
+            }),
+          ),
+        ),
+      }),
+    });
   }
   const routeTemplates = frozenSet(
     [

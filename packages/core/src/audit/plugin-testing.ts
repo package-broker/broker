@@ -609,7 +609,7 @@ export interface AuditSinkConformanceAdapter {
   readonly wireRecords: (body: string) => readonly Readonly<Record<string, unknown>>[];
   readonly wireFormat: 'json' | 'otlp';
   /**
-   * Encode protocol responses. Partial replies must encode options.rejectedCount exactly.
+   * Encode protocol responses. Supported partial replies encode options.rejectedCount exactly.
    * Retry replies use options.status/retryAfterMs; bad_response uses options.invalid.
    * wrong_epoch changes only the receiver epoch, or is ordinary transport success.
    */
@@ -619,7 +619,8 @@ export interface AuditSinkConformanceAdapter {
     options: AuditConformanceResponseOptions,
   ) => AuditConformanceResponse;
   readonly frontierResponse?: (position: AuditPositionV1) => AuditConformanceResponse;
-  readonly partialOutcome: 'uncertain' | 'accepted_with_warning';
+  /** Unsupported protocols require full ACKs or failure and must never report partial success. */
+  readonly partialOutcome: 'uncertain' | 'accepted_with_warning' | 'unsupported';
 }
 
 export class AuditSinkConformanceError extends Error {
@@ -675,6 +676,7 @@ export async function runAuditSinkConformance(
     let generation = 0;
     let probe = false;
     let probeCalls = 0;
+    let probeIdentity: Pick<AuditBatchV1, 'chainId' | 'epoch' | 'orgId'> | null = null;
     let transportFailed = false;
     const contexts = new Map<AbortSignal, { step: AuditConformanceStep; calls: number }>();
     const fetch: AuditBoundFetch = async (request) => {
@@ -688,6 +690,12 @@ export async function runAuditSinkConformance(
               decoded === null &&
               position !== null &&
               adapter.frontierResponse !== undefined,
+          );
+          const wire = JSON.parse(request.body) as Record<string, unknown>;
+          assertConformance(
+            probeIdentity !== null &&
+              wire['chain_id'] === probeIdentity.chainId &&
+              wire['org_id'] === probeIdentity.orgId,
           );
           return adapter.frontierResponse!(position!);
         }
@@ -762,6 +770,7 @@ export async function runAuditSinkConformance(
       adapter.create(
         {
           runtime: 'docker',
+          deploymentId: 'conformance',
           fetch,
           env: () => undefined,
           clock: { now: () => new Date('2026-10-28T00:00:02.000Z') },
@@ -787,6 +796,10 @@ export async function runAuditSinkConformance(
         }
         contexts.delete(controller.signal);
         assertConformance(!transportFailed && pending.calls === 1);
+        assertConformance(
+          adapter.partialOutcome !== 'unsupported' ||
+            !(result.outcome === 'accepted_with_warning' && result.code === 'partial_success'),
+        );
         if (step.loseAck || step.crashBeforeCommit) {
           assertConformance(
             result.outcome === 'retry' && (result.code === 'network' || result.code === 'timeout'),
@@ -807,6 +820,14 @@ export async function runAuditSinkConformance(
                 result.throughHash === step.batch.throughHash),
           );
         } else if (step.reply === 'partial') {
+          if (adapter.partialOutcome === 'unsupported') {
+            assertConformance(
+              result.outcome === 'retry' ||
+                result.outcome === 'rejected' ||
+                (result.outcome === 'accepted' && ackMatches(result, step.batch)),
+            );
+            return;
+          }
           assertConformance(result.outcome === adapter.partialOutcome);
           if (result.outcome === 'uncertain')
             assertConformance(
@@ -840,11 +861,21 @@ export async function runAuditSinkConformance(
         probe = true;
         sink = create();
         assertConformance(sink.frontier !== undefined);
-        const remote = await sink.frontier!(new AbortController().signal);
-        assertConformance(
-          !transportFailed && probeCalls === 1 && stable(remote) === stable(position),
-        );
-        assertConformance(remote !== null && remote.seq > 0);
+        const batch = fixture.steps[0]!.batch;
+        for (const identity of [
+          { chainId: batch.chainId, epoch: batch.epoch, orgId: batch.orgId },
+          { chainId: 'f'.repeat(32), epoch: batch.epoch + 1, orgId: batch.orgId },
+          { chainId: 'f'.repeat(32), epoch: batch.epoch + 1, orgId: 'frontier-other-org' },
+        ]) {
+          probeIdentity = identity;
+          probeCalls = 0;
+          position = { ...position!, chainId: identity.chainId, epoch: identity.epoch };
+          const remote = await sink.frontier!(identity, new AbortController().signal);
+          assertConformance(
+            !transportFailed && probeCalls === 1 && stable(remote) === stable(position),
+          );
+          assertConformance(remote !== null && remote.seq > 0);
+        }
         frontier = 'passed';
       }
       passed.push(fixture.name);

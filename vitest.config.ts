@@ -3,6 +3,12 @@ import { defineConfig } from 'vitest/config';
 
 const alias = [
   {
+    find: '@package-broker/core/plugin/testing',
+    replacement: fileURLToPath(
+      new URL('./packages/core/src/audit/plugin-testing.ts', import.meta.url),
+    ),
+  },
+  {
     find: /^@package-broker\/([a-z0-9-]+)\/(?!package\.json$)(.+)$/,
     replacement: fileURLToPath(new URL('./packages/$1/src/$2.ts', import.meta.url)),
   },
@@ -23,6 +29,7 @@ const packages = [
   'ui-assets',
   'plugin-sso-oidc',
   'plugin-github',
+  'plugin-audit-webhook',
 ];
 
 const loadTolerantProjects = new Set([

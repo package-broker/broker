@@ -23,6 +23,7 @@ export const KERNEL_EVENTS = frozenSet([
 ]);
 
 export const AUDIT_EVENTS = frozenSet([
+  'audit.effective_unavailable',
   'audit.sink_admin_refused',
   'audit.alert',
   'audit.failure_event_invalid',
@@ -42,6 +43,7 @@ export const AUDIT_EVENTS = frozenSet([
 ]);
 
 const REASON_CODES = [
+  'audit.effective_unavailable',
   'no_ip_key_saturated',
   'org_cap_reached',
   'authz.unauthenticated',

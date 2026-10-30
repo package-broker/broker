@@ -142,6 +142,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     return createApiModule({
       organization: {
         ...common,
+        log: observability.log,
         organizations,
         users,
         administration: services.administration,

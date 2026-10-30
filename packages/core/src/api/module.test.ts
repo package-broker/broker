@@ -24,6 +24,7 @@ import * as sourceNames from './routes/source-names.js';
 import * as sourceAttachment from './routes/source-attachment.js';
 import * as packages from './routes/packages.js';
 import * as audit from './routes/audit.js';
+import * as auditExport from './routes/audit-export.js';
 import * as permissions from './routes/permissions.js';
 import * as packageManage from './routes/package-manage.js';
 import * as importRuns from './routes/import.js';
@@ -103,6 +104,7 @@ const EXPECTED_ROUTES = [
   'GET /_pb/projects/:project/packages/:package/versions',
   'GET /_pb/audit',
   'GET /_pb/audit/head',
+  'GET /_pb/audit/export',
   'GET /_pb/projects/:project/audit',
   'GET /_pb/me/permissions',
   'GET /_pb/projects/:project/permissions',
@@ -409,6 +411,7 @@ describe('createApiModule', () => {
       vi.spyOn(sourceAttachment, 'sourceAttachmentRoutes'),
       vi.spyOn(packages, 'packageRoutes'),
       vi.spyOn(audit, 'auditRoutes'),
+      vi.spyOn(auditExport, 'auditExportRoutes'),
       vi.spyOn(permissions, 'myPermissionsRoute'),
       vi.spyOn(permissions, 'myProjectPermissionsRoute'),
     ];

@@ -17,6 +17,7 @@ import {
 } from './response.js';
 
 const statuses = {
+  rate_limited: 429,
   unsupported_package: 400,
   unsupported_source_kind: 400,
   package_not_found: 404,

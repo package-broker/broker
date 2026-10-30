@@ -59,6 +59,24 @@ describe('shared API assembly', () => {
     },
   );
 
+  it('routes withheld export alerts through observability and the configured alert service', () => {
+    const assemble = vi.spyOn(api, 'createApiModule');
+    const log = vi.fn();
+    const raise = vi.fn();
+    createApiRoutes({
+      ...options,
+      observability: { log, counter: vi.fn(), histogram: vi.fn() },
+      auditAlerts: { raise },
+    });
+    const org = database.orgs!.a;
+    assemble.mock.calls[0]![0].auditExport!.alert(org);
+    expect(log).toHaveBeenCalledExactlyOnceWith({
+      level: 'error',
+      event: 'audit.delivery_loss',
+      reason_code: 'audit.withheld',
+    });
+    expect(raise).toHaveBeenCalledExactlyOnceWith(org, 'withheld');
+  });
   it('uses the explicitly supplied client IP resolver', () => {
     const assemble = vi.spyOn(api, 'createApiModule');
     const explicitClientIp = (): string | null => '203.0.113.11';

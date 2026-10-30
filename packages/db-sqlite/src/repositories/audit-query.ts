@@ -120,6 +120,7 @@ export function createAuditJournalReader(
   executor: ScalarSqlExecutor,
   org: OrgContext,
   observability: Pick<Observability, 'counter'> = noopObservability,
+  maximumPageSize: 200 | 2000 = 200,
 ): AuditJournalReader {
   const orgId = org.orgId;
   async function head(): Promise<AuditHeadV1> {
@@ -166,8 +167,8 @@ export function createAuditJournalReader(
     head,
     async list(query: Parameters<AuditJournalReader['list']>[0]) {
       const { projectId, actor, action, afterSeq, limit } = query;
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
-        throw new RangeError('limit must be an integer from 1 to 200');
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximumPageSize) {
+        throw new RangeError(`limit must be an integer from 1 to ${maximumPageSize}`);
       }
       if (afterSeq !== undefined && (!Number.isSafeInteger(afterSeq) || afterSeq < 0)) {
         throw new RangeError('Invalid audit journal cursor');

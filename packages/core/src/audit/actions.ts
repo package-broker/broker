@@ -153,7 +153,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.credential_set': ['external_ref'],
   'purge.batch': ['count', 'kind'],
   'sync_session.finalize': ['source_id', 'added', 'updated', 'removed'],
-  'audit.export': ['from_seq', 'to_seq', 'count', 'format'],
+  'audit.export': ['from_seq', 'to_seq', 'count', 'withheld', 'format'],
   'audit.mode_change': [
     'from_mode',
     'to_mode',
@@ -297,6 +297,7 @@ const AUDIT_CONTROL_INTEGERS: ReadonlySet<string> = new Set([
   'from_seq',
   'to_seq',
   'count',
+  'withheld',
   'mode_generation',
   'cutover_seq',
   'epoch',

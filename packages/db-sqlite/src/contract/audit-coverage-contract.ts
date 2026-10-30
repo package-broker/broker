@@ -38,6 +38,15 @@ interface CoverageEntry {
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
+    actions: ['audit.export'],
+    callers: ['core/src/api/routes/audit-export.ts'],
+    repository: 'audit-api-export',
+    batchGuard:
+      'executor.batch; live session, reauthentication, admin authority, snapshot and organization principal rate assertions',
+    cardinality: '1 per released export response; refused access and failed batches stage zero',
+    stagingCalls: 1,
+  },
+  {
     actions: ['audit.sink_admin'],
     callers: ['core/src/audit/fork.ts'],
     repository: 'audit-fork',
@@ -397,7 +406,7 @@ export const AUDIT_INJECTED_STATEMENTS = [
   },
 ] as const;
 
-const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set(['audit.export']);
+const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set();
 
 export const AUDIT_UNCAPTURED: readonly {
   readonly action: AuditAction;

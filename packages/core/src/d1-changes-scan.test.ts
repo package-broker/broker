@@ -668,6 +668,18 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Destructures validated audit ledger SELECT fields; the rest object contains no executor result metadata.',
+      sites: ['db-sqlite/src/repositories/audit-api-export.ts:object rest access: ...row #1'],
+    },
+    {
+      reason:
+        'Loads the shared API export persistence suite; success counts RETURNING rows without executor changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-api-export-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'Named constant batch indices select UPDATE RETURNING rows; success uses rows.length and never executor change metadata.',
       sites: [
         'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[chainUpdateIndex] #1',

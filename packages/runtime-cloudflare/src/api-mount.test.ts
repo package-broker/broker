@@ -280,6 +280,13 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ownerPacket: 'T531',
   },
   {
+    dependency: 'auditExport',
+    constructed: 'audit export store over the audit journal, anchors and sessions',
+    routes: ['GET /_pb/audit/export'],
+    jobs: [],
+    ownerPacket: 'T531',
+  },
+  {
     dependency: 'packageManage',
     constructed: 'package manage service over admin reader, visibility store and sessions',
     routes: [

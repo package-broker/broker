@@ -4,6 +4,28 @@ import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-s
 import { bindSnapshot, exportDatabase, restoreDatabase } from './sql-snapshot.test.support.js';
 
 describe('length-preserving logical text export', () => {
+  it('rejects an oversized atomic data batch before committing schema', async () => {
+    const restored = openNodeSqliteExecutor();
+    try {
+      await expect(
+        restoreDatabase(restored.executor, [
+          { sql: 'CREATE TABLE publisher_content (value TEXT)', params: [] },
+          ...Array.from({ length: 201 }, () => ({
+            sql: 'INSERT INTO publisher_content VALUES (?)',
+            params: ['value'],
+          })),
+        ]),
+      ).rejects.toMatchObject({ kind: 'too_big' });
+      expect(
+        await restored.executor.all({
+          sql: "SELECT name FROM sqlite_master WHERE name = 'publisher_content'",
+          params: [],
+        }),
+      ).toEqual([]);
+    } finally {
+      await restored.close();
+    }
+  });
   it('rolls back every restored row when a deferred foreign key fails', async () => {
     const restored = openNodeSqliteExecutor();
     try {
@@ -105,7 +127,7 @@ describe('length-preserving logical text export', () => {
           expect(Buffer.byteLength(sql)).toBeLessThan(100_000);
           expect(params.length).toBeLessThanOrEqual(100);
         }
-        await restored.executor.batch(bindSnapshot(JSON.parse(JSON.stringify(statements))));
+        await restoreDatabase(restored.executor, JSON.parse(JSON.stringify(statements)));
         for (const org of ['org-a', 'org-b']) {
           const query = {
             sql: 'SELECT hex(description) AS description, hex(metadata_json) AS metadata FROM publisher_content WHERE org_id = ? ORDER BY rowid',
@@ -147,7 +169,7 @@ describe('length-preserving logical text export', () => {
         { sql: 'INSERT INTO publisher_content VALUES (?, ?)', params: ['org-b', 'foreign\0text'] },
       ]);
       const statements = await exportDatabase(source.executor);
-      await restored.executor.batch(bindSnapshot(JSON.parse(JSON.stringify(statements))));
+      await restoreDatabase(restored.executor, JSON.parse(JSON.stringify(statements)));
       for (const org of ['org-a', 'org-b']) {
         const sql =
           'SELECT typeof(value) AS type, hex(value) AS bytes FROM publisher_content WHERE org_id = ? ORDER BY rowid';

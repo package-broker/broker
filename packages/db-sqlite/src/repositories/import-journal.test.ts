@@ -583,11 +583,12 @@ describe('import journal', () => {
     ['project', 'status', 'archived'],
     ['role', 'protects_last_holder', 1],
     ['source', 'removal_policy', 'exclude'],
+    ['source', 'require_publish_approval', 1],
     ['registered_name', 'pattern', 'changed/*'],
     ['project_source', 'precedence', 42],
     ['access_grant', 'created_by', 'actor'],
   ] as const)(
-    'hashes the complete created %s domain and detects a later %s edit',
+    'hashes the imported %s domain across a later %s edit',
     async (table, column, changed) => {
       expect(
         await apply([
@@ -659,6 +660,7 @@ describe('import journal', () => {
         const domain: Record<string, SqlValue | readonly string[]> = Object.fromEntries(
           Object.entries(row!).filter(([key]) => !excluded.has(key)),
         );
+        if (table === 'source') delete domain.require_publish_approval;
         if (table === 'role') domain.permissions = ['project:read'];
         const digest = await crypto.subtle.digest(
           'SHA-256',
@@ -683,7 +685,9 @@ describe('import journal', () => {
           ...identity,
         ),
       ]);
-      expect(ref.contentHash).not.toBe(await liveHash());
+      if (table === 'source' && column === 'require_publish_approval')
+        expect(ref.contentHash).toBe(await liveHash());
+      else expect(ref.contentHash).not.toBe(await liveHash());
     },
   );
   async function protect() {

@@ -429,6 +429,18 @@ describe('import rollback store', () => {
     },
   );
 
+  it('keeps source publish policy outside the imported hash domain', async () => {
+    await apply();
+    await exec(
+      "UPDATE source SET require_publish_approval = 1 WHERE org_id = ? AND name = 'registry'",
+      ctx.orgId,
+    );
+    expect(await rollback()).toEqual({
+      status: 'rolled_back',
+      counts: { restored: 7, conflict: 0, expired: 0 },
+    });
+  });
+
   it('never restores a version edited between the read and the batch', async () => {
     await apply();
     beforeBatch = async () => {

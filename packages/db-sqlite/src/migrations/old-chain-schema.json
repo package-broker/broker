@@ -374,6 +374,24 @@
     },
     {
       "type": "index",
+      "name": "package_access_request_expiry",
+      "tbl_name": "package_access_request",
+      "sql": "CREATE INDEX package_access_request_expiry ON package_access_request (org_id, expires_at, id) WHERE state = 'pending'"
+    },
+    {
+      "type": "index",
+      "name": "package_access_request_list",
+      "tbl_name": "package_access_request",
+      "sql": "CREATE INDEX package_access_request_list ON package_access_request (org_id, state, id)"
+    },
+    {
+      "type": "index",
+      "name": "package_access_request_pending",
+      "tbl_name": "package_access_request",
+      "sql": "CREATE UNIQUE INDEX package_access_request_pending ON package_access_request (package_id, project_id) WHERE state = 'pending'"
+    },
+    {
+      "type": "index",
       "name": "package_by_name",
       "tbl_name": "package",
       "sql": "CREATE INDEX package_by_name ON package (org_id, ecosystem, name)"
@@ -437,6 +455,30 @@
       "name": "project_source_source",
       "tbl_name": "project_source",
       "sql": "CREATE INDEX project_source_source ON project_source (source_id)"
+    },
+    {
+      "type": "index",
+      "name": "publish_approval_expiry",
+      "tbl_name": "publish_approval",
+      "sql": "CREATE INDEX publish_approval_expiry ON publish_approval (org_id, expires_at, id) WHERE approval_state = 'pending'"
+    },
+    {
+      "type": "index",
+      "name": "publish_approval_list",
+      "tbl_name": "publish_approval",
+      "sql": "CREATE INDEX publish_approval_list ON publish_approval (org_id, approval_state, id)"
+    },
+    {
+      "type": "index",
+      "name": "publish_approval_package",
+      "tbl_name": "publish_approval",
+      "sql": "CREATE INDEX publish_approval_package ON publish_approval (org_id, package_id)"
+    },
+    {
+      "type": "index",
+      "name": "publish_approval_scan",
+      "tbl_name": "publish_approval",
+      "sql": "CREATE INDEX publish_approval_scan ON publish_approval (org_id, scan_state, updated_at, id)"
     },
     {
       "type": "index",
@@ -614,6 +656,12 @@
     },
     {
       "type": "index",
+      "name": "user_account_org_id",
+      "tbl_name": "user_account",
+      "sql": "CREATE UNIQUE INDEX user_account_org_id ON user_account (id, org_id)"
+    },
+    {
+      "type": "index",
       "name": "user_group_name",
       "tbl_name": "user_group",
       "sql": "CREATE INDEX user_group_name ON user_group (org_id, provider, group_name, user_id)"
@@ -730,7 +778,7 @@
       "type": "table",
       "name": "access_grant",
       "tbl_name": "access_grant",
-      "sql": "CREATE TABLE access_grant (\n  id            TEXT NOT NULL PRIMARY KEY,\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  subject_type  TEXT NOT NULL CHECK (subject_type IN ('group', 'email')),\n  subject_value TEXT NOT NULL CHECK (subject_type = 'group' OR subject_value = lower(subject_value)),\n  subject_provider TEXT CHECK ((subject_type = 'group' AND subject_provider IS NOT NULL AND length(subject_provider) BETWEEN 1 AND 64 AND subject_provider = trim(subject_provider)) OR (subject_type = 'email' AND subject_provider IS NULL)),\n  scope         TEXT NOT NULL CHECK (scope IN ('organization', 'project')),\n  project_id    TEXT REFERENCES project (id),\n  role_id       TEXT NOT NULL REFERENCES role (id),\n  created_by    TEXT,\n  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT,\n  CHECK ((scope = 'organization' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL))\n) STRICT"
+      "sql": "CREATE TABLE access_grant (\n  id               TEXT NOT NULL PRIMARY KEY,\n  org_id           TEXT NOT NULL REFERENCES organization (id),\n  subject_type     TEXT NOT NULL CHECK (subject_type IN ('group', 'email')),\n  subject_value    TEXT NOT NULL CHECK (subject_type = 'group' OR subject_value = lower(subject_value)),\n  subject_provider TEXT CHECK ((subject_type = 'group' AND subject_provider IS NOT NULL AND length(subject_provider) BETWEEN 1 AND 64 AND subject_provider = trim(subject_provider)) OR (subject_type = 'email' AND subject_provider IS NULL)),\n  scope            TEXT NOT NULL CHECK (scope IN ('organization', 'project')),\n  project_id       TEXT REFERENCES project (id),\n  role_id          TEXT NOT NULL REFERENCES role (id),\n  created_by       TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  revision         INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  last_op_id       TEXT,\n  CHECK ((scope = 'organization' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL))\n) STRICT"
     },
     {
       "type": "table",
@@ -760,7 +808,7 @@
       "type": "table",
       "name": "blob",
       "tbl_name": "blob",
-      "sql": "CREATE TABLE blob (\n  id               TEXT NOT NULL PRIMARY KEY,\n  org_id           TEXT NOT NULL REFERENCES organization (id),\n  sha256           TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 = lower(sha256)),\n  size_bytes       INTEGER NOT NULL CHECK (size_bytes >= 0),\n  storage_key      TEXT NOT NULL,\n  media_type       TEXT NOT NULL DEFAULT 'application/octet-stream',\n  refetchable      INTEGER NOT NULL DEFAULT 1 CHECK (refetchable IN (0, 1)),\n  upstream_url     TEXT,\n  last_fetched_at  TEXT,\n  last_accessed_at TEXT,\n  purge_after      TEXT,\n  deleted_at       TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, purge_generation TEXT, purge_lease_until TEXT, published_at TEXT) STRICT"
+      "sql": "CREATE TABLE blob (\n  id                TEXT NOT NULL PRIMARY KEY,\n  org_id            TEXT NOT NULL REFERENCES organization (id),\n  sha256            TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 = lower(sha256)),\n  size_bytes        INTEGER NOT NULL CHECK (size_bytes >= 0),\n  storage_key       TEXT NOT NULL,\n  media_type        TEXT NOT NULL DEFAULT 'application/octet-stream',\n  refetchable       INTEGER NOT NULL DEFAULT 1 CHECK (refetchable IN (0, 1)),\n  upstream_url      TEXT,\n  last_fetched_at   TEXT,\n  last_accessed_at  TEXT,\n  purge_after       TEXT,\n  deleted_at        TEXT,\n  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  purge_generation  TEXT,\n  purge_lease_until TEXT,\n  published_at      TEXT\n) STRICT"
     },
     {
       "type": "table",
@@ -796,19 +844,19 @@
       "type": "table",
       "name": "customer_grant",
       "tbl_name": "customer_grant",
-      "sql": "CREATE TABLE customer_grant (\n  id                TEXT NOT NULL PRIMARY KEY,\n  org_id            TEXT NOT NULL REFERENCES organization (id),\n  customer_id       TEXT NOT NULL REFERENCES customer (id),\n  project_id        TEXT NOT NULL REFERENCES project (id),\n  package_id        TEXT REFERENCES package (id),\n  bundle_id         TEXT REFERENCES bundle (id),\n  version_constraint TEXT,\n  minimum_stability TEXT NOT NULL DEFAULT 'stable' CHECK (minimum_stability IN ('dev', 'alpha', 'beta', 'RC', 'stable')),\n  valid_until       TEXT,\n  revoked_at        TEXT,\n  row_version       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),\n  last_op_id        TEXT,\n  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  CHECK ((package_id IS NOT NULL AND bundle_id IS NULL) OR (package_id IS NULL AND bundle_id IS NOT NULL))\n) STRICT"
+      "sql": "CREATE TABLE customer_grant (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  customer_id        TEXT NOT NULL REFERENCES customer (id),\n  project_id         TEXT NOT NULL REFERENCES project (id),\n  package_id         TEXT REFERENCES package (id),\n  bundle_id          TEXT REFERENCES bundle (id),\n  version_constraint TEXT,\n  minimum_stability  TEXT NOT NULL DEFAULT 'stable' CHECK (minimum_stability IN ('dev', 'alpha', 'beta', 'RC', 'stable')),\n  valid_until        TEXT,\n  revoked_at         TEXT,\n  row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),\n  last_op_id         TEXT,\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  CHECK ((package_id IS NOT NULL AND bundle_id IS NULL) OR (package_id IS NULL AND bundle_id IS NOT NULL))\n) STRICT"
     },
     {
       "type": "table",
       "name": "dist_tag",
       "tbl_name": "dist_tag",
-      "sql": "CREATE TABLE \"dist_tag\" (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  package_id TEXT NOT NULL,\n  tag        TEXT NOT NULL,\n  version_id TEXT NOT NULL,\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (package_id, tag),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE dist_tag (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  package_id TEXT NOT NULL,\n  tag        TEXT NOT NULL,\n  version_id TEXT NOT NULL,\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (package_id, tag),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "dist_tag_history",
       "tbl_name": "dist_tag_history",
-      "sql": "CREATE TABLE \"dist_tag_history\" (\n  id                  TEXT NOT NULL PRIMARY KEY,\n  org_id              TEXT NOT NULL REFERENCES organization (id),\n  package_id          TEXT NOT NULL,\n  tag                 TEXT NOT NULL,\n  version_id          TEXT,\n  previous_version_id TEXT,\n  action              TEXT NOT NULL CHECK (action IN ('set', 'remove')),\n  actor_type          TEXT NOT NULL,\n  actor_id            TEXT,\n  op_id               TEXT,\n  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id),\n  FOREIGN KEY (org_id, previous_version_id) REFERENCES version (org_id, id)\n) STRICT"
+      "sql": "CREATE TABLE dist_tag_history (\n  id                  TEXT NOT NULL PRIMARY KEY,\n  org_id              TEXT NOT NULL REFERENCES organization (id),\n  package_id          TEXT NOT NULL,\n  tag                 TEXT NOT NULL,\n  version_id          TEXT,\n  previous_version_id TEXT,\n  action              TEXT NOT NULL CHECK (action IN ('set', 'remove')),\n  actor_type          TEXT NOT NULL,\n  actor_id            TEXT,\n  op_id               TEXT,\n  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id),\n  FOREIGN KEY (org_id, previous_version_id) REFERENCES version (org_id, id)\n) STRICT"
     },
     {
       "type": "table",
@@ -838,13 +886,13 @@
       "type": "table",
       "name": "import_ref",
       "tbl_name": "import_ref",
-      "sql": "CREATE TABLE import_ref (\n  id                TEXT NOT NULL PRIMARY KEY,\n  org_id            TEXT NOT NULL REFERENCES organization (id),\n  import_run_id     TEXT NOT NULL REFERENCES import_run (id),\n  entity_type       TEXT NOT NULL,\n  entity_id         TEXT NOT NULL,\n  external_ref      TEXT NOT NULL,\n  action            TEXT NOT NULL CHECK (action IN ('create', 'update')),\n  before_image_json TEXT CHECK (before_image_json IS NULL OR json_valid(before_image_json)),\n  content_hash      TEXT,\n  conflict_state    TEXT NOT NULL DEFAULT 'none' CHECK (conflict_state IN ('none', 'changed_after_import', 'resolved')),\n  rolled_back_at    TEXT,\n  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, published_at_basis TEXT CHECK (published_at_basis IS NULL OR published_at_basis IN ('source_release', 'packagist_added', 'import_time')), expired_at TEXT) STRICT"
+      "sql": "CREATE TABLE import_ref (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  import_run_id      TEXT NOT NULL REFERENCES import_run (id),\n  entity_type        TEXT NOT NULL,\n  entity_id          TEXT NOT NULL,\n  external_ref       TEXT NOT NULL,\n  action             TEXT NOT NULL CHECK (action IN ('create', 'update')),\n  before_image_json  TEXT CHECK (before_image_json IS NULL OR json_valid(before_image_json)),\n  content_hash       TEXT,\n  conflict_state     TEXT NOT NULL DEFAULT 'none' CHECK (conflict_state IN ('none', 'changed_after_import', 'resolved')),\n  rolled_back_at     TEXT,\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  published_at_basis TEXT CHECK (published_at_basis IS NULL OR published_at_basis IN ('source_release', 'packagist_added', 'import_time')),\n  expired_at         TEXT\n) STRICT"
     },
     {
       "type": "table",
       "name": "import_run",
       "tbl_name": "import_run",
-      "sql": "CREATE TABLE import_run (\n  id                      TEXT NOT NULL PRIMARY KEY,\n  org_id                  TEXT NOT NULL REFERENCES organization (id),\n  source_system           TEXT NOT NULL,\n  state                   TEXT NOT NULL DEFAULT 'planned' CHECK (state IN ('planned', 'applying', 'failed', 'applied', 'verifying', 'verified', 'rolled_back', 'cancelled')),\n  plan_hash               TEXT,\n  planned_count           INTEGER NOT NULL DEFAULT 0 CHECK (planned_count >= 0),\n  applied_count           INTEGER NOT NULL DEFAULT 0 CHECK (applied_count >= 0),\n  started_by_user_id      TEXT REFERENCES user_account (id),\n  before_image_expires_at TEXT,\n  accepted_at             TEXT,\n  last_error              TEXT,\n  created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, approved_by_user_id TEXT REFERENCES user_account (id), approved_at TEXT, credential_window_until TEXT, started_by_service_principal_id TEXT REFERENCES service_principal (id), manifest_blob_sha256 TEXT CHECK (manifest_blob_sha256 IS NULL OR length(manifest_blob_sha256) = 64), rollback_restored_count INTEGER NOT NULL DEFAULT 0 CHECK (rollback_restored_count >= 0), rollback_conflict_count INTEGER NOT NULL DEFAULT 0 CHECK (rollback_conflict_count >= 0), rollback_expired_count INTEGER NOT NULL DEFAULT 0 CHECK (rollback_expired_count >= 0)) STRICT"
+      "sql": "CREATE TABLE import_run (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  org_id                          TEXT NOT NULL REFERENCES organization (id),\n  source_system                   TEXT NOT NULL,\n  state                           TEXT NOT NULL DEFAULT 'planned' CHECK (state IN ('planned', 'applying', 'failed', 'applied', 'verifying', 'verified', 'rolled_back', 'cancelled')),\n  plan_hash                       TEXT,\n  planned_count                   INTEGER NOT NULL DEFAULT 0 CHECK (planned_count >= 0),\n  applied_count                   INTEGER NOT NULL DEFAULT 0 CHECK (applied_count >= 0),\n  started_by_user_id              TEXT REFERENCES user_account (id),\n  before_image_expires_at         TEXT,\n  accepted_at                     TEXT,\n  last_error                      TEXT,\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  approved_by_user_id             TEXT REFERENCES user_account (id),\n  approved_at                     TEXT,\n  credential_window_until         TEXT,\n  started_by_service_principal_id TEXT REFERENCES service_principal (id),\n  manifest_blob_sha256            TEXT CHECK (manifest_blob_sha256 IS NULL OR length(manifest_blob_sha256) = 64),\n  rollback_restored_count         INTEGER NOT NULL DEFAULT 0 CHECK (rollback_restored_count >= 0),\n  rollback_conflict_count         INTEGER NOT NULL DEFAULT 0 CHECK (rollback_conflict_count >= 0),\n  rollback_expired_count          INTEGER NOT NULL DEFAULT 0 CHECK (rollback_expired_count >= 0)\n) STRICT"
     },
     {
       "type": "table",
@@ -862,13 +910,13 @@
       "type": "table",
       "name": "job_attempt",
       "tbl_name": "job_attempt",
-      "sql": "CREATE TABLE \"job_attempt\" (\n  id          TEXT NOT NULL PRIMARY KEY,\n  org_id      TEXT NOT NULL REFERENCES organization (id),\n  job_id      TEXT NOT NULL REFERENCES job (id) ON DELETE CASCADE,\n  attempt     INTEGER NOT NULL CHECK (attempt >= 1),\n  fence       INTEGER NOT NULL CHECK (fence >= 1),\n  worker      TEXT NOT NULL,\n  outcome     TEXT NOT NULL DEFAULT 'running' CHECK (outcome IN ('running', 'succeeded', 'failed', 'lease_expired', 'released')),\n  error       TEXT,\n  started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  finished_at TEXT,\n  next_run_at TEXT\n) STRICT"
+      "sql": "CREATE TABLE job_attempt (\n  id          TEXT NOT NULL PRIMARY KEY,\n  org_id      TEXT NOT NULL REFERENCES organization (id),\n  job_id      TEXT NOT NULL REFERENCES job (id) ON DELETE CASCADE,\n  attempt     INTEGER NOT NULL CHECK (attempt >= 1),\n  fence       INTEGER NOT NULL CHECK (fence >= 1),\n  worker      TEXT NOT NULL,\n  outcome     TEXT NOT NULL DEFAULT 'running' CHECK (outcome IN ('running', 'succeeded', 'failed', 'lease_expired', 'released')),\n  error       TEXT,\n  started_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  finished_at TEXT,\n  next_run_at TEXT\n) STRICT"
     },
     {
       "type": "table",
       "name": "job_schedule",
       "tbl_name": "job_schedule",
-      "sql": "CREATE TABLE job_schedule (\n  org_id         TEXT NOT NULL REFERENCES organization (id),\n  name           TEXT NOT NULL,\n  every_seconds  INTEGER CHECK (every_seconds IS NULL OR every_seconds > 0),\n  cron           TEXT,\n  next_run_at    TEXT NOT NULL,\n  last_slot      TEXT,\n  enabled        INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n  PRIMARY KEY (org_id, name),\n  CHECK (every_seconds IS NOT NULL OR cron IS NOT NULL)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE job_schedule (\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  name          TEXT NOT NULL,\n  every_seconds INTEGER CHECK (every_seconds IS NULL OR every_seconds > 0),\n  cron          TEXT,\n  next_run_at   TEXT NOT NULL,\n  last_slot     TEXT,\n  enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n  PRIMARY KEY (org_id, name),\n  CHECK (every_seconds IS NOT NULL OR cron IS NOT NULL)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
@@ -892,55 +940,67 @@
       "type": "table",
       "name": "organization",
       "tbl_name": "organization",
-      "sql": "CREATE TABLE organization (\n  id                                TEXT NOT NULL PRIMARY KEY,\n  singleton                         INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),\n  slug                              TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                              TEXT NOT NULL,\n  retention_removed_upstream_days   INTEGER NOT NULL DEFAULT 365 CHECK (retention_removed_upstream_days >= 0),\n  token_default_expiry_days         INTEGER NOT NULL DEFAULT 90 CHECK (token_default_expiry_days > 0),\n  token_ci_readonly_expiry_days     INTEGER NOT NULL DEFAULT 365 CHECK (token_ci_readonly_expiry_days > 0),\n  created_at                        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  audit_last_verified_at TEXT\n) STRICT"
+      "sql": "CREATE TABLE organization (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  singleton                       INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),\n  slug                            TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                            TEXT NOT NULL,\n  retention_removed_upstream_days INTEGER NOT NULL DEFAULT 365 CHECK (retention_removed_upstream_days >= 0),\n  token_default_expiry_days       INTEGER NOT NULL DEFAULT 90 CHECK (token_default_expiry_days > 0),\n  token_ci_readonly_expiry_days   INTEGER NOT NULL DEFAULT 365 CHECK (token_ci_readonly_expiry_days > 0),\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  audit_last_verified_at          TEXT\n) STRICT"
     },
     {
       "type": "table",
       "name": "package",
       "tbl_name": "package",
-      "sql": "CREATE TABLE package (\n  id                         TEXT NOT NULL PRIMARY KEY,\n  org_id                     TEXT NOT NULL REFERENCES organization (id),\n  source_id                  TEXT NOT NULL,\n  ecosystem                  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  name                       TEXT NOT NULL CHECK (name = lower(name)),\n  description                TEXT,\n  visible_to_new_projects    INTEGER NOT NULL DEFAULT 1 CHECK (visible_to_new_projects IN (0, 1)),\n  status                     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'removed_upstream')),\n  removed_upstream_at        TEXT,\n  rev                        INTEGER NOT NULL DEFAULT 1 CHECK (rev >= 1),\n  modified_at                TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  last_synced_at             TEXT,\n  created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  removal_cause              TEXT CHECK (removal_cause IS NULL OR removal_cause IN ('document_absent', 'source_listing')),\n  last_op_id                 TEXT,\n  listing_open_stamp         TEXT,\n  listing_seen_stamp         TEXT,\n  listing_opened_at          TEXT,\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT"
+      "sql": "CREATE TABLE package (\n  id                      TEXT NOT NULL PRIMARY KEY,\n  org_id                  TEXT NOT NULL REFERENCES organization (id),\n  source_id               TEXT NOT NULL,\n  ecosystem               TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  name                    TEXT NOT NULL CHECK (name = lower(name)),\n  description             TEXT,\n  visible_to_new_projects INTEGER NOT NULL DEFAULT 1 CHECK (visible_to_new_projects IN (0, 1)),\n  status                  TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'removed_upstream')),\n  removed_upstream_at     TEXT,\n  rev                     INTEGER NOT NULL DEFAULT 1 CHECK (rev >= 1),\n  modified_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  last_synced_at          TEXT,\n  created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  removal_cause           TEXT CHECK (removal_cause IS NULL OR removal_cause IN ('document_absent', 'source_listing')),\n  last_op_id              TEXT,\n  listing_open_stamp      TEXT,\n  listing_seen_stamp      TEXT,\n  listing_opened_at       TEXT, new_project_access_mode TEXT NOT NULL DEFAULT 'none' CONSTRAINT package_access_mode CHECK (new_project_access_mode IN ('none', 'request')), held_until_active INTEGER NOT NULL DEFAULT 0 CONSTRAINT package_held CHECK (held_until_active IN (0, 1)),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "package_access_request",
+      "tbl_name": "package_access_request",
+      "sql": "CREATE TABLE package_access_request (\n  id TEXT NOT NULL PRIMARY KEY,\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  package_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  state TEXT NOT NULL DEFAULT 'pending' CONSTRAINT access_state CHECK (state IN ('pending', 'approved', 'rejected', 'expired')),\n  requested_by_user_id TEXT NOT NULL,\n  reason TEXT CONSTRAINT access_reason_bytes CHECK (reason IS NULL OR length(CAST(reason AS BLOB)) <= 1000) CONSTRAINT access_reason_controls CHECK (reason IS NULL OR (instr(reason, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), reason) = 0)),\n  decided_by_user_id TEXT,\n  decided_at TEXT,\n  decision_reason TEXT CONSTRAINT access_decision_reason_bytes CHECK (decision_reason IS NULL OR length(CAST(decision_reason AS BLOB)) <= 1000) CONSTRAINT access_decision_reason_controls CHECK (decision_reason IS NULL OR (instr(decision_reason, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), decision_reason) = 0)),\n  expires_at TEXT NOT NULL,\n  revision INTEGER NOT NULL DEFAULT 1 CONSTRAINT access_revision CHECK (revision >= 1),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  CONSTRAINT access_decision_actor CHECK (state NOT IN ('approved', 'rejected') OR decided_by_user_id IS NOT NULL),\n  CONSTRAINT access_expiry_actor CHECK (state <> 'expired' OR decided_by_user_id IS NULL),\n  CONSTRAINT access_decision_time CHECK ((decided_at IS NOT NULL) = (state IN ('approved', 'rejected', 'expired'))),\n  FOREIGN KEY (org_id, requested_by_user_id) REFERENCES user_account (org_id, id),\n  FOREIGN KEY (org_id, decided_by_user_id) REFERENCES user_account (org_id, id)\n) STRICT"
     },
     {
       "type": "table",
       "name": "project",
       "tbl_name": "project",
-      "sql": "CREATE TABLE project (\n  id                       TEXT NOT NULL PRIMARY KEY,\n  org_id                   TEXT NOT NULL REFERENCES organization (id),\n  slug                     TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                     TEXT NOT NULL,\n  status                   TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),\n  token_max_scope          TEXT NOT NULL DEFAULT 'full' CHECK (token_max_scope IN ('read', 'write', 'full')),\n  require_publish_approval INTEGER NOT NULL DEFAULT 0 CHECK (require_publish_approval IN (0, 1)),\n  created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT) STRICT"
+      "sql": "CREATE TABLE project (\n  id                       TEXT NOT NULL PRIMARY KEY,\n  org_id                   TEXT NOT NULL REFERENCES organization (id),\n  slug                     TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                     TEXT NOT NULL,\n  status                   TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),\n  token_max_scope          TEXT NOT NULL DEFAULT 'full' CHECK (token_max_scope IN ('read', 'write', 'full')),\n  require_publish_approval INTEGER NOT NULL DEFAULT 0 CHECK (require_publish_approval IN (0, 1)),\n  created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  revision                 INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  last_op_id               TEXT\n) STRICT"
     },
     {
       "type": "table",
       "name": "project_package",
       "tbl_name": "project_package",
-      "sql": "CREATE TABLE \"project_package\" (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  package_id TEXT NOT NULL,\n  origin     TEXT NOT NULL CHECK (origin IN ('subscription', 'explicit', 'pattern')),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  ecosystem  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  name       TEXT NOT NULL CHECK (name = lower(name)),\n  PRIMARY KEY (project_id, package_id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE project_package (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  package_id TEXT NOT NULL,\n  origin     TEXT NOT NULL CHECK (origin IN ('subscription', 'explicit', 'pattern')),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  ecosystem  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  name       TEXT NOT NULL CHECK (name = lower(name)),\n  PRIMARY KEY (project_id, package_id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "project_package_pattern",
       "tbl_name": "project_package_pattern",
-      "sql": "CREATE TABLE \"project_package_pattern\" (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  source_id  TEXT NOT NULL,\n  pattern    TEXT NOT NULL CHECK (pattern = lower(pattern)),\n  effect     TEXT NOT NULL CHECK (effect IN ('include', 'exclude')),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT"
+      "sql": "CREATE TABLE project_package_pattern (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  source_id  TEXT NOT NULL,\n  pattern    TEXT NOT NULL CHECK (pattern = lower(pattern)),\n  effect     TEXT NOT NULL CHECK (effect IN ('include', 'exclude')),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT"
     },
     {
       "type": "table",
       "name": "project_source",
       "tbl_name": "project_source",
-      "sql": "CREATE TABLE \"project_source\" (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  source_id  TEXT NOT NULL,\n  precedence INTEGER NOT NULL DEFAULT 100 CHECK (precedence >= 0),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (project_id, source_id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE project_source (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  source_id  TEXT NOT NULL,\n  precedence INTEGER NOT NULL DEFAULT 100 CHECK (precedence >= 0),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  PRIMARY KEY (project_id, source_id),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "publish_approval",
+      "tbl_name": "publish_approval",
+      "sql": "CREATE TABLE publish_approval (\n  id TEXT NOT NULL PRIMARY KEY,\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  package_id TEXT NOT NULL,\n  version_id TEXT NOT NULL UNIQUE,\n  source_id TEXT NOT NULL,\n  hold_approval INTEGER NOT NULL CONSTRAINT publish_hold_approval CHECK (hold_approval IN (0, 1)),\n  hold_scan INTEGER NOT NULL CONSTRAINT publish_hold_scan CHECK (hold_scan IN (0, 1)),\n  approval_state TEXT NOT NULL CONSTRAINT publish_approval_state CHECK (approval_state IN ('not_required', 'pending', 'approved', 'rejected', 'expired')),\n  scan_state TEXT NOT NULL CONSTRAINT publish_scan_state CHECK (scan_state IN ('not_required', 'queued', 'running', 'allowed', 'denied', 'failed')),\n  required_scanners_json TEXT NOT NULL DEFAULT '[]' CONSTRAINT publish_scanners_json CHECK (json_valid(required_scanners_json)),\n  scan_attempts INTEGER NOT NULL DEFAULT 0 CONSTRAINT publish_attempts CHECK (scan_attempts >= 0),\n  requested_by_type TEXT NOT NULL CONSTRAINT publish_requester_type CHECK (requested_by_type IN ('user', 'service')),\n  requested_by_id TEXT NOT NULL,\n  token_id TEXT NOT NULL,\n  route_project_id TEXT,\n  dist_tags_json TEXT NOT NULL DEFAULT '{}' CONSTRAINT publish_tags_json CHECK (json_valid(dist_tags_json)),\n  readme_pending INTEGER NOT NULL DEFAULT 0 CONSTRAINT publish_readme_pending CHECK (readme_pending IN (0, 1)),\n  decided_by_user_id TEXT,\n  decided_at TEXT,\n  decision_reason TEXT CONSTRAINT publish_reason_bytes CHECK (decision_reason IS NULL OR length(CAST(decision_reason AS BLOB)) <= 1000),\n  scan_verdict_json TEXT NOT NULL DEFAULT '[]' CONSTRAINT publish_verdict_json CHECK (json_valid(scan_verdict_json)),\n  expires_at TEXT NOT NULL,\n  revision INTEGER NOT NULL DEFAULT 1 CONSTRAINT publish_revision CHECK (revision >= 1),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  CONSTRAINT publish_approval_hold CHECK ((hold_approval = 0) = (approval_state = 'not_required')),\n  CONSTRAINT publish_scan_hold CHECK ((hold_scan = 0) = (scan_state = 'not_required')),\n  CONSTRAINT publish_decision_time CHECK ((decided_at IS NOT NULL) = (approval_state IN ('approved', 'rejected', 'expired'))),\n  CONSTRAINT publish_decision_actor CHECK (approval_state NOT IN ('approved', 'rejected') OR decided_by_user_id IS NOT NULL),\n  CONSTRAINT publish_expiry_actor CHECK (approval_state <> 'expired' OR decided_by_user_id IS NULL),\n  FOREIGN KEY (org_id, package_id) REFERENCES package (org_id, id),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id),\n  FOREIGN KEY (org_id, route_project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, decided_by_user_id) REFERENCES user_account (org_id, id)\n) STRICT"
     },
     {
       "type": "table",
       "name": "registered_name",
       "tbl_name": "registered_name",
-      "sql": "CREATE TABLE \"registered_name\" (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  source_id  TEXT NOT NULL,\n  ecosystem  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  pattern    TEXT NOT NULL CHECK (pattern = lower(pattern)),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id) ON DELETE CASCADE\n) STRICT"
+      "sql": "CREATE TABLE registered_name (\n  id         TEXT NOT NULL PRIMARY KEY,\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  source_id  TEXT NOT NULL,\n  ecosystem  TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  pattern    TEXT NOT NULL CHECK (pattern = lower(pattern)),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  FOREIGN KEY (org_id, source_id) REFERENCES source (org_id, id) ON DELETE CASCADE\n) STRICT"
     },
     {
       "type": "table",
       "name": "representation_clock",
       "tbl_name": "representation_clock",
-      "sql": "CREATE TABLE representation_clock (\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  project_id    TEXT NOT NULL REFERENCES project (id) ON DELETE CASCADE,\n  key_hash      TEXT NOT NULL CHECK (length(key_hash) = 64 AND key_hash = lower(key_hash) AND key_hash NOT GLOB '*[^0-9a-f]*'),\n  form          TEXT NOT NULL CHECK (form IN ('composer-p2', 'composer-p2-dev')),\n  validator     TEXT NOT NULL CHECK (length(validator) = 64 AND validator = lower(validator) AND validator NOT GLOB '*[^0-9a-f]*'),\n  last_modified TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0 CHECK (rev >= 0), package_id TEXT NOT NULL DEFAULT '',\n  PRIMARY KEY (project_id, key_hash, form)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE representation_clock (\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  project_id    TEXT NOT NULL REFERENCES project (id) ON DELETE CASCADE,\n  key_hash      TEXT NOT NULL CHECK (length(key_hash) = 64 AND key_hash = lower(key_hash) AND key_hash NOT GLOB '*[^0-9a-f]*'),\n  form          TEXT NOT NULL CHECK (form IN ('composer-p2', 'composer-p2-dev')),\n  validator     TEXT NOT NULL CHECK (length(validator) = 64 AND validator = lower(validator) AND validator NOT GLOB '*[^0-9a-f]*'),\n  last_modified TEXT NOT NULL,\n  rev           INTEGER NOT NULL DEFAULT 0 CHECK (rev >= 0),\n  package_id    TEXT NOT NULL DEFAULT '',\n  PRIMARY KEY (project_id, key_hash, form)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "role",
       "tbl_name": "role",
-      "sql": "CREATE TABLE role (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  key                  TEXT NOT NULL CHECK (key = lower(key)),\n  name                 TEXT NOT NULL,\n  scope                TEXT NOT NULL CHECK (scope IN ('organization', 'project')),\n  is_system            INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),\n  protects_last_holder INTEGER NOT NULL DEFAULT 0 CHECK (protects_last_holder IN (0, 1)),\n  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT) STRICT"
+      "sql": "CREATE TABLE role (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  key                  TEXT NOT NULL CHECK (key = lower(key)),\n  name                 TEXT NOT NULL,\n  scope                TEXT NOT NULL CHECK (scope IN ('organization', 'project')),\n  is_system            INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),\n  protects_last_holder INTEGER NOT NULL DEFAULT 0 CHECK (protects_last_holder IN (0, 1)),\n  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  revision             INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  last_op_id           TEXT\n) STRICT"
     },
     {
       "type": "table",
@@ -958,7 +1018,7 @@
       "type": "table",
       "name": "service_principal",
       "tbl_name": "service_principal",
-      "sql": "CREATE TABLE service_principal (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  name               TEXT NOT NULL,\n  project_id         TEXT REFERENCES project (id),\n  created_by_user_id TEXT NOT NULL REFERENCES user_account (id),\n  status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), last_op_id TEXT) STRICT"
+      "sql": "CREATE TABLE service_principal (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  name               TEXT NOT NULL,\n  project_id         TEXT REFERENCES project (id),\n  created_by_user_id TEXT NOT NULL REFERENCES user_account (id),\n  status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  revision           INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  last_op_id         TEXT\n) STRICT"
     },
     {
       "type": "table",
@@ -976,7 +1036,7 @@
       "type": "table",
       "name": "source",
       "tbl_name": "source",
-      "sql": "CREATE TABLE source (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  org_id                          TEXT NOT NULL REFERENCES organization (id),\n  project_id                      TEXT REFERENCES project (id),\n  name                            TEXT NOT NULL,\n  ecosystem                       TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  type                            TEXT NOT NULL CHECK (type IN ('vcs', 'composer_repository', 'npm_registry', 'packagist_proxy', 'npmjs_proxy', 'hosted')),\n  url                             TEXT,\n  credential_id                   TEXT REFERENCES credential (id),\n  config_json                     TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),\n  protocol_mode                   TEXT CHECK (protocol_mode IS NULL OR protocol_mode IN ('v2', 'v1-providers', 'v1-lazy', 'v1-includes', 'npm-packument')),\n  has_available_packages          INTEGER NOT NULL DEFAULT 0 CHECK (has_available_packages IN (0, 1)),\n  user_agent                      TEXT,\n  default_visible_to_new_projects INTEGER NOT NULL DEFAULT 1 CHECK (default_visible_to_new_projects IN (0, 1)),\n  removal_policy                  TEXT NOT NULL DEFAULT 'flag' CHECK (removal_policy IN ('flag', 'exclude')),\n  retention_days_override         INTEGER CHECK (retention_days_override IS NULL OR retention_days_override >= 0),\n  status                          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'degraded', 'failing', 'paused')),\n  poll_interval_seconds           INTEGER NOT NULL DEFAULT 86400 CHECK (poll_interval_seconds > 0),\n  next_poll_at                    TEXT,\n  last_polled_at                  TEXT,\n  last_success_at                 TEXT,\n  poll_etag                       TEXT,\n  poll_last_modified              TEXT,\n  root_hash                       TEXT,\n  listing_hash                    TEXT,\n  consecutive_failures            INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),\n  last_error                      TEXT,\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  listing_open_stamp              TEXT,\n  listing_opened_at               TEXT,\n  last_refusal_at                 TEXT,\n  last_refusal_absent             INTEGER CHECK (last_refusal_absent IS NULL OR last_refusal_absent >= 0),\n  last_refusal_listed             INTEGER CHECK (last_refusal_listed IS NULL OR last_refusal_listed >= 0),\n  last_refusal_successful         INTEGER CHECK (last_refusal_successful IS NULL OR last_refusal_successful >= 0),\n  removal_accepted                INTEGER NOT NULL DEFAULT 0 CHECK (removal_accepted IN (0, 1)),\n  sync_generation                 TEXT,\n  sync_counts                     TEXT NOT NULL DEFAULT '{\"listing\":true,\"queued\":0,\"running\":0,\"retrying\":0,\"failed\":0,\"completed\":0,\"errors\":{}}' CHECK (json_valid(sync_counts)),\n  CHECK ((last_refusal_at IS NULL) = (last_refusal_absent IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_listed IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_successful IS NULL)),\n  CHECK (removal_accepted = 0 OR last_refusal_at IS NOT NULL)\n) STRICT"
+      "sql": "CREATE TABLE source (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  org_id                          TEXT NOT NULL REFERENCES organization (id),\n  project_id                      TEXT REFERENCES project (id),\n  name                            TEXT NOT NULL,\n  ecosystem                       TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  type                            TEXT NOT NULL CHECK (type IN ('vcs', 'composer_repository', 'npm_registry', 'packagist_proxy', 'npmjs_proxy', 'hosted')),\n  url                             TEXT,\n  credential_id                   TEXT REFERENCES credential (id),\n  config_json                     TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config_json)),\n  protocol_mode                   TEXT CHECK (protocol_mode IS NULL OR protocol_mode IN ('v2', 'v1-providers', 'v1-lazy', 'v1-includes', 'npm-packument')),\n  has_available_packages          INTEGER NOT NULL DEFAULT 0 CHECK (has_available_packages IN (0, 1)),\n  user_agent                      TEXT,\n  default_visible_to_new_projects INTEGER NOT NULL DEFAULT 1 CHECK (default_visible_to_new_projects IN (0, 1)),\n  removal_policy                  TEXT NOT NULL DEFAULT 'flag' CHECK (removal_policy IN ('flag', 'exclude')),\n  retention_days_override         INTEGER CHECK (retention_days_override IS NULL OR retention_days_override >= 0),\n  status                          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'degraded', 'failing', 'paused')),\n  poll_interval_seconds           INTEGER NOT NULL DEFAULT 86400 CHECK (poll_interval_seconds > 0),\n  next_poll_at                    TEXT,\n  last_polled_at                  TEXT,\n  last_success_at                 TEXT,\n  poll_etag                       TEXT,\n  poll_last_modified              TEXT,\n  root_hash                       TEXT,\n  listing_hash                    TEXT,\n  consecutive_failures            INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),\n  last_error                      TEXT,\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  listing_open_stamp              TEXT,\n  listing_opened_at               TEXT,\n  last_refusal_at                 TEXT,\n  last_refusal_absent             INTEGER CHECK (last_refusal_absent IS NULL OR last_refusal_absent >= 0),\n  last_refusal_listed             INTEGER CHECK (last_refusal_listed IS NULL OR last_refusal_listed >= 0),\n  last_refusal_successful         INTEGER CHECK (last_refusal_successful IS NULL OR last_refusal_successful >= 0),\n  removal_accepted                INTEGER NOT NULL DEFAULT 0 CHECK (removal_accepted IN (0, 1)),\n  sync_generation                 TEXT,\n  sync_counts                     TEXT NOT NULL DEFAULT '{\"listing\":true,\"queued\":0,\"running\":0,\"retrying\":0,\"failed\":0,\"completed\":0,\"errors\":{}}' CHECK (json_valid(sync_counts)), require_publish_approval INTEGER NOT NULL DEFAULT 0 CONSTRAINT source_publish_approval CHECK (require_publish_approval IN (0, 1)),\n  CHECK ((last_refusal_at IS NULL) = (last_refusal_absent IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_listed IS NULL)\n    AND (last_refusal_at IS NULL) = (last_refusal_successful IS NULL)),\n  CHECK (removal_accepted = 0 OR last_refusal_at IS NOT NULL)\n) STRICT"
     },
     {
       "type": "table",
@@ -988,7 +1048,7 @@
       "type": "table",
       "name": "token",
       "tbl_name": "token",
-      "sql": "CREATE TABLE token (\n  id                   TEXT NOT NULL PRIMARY KEY,\n  org_id               TEXT NOT NULL REFERENCES organization (id),\n  kind                 TEXT NOT NULL CHECK (kind IN ('pat', 'svc', 'cst')),\n  selector             TEXT NOT NULL CHECK (length(selector) = 12),\n  hash                 TEXT NOT NULL CHECK (length(hash) = 64),\n  pepper_version       INTEGER NOT NULL CHECK (pepper_version >= 1),\n  name                 TEXT NOT NULL,\n  scopes_json          TEXT NOT NULL CHECK (json_valid(scopes_json)),\n  read_only            INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),\n  user_id              TEXT REFERENCES user_account (id),\n  service_principal_id TEXT REFERENCES service_principal (id),\n  customer_id          TEXT REFERENCES customer (id),\n  project_id           TEXT REFERENCES project (id),\n  created_by_user_id   TEXT REFERENCES user_account (id),\n  expires_at           TEXT,\n  revoked_at           TEXT,\n  last_used_at         TEXT,\n  created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), project_mode TEXT NOT NULL DEFAULT 'selected' CHECK (project_mode IN ('all', 'selected')), validation_kind TEXT CHECK (validation_kind IS NULL OR (validation_kind IN ('sso', 'local') AND kind = 'pat')), validation_identity_id TEXT REFERENCES identity (id) ON DELETE SET NULL\n  CHECK (validation_identity_id IS NULL OR (validation_kind IS NOT 'local' AND kind = 'pat')), last_op_id TEXT,\n  CHECK (\n    (kind = 'pat' AND user_id IS NOT NULL AND service_principal_id IS NULL AND customer_id IS NULL) OR\n    (kind = 'svc' AND service_principal_id IS NOT NULL AND user_id IS NULL AND customer_id IS NULL) OR\n    (kind = 'cst' AND customer_id IS NOT NULL AND user_id IS NULL AND service_principal_id IS NULL)\n  ),\n  CHECK (kind = 'cst' OR expires_at IS NOT NULL),\n  FOREIGN KEY (org_id, validation_identity_id, user_id) REFERENCES identity (org_id, id, user_id)\n) STRICT"
+      "sql": "CREATE TABLE token (\n  id                     TEXT NOT NULL PRIMARY KEY,\n  org_id                 TEXT NOT NULL REFERENCES organization (id),\n  kind                   TEXT NOT NULL CHECK (kind IN ('pat', 'svc', 'cst')),\n  selector               TEXT NOT NULL CHECK (length(selector) = 12),\n  hash                   TEXT NOT NULL CHECK (length(hash) = 64),\n  pepper_version         INTEGER NOT NULL CHECK (pepper_version >= 1),\n  name                   TEXT NOT NULL,\n  scopes_json            TEXT NOT NULL CHECK (json_valid(scopes_json)),\n  read_only              INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),\n  user_id                TEXT REFERENCES user_account (id),\n  service_principal_id   TEXT REFERENCES service_principal (id),\n  customer_id            TEXT REFERENCES customer (id),\n  project_id             TEXT REFERENCES project (id),\n  created_by_user_id     TEXT REFERENCES user_account (id),\n  expires_at             TEXT,\n  revoked_at             TEXT,\n  last_used_at           TEXT,\n  created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  project_mode           TEXT NOT NULL DEFAULT 'selected' CHECK (project_mode IN ('all', 'selected')),\n  validation_kind        TEXT CHECK (validation_kind IS NULL OR (validation_kind IN ('sso', 'local') AND kind = 'pat')),\n  validation_identity_id TEXT REFERENCES identity (id) ON DELETE SET NULL CHECK (validation_identity_id IS NULL OR (validation_kind IS NOT 'local' AND kind = 'pat')),\n  last_op_id             TEXT,\n  CHECK ( (kind = 'pat' AND user_id IS NOT NULL AND service_principal_id IS NULL AND customer_id IS NULL) OR (kind = 'svc' AND service_principal_id IS NOT NULL AND user_id IS NULL AND customer_id IS NULL) OR (kind = 'cst' AND customer_id IS NOT NULL AND user_id IS NULL AND service_principal_id IS NULL) ),\n  CHECK (kind = 'cst' OR expires_at IS NOT NULL),\n  -- The single-column FK clears only the identity on deletion; this FK enforces ownership.\n  FOREIGN KEY (org_id, validation_identity_id, user_id) REFERENCES identity (org_id, id, user_id)\n) STRICT"
     },
     {
       "type": "table",
@@ -1006,7 +1066,7 @@
       "type": "table",
       "name": "user_account",
       "tbl_name": "user_account",
-      "sql": "CREATE TABLE user_account (\n  id               TEXT NOT NULL PRIMARY KEY,\n  org_id           TEXT NOT NULL REFERENCES organization (id),\n  email            TEXT NOT NULL CHECK (email = lower(email)),\n  display_name     TEXT,\n  status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),\n  last_login_at    TEXT,\n  idp_validated_at TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n, pat_invalid_before TEXT) STRICT"
+      "sql": "CREATE TABLE user_account (\n  id                 TEXT NOT NULL PRIMARY KEY,\n  org_id             TEXT NOT NULL REFERENCES organization (id),\n  email              TEXT NOT NULL CHECK (email = lower(email)),\n  display_name       TEXT,\n  status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),\n  last_login_at      TEXT,\n  idp_validated_at   TEXT,\n  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  pat_invalid_before TEXT\n) STRICT"
     },
     {
       "type": "table",
@@ -1022,6 +1082,12 @@
     },
     {
       "type": "table",
+      "name": "version_readme",
+      "tbl_name": "version_readme",
+      "sql": "CREATE TABLE version_readme (\n  version_id TEXT NOT NULL PRIMARY KEY,\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  filename TEXT NOT NULL,\n  body TEXT NOT NULL CONSTRAINT readme_body_bytes CHECK (length(CAST(body AS BLOB)) <= 524288),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  CONSTRAINT readme_controls CHECK (instr(body, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), body) = 0),\n  FOREIGN KEY (org_id, version_id) REFERENCES version (org_id, id) ON DELETE CASCADE\n) STRICT"
+    },
+    {
+      "type": "table",
       "name": "version_revision",
       "tbl_name": "version_revision",
       "sql": "CREATE TABLE version_revision (\n  id            TEXT NOT NULL PRIMARY KEY,\n  org_id        TEXT NOT NULL REFERENCES organization (id),\n  version_id    TEXT NOT NULL REFERENCES version (id),\n  revision      INTEGER NOT NULL CHECK (revision >= 1),\n  blob_id       TEXT REFERENCES blob (id),\n  source_ref    TEXT,\n  metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json)),\n  reason        TEXT NOT NULL,\n  op_id         TEXT,\n  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n) STRICT"
@@ -1030,31 +1096,31 @@
       "type": "table",
       "name": "vulnerability_advisory",
       "tbl_name": "vulnerability_advisory",
-      "sql": "CREATE TABLE vulnerability_advisory (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  advisory_id TEXT NOT NULL CHECK (length(CAST(advisory_id AS BLOB)) BETWEEN 1 AND 200 AND instr(advisory_id, '/') = 0 AND instr(advisory_id, char(92)) = 0 AND advisory_id NOT IN ('.', '..')),\n  detail_json TEXT CHECK (detail_json IS NULL OR (length(CAST(detail_json AS BLOB)) <= 65536 AND json_valid(detail_json) AND json_type(detail_json) = 'object')),\n  summary TEXT CHECK (summary IS NULL OR length(CAST(summary AS BLOB)) <= 8192),\n  severity_json TEXT CHECK (severity_json IS NULL OR (length(CAST(severity_json AS BLOB)) <= 16384 AND json_valid(severity_json))),\n  modified_at TEXT CHECK (modified_at IS NULL OR (length(modified_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', modified_at) IS modified_at)),\n  fetched_at TEXT CHECK (fetched_at IS NULL OR (length(fetched_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at) IS fetched_at)),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 1000),\n  last_error_code TEXT CHECK (last_error_code IN ('unavailable', 'protocol', 'config', 'limit')),\n  PRIMARY KEY (org_id, source, advisory_id)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE vulnerability_advisory (\n  org_id          TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  source          TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  advisory_id     TEXT NOT NULL CHECK (length(CAST(advisory_id AS BLOB)) BETWEEN 1 AND 200 AND instr(advisory_id, '/') = 0 AND instr(advisory_id, char(92)) = 0 AND advisory_id NOT IN ('.', '..')),\n  detail_json     TEXT CHECK (detail_json IS NULL OR (length(CAST(detail_json AS BLOB)) <= 65536 AND json_valid(detail_json) AND json_type(detail_json) = 'object')),\n  summary         TEXT CHECK (summary IS NULL OR length(CAST(summary AS BLOB)) <= 8192),\n  severity_json   TEXT CHECK (severity_json IS NULL OR (length(CAST(severity_json AS BLOB)) <= 16384 AND json_valid(severity_json))),\n  modified_at     TEXT CHECK (modified_at IS NULL OR (length(modified_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', modified_at) IS modified_at)),\n  fetched_at      TEXT CHECK (fetched_at IS NULL OR (length(fetched_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at) IS fetched_at)),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  failure_count   INTEGER NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 1000),\n  last_error_code TEXT CHECK (last_error_code IN ('unavailable', 'protocol', 'config', 'limit')),\n  PRIMARY KEY (org_id, source, advisory_id)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "vulnerability_match",
       "tbl_name": "vulnerability_match",
-      "sql": "CREATE TABLE vulnerability_match (\n  org_id TEXT NOT NULL,\n  version_id TEXT NOT NULL,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  advisory_id TEXT NOT NULL CHECK (length(CAST(advisory_id AS BLOB)) BETWEEN 1 AND 200 AND instr(advisory_id, '/') = 0 AND instr(advisory_id, char(92)) = 0 AND advisory_id NOT IN ('.', '..')),\n  advisory_modified_at TEXT CHECK (advisory_modified_at IS NULL OR (length(advisory_modified_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', advisory_modified_at) IS advisory_modified_at)),\n  PRIMARY KEY (org_id, version_id, source, advisory_id),\n  FOREIGN KEY (org_id, version_id, source) REFERENCES vulnerability_result(org_id, version_id, source) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE vulnerability_match (\n  org_id               TEXT NOT NULL,\n  version_id           TEXT NOT NULL,\n  source               TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  advisory_id          TEXT NOT NULL CHECK (length(CAST(advisory_id AS BLOB)) BETWEEN 1 AND 200 AND instr(advisory_id, '/') = 0 AND instr(advisory_id, char(92)) = 0 AND advisory_id NOT IN ('.', '..')),\n  advisory_modified_at TEXT CHECK (advisory_modified_at IS NULL OR (length(advisory_modified_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', advisory_modified_at) IS advisory_modified_at)),\n  PRIMARY KEY (org_id, version_id, source, advisory_id),\n  FOREIGN KEY (org_id, version_id, source) REFERENCES vulnerability_result(org_id, version_id, source) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "vulnerability_refresh",
       "tbl_name": "vulnerability_refresh",
-      "sql": "CREATE TABLE vulnerability_refresh (\n  org_id TEXT NOT NULL,\n  refresh_id TEXT NOT NULL CHECK (length(refresh_id) BETWEEN 1 AND 200),\n  version_id TEXT NOT NULL,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  generation INTEGER NOT NULL CHECK (generation >= 0),\n  mapping_version INTEGER NOT NULL CHECK (mapping_version > 0),\n  query_version TEXT NOT NULL,\n  continuation_token TEXT NOT NULL CHECK (length(CAST(continuation_token AS BLOB)) BETWEEN 1 AND 4096),\n  page_count INTEGER NOT NULL CHECK (page_count BETWEEN 1 AND 4),\n  accumulated_ids_json TEXT NOT NULL CHECK (length(CAST(accumulated_ids_json AS BLOB)) <= 65536 AND json_valid(accumulated_ids_json) AND json_type(accumulated_ids_json) = 'array' AND json_array_length(accumulated_ids_json) <= 200),\n  started_at TEXT NOT NULL CHECK (length(started_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at) IS started_at),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  PRIMARY KEY (org_id, refresh_id),\n  UNIQUE (org_id, version_id, source),\n  FOREIGN KEY (org_id, version_id, source) REFERENCES vulnerability_result(org_id, version_id, source) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE vulnerability_refresh (\n  org_id               TEXT NOT NULL,\n  refresh_id           TEXT NOT NULL CHECK (length(refresh_id) BETWEEN 1 AND 200),\n  version_id           TEXT NOT NULL,\n  source               TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  generation           INTEGER NOT NULL CHECK (generation >= 0),\n  mapping_version      INTEGER NOT NULL CHECK (mapping_version > 0),\n  query_version        TEXT NOT NULL,\n  continuation_token   TEXT NOT NULL CHECK (length(CAST(continuation_token AS BLOB)) BETWEEN 1 AND 4096),\n  page_count           INTEGER NOT NULL CHECK (page_count BETWEEN 1 AND 4),\n  accumulated_ids_json TEXT NOT NULL CHECK (length(CAST(accumulated_ids_json AS BLOB)) <= 65536 AND json_valid(accumulated_ids_json) AND json_type(accumulated_ids_json) = 'array' AND json_array_length(accumulated_ids_json) <= 200),\n  started_at           TEXT NOT NULL CHECK (length(started_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', started_at) IS started_at),\n  next_attempt_at      TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  PRIMARY KEY (org_id, refresh_id),\n  UNIQUE (org_id, version_id, source),\n  FOREIGN KEY (org_id, version_id, source) REFERENCES vulnerability_result(org_id, version_id, source) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "vulnerability_result",
       "tbl_name": "vulnerability_result",
-      "sql": "CREATE TABLE vulnerability_result (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  version_id TEXT NOT NULL,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  package_id TEXT NOT NULL,\n  ecosystem TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  package_key TEXT NOT NULL,\n  version TEXT NOT NULL,\n  query_version TEXT NOT NULL,\n  mapping_version INTEGER NOT NULL CHECK (mapping_version > 0),\n  assessment TEXT CHECK (assessment IN ('affected', 'not_affected')),\n  fetched_at TEXT CHECK (fetched_at IS NULL OR (length(fetched_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at) IS fetched_at)),\n  attempted_at TEXT NOT NULL CHECK (length(attempted_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', attempted_at) IS attempted_at),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 1000),\n  last_error_code TEXT CHECK (last_error_code IN ('unavailable', 'protocol', 'config', 'limit')),\n  generation INTEGER NOT NULL CHECK (generation >= 0),\n  refresh_id TEXT,\n  PRIMARY KEY (org_id, version_id, source),\n  UNIQUE (org_id, ecosystem, package_id, version_id, source),\n  FOREIGN KEY (org_id, version_id) REFERENCES version(org_id, id) ON DELETE CASCADE,\n  FOREIGN KEY (org_id, package_id) REFERENCES package(org_id, id) ON DELETE CASCADE,\n  CHECK ((assessment IS NULL) = (fetched_at IS NULL))\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE vulnerability_result (\n  org_id          TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  version_id      TEXT NOT NULL,\n  source          TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  package_id      TEXT NOT NULL,\n  ecosystem       TEXT NOT NULL CHECK (ecosystem IN ('composer', 'npm')),\n  package_key     TEXT NOT NULL,\n  version         TEXT NOT NULL,\n  query_version   TEXT NOT NULL,\n  mapping_version INTEGER NOT NULL CHECK (mapping_version > 0),\n  assessment      TEXT CHECK (assessment IN ('affected', 'not_affected')),\n  fetched_at      TEXT CHECK (fetched_at IS NULL OR (length(fetched_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', fetched_at) IS fetched_at)),\n  attempted_at    TEXT NOT NULL CHECK (length(attempted_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', attempted_at) IS attempted_at),\n  next_attempt_at TEXT NOT NULL CHECK (length(next_attempt_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_attempt_at) IS next_attempt_at),\n  failure_count   INTEGER NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 1000),\n  last_error_code TEXT CHECK (last_error_code IN ('unavailable', 'protocol', 'config', 'limit')),\n  generation      INTEGER NOT NULL CHECK (generation >= 0),\n  refresh_id      TEXT,\n  PRIMARY KEY (org_id, version_id, source),\n  UNIQUE (org_id, ecosystem, package_id, version_id, source),\n  FOREIGN KEY (org_id, version_id) REFERENCES version(org_id, id) ON DELETE CASCADE,\n  FOREIGN KEY (org_id, package_id) REFERENCES package(org_id, id) ON DELETE CASCADE,\n  CHECK ((assessment IS NULL) = (fetched_at IS NULL))\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
       "name": "vulnerability_sync_state",
       "tbl_name": "vulnerability_sync_state",
-      "sql": "CREATE TABLE vulnerability_sync_state (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  source TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  fence INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),\n  lease_owner TEXT,\n  lease_until TEXT CHECK (lease_until IS NULL OR (length(lease_until) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', lease_until) IS lease_until)),\n  next_request_at TEXT NOT NULL CHECK (length(next_request_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_request_at) IS next_request_at),\n  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 1000),\n  write_token TEXT,\n  prune_cursor TEXT NOT NULL DEFAULT '',\n  selection_cursor TEXT NOT NULL DEFAULT '{\"due\":\"\",\"id\":\"\"}' CHECK (length(selection_cursor) <= 1024 AND json_valid(selection_cursor) AND json_type(selection_cursor) = 'object'),\n  blocked_until TEXT CHECK (blocked_until IS NULL OR (length(blocked_until) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', blocked_until) IS blocked_until)),\n  CHECK ((lease_owner IS NULL) = (lease_until IS NULL)),\n  PRIMARY KEY (org_id, source)\n) STRICT, WITHOUT ROWID"
+      "sql": "CREATE TABLE vulnerability_sync_state (\n  org_id               TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  source               TEXT NOT NULL DEFAULT 'osv' CHECK (source = 'osv'),\n  fence                INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),\n  lease_owner          TEXT,\n  lease_until          TEXT CHECK (lease_until IS NULL OR (length(lease_until) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', lease_until) IS lease_until)),\n  next_request_at      TEXT NOT NULL CHECK (length(next_request_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', next_request_at) IS next_request_at),\n  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures BETWEEN 0 AND 1000),\n  write_token          TEXT,\n  prune_cursor         TEXT NOT NULL DEFAULT '',\n  selection_cursor     TEXT NOT NULL DEFAULT '{\"due\":\"\",\"id\":\"\"}' CHECK (length(selection_cursor) <= 1024 AND json_valid(selection_cursor) AND json_type(selection_cursor) = 'object'),\n  blocked_until        TEXT CHECK (blocked_until IS NULL OR (length(blocked_until) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', blocked_until) IS blocked_until)),\n  CHECK ((lease_owner IS NULL) = (lease_until IS NULL)),\n  PRIMARY KEY (org_id, source)\n) STRICT, WITHOUT ROWID"
     },
     {
       "type": "table",
@@ -1861,6 +1927,38 @@
       "partial": 0
     },
     {
+      "tbl_name": "package_access_request",
+      "seq": 0,
+      "name": "package_access_request_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "package_access_request",
+      "seq": 1,
+      "name": "package_access_request_list",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "package_access_request",
+      "seq": 2,
+      "name": "package_access_request_pending",
+      "unique": 1,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "package_access_request",
+      "seq": 3,
+      "name": "sqlite_autoindex_package_access_request_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
       "tbl_name": "project",
       "seq": 0,
       "name": "project_org_id",
@@ -1944,6 +2042,54 @@
       "tbl_name": "project_source",
       "seq": 1,
       "name": "sqlite_autoindex_project_source_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "publish_approval",
+      "seq": 0,
+      "name": "publish_approval_scan",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "publish_approval",
+      "seq": 1,
+      "name": "publish_approval_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "publish_approval",
+      "seq": 2,
+      "name": "publish_approval_list",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "publish_approval",
+      "seq": 3,
+      "name": "publish_approval_package",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "publish_approval",
+      "seq": 4,
+      "name": "sqlite_autoindex_publish_approval_2",
+      "unique": 1,
+      "origin": "u",
+      "partial": 0
+    },
+    {
+      "tbl_name": "publish_approval",
+      "seq": 5,
+      "name": "sqlite_autoindex_publish_approval_1",
       "unique": 1,
       "origin": "pk",
       "partial": 0
@@ -2287,7 +2433,7 @@
     {
       "tbl_name": "user_account",
       "seq": 0,
-      "name": "user_account_email",
+      "name": "user_account_org_id",
       "unique": 1,
       "origin": "c",
       "partial": 0
@@ -2295,6 +2441,14 @@
     {
       "tbl_name": "user_account",
       "seq": 1,
+      "name": "user_account_email",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "user_account",
+      "seq": 2,
       "name": "sqlite_autoindex_user_account_1",
       "unique": 1,
       "origin": "pk",
@@ -2392,6 +2546,14 @@
       "tbl_name": "version",
       "seq": 9,
       "name": "sqlite_autoindex_version_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "version_readme",
+      "seq": 0,
+      "name": "sqlite_autoindex_version_readme_1",
       "unique": 1,
       "origin": "pk",
       "partial": 0

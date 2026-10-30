@@ -318,6 +318,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/testing/mutation-table/fixtures.ts',
   'db-sqlite/src/testing/mutation-table/harness.ts',
   'db-sqlite/src/testing/node-sqlite-executor.ts',
+  'db-sqlite/src/testing/sql-snapshot.ts',
 ];
 
 // Mutation targets in readers and imported statement builders; no whole-source pins.
@@ -435,6 +436,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     'INSERT INTO access_grant; INSERT INTO identity; INSERT INTO identity_provider_binding x2; INSERT INTO package; INSERT INTO project; INSERT INTO role; INSERT INTO role_permission; INSERT INTO session x2; INSERT INTO source; INSERT INTO user_account x2; INSERT INTO version',
   'db-sqlite/src/testing/mutation-table/harness.ts': '',
   'db-sqlite/src/testing/node-sqlite-executor.ts': '',
+  'db-sqlite/src/testing/sql-snapshot.ts': '',
   'runtime-cloudflare/src/db/d1-executor.ts': '',
 };
 
@@ -465,8 +467,12 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'dist_tag(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'package_access_request(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'package_access_request(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_package(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_package(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'upstream_state(package_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'version(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'version(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
@@ -485,6 +491,8 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'project_package_pattern(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_source(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_source(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'registered_name(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'registered_name(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'source_sync_package(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
@@ -498,6 +506,10 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'dist_tag_history(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(previous_version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'version_readme(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'version_readme(version_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'version_revision(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'vulnerability_result(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'vulnerability_result(version_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
@@ -1130,8 +1142,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
-        'Object introspection in migration-contract; domain/fixture values are reviewed as possible indirect count access.',
+        'Object introspection and computed keys in migration contracts contain scalar fixture values, not executor mutation results.',
       sites: [
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:unresolved computed access: before[index] #1',
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:opaque object access: Object.entries(source!) #1',
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:opaque object access: Object.values(values) #1',
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:opaque object access: Object.values(columns) #1',
+        "db-sqlite/src/contract/npm-publish-migration-contract.ts:unresolved computed key: await expect(\n              insert(executor, table, { ...base, [column]: `other-${parent}` }),\n            ).rejects.toMatchObject({ kind: 'foreign_key' }); #1",
         'db-sqlite/src/contract/migration-contract.ts:opaque object access: Object.values(values) #1',
         'db-sqlite/src/contract/migration-contract.ts:opaque object access: Object.values(values) #2',
       ],
@@ -3303,6 +3320,8 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { mutationFence } from '@package-broker/core/authz/fence'; #1",
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata'; #1",
+        "db-sqlite/src/testing/sql-snapshot.ts:opaque dependency: import {\n  D1_STATEMENTS_PER_BATCH,\n  type ScalarSqlValue,\n  type SqlExecutor,\n  type Statement,\n} from '@package-broker/core/db/port'; #1",
+        "db-sqlite/src/testing/sql-snapshot.ts:opaque dependency: import { assertBatchStatementCount } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/node-sqlite-executor.ts:opaque dependency: import {\n  DbError,\n  assertBatchStatementCount,\n  classifySqliteError,\n} from '@package-broker/core/db/errors'; #1",
         "runtime-cloudflare/src/db/d1-executor.ts:opaque dependency: import {\n  DbError,\n  assertBatchStatementCount,\n  classifySqliteError,\n} from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/catalogue-fixture.ts:opaque dependency: import {\n  D1_STATEMENTS_PER_BATCH,\n  D1_STATEMENTS_PER_INVOCATION,\n  type ScalarSqlExecutor,\n  type ScalarStatement,\n} from '@package-broker/core/db/port'; #1",

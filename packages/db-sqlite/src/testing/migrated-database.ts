@@ -155,3 +155,5 @@ export async function openMigratedDatabase(
     throw error;
   }
 }
+
+export { bindSnapshot, restoreDatabase, type SnapshotStatement } from './sql-snapshot.js';

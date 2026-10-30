@@ -1,41 +1,14 @@
 /* eslint-disable no-restricted-syntax -- Isolated fixture seeding and full database snapshots require SQL; this module is rehearsal-only. */
-import type { ScalarSqlValue, SqlExecutor, Statement } from '@package-broker/core/db/port';
-import { D1_STATEMENTS_PER_BATCH } from '@package-broker/core/db/port';
-import { assertBatchStatementCount } from '@package-broker/core/db/errors';
+import type { ScalarSqlValue, SqlExecutor } from '@package-broker/core/db/port';
+import type { SnapshotStatement } from '@package-broker/db-sqlite/testing/migrated-database';
+export {
+  bindSnapshot,
+  restoreDatabase,
+  type SnapshotStatement,
+} from '@package-broker/db-sqlite/testing/migrated-database';
 const quoteId = (s: string) => `"${s.replaceAll('"', '""')}"`;
-export interface SnapshotStatement {
-  sql: string;
-  params: (ScalarSqlValue | { hex: string })[];
-}
-
 const MAX_SQL_BYTES = 100_000;
 const MAX_PARAMETERS = 100;
-
-export function bindSnapshot(statements: readonly SnapshotStatement[]): Statement[] {
-  return statements.map(({ sql, params }) => ({
-    sql,
-    params: params.map((value) =>
-      value !== null && typeof value === 'object' ? Buffer.from(value.hex, 'hex') : value,
-    ),
-  }));
-}
-
-export async function restoreDatabase(
-  executor: SqlExecutor,
-  statements: readonly SnapshotStatement[],
-): Promise<void> {
-  const schema: SnapshotStatement[] = [];
-  const data: SnapshotStatement[] = [];
-  for (const statement of statements) {
-    if (/^CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\b/i.test(statement.sql)) schema.push(statement);
-    else data.push(statement);
-  }
-  // Keep deferred foreign keys, all rows and the final triggers in one transaction.
-  assertBatchStatementCount(data.length);
-  for (let offset = 0; offset < schema.length; offset += D1_STATEMENTS_PER_BATCH)
-    await executor.batch(bindSnapshot(schema.slice(offset, offset + D1_STATEMENTS_PER_BATCH)));
-  await executor.batch(bindSnapshot(data));
-}
 
 export async function exportDatabase(executor: SqlExecutor): Promise<SnapshotStatement[]> {
   const schema = await executor.all<{ name: string; type: string; sql: string }>({

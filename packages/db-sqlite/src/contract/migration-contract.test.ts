@@ -1,9 +1,14 @@
+import { expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadMigrationSource } from '../migrations/source.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
-import { describeMigrationContract, type OpenedPair } from './migration-contract.js';
+import {
+  describeMigrationContract,
+  describeNpmPublishMigrationContract,
+  type OpenedPair,
+} from './migration-contract.js';
 
 async function openPair(): Promise<OpenedPair> {
   const directory = await mkdtemp(join(tmpdir(), 'pb-migration-contract-'));
@@ -32,3 +37,19 @@ describeMigrationContract('node:sqlite', openPair, async () =>
     await readFile(new URL('../../migrations/0001_init.sql', import.meta.url), 'utf8'),
   ),
 );
+
+it('registers npm publish contracts explicitly at every backend entrypoint', async () => {
+  const shared = await readFile(new URL('./migration-contract.ts', import.meta.url), 'utf8');
+  expect(shared).not.toContain('describeNpmPublishMigrationContract(name, open)');
+  expect(shared.startsWith("import { readFileSync } from 'node:fs';")).toBe(true);
+  for (const path of [
+    '../../../runtime-node/src/db/better-sqlite3-executor.migration-contract.test.ts',
+    '../../../runtime-cloudflare/src/db/d1-executor.migration-contract.test.ts',
+  ]) {
+    expect(await readFile(new URL(path, import.meta.url), 'utf8')).toMatch(
+      /describeNpmPublishMigrationContract\('(?:better-sqlite3|d1)', openPair\)/,
+    );
+  }
+});
+
+describeNpmPublishMigrationContract('node:sqlite', openPair);

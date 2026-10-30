@@ -130,3 +130,12 @@ describe('D1 LIKE/GLOB pattern limit', () => {
     expect(Object.keys(DYNAMIC).filter((key) => !seen.has(key))).toEqual([]);
   });
 });
+
+it('npm readme control-character glob fits the D1 pattern byte limit', () => {
+  const sql = readFileSync(join(packagesRoot, 'db-sqlite/migrations/0002_npm_publish.sql'), 'utf8');
+  const match = /glob\(char\(([0-9,]+)\), body\)/.exec(sql);
+  expect(match).not.toBeNull();
+  const pattern = String.fromCharCode(...match![1]!.split(',').map(Number));
+  expect(Buffer.byteLength(pattern)).toBeLessThanOrEqual(D1_MAX_PATTERN_BYTES);
+  expect(pattern).toHaveLength(33);
+});

@@ -96,7 +96,7 @@ export function blobOrphanCondition(_ctx: OrgContext, blobRef: string): Eligible
   if (!Number.isSafeInteger(ORPHAN_GRACE_DAYS) || ORPHAN_GRACE_DAYS <= 0) invalid();
   return {
     sql: `(${orphanSql(blobRef)}
-    AND ${blobRef}.refetchable = 1
+    AND (${blobRef}.refetchable = 1 OR (${blobRef}.refetchable = 0 AND ${blobRef}.storage_key LIKE 'npm-publish/%'))
     AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')
     AND NOT EXISTS (
       SELECT 1 FROM ingest_session bref_ing

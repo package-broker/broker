@@ -13,6 +13,7 @@ const SUPPORTED_AMZ_HEADERS = new Set([
   'x-amz-date',
   'x-amz-content-sha256',
   'x-amz-copy-source',
+  'x-amz-metadata-directive',
   'x-amz-security-token',
   'x-amz-checksum-sha256',
   'x-amz-checksum-mode',
@@ -310,7 +311,7 @@ export function startS3Fake(options: S3FakeOptions = {}): S3Fake {
 
     switch (request.method) {
       case 'PUT': {
-        if (copySource !== null) return copy(copySource, key);
+        if (copySource !== null) return copy(copySource, key, request.headers);
         if (request.headers.get('if-none-match') === '*' && stored !== undefined)
           throw new Rejection(412, 'PreconditionFailed');
         const etag = `"${createHash('md5').update(body).digest('hex')}"`;
@@ -372,7 +373,7 @@ export function startS3Fake(options: S3FakeOptions = {}): S3Fake {
     }
   }
 
-  function copy(copySource: string, key: string): Response {
+  function copy(copySource: string, key: string, headers: Headers): Response {
     if (copySource.includes('?')) throw new Rejection(501, 'NotImplemented');
     const [sourceBucket, ...sourceParts] = decode(copySource.replace(/^\//, '')).split('/');
     const sourceKey = sourceParts.join('/');
@@ -387,7 +388,15 @@ export function startS3Fake(options: S3FakeOptions = {}): S3Fake {
         { status: 200, headers: { 'content-type': 'application/xml' } },
       );
     }
-    objects.set(key, source);
+    const directive = headers.get('x-amz-metadata-directive');
+    if (directive !== null && directive !== 'COPY' && directive !== 'REPLACE')
+      throw new Rejection(501, 'NotImplemented');
+    objects.set(
+      key,
+      directive === 'REPLACE'
+        ? { ...source, contentType: headers.get('content-type') ?? 'binary/octet-stream' }
+        : source,
+    );
     return new Response(
       `${XML_PREFIX}<CopyObjectResult><ETag>${source.etag}</ETag><LastModified>${LAST_MODIFIED}</LastModified></CopyObjectResult>`,
       { status: 200, headers: { 'content-type': 'application/xml' } },

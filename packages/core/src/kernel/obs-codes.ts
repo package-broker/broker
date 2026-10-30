@@ -18,6 +18,8 @@ export const KERNEL_EVENTS = frozenSet([
   'http.request',
   'http.error',
   'health.schema_drift',
+  'staged_blob_sweep_failed',
+  'promoted_blob_cleanup_failed',
   'authz.denied',
   'authz.error',
 ]);

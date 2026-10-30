@@ -1,6 +1,16 @@
+import { mkdtemp, open, rm, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { createHash, randomUUID } from 'node:crypto';
 import { AwsV4Signer } from 'aws4fetch';
-import { BlobSizeMismatchError, BlobValidationError } from '@package-broker/core/platform/blob';
+import {
+  BlobSizeMismatchError,
+  BlobValidationError,
+  BlobTooLargeError,
+  stagedStorageKey,
+  stagedListPrefix,
+} from '@package-broker/core/platform/blob';
 import type { ByteRange, ByteStore } from '@package-broker/core/platform/blob';
 
 export interface S3ByteStoreOptions {
@@ -322,8 +332,10 @@ export function createS3ByteStore(options: S3ByteStoreOptions): ByteStore {
     storageKey: string,
     headers: Record<string, string> = {},
     upload?: { body: ReadableStream<Uint8Array>; signal: AbortSignal },
+    query?: Record<string, string>,
   ): Promise<Response> {
-    const url = objectUrl(storageKey);
+    const url = storageKey === '' ? new URL(`${bucketPath}/`, base) : objectUrl(storageKey);
+    for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
     let signed: { url: URL; headers: Headers };
     try {
       signed = await new AwsV4Signer({
@@ -420,9 +432,12 @@ export function createS3ByteStore(options: S3ByteStoreOptions): ByteStore {
     }
   }
 
-  async function copy(sourceKey: string, targetKey: string): Promise<void> {
+  async function copy(sourceKey: string, targetKey: string, mediaType?: string): Promise<void> {
     const response = await send('PUT', targetKey, {
       'x-amz-copy-source': `/${options.bucket}/${encodeKey(sourceKey)}`,
+      ...(mediaType === undefined
+        ? {}
+        : { 'content-type': mediaType, 'x-amz-metadata-directive': 'REPLACE' }),
     });
     if (response.status !== 200) {
       await discard(response);
@@ -462,21 +477,127 @@ export function createS3ByteStore(options: S3ByteStoreOptions): ByteStore {
     if (!verifier.completed) throw new S3UploadIncompleteError();
   }
 
-  return Object.freeze({
-    async putStaged() {
-      throw new Error('not_implemented');
+  const store: ByteStore = {
+    async putStaged(handle, body, maxBytes, mediaType) {
+      stagedStorageKey(handle);
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new BlobValidationError();
+      const temporary = await mkdtemp(join(tmpdir(), 'pb-s3-stage-'));
+      const path = join(temporary, 'body');
+      const file = await open(path, 'wx+', 0o600);
+      const reader = body.getReader();
+      try {
+        await unlink(path);
+        await rm(temporary, { recursive: true, force: true });
+        let size = 0;
+        const hash = createHash('sha256');
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > maxBytes) throw new BlobTooLargeError();
+          hash.update(value);
+          let offset = 0;
+          while (offset < value.length) {
+            const { bytesWritten } = await file.write(value, offset, value.length - offset);
+            if (bytesWritten === 0) throw new BlobValidationError();
+            offset += bytesWritten;
+          }
+        }
+        const sha256 = hash.digest('hex') as import('@package-broker/core/platform/blob').Sha256;
+        const verifier: VerifierState = { completed: false, error: null };
+        const source = Readable.toWeb(
+          file.createReadStream({ start: 0, autoClose: false }),
+        ) as ReadableStream<Uint8Array>;
+        const diskReader = source.getReader();
+        try {
+          const input = { sha256, size, mediaType };
+          await stage(
+            handle,
+            verifyingBody(diskReader, input, verifier),
+            input,
+            verifier,
+            new AbortController().signal,
+          );
+        } finally {
+          await diskReader.cancel().catch(() => undefined);
+          diskReader.releaseLock();
+        }
+        return { sha256, size };
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        await remove(handle).catch(() => undefined);
+        throw error;
+      } finally {
+        reader.releaseLock();
+        await file.close().catch(() => undefined);
+        await rm(temporary, { recursive: true, force: true });
+      }
     },
-    async openStaged() {
-      throw new Error('not_implemented');
+    async openStaged(handle) {
+      stagedStorageKey(handle);
+      const found = await store.get(handle);
+      if (found === null) throw new BlobValidationError();
+      return found.body;
     },
-    async promote() {
-      throw new Error('not_implemented');
+    async promote(handle, sha256, size, mediaType) {
+      const key = stagedStorageKey(handle, sha256);
+      const staged = await headObject(handle, true);
+      if (staged === null || staged.size !== size) throw new BlobSizeMismatchError();
+      await verifyExisting(handle, staged, { sha256, size });
+      const existing = await headObject(key, true);
+      if (existing === null) await copy(handle, key, mediaType);
+      else await verifyExisting(key, existing, { sha256, size });
+      await remove(handle);
     },
-    async discardStaged() {
-      throw new Error('not_implemented');
+    async discardStaged(handle) {
+      stagedStorageKey(handle);
+      await remove(handle);
     },
-    async listStaged() {
-      throw new Error('not_implemented');
+    async listStaged(olderThan, orgPrefix) {
+      const prefix = stagedListPrefix(orgPrefix);
+      const cutoff = Date.parse(olderThan);
+      if (!Number.isFinite(cutoff)) throw new BlobValidationError();
+      const result: import('@package-broker/core/platform/blob').StagedByteObject[] = [];
+      let continuation: string | undefined;
+      const seen = new Set<string>();
+      do {
+        const response = await send('GET', '', {}, undefined, {
+          'list-type': '2',
+          prefix,
+          'encoding-type': 'url',
+          ...(continuation === undefined ? {} : { 'continuation-token': continuation }),
+        });
+        if (response.status !== 200) {
+          await discard(response);
+          throw new S3RequestError(response.status);
+        }
+        const xml = await readBounded(response, 2 * 1024 * 1024);
+        if (!/<ListBucketResult[\s>]/.test(xml)) throw new BlobValidationError();
+        for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+          const encoded = /<Key>([^<]*)<\/Key>/.exec(match[1]!)?.[1];
+          const stamp = /<LastModified>([^<]*)<\/LastModified>/.exec(match[1]!)?.[1];
+          if (encoded === undefined || stamp === undefined || !Number.isFinite(Date.parse(stamp)))
+            throw new BlobValidationError();
+          let handle: import('@package-broker/core/platform/blob').StagedBlobHandle;
+          try {
+            handle = decodeURIComponent(encoded) as never;
+            stagedStorageKey(handle);
+          } catch {
+            continue;
+          }
+          if (Date.parse(stamp) < cutoff)
+            result.push({ handle, createdAt: new Date(stamp).toISOString() });
+          if (result.length === 50) return result;
+        }
+        const token = /<NextContinuationToken>([^<]*)<\/NextContinuationToken>/.exec(xml)?.[1];
+        if (/<IsTruncated>true<\/IsTruncated>/.test(xml)) {
+          if (token === undefined || token.includes('&') || seen.has(token))
+            throw new BlobValidationError();
+          seen.add(token);
+          continuation = token;
+        } else continuation = undefined;
+      } while (continuation !== undefined);
+      return result;
     },
     async putVerified(storageKey, source, input) {
       validateKey(storageKey);
@@ -569,5 +690,6 @@ export function createS3ByteStore(options: S3ByteStoreOptions): ByteStore {
     },
 
     remove,
-  } satisfies ByteStore);
+  };
+  return Object.freeze(store);
 }

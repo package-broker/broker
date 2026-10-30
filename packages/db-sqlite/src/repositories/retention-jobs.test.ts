@@ -57,7 +57,7 @@ function harness() {
   const observability = { counter: vi.fn(), histogram: vi.fn(), log: vi.fn() };
   const lifecycle = createBlobLifecycle({
     metadata: repo,
-    store: { remove } as unknown as ByteStore,
+    store: { remove, head: async () => null } as unknown as ByteStore,
     observability,
     deleteTimeoutMs: 1000,
     leaseMs: 900_000,
@@ -176,7 +176,10 @@ describe('scan, schedule, deadline, claim and removal', () => {
 
     await pastDeadline();
     await h.runPurge();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(a.orgId, D1));
+    expect(h.remove.mock.calls).toEqual([
+      [`npm-publish/${blobStorageKey(a.orgId, D1)}`],
+      [blobStorageKey(a.orgId, D1)],
+    ]);
     expect((await rowOf(D1))?.deleted_at).not.toBeNull();
   });
 
@@ -185,7 +188,10 @@ describe('scan, schedule, deadline, claim and removal', () => {
     await publish(h.repo);
     await age(D1, 8);
     await h.runScan();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(a.orgId, D1));
+    expect(h.remove.mock.calls).toEqual([
+      [`npm-publish/${blobStorageKey(a.orgId, D1)}`],
+      [blobStorageKey(a.orgId, D1)],
+    ]);
     expect((await rowOf(D1))?.deleted_at).not.toBeNull();
   });
 
@@ -291,7 +297,10 @@ describe('a tombstoned reference attached to an orphan-scheduled blob', () => {
     const h = await scheduled();
     await attach(366);
     await h.runPurge();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(a.orgId, D1));
+    expect(h.remove.mock.calls).toEqual([
+      [`npm-publish/${blobStorageKey(a.orgId, D1)}`],
+      [blobStorageKey(a.orgId, D1)],
+    ]);
     expect((await rowOf(D1))?.deleted_at).not.toBeNull();
   });
 });

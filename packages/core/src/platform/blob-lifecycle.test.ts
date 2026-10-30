@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import {
   blobStorageKey,
+  createBlobStore,
+  createBlobUploadAdmission,
   parseSha256,
   type ByteStore,
   type PurgeGeneration,
@@ -18,6 +20,7 @@ const input = { removedAt: '2026-10-17T00:00:00.000Z' };
 const delegates = ['softDelete', 'claimPurge', 'markDeleted', 'cancelPurge', 'unschedule'] as const;
 function fixture() {
   const metadata = {
+    inspect: vi.fn(async () => null),
     softDelete: vi.fn(async () => true),
     claimPurge: vi.fn(async (): Promise<PurgeGeneration | null> => generation),
     canStartRemove: vi.fn(async () => true),
@@ -28,7 +31,7 @@ function fixture() {
     listDue: vi.fn(async (): Promise<Sha256[]> => []),
   };
   const remove = vi.fn<ByteStore['remove']>(async () => undefined);
-  const store = { remove } as unknown as ByteStore;
+  const store = { remove, head: async () => null } as unknown as ByteStore;
   const observability = { counter: vi.fn(), histogram: vi.fn(), log: vi.fn() };
   const options = { metadata, store, observability, deleteTimeoutMs: 1000, leaseMs: 10000 };
   return { metadata, remove, observability, options, service: createBlobLifecycle(options) };
@@ -56,10 +59,15 @@ afterEach(() => {
   }
   vi.useRealTimers();
 });
-it('removes once with the organization storage key and leaves markDeleted separate', async () => {
+it('removes both organization storage keys and leaves markDeleted separate', async () => {
   await expect(f.service.recheckAndRemove(ctx, key, generation)).resolves.toBe(true);
-  expect(f.metadata.canStartRemove).toHaveBeenCalledExactlyOnceWith(ctx, key, generation, 2000);
-  expect(f.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(ctx.orgId, key));
+  expect(f.metadata.canStartRemove.mock.calls).toEqual(
+    Array.from({ length: 3 }, () => [ctx, key, generation, 2000]),
+  );
+  expect(f.remove.mock.calls).toEqual([
+    [`npm-publish/${blobStorageKey(ctx.orgId, key)}`],
+    [blobStorageKey(ctx.orgId, key)],
+  ]);
   expect(f.metadata.markDeleted).not.toHaveBeenCalled();
   expect(f.observability.counter).toHaveBeenCalledWith('pb.blob.purge', { outcome: 'removed' });
   expect(f.observability.histogram).toHaveBeenCalledTimes(1);
@@ -100,7 +108,7 @@ it.each(['never', 'resolve', 'reject'] as const)('bounds removal with late %s', 
   await vi.advanceTimersByTimeAsync(0);
 });
 it('accepts removal one millisecond before the deadline', async () => {
-  f.remove.mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 999)));
+  f.remove.mockImplementationOnce(() => new Promise((resolve) => setTimeout(resolve, 999)));
   const result = f.service.recheckAndRemove(ctx, key, generation);
   await vi.advanceTimersByTimeAsync(999);
   await expect(result).resolves.toBe(true);
@@ -196,8 +204,13 @@ it.each([Infinity, -1000])(
 it('uses each organization context unchanged for recheck and physical storage', async () => {
   const other = orgContext('org-b');
   await expect(f.service.recheckAndRemove(other, key, generation)).resolves.toBe(true);
-  expect(f.metadata.canStartRemove).toHaveBeenCalledExactlyOnceWith(other, key, generation, 2000);
-  expect(f.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(other.orgId, key));
+  expect(f.metadata.canStartRemove.mock.calls).toEqual(
+    Array.from({ length: 3 }, () => [other, key, generation, 2000]),
+  );
+  expect(f.remove.mock.calls).toEqual([
+    [`npm-publish/${blobStorageKey(other.orgId, key)}`],
+    [blobStorageKey(other.orgId, key)],
+  ]);
 });
 
 it.each([true, false])('queue admission %s avoids byte removal', async (eligible) => {
@@ -259,14 +272,20 @@ it.each(['live', 'aborted', 'refused', 'error', 'stale', 'foreign'] as const)(
     if (mode === 'error') f.remove.mockRejectedValue(new Error('storage failure'));
     if (mode === 'stale') f.metadata.markDeleted.mockResolvedValue(false);
     if (mode === 'live')
-      f.metadata.canStartRemove.mockResolvedValueOnce(true).mockResolvedValue(false);
+      f.metadata.canStartRemove
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false);
     const org = mode === 'foreign' ? orgContext('org-b') : ctx;
     const job = createBlobRemoveJob(f.service);
     const context = { org, signal: controller.signal } as JobContext;
     const payload = job.validate({ sha256: key, generation });
     await expect(job.handler(payload, context)).resolves.toBeUndefined();
     if (mode === 'live') await job.handler(payload, context);
-    expect(f.remove).toHaveBeenCalledTimes(['live', 'error', 'stale'].includes(mode) ? 1 : 0);
+    expect(f.remove).toHaveBeenCalledTimes(
+      mode === 'error' ? 1 : ['live', 'stale'].includes(mode) ? 2 : 0,
+    );
     expect(f.metadata.markDeleted).toHaveBeenCalledTimes(['live', 'stale'].includes(mode) ? 1 : 0);
     if (mode === 'live')
       expect(f.metadata.markDeleted).toHaveBeenCalledExactlyOnceWith(ctx, key, generation);
@@ -323,19 +342,19 @@ it.each([
   ['byte store throw', true, true, 'reject', true, 'error'],
   ['stale tombstone after removal', true, true, 'none', false, 'stale'],
 ] as const)('purgeBytes classifies %s', async (_name, recheck, probe, store, marked, expected) => {
-  f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValueOnce(probe);
+  f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValue(probe);
   if (store === 'reject') f.remove.mockRejectedValue(new Error('private storage failure'));
   f.metadata.markDeleted.mockResolvedValue(marked);
   await expect(f.service.purgeBytes(ctx, key, generation)).resolves.toBe(expected);
   expect(f.metadata.canStartRemove.mock.calls).toEqual(
     recheck
-      ? [[ctx, key, generation, 2000]]
+      ? Array.from({ length: store === 'reject' ? 2 : 3 }, () => [ctx, key, generation, 2000])
       : [
           [ctx, key, generation, 2000],
           [ctx, key, generation, 0],
         ],
   );
-  expect(f.remove).toHaveBeenCalledTimes(recheck ? 1 : 0);
+  expect(f.remove).toHaveBeenCalledTimes(recheck ? (store === 'reject' ? 1 : 2) : 0);
   expect(f.metadata.markDeleted).toHaveBeenCalledTimes(recheck && store === 'none' ? 1 : 0);
   expect(f.metadata.cancelPurge).not.toHaveBeenCalled();
 });
@@ -354,7 +373,7 @@ it('purgeBytes reports a stalled removal as timeout and ignores its late complet
   expect(f.observability.counter).toHaveBeenCalledWith('pb.blob.purge', { outcome: 'timeout' });
   expect(f.metadata.markDeleted).not.toHaveBeenCalled();
   expect(f.metadata.cancelPurge).not.toHaveBeenCalled();
-  expect(f.metadata.canStartRemove).toHaveBeenCalledOnce();
+  expect(f.metadata.canStartRemove).toHaveBeenCalledTimes(2);
 });
 it.each([
   [true, true, 'queued'],
@@ -374,7 +393,7 @@ it.each([
         get: vi.fn(),
       },
     });
-    f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValueOnce(probe);
+    f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValue(probe);
     await expect(service.purgeBytes(ctx, key, generation)).resolves.toBe(expected);
     expect(enqueue).toHaveBeenCalledTimes(expected === 'queued' ? 1 : 0);
     expect(f.remove).not.toHaveBeenCalled();
@@ -388,5 +407,161 @@ it.each([
     'invalid blob input',
   );
   for (const port of Object.values(f.metadata)) expect(port).not.toHaveBeenCalled();
+  expect(f.remove).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  'Round 3 never starts a second deletion after a stalled remove times out, generation live=%s',
+  async (live) => {
+    let finish!: () => void;
+    f.remove.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const result = f.service.purgeBytes(ctx, key, generation);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await result).toBe('timeout');
+    f.metadata.canStartRemove.mockResolvedValue(live);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.remove).toHaveBeenCalledTimes(1);
+    expect(f.metadata.markDeleted).not.toHaveBeenCalled();
+  },
+);
+it('Round 3 rechecks the generation before the second deletion', async () => {
+  f.remove.mockImplementationOnce(async () => {
+    f.metadata.canStartRemove.mockResolvedValue(false);
+  });
+  expect(await f.service.purgeBytes(ctx, key, generation)).toBe('stale');
+  expect(f.remove).toHaveBeenCalledTimes(1);
+  expect(f.metadata.markDeleted).not.toHaveBeenCalled();
+});
+it('Round 3 deletes both keys without a HEAD', async () => {
+  const head = vi.fn(async () => null);
+  const service = createBlobLifecycle({ ...f.options, store: { ...f.options.store, head } });
+  expect(await service.purgeBytes(ctx, key, generation)).toBe('removed');
+  expect(head).not.toHaveBeenCalled();
+  expect(f.remove.mock.calls).toEqual([
+    [`npm-publish/${blobStorageKey(ctx.orgId, key)}`],
+    [blobStorageKey(ctx.orgId, key)],
+  ]);
+});
+
+it('Round 3 does not delete after a stalled lease recheck returns past the deadline', async () => {
+  let finish!: (allowed: boolean) => void;
+  f.metadata.canStartRemove.mockResolvedValueOnce(true).mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const result = f.service.purgeBytes(ctx, key, generation);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await result).toBe('timeout');
+  finish(true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.remove).not.toHaveBeenCalled();
+});
+it('Round 3 ignores a stalled HEAD while purging both keys', async () => {
+  const head = vi.fn(() => new Promise<null>(() => {}));
+  const service = createBlobLifecycle({ ...f.options, store: { ...f.options.store, head } });
+  const result = service.purgeBytes(ctx, key, generation);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await result).toBe('removed');
+  expect(head).not.toHaveBeenCalled();
+  expect(f.remove).toHaveBeenCalledTimes(2);
+});
+
+it('Round 3 preserves a real re-publication while the old npm removal is stalled', async () => {
+  const digest = parseSha256('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  const canonical = blobStorageKey(ctx.orgId, digest);
+  const npm = `npm-publish/${canonical}`;
+  const objects = new Set([canonical, npm]);
+  let finish!: () => void;
+  let current = generation;
+  let leaseExpired = false;
+  let published = false;
+  const info = () => ({
+    generation: current,
+    sha256: digest,
+    size: 0,
+    mediaType: 'application/zip',
+    purgeAfter: null,
+  });
+  const bytes = {
+    ...f.options.store,
+    async remove(storageKey: string) {
+      if (storageKey === npm)
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      objects.delete(storageKey);
+    },
+    async putVerified(
+      storageKey: string,
+      body: ReadableStream<Uint8Array>,
+      input: { size: number; mediaType: string },
+    ) {
+      await new Response(body).arrayBuffer();
+      objects.add(storageKey);
+      return input;
+    },
+    async head(storageKey: string) {
+      return objects.has(storageKey) ? info() : null;
+    },
+  };
+  f.metadata.canStartRemove.mockImplementation(async () => current === generation && !leaseExpired);
+  const lifecycle = createBlobLifecycle({ ...f.options, store: bytes });
+  const result = lifecycle.purgeBytes(ctx, digest, generation);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await result).toBe('timeout');
+  leaseExpired = true;
+  const store = createBlobStore(
+    bytes,
+    {
+      async reserve() {
+        expect(leaseExpired).toBe(true);
+        current = 'd'.repeat(32) as PurgeGeneration;
+        return current;
+      },
+      async publish() {
+        published = true;
+        return info();
+      },
+      async find() {
+        return published ? info() : null;
+      },
+      async inspect() {
+        return published ? { info: info(), purging: false } : null;
+      },
+      async narrowRefetchable() {
+        return null;
+      },
+    },
+    { admission: createBlobUploadAdmission() },
+  );
+  await store.put(
+    ctx,
+    digest,
+    new ReadableStream({
+      start(c) {
+        c.close();
+      },
+    }),
+    { size: 0, mediaType: 'application/zip', refetchable: true },
+  );
+  finish();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(await store.head(ctx, digest)).toEqual(info());
+  expect(objects.has(canonical)).toBe(true);
+  expect(f.metadata.markDeleted).not.toHaveBeenCalled();
+});
+
+it('Round 4 inner removal refusal emits the refused counter', async () => {
+  f.metadata.canStartRemove.mockResolvedValueOnce(true).mockResolvedValue(false);
+  expect(await f.service.purgeBytes(ctx, key, generation)).toBe('stale');
+  expect(f.observability.counter).toHaveBeenCalledWith('pb.blob.purge', { outcome: 'refused' });
   expect(f.remove).not.toHaveBeenCalled();
 });

@@ -551,6 +551,8 @@ async function buildServices(
   ports: PlatformPortConfig,
   options: StartOptions,
   executor: SqlExecutor,
+  admissionWaitMs: number,
+  observability: Observability,
 ): Promise<PlatformServices> {
   blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
   const byteStore = await openByteStore(ports.blob, options.env, options.fetch);
@@ -560,8 +562,10 @@ async function buildServices(
       byteStore,
       createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
       {
+        observability,
         admission: createBlobUploadAdmission(),
         maxBytes: ports.blob.maxBytes,
+        admissionWaitMs,
       },
     );
   } catch (error) {
@@ -744,7 +748,13 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
 
     if (ports !== null) {
       telemetry = createTelemetry(ports, options);
-      services = await buildServices(ports, options, opened.executor);
+      services = await buildServices(
+        ports,
+        options,
+        opened.executor,
+        registry.timers.waitBudgetMs,
+        telemetry.observe(),
+      );
     }
 
     if (options.env['PB_MIGRATE'] !== 'off') {

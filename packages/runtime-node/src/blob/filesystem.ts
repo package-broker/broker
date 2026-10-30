@@ -20,6 +20,9 @@ import {
   BlobRangeError,
   BlobSizeMismatchError,
   BlobValidationError,
+  BlobTooLargeError,
+  stagedStorageKey,
+  stagedListPrefix,
 } from '@package-broker/core/platform/blob';
 import type { ByteRange, ByteStore } from '@package-broker/core/platform/blob';
 
@@ -474,21 +477,112 @@ export async function openFilesystemByteStore(
     }
   }
 
-  return Object.freeze({
-    async putStaged() {
-      throw new Error('not_implemented');
+  const store: ByteStore = {
+    async putStaged(handle, body, maxBytes, mediaType) {
+      stagedStorageKey(handle);
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new BlobValidationError();
+      parseMediaType(mediaType);
+      const key = parseKey(handle);
+      const reader = body.getReader();
+      const temporary = await stage();
+      try {
+        const hash = createHash('sha256');
+        let size = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > maxBytes) throw new BlobTooLargeError();
+          hash.update(value);
+          await writeAll(temporary.handle, value);
+        }
+        await temporary.handle.sync();
+        await temporary.handle.close();
+        const directory = await directoryOf(key.parents, true);
+        if (directory === null) throw new FilesystemUnsafePathError();
+        await publishMediaType(directory, key.name, mediaType);
+        await link(temporary.path, join(directory, key.name));
+        await syncDirectory(directory);
+        return {
+          sha256: hash.digest('hex') as import('@package-broker/core/platform/blob').Sha256,
+          size,
+        };
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
+      } finally {
+        reader.releaseLock();
+        await release(temporary);
+      }
     },
-    async openStaged() {
-      throw new Error('not_implemented');
+    async openStaged(handle) {
+      stagedStorageKey(handle);
+      const found = await store.get(handle);
+      if (found === null) throw new BlobValidationError();
+      return found.body;
     },
-    async promote() {
-      throw new Error('not_implemented');
+    async promote(handle, sha256, size, mediaType) {
+      const key = parseKey(stagedStorageKey(handle, sha256));
+      const staged = parseKey(handle);
+      const sourceDirectory = await directoryOf(staged.parents, false);
+      if (sourceDirectory === null) throw new BlobValidationError();
+      const source = join(sourceDirectory, staged.name);
+      await verifyExisting(source, sha256, size);
+      const directory = await directoryOf(key.parents, true);
+      if (directory === null) throw new FilesystemUnsafePathError();
+      const finalPath = join(directory, key.name);
+      await exclusive(finalPath, async () => {
+        try {
+          await lstat(finalPath);
+          await verifyExisting(finalPath, sha256, size);
+          await store.remove(handle);
+          return;
+        } catch (error) {
+          if (code(error) !== 'ENOENT') throw error;
+        }
+        await publishMediaType(directory, key.name, mediaType);
+        await rename(source, finalPath);
+        await store.remove(handle);
+        await syncDirectory(directory);
+        await syncDirectory(sourceDirectory);
+      });
     },
-    async discardStaged() {
-      throw new Error('not_implemented');
+    async discardStaged(handle) {
+      stagedStorageKey(handle);
+      await store.remove(handle);
     },
-    async listStaged() {
-      throw new Error('not_implemented');
+    async listStaged(olderThan, orgPrefix) {
+      const prefix = stagedListPrefix(orgPrefix);
+      const cutoff = Date.parse(olderThan);
+      if (!Number.isFinite(cutoff)) throw new BlobValidationError();
+      const directory = await directoryOf(['staging'], false);
+      if (directory === null) return [];
+      const result: import('@package-broker/core/platform/blob').StagedByteObject[] = [];
+      for (const org of prefix === 'staging/'
+        ? await readdir(directory)
+        : [prefix.split('/')[1]!]) {
+        if (!/^[0-9a-f]{2,256}$/.test(org)) continue;
+        const child = await directoryOf(['staging', org], false);
+        if (child === null) continue;
+        for (const name of await readdir(child)) {
+          const handle =
+            `staging/${org}/${name}` as import('@package-broker/core/platform/blob').StagedBlobHandle;
+          try {
+            stagedStorageKey(handle);
+          } catch {
+            continue;
+          }
+          try {
+            const entry = await lstat(join(child, name));
+            if (entry.isFile() && entry.mtimeMs < cutoff)
+              result.push({ handle, createdAt: entry.mtime.toISOString() });
+          } catch (error) {
+            if (code(error) !== 'ENOENT') throw error;
+          }
+          if (result.length === 50) return result;
+        }
+      }
+      return result;
     },
     async putVerified(storageKey, body, input) {
       let key: { parents: string[]; name: string };
@@ -630,5 +724,6 @@ export async function openFilesystemByteStore(
       }
       await syncDirectory(directory);
     },
-  } satisfies ByteStore);
+  };
+  return Object.freeze(store);
 }

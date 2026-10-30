@@ -1,5 +1,6 @@
 import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
 import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { expireStagedCapabilities } from '@package-broker/core/platform/blob';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
@@ -1194,7 +1195,10 @@ function retentionRegistrations(
                 openStaged: (...args) => store.openStaged(...args),
                 promote: (...args) => store.promote(...args),
                 discardStaged: (...args) => store.discardStaged(...args),
-                listStaged: (...args) => store.listStaged(...args),
+                listStaged: (...args) => {
+                  expireStagedCapabilities(store);
+                  return store.listStaged(...args);
+                },
                 putVerified: (...args) => store.putVerified(...args),
                 head: (...args) => store.head(...args),
                 get: (...args) => store.get(...args),
@@ -1223,7 +1227,21 @@ function retentionRegistrations(
         const bound =
           definition.name === retentionScanJob.name
             ? createRetentionScanJob({ reader: createBlobReferenceReader(guarded), lifecycle })
-            : createBlobPurgeJob({ lifecycle });
+            : createBlobPurgeJob({
+                lifecycle,
+                staged: {
+                  listStaged: (...args) => {
+                    expireStagedCapabilities(store);
+                    return store.listStaged(...args);
+                  },
+                  async discardStaged(handle) {
+                    checkSignal();
+                    await executor.batch(guard);
+                    checkSignal();
+                    await store.discardStaged(handle);
+                  },
+                },
+              });
         await bound.handler(payload, context);
       },
     }),
@@ -1379,6 +1397,7 @@ export function createWorker(
     executor: SqlExecutor,
     registration: Registration,
     resolveOrg: () => Promise<OrgContext>,
+    admissionWaitMs: number,
   ) {
     const repository = createJobRepository(executor);
     const schedule = createJobScheduleRepository(executor);
@@ -1477,8 +1496,10 @@ export function createWorker(
         byteStore,
         createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
         {
+          observability,
           admission: uploadAdmission,
           maxBytes: config.blob.maxBytes,
+          admissionWaitMs,
         },
       ),
       cache: createCacheApiAdapter(
@@ -1799,7 +1820,14 @@ export function createWorker(
     const services =
       config === null || bound === null
         ? undefined
-        : buildPlatform(config, bound, executor as SqlExecutor, registration, resolveOrg);
+        : buildPlatform(
+            config,
+            bound,
+            executor as SqlExecutor,
+            registration,
+            resolveOrg,
+            registryConfig?.timers.waitBudgetMs ?? 8000,
+          );
     coreJobBindings.services = services;
     if (built !== undefined && services !== undefined) {
       importJobs.set({

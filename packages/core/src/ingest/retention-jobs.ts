@@ -1,7 +1,13 @@
 import { sha256Hex } from '../auth/primitives.js';
 import type { OrgContext } from '../db/port.js';
 import type { SourceRepository } from '../db/source.js';
-import type { PurgeGeneration, Sha256 } from '../platform/blob.js';
+import {
+  orgStorageSegment,
+  stagedStorageKey,
+  type ByteStore,
+  type PurgeGeneration,
+  type Sha256,
+} from '../platform/blob.js';
 import type { BlobLifecycleMetadataPort, BlobPurgeOutcome } from '../platform/blob-lifecycle.js';
 import {
   canonicalPayload,
@@ -220,7 +226,10 @@ export function createRetentionScanJob(deps: {
   });
 }
 
-export function createBlobPurgeJob(deps: { readonly lifecycle: PurgeLifecycle }): JobDefinition {
+export function createBlobPurgeJob(deps: {
+  readonly lifecycle: PurgeLifecycle;
+  readonly staged?: Pick<ByteStore, 'listStaged' | 'discardStaged'>;
+}): JobDefinition {
   const { lifecycle } = deps;
   return defineJob<unknown>({
     ...blobPurgeJob,
@@ -232,6 +241,29 @@ export function createBlobPurgeJob(deps: { readonly lifecycle: PurgeLifecycle })
       for (const key of keys) {
         if (job.signal.aborted) return;
         await claimAndRemove(lifecycle, ctx, key);
+      }
+      if (deps.staged !== undefined && payload.after === undefined) {
+        try {
+          const cutoff = new Date(job.ports.clock.now().getTime() - 24 * 3600 * 1000).toISOString();
+          const org = orgStorageSegment(ctx.orgId);
+          for (const item of await deps.staged.listStaged(cutoff, `staging/${org}/`)) {
+            if (job.signal.aborted) return;
+            try {
+              stagedStorageKey(item.handle);
+            } catch {
+              continue;
+            }
+            if (
+              item.handle.startsWith(`staging/${org}/`) &&
+              Date.parse(item.createdAt) < Date.parse(cutoff)
+            ) {
+              await deps.staged.discardStaged(item.handle);
+            }
+          }
+        } catch {
+          job.observability.counter('pb.blob.staging_sweep', { outcome: 'error' });
+          job.observability.log({ level: 'warn', event: 'staged_blob_sweep_failed' });
+        }
       }
       const last = keys[PAGE - 1];
       if (last !== undefined && !job.signal.aborted) {

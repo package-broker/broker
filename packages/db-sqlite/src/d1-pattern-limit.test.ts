@@ -11,6 +11,7 @@ const EXPECTED_MATCHES: Record<string, number> = {
   'db-sqlite/src/contract/auth-contract.ts': 2,
   'db-sqlite/src/contract/migration-contract.ts': 5,
   'db-sqlite/src/contract/migration-lock-contract.ts': 1,
+  'db-sqlite/src/repositories/blob-references.ts': 1,
   'db-sqlite/src/repositories/catalogue-list.ts': 1,
   'db-sqlite/src/repositories/catalogue-predicates.ts': 4,
   'db-sqlite/src/repositories/job-schedule.ts': 2,

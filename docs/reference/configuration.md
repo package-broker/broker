@@ -137,6 +137,8 @@ Each stanza has four sections: `blob`, `cache`, `jobs` and `observability`. Ever
 
 ### `blob`
 
+Staged-object cleanup requires S3 `s3:ListBucket` permission on the bucket, or the R2 binding’s `list` capability, alongside object read, write and delete access. See [staged package uploads](../operations/blob-staging.md).
+
 | Key                                                                             | Adapter      | Meaning                                                                                                            |
 | ------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `maxBytes`                                                                      | all          | Required. Largest single blob in bytes, a positive integer of at most 67108864 (64 MiB).                           |

@@ -1660,6 +1660,7 @@ describe('blob purge timing', () => {
       const metadata = {
         softDelete: async () => false,
         claimPurge: async () => null,
+        inspect: async () => null,
         canStartRemove: async () => false,
         markDeleted: async () => false,
         cancelPurge: async () => false,

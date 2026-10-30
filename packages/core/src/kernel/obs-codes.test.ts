@@ -34,9 +34,17 @@ describe('vocabularies', () => {
     expect(AUDIT_EVENTS.size).toBe(5);
   });
 
-  it('has exactly the 5 kernel events', () => {
+  it('has exactly the 7 kernel events', () => {
     expect([...KERNEL_EVENTS].sort()).toEqual(
-      ['authz.denied', 'authz.error', 'health.schema_drift', 'http.error', 'http.request'].sort(),
+      [
+        'authz.denied',
+        'authz.error',
+        'health.schema_drift',
+        'http.error',
+        'http.request',
+        'staged_blob_sweep_failed',
+        'promoted_blob_cleanup_failed',
+      ].sort(),
     );
   });
 

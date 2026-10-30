@@ -1,4 +1,10 @@
-import { BlobSizeMismatchError, BlobValidationError } from '@package-broker/core/platform/blob';
+import {
+  BlobSizeMismatchError,
+  BlobValidationError,
+  BlobTooLargeError,
+  stagedStorageKey,
+  stagedListPrefix,
+} from '@package-broker/core/platform/blob';
 import type { ByteRange, ByteStore } from '@package-broker/core/platform/blob';
 import type {
   FixedLengthStream,
@@ -29,6 +35,12 @@ export type R2BucketLike = {
     ...args: Parameters<R2Bucket['head']>
   ): Promise<R2Result<Awaited<ReturnType<R2Bucket['head']>>>>;
   delete: R2Bucket['delete'];
+  createMultipartUpload?: R2Bucket['createMultipartUpload'];
+  list?: (options?: { prefix?: string; cursor?: string }) => Promise<{
+    objects: readonly { key: string; uploaded?: Date }[];
+    truncated: boolean;
+    cursor?: string;
+  }>;
 };
 
 export type FixedLengthStreamLike = Pick<FixedLengthStream, 'readable' | 'writable'>;
@@ -119,21 +131,152 @@ export function createR2ByteStore(
 ): ByteStore {
   const fixedLengthStream = options.fixedLengthStream ?? defaultFixedLengthStream;
 
-  return Object.freeze({
-    async putStaged() {
-      throw new Error('not_implemented');
+  const active = new Map<string, () => Promise<void>>();
+  const store: ByteStore = {
+    async putStaged(handle, body, maxBytes, mediaType) {
+      stagedStorageKey(handle);
+      if (
+        !Number.isSafeInteger(maxBytes) ||
+        maxBytes < 0 ||
+        bucket.createMultipartUpload === undefined
+      )
+        throw new BlobValidationError();
+      const reader = body.getReader();
+      let upload:
+        Awaited<ReturnType<NonNullable<R2BucketLike['createMultipartUpload']>>> | undefined;
+      let writer: WritableStreamDefaultWriter<Uint8Array> | undefined;
+      let digestResult: Promise<ArrayBuffer> | undefined;
+      let cancelled = false;
+      const abort = async () => {
+        cancelled = true;
+        await reader.cancel().catch(() => undefined);
+        await upload?.abort().catch(() => undefined);
+      };
+      active.set(handle, abort);
+      try {
+        upload = await bucket.createMultipartUpload(handle, {
+          httpMetadata: { contentType: mediaType },
+        });
+        if (cancelled) throw new BlobValidationError();
+        const factory = (
+          crypto as unknown as {
+            DigestStream: new (
+              name: string,
+            ) => WritableStream<Uint8Array> & { digest: Promise<ArrayBuffer> };
+          }
+        ).DigestStream;
+        const digest = new factory('SHA-256');
+        digestResult = digest.digest;
+        writer = digest.getWriter();
+        const parts: { partNumber: number; etag: string }[] = [];
+        const capacity = 8 * 1024 * 1024;
+        let part: Uint8Array | undefined;
+        let used = 0;
+        let size = 0;
+        const flush = async () => {
+          const bytes = part!.subarray(0, used);
+          part = undefined;
+          const uploaded = await upload!.uploadPart(parts.length + 1, bytes);
+          parts.push(uploaded);
+          used = 0;
+        };
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (cancelled) throw new BlobValidationError();
+          if (done) break;
+          size += value.length;
+          if (size > maxBytes) throw new BlobTooLargeError();
+          await writer.write(value);
+          for (let offset = 0; offset < value.length;) {
+            const n = Math.min(capacity - used, value.length - offset);
+            part ??= new Uint8Array(capacity);
+            part.set(value.subarray(offset, offset + n), used);
+            offset += n;
+            used += n;
+            if (used === capacity) await flush();
+          }
+        }
+        await writer.close();
+        if (used > 0) await flush();
+        if (cancelled) throw new BlobValidationError();
+        if (size === 0) {
+          await upload.abort();
+          await bucket.put(handle, new Uint8Array(), { httpMetadata: { contentType: mediaType } });
+        } else await upload.complete(parts);
+        if (cancelled) throw new BlobValidationError();
+        const sha256 = [...new Uint8Array(await digest.digest)]
+          .map((n) => n.toString(16).padStart(2, '0'))
+          .join('') as import('@package-broker/core/platform/blob').Sha256;
+        return { sha256, size };
+      } catch (error) {
+        await abort();
+        await writer?.abort().catch(() => undefined);
+        await digestResult?.catch(() => undefined);
+        await bucket.delete(handle).catch(() => undefined);
+        throw error;
+      } finally {
+        active.delete(handle);
+        reader.releaseLock();
+      }
     },
-    async openStaged() {
-      throw new Error('not_implemented');
+    async openStaged(handle) {
+      stagedStorageKey(handle);
+      const found = asObject(await bucket.get(handle));
+      if (found?.body === undefined) throw new BlobValidationError();
+      return found.body;
     },
-    async promote() {
-      throw new Error('not_implemented');
+    async promote(handle, sha256, size, mediaType) {
+      const key = stagedStorageKey(handle, sha256);
+      let found: ByteStoreObject | null = null;
+      try {
+        found = asObject(await bucket.get(handle));
+        if (found?.body === undefined || found.size !== size) throw new BlobSizeMismatchError();
+        await store.putVerified(key, found.body, {
+          sha256,
+          size,
+          mediaType,
+        });
+        await bucket.delete(handle);
+      } catch (error) {
+        await found?.body?.cancel().catch(() => undefined);
+        await active.get(handle)?.();
+        throw error;
+      }
     },
-    async discardStaged() {
-      throw new Error('not_implemented');
+    async discardStaged(handle) {
+      stagedStorageKey(handle);
+      await active.get(handle)?.();
+      await bucket.delete(handle);
     },
-    async listStaged() {
-      throw new Error('not_implemented');
+    async listStaged(olderThan, orgPrefix) {
+      const prefix = stagedListPrefix(orgPrefix);
+      if (!Number.isFinite(Date.parse(olderThan)) || bucket.list === undefined)
+        throw new BlobValidationError();
+      const objects: import('@package-broker/core/platform/blob').StagedByteObject[] = [];
+      let cursor: string | undefined;
+      const seen = new Set<string>();
+      do {
+        const page = await bucket.list({
+          prefix,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        for (const object of page.objects) {
+          if (object.uploaded !== undefined && object.uploaded.getTime() < Date.parse(olderThan)) {
+            try {
+              stagedStorageKey(object.key as never);
+            } catch {
+              continue;
+            }
+            objects.push({ handle: object.key as never, createdAt: object.uploaded.toISOString() });
+            if (objects.length === 50) return objects;
+          }
+        }
+        cursor = page.truncated ? page.cursor : undefined;
+        if (page.truncated && (cursor === undefined || seen.has(cursor)))
+          throw new BlobValidationError();
+        if (cursor !== undefined) seen.add(cursor);
+      } while (cursor !== undefined);
+      return objects;
     },
     async putVerified(storageKey, source, input) {
       const body = input.size === 0 ? await drainEmpty(source) : source;
@@ -206,5 +349,6 @@ export function createR2ByteStore(
     async remove(storageKey) {
       await bucket.delete(storageKey);
     },
-  } satisfies ByteStore);
+  };
+  return Object.freeze(store);
 }

@@ -9,9 +9,11 @@ import {
   BlobSizeMismatchError,
   BlobValidationError,
   parseSha256,
+  stagedStorageKey,
 } from '@package-broker/core/platform/blob';
 import type {
   BlobInfo,
+  ByteStore,
   BlobLifecycle,
   CoreBlobStore as BlobStore,
   ByteRange,
@@ -71,7 +73,9 @@ export type BlobReferenceStatus =
  * database clock.
  */
 export interface BlobLifecycleFixture extends BlobContractFixture {
-  readonly lifecycle: BlobLifecycle & Pick<BlobLifecycleMetadataPort, 'unschedule'>;
+  readonly byteStore: ByteStore;
+  readonly lifecycle: BlobLifecycle &
+    Pick<BlobLifecycleMetadataPort, 'unschedule' | 'scheduleOrphan'>;
   readonly inspect: (
     ctx: OrgContext,
     key: Sha256,
@@ -1037,7 +1041,7 @@ export function describeBlobLifecycleContract(
       const generation = await f.lifecycle.claimPurge(org, key);
       expect(generation).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
     });
 
     it('lifecycle 2: a reference added after the claim stops the removal and the purge is cancelled', async () => {
@@ -1070,7 +1074,7 @@ export function describeBlobLifecycleContract(
       expect(f.removeCalls()).toBe(0);
       await f.setVersionStatus(org, key, 'removed_upstream');
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
     });
 
     it('lifecycle 3: a reactivation after the claim behaves like a late reference', async () => {
@@ -1094,7 +1098,7 @@ export function describeBlobLifecycleContract(
       const generation = await f.lifecycle.claimPurge(org, key);
       expect(generation).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
     });
 
     it('lifecycle 4: a lease with less than the margin left refuses the removal', async () => {
@@ -1119,7 +1123,7 @@ export function describeBlobLifecycleContract(
       const generation = (await f.lifecycle.claimPurge(org, key))!;
       await f.shortenLease(org, key, f.leaseMarginMs() + 5_000);
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
     });
 
     it('lifecycle 5: a generation bump makes the old claim remove and mark nothing', async () => {
@@ -1173,7 +1177,7 @@ export function describeBlobLifecycleContract(
       await f.expireRetention(org, key);
       const current = (await f.lifecycle.claimPurge(org, key))!;
       expect(await f.lifecycle.recheckAndRemove(org, key, current)).toBe(true);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
     });
 
     it('lifecycle 6: a crash after the remove recovers on the next claim and a repeat marks nothing', async () => {
@@ -1191,7 +1195,7 @@ export function describeBlobLifecycleContract(
       expect(recovered).not.toBeNull();
       expect(recovered).not.toBe(first);
       expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
       expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
       expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
       expect(await f.store.head(org, key)).toBeNull();
@@ -1209,7 +1213,7 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
       expect(await f.lifecycle.markDeleted(org, key, generation)).toBe(true);
       expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
-      expect(f.removeCalls()).toBe(1);
+      expect(f.removeCalls()).toBe(2);
     });
 
     async function due(f: BlobLifecycleFixture, label: string, old = true) {
@@ -1252,7 +1256,7 @@ export function describeBlobLifecycleContract(
       expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
     }, 5_000);
 
-    it('lifecycle 8 negative: expiry recovers a failed remove in two calls', async () => {
+    it('lifecycle 8 negative: expiry recovers a failed remove in three calls', async () => {
       const f = await readyLifecycle(make);
       const { org, key } = await due(f, 'retry failure');
       const first = (await f.lifecycle.claimPurge(org, key))!;
@@ -1264,7 +1268,7 @@ export function describeBlobLifecycleContract(
       expect(next).not.toBe(first);
       expect(await f.lifecycle.recheckAndRemove(org, key, next)).toBe(true);
       expect(await f.lifecycle.markDeleted(org, key, next)).toBe(true);
-      expect(f.removeCalls()).toBe(2);
+      expect(f.removeCalls()).toBe(3);
     }, 5_000);
 
     it('lifecycle 9: orphan grace blocks a new blob and a re-put after an old claim', async () => {
@@ -1424,6 +1428,272 @@ export function describeBlobReserveContract(
       const org = await f.seed(nextOrg());
       const error = await rejection(f.reserve(org, 'nope' as Sha256));
       expect(error).toBeInstanceOf(BlobValidationError);
+    });
+  });
+}
+
+export function describeBlobStagingContract(
+  name: string,
+  make: () => Promise<BlobLifecycleFixture>,
+): void {
+  describe(`blob staging contract: ${name}`, () => {
+    it('Round 5 removes promoted bytes when metadata publication fails', async () => {
+      const f = await make();
+      const org = await f.seed(nextOrg());
+      const staged = await f.store.stage(org, streamOf(bytes('failed staged publication')), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+      f.failNextPublish();
+      await expect(f.store.promote(org, staged, { refetchable: false })).rejects.toThrow();
+      expect(await f.byteStore.head(stagedStorageKey(staged.handle, staged.sha256))).toBeNull();
+      expect(await f.store.head(org, staged.sha256)).toBeNull();
+    });
+
+    it('Round 5 removes the concurrent loser and preserves the published winner', async () => {
+      const f = await make();
+      const org = await f.seed(nextOrg());
+      const data = bytes('staged publication winner');
+      const stage = () =>
+        f.store.stage(org, streamOf(data), { maxBytes: 1024, mediaType: 'application/gzip' });
+      const loser = await stage();
+      const winner = await stage();
+      const promote = f.byteStore.promote;
+      f.byteStore.promote = async (...args) => {
+        await promote(...args);
+        if (args[0] === loser.handle) await f.store.promote(org, winner, { refetchable: false });
+      };
+      const info = await f.store.promote(org, loser, { refetchable: false });
+      expect(await f.byteStore.head(stagedStorageKey(loser.handle, loser.sha256))).toBeNull();
+      expect(await f.byteStore.head(stagedStorageKey(winner.handle, winner.sha256))).not.toBeNull();
+      expect(await f.store.head(org, loser.sha256)).toEqual(info);
+      expect(
+        new Uint8Array(
+          await new Response((await f.store.get(org, loser.sha256))!.body).arrayBuffer(),
+        ),
+      ).toEqual(data);
+    });
+
+    it('Round 4 dedup reserves after scheduleOrphan and claimPurge race the lookup', async () => {
+      const f = await make();
+      const org = await f.seed(nextOrg());
+      const data = bytes('real dedup purge race');
+      const key = await put(f.store, org, data, { mediaType: 'application/gzip' });
+      await f.ageBlob(org, key, 8);
+      const staged = await f.store.stage(org, streamOf(data), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+      const head = f.byteStore.head;
+      f.byteStore.head = async (physicalKey) => {
+        const result = await head(physicalKey);
+        expect(await f.lifecycle.scheduleOrphan(org, key)).toBe(true);
+        expect(await f.lifecycle.claimPurge(org, key)).not.toBeNull();
+        return result;
+      };
+      await expect(f.store.promote(org, staged, { refetchable: false })).rejects.toBeInstanceOf(
+        BlobBusyError,
+      );
+    });
+
+    it('Round 4 stalled old removal cannot erase a staged republication', async () => {
+      const f = await make();
+      const org = await f.seed(nextOrg());
+      const data = bytes('stalled staged republication');
+      const stage = () =>
+        f.store.stage(org, streamOf(data), { maxBytes: 1024, mediaType: 'application/gzip' });
+      const first = await stage();
+      await f.store.promote(org, first, { refetchable: false });
+      await f.ageBlob(org, first.sha256, 8);
+      await f.lifecycle.softDelete(org, first.sha256, { removedAt: await f.now() });
+      await f.expireRetention(org, first.sha256);
+      const generation = (await f.lifecycle.claimPurge(org, first.sha256))!;
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let finish!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const remove = f.byteStore.remove;
+      let firstCall = true;
+      f.byteStore.remove = async (key) => {
+        if (firstCall) {
+          firstCall = false;
+          entered();
+          await blocked;
+        }
+        await remove(key);
+      };
+      const pending = f.lifecycle.recheckAndRemove(org, first.sha256, generation);
+      await started;
+      try {
+        await f.expireLease(org, first.sha256);
+        await f.store.promote(org, await stage(), { refetchable: false });
+      } finally {
+        finish();
+      }
+      expect(await pending).toBe(false);
+      expect(await f.byteStore.head(stagedStorageKey(first.handle, first.sha256))).toBeNull();
+      expect(await f.store.head(org, first.sha256)).not.toBeNull();
+      const found = await f.store.get(org, first.sha256);
+      expect(found).not.toBeNull();
+      expect(new Uint8Array(await new Response(found!.body).arrayBuffer())).toEqual(data);
+    });
+
+    it('Round 4 physical promotion failure retains staging for the sweep', async () => {
+      const f = await make();
+      const handle = 'staging/61/01J00000000000000000000001' as never;
+      const data = bytes('retain failed promotion');
+      const staged = await f.byteStore.putStaged(handle, streamOf(data), 1024, 'application/gzip');
+      await expect(
+        f.byteStore.promote(handle, staged.sha256, data.length + 1, 'application/gzip'),
+      ).rejects.toThrow();
+      expect(
+        new Uint8Array(await new Response(await f.byteStore.openStaged(handle)).arrayBuffer()),
+      ).toEqual(data);
+      await f.byteStore.discardStaged(handle);
+    });
+
+    it.each([0, 7])(
+      'Round 3 physical promotion consumes %i staged bytes on creation and deduplication',
+      async (size) => {
+        const f = await make();
+        const data = new Uint8Array(size).fill(3);
+        const handle = 'staging/61/01J00000000000000000000001' as never;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const staged = await f.byteStore.putStaged(
+            handle,
+            streamOf(data),
+            size,
+            'application/gzip',
+          );
+          await f.byteStore.promote(handle, staged.sha256, size, 'application/gzip');
+          expect(await f.byteStore.head(handle)).toBeNull();
+          await f.byteStore.discardStaged(handle);
+        }
+      },
+    );
+
+    it('Round 3 zero-byte stages promote and consume the stage', async () => {
+      const f = await make();
+      const org = await f.seed('01J0STAGED00000000000000A');
+      const staged = await f.store.stage(org, streamOf(new Uint8Array()), {
+        maxBytes: 0,
+        mediaType: 'application/gzip',
+      });
+      const info = await f.store.promote(org, staged, { refetchable: false });
+      expect(info.size).toBe(0);
+      expect(await f.stagedObjects()).toBe(0);
+      expect(
+        new Uint8Array(
+          await new Response((await f.store.get(org, staged.sha256))!.body).arrayBuffer(),
+        ),
+      ).toEqual(new Uint8Array());
+      await expect(f.store.openStaged(org, staged)).rejects.toBeInstanceOf(BlobValidationError);
+    });
+    it.each(['success', 'failed catalogue'])(
+      'Round 3 cached dedup preserves refetchability with catalogue %s',
+      async (outcome) => {
+        const f = await make();
+        const org = await f.seed('01J0STAGED00000000000000A');
+        const data = bytes('cached stage');
+        const key = await digestOf(data);
+        const info = await f.store.put(org, key, streamOf(data), {
+          size: data.length,
+          mediaType: 'application/gzip',
+          refetchable: true,
+        });
+        const staged = await f.store.stage(org, streamOf(data), {
+          maxBytes: 1024,
+          mediaType: 'application/gzip',
+        });
+        const dedup = await f.store.promote(org, staged, { refetchable: false });
+        expect(dedup).toEqual({ ...info, generation: dedup.generation });
+        expect(dedup.generation).not.toBe(info.generation);
+        expect(await f.refetchableOf(org, key)).toBe(true);
+        expect(await f.stagedObjects()).toBe(0);
+        await f.ageBlob(org, key, 8);
+        if (outcome === 'success') await f.addReference(org, key, 'active');
+        await f.lifecycle.softDelete(org, key, { removedAt: await f.now() });
+        await f.expireRetention(org, key);
+        if (outcome === 'success') {
+          expect(await f.lifecycle.claimPurge(org, key)).toBeNull();
+          return;
+        }
+        const generation = await f.lifecycle.claimPurge(org, key);
+        expect(generation).not.toBeNull();
+        expect(await f.lifecycle.recheckAndRemove(org, key, generation!)).toBe(true);
+      },
+    );
+
+    it('concurrent staged promotions converge on one live generation', async () => {
+      const f = await make();
+      const org = await f.seed('01J0STAGED00000000000000A');
+      const data = bytes('concurrent staged promotion');
+      const left = await f.store.stage(org, streamOf(data), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+      const right = await f.store.stage(org, streamOf(data), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+      const results = await Promise.all([
+        f.store.promote(org, left, { refetchable: false }),
+        f.store.promote(org, right, { refetchable: false }),
+      ]);
+      expect(results[0]).toEqual(results[1]);
+      expect(await f.store.head(org, left.sha256)).toEqual(results[0]);
+    });
+    it('stages invisibly, binds ownership and identity, promotes once and purges an abandoned promotion', async () => {
+      const f = await make();
+      const org = await f.seed('01J0STAGED00000000000000A');
+      const other = await f.seed('01J0STAGED00000000000000B');
+      const data = new TextEncoder().encode('staged npm bytes');
+      const staged = await f.store.stage(org, streamOf(data), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+      expect(await f.store.head(org, staged.sha256)).toBeNull();
+      expect(
+        new Uint8Array(await new Response(await f.store.openStaged(org, staged)).arrayBuffer()),
+      ).toEqual(data);
+      await expect(f.store.openStaged(other, staged)).rejects.toBeInstanceOf(BlobValidationError);
+      await expect(f.store.discard(other, staged)).rejects.toBeInstanceOf(BlobValidationError);
+      await expect(f.store.promote(other, staged, { refetchable: false })).rejects.toBeInstanceOf(
+        BlobValidationError,
+      );
+      await expect(
+        f.store.promote(org, { ...staged, size: staged.size + 1 }, { refetchable: false }),
+      ).rejects.toBeInstanceOf(BlobValidationError);
+      const info = await f.store.promote(org, staged, { refetchable: false });
+      expect(info.sha256).toBe(staged.sha256);
+      expect(info.size).toBe(data.length);
+      expect(await f.refetchableOf(org, staged.sha256)).toBe(false);
+      expect(
+        new Uint8Array(
+          await new Response((await f.store.get(org, staged.sha256))!.body).arrayBuffer(),
+        ),
+      ).toEqual(data);
+      const duplicate = await f.store.stage(org, streamOf(data), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+      const dedup = await f.store.promote(org, duplicate, { refetchable: false });
+      expect(dedup).toEqual({ ...info, generation: dedup.generation });
+      expect(dedup.generation).not.toBe(info.generation);
+      await f.ageBlob(org, staged.sha256, 6);
+      await f.lifecycle.softDelete(org, staged.sha256, { removedAt: await f.now() });
+      await f.expireRetention(org, staged.sha256);
+      expect(await f.lifecycle.claimPurge(org, staged.sha256)).toBeNull();
+      await f.ageBlob(org, staged.sha256, 8);
+      const generation = await f.lifecycle.claimPurge(org, staged.sha256);
+      expect(generation).not.toBeNull();
+      expect(await f.lifecycle.recheckAndRemove(org, staged.sha256, generation!)).toBe(true);
+      expect(await f.lifecycle.markDeleted(org, staged.sha256, generation!)).toBe(true);
+      expect(await f.store.get(org, staged.sha256)).toBeNull();
     });
   });
 }

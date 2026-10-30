@@ -162,3 +162,69 @@ it('documents sign-in and rejects invalid or misplaced sign-in flags without ref
     error.mockRestore();
   }
 });
+
+it.each(['deploy', 'setup'])(
+  'passes local-auth and explicit environment to %s without defaulting',
+  async (command) => {
+    const { runCloudflareDeploy } = await import('./commands/cloudflare/deploy.js');
+    const operation = vi.mocked(command === 'deploy' ? runCloudflareDeploy : runCloudflareSetup);
+    vi.stubEnv('PB_AUTH_LOCAL', 'enabled');
+    try {
+      for (const mode of ['enabled', 'disabled', undefined]) {
+        operation.mockClear();
+        expect(
+          await run([
+            'cloudflare',
+            command,
+            '--worker-name',
+            'broker',
+            ...(mode ? ['--local-auth', mode] : []),
+          ]),
+        ).toBe(0);
+        const received = operation.mock.calls[0]![0];
+        expect(received.env.PB_AUTH_LOCAL).toBe('enabled');
+        if (mode) expect(received).toHaveProperty('localAuth', mode);
+        else expect(received).not.toHaveProperty('localAuth');
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it('documents local-auth and rejects invalid, missing and misplaced values safely', async () => {
+  const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    expect(await run(['--help'])).toBe(0);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('--local-auth enabled|disabled'));
+    for (const args of [
+      ['cloudflare', 'deploy', '--worker-name', 'broker', '--local-auth', 'PRIVATE_MODE'],
+      ['cloudflare', 'setup', '--local-auth'],
+      [
+        'cloudflare',
+        'setup',
+        '--worker-name',
+        'broker',
+        '--local-auth',
+        'enabled',
+        '--local-auth=enabled',
+      ],
+      [
+        'cloudflare',
+        'deploy',
+        '--worker-name',
+        'broker',
+        '--local-auth=disabled',
+        '--local-auth',
+        'enabled',
+      ],
+      ['cloudflare', 'provision', '--local-auth', 'enabled'],
+    ])
+      expect(await run(args)).toBe(2);
+    expect(JSON.stringify(error.mock.calls)).not.toContain('PRIVATE_MODE');
+  } finally {
+    log.mockRestore();
+    error.mockRestore();
+  }
+});

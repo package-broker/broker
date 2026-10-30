@@ -50,7 +50,14 @@ import {
   type CommandResult,
 } from './api.js';
 import { inputMessages } from './input-messages.js';
-import { resolveLocalAuth, type LocalAuthMode } from './local-auth.js';
+import {
+  resolveLocalAuth,
+  verifiedDeployment,
+  frozenLocalAuthAttempt,
+  readLocalAuthSources,
+  liveLocalAuthModes,
+  type LocalAuthMode,
+} from './local-auth.js';
 import { resolveZone } from './zone.js';
 import { routeConflict } from './routes.js';
 import {
@@ -1814,11 +1821,7 @@ export async function deploy(
     }
     await liveResources(api, journal, artifact.ports);
     let current = exists ? await active(api, base) : { id: null, versions: [] };
-    const recordedVerified =
-      journal.deployment?.attempt.phase === 'verified' &&
-      journal.deployment.attempt.smoke === 'passed'
-        ? journal.deployment.attempt
-        : journal.deployment?.last_verified;
+    const recordedVerified = verifiedDeployment(journal.deployment);
     if (
       current.versions.length > 1 &&
       journal.deployment?.attempt.phase !== 'activation_pending' &&
@@ -1882,20 +1885,8 @@ export async function deploy(
     if (installedNames.length && !contract.secretInheritance)
       throw new CloudflareError('capability_unknown');
     const priorAttempt = journal.deployment?.attempt;
-    const resuming =
-      priorAttempt &&
-      [
-        'preparing_upload',
-        'upload_pending',
-        'uploaded',
-        'configuring',
-        'activation_pending',
-      ].includes(priorAttempt.phase);
+    const resuming = priorAttempt && frozenLocalAuthAttempt(priorAttempt, 'deploy') !== undefined;
     if (resuming) {
-      if (priorAttempt.local_auth === undefined)
-        return invalid(
-          "This frozen deployment attempt predates local-auth support and cannot be resumed; finish it with the previous release's CLI, then deploy again",
-        );
       if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
         return conflict('artifact_sha256');
       if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
@@ -1904,46 +1895,25 @@ export async function deploy(
     const removeSecret = () =>
       invalid('Remove the secret first: wrangler secret delete PB_IDP_PROVIDERS');
     if (installedNames.includes('PB_IDP_PROVIDERS')) return removeSecret();
-    const sources: Record<string, unknown>[] = [];
-    for (const version of current.versions) {
-      const result =
-        prior ?? object((await api.request(`${base}/versions/${version.version_id}`)).result);
-      if (result.id !== version.version_id) return conflict('version_id');
-      const resources = object(result.resources ?? {});
-      if (!Array.isArray(resources.bindings)) return conflict('providers');
-      if (
-        resources.bindings
-          .map(object)
-          .some((b) => b.name === 'PB_IDP_PROVIDERS' && b.type === 'secret_text')
-      )
-        return removeSecret();
-      sources.push(resources);
-    }
-    if (exists && sources.length === 0) {
-      if (!workerSettings || !Array.isArray(workerSettings.bindings)) return conflict('local_auth');
-      sources.push(workerSettings);
-    }
+    const sources = exists
+      ? await readLocalAuthSources({
+          api,
+          base,
+          versions: current.versions,
+          settings: workerSettings,
+          prior,
+          stage: 'deploy',
+        })
+      : [];
     const localAuth = resolveLocalAuth({
       flag: o.localAuth,
+      verified: recordedVerified,
       env: o.env.PB_AUTH_LOCAL,
-      sources: exists ? (sources as { bindings: readonly unknown[] }[]) : null,
+      sources: exists ? sources : null,
       secretNames: [...selectedSecrets, ...installedNames],
       ...(resuming ? { frozen: priorAttempt } : {}),
     });
-    const liveModes = sources.map((source) => {
-      const binding = (source.bindings as unknown[])
-        .map(object)
-        .find((binding) => binding.name === 'PB_AUTH_LOCAL');
-      return binding?.text ?? 'enabled';
-    });
-    if (new Set(liveModes).size > 1) return conflict('local_auth');
-    if (
-      localAuth === 'enabled' &&
-      o.localAuth === undefined &&
-      o.env.PB_AUTH_LOCAL === 'enabled' &&
-      (liveModes.includes('disabled') || recordedVerified?.local_auth === 'disabled')
-    )
-      return invalid('Re-enabling local sign-in requires --local-auth enabled');
+    const liveModes = liveLocalAuthModes(sources, 'deploy');
     if (
       liveModes.some((mode) => mode !== localAuth) ||
       (recordedVerified && localAuth !== (recordedVerified.local_auth ?? 'enabled'))
@@ -2110,10 +2080,7 @@ export async function deploy(
       }),
     );
     const priorJournal = journal.deployment;
-    const verified =
-      priorAttempt?.phase === 'verified' && priorAttempt.smoke === 'passed'
-        ? priorAttempt
-        : (priorJournal?.last_verified ?? null);
+    const verified = verifiedDeployment(priorJournal);
     const livePlain =
       workerSettings &&
       (workerSettings.bindings as unknown[])

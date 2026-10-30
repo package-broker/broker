@@ -1,7 +1,12 @@
 import { expect, it, vi } from 'vitest';
 import { inputMessages } from './input-messages.js';
 import { CloudflareError } from './api.js';
-import { resolveLocalAuth } from './local-auth.js';
+import {
+  resolveLocalAuth,
+  verifiedDeployment,
+  liveLocalAuthModes,
+  readLocalAuthSources,
+} from './local-auth.js';
 
 const source = (text: unknown) => ({
   bindings: [{ name: 'PB_AUTH_LOCAL', type: 'plain_text', text }],
@@ -11,7 +16,9 @@ it('resolves flag, environment, live binding and default in order', () => {
   expect(resolveLocalAuth({ sources: null })).toBe('enabled');
   expect(resolveLocalAuth({ sources: [{ bindings: [] }] })).toBe('enabled');
   expect(resolveLocalAuth({ sources: [source('disabled')] })).toBe('disabled');
-  expect(resolveLocalAuth({ env: 'enabled', sources: [source('disabled')] })).toBe('enabled');
+  expect(() => resolveLocalAuth({ env: 'enabled', sources: [source('disabled')] })).toThrow(
+    'Re-enabling local sign-in requires --local-auth enabled',
+  );
   expect(resolveLocalAuth({ sources: null, flag: 'disabled', env: 'disabled' })).toBe('disabled');
   expect(resolveLocalAuth({ flag: 'enabled', sources: [source('disabled')] })).toBe('enabled');
 });
@@ -175,3 +182,73 @@ it('registers fixed input reasons for the deploy failure wrapper', () => {
     }
   }
 });
+
+it('requires the flag to re-enable a verified disabled mode even when live bindings are enabled', () => {
+  for (const extra of [{}, { env: 'enabled' }, { frozen: { local_auth: 'enabled' as const } }]) {
+    const options = {
+      sources: [source('enabled')],
+      verified: { local_auth: 'disabled' as const },
+      ...extra,
+    };
+    expect(() => resolveLocalAuth(options)).toThrow(
+      'Re-enabling local sign-in requires --local-auth enabled',
+    );
+    expect(resolveLocalAuth({ ...options, flag: 'enabled' })).toBe('enabled');
+  }
+});
+
+it('derives verified policy only from a smoke-passed verified attempt', () => {
+  const previous = { local_auth: 'disabled' };
+  for (const [phase, smoke, current] of [
+    ['verified', 'passed', true],
+    ['verified', 'pending', false],
+    ['uploaded', 'passed', false],
+  ] as const) {
+    const attempt = { phase, smoke, local_auth: 'enabled' };
+    expect(verifiedDeployment({ attempt, last_verified: previous } as never)).toBe(
+      current ? attempt : previous,
+    );
+  }
+  expect(verifiedDeployment(null)).toBeNull();
+});
+
+it.each(['deploy', 'setup'] as const)(
+  'refuses split live modes in %s even with an explicit flag',
+  (stage) => {
+    const sources = [source('enabled'), source('disabled')];
+    expect(resolveLocalAuth({ sources, flag: 'enabled', stage })).toBe('enabled');
+    expect(() => liveLocalAuthModes(sources, stage)).toThrow(
+      expect.objectContaining({ code: 'configuration_conflict', fields: ['local_auth'], stage }),
+    );
+  },
+);
+
+it.each(['deploy', 'setup'] as const)(
+  'reads version bindings and settings consistently for %s',
+  async (stage) => {
+    const request = vi
+      .fn()
+      .mockResolvedValue({ result: { id: 'v1', resources: source('disabled') } });
+    const options = {
+      api: { request } as never,
+      base: '/worker',
+      versions: [{ version_id: 'v1' }],
+      stage,
+    };
+    expect(await readLocalAuthSources(options)).toEqual([source('disabled')]);
+    expect(request).toHaveBeenCalledWith('/worker/versions/v1');
+    request.mockResolvedValueOnce({ result: { id: 'wrong', resources: source('enabled') } });
+    await expect(readLocalAuthSources(options)).rejects.toMatchObject({
+      fields: ['version_id'],
+      stage,
+    });
+    request.mockResolvedValueOnce({ result: source('enabled') });
+    expect(await readLocalAuthSources({ ...options, versions: [] })).toEqual([source('enabled')]);
+    expect(request).toHaveBeenLastCalledWith('/worker/settings');
+    request.mockResolvedValueOnce({ result: {} });
+    await expect(readLocalAuthSources({ ...options, versions: [] })).rejects.toMatchObject({
+      fields: ['local_auth'],
+      stage,
+    });
+  },
+);

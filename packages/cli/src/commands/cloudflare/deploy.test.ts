@@ -6561,3 +6561,20 @@ it('refuses a partial rollout back to a verified mode when the live mode changed
   });
   expect(mutations(h)).toEqual([]);
 });
+
+it('requires the flag when verified disabled survives but live mode is enabled and env is absent', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  await verifiedIdentityDeploy(h);
+  const j = (await store.read())!;
+  j.deployment!.attempt.local_auth = 'disabled';
+  await store.write(j);
+  h.calls.length = 0;
+  const result = await deploy(options(h));
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Re-enabling local sign-in requires --local-auth enabled',
+  });
+  expect(mutations(h)).toEqual([]);
+  expect((await deploy({ ...options(h), localAuth: 'enabled' })).output.error).toBeNull();
+});

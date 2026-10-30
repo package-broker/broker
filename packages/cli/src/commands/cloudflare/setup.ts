@@ -44,6 +44,15 @@ import {
   installIdentity,
   type Inventory,
 } from './inventory.js';
+import {
+  resolveLocalAuth,
+  verifiedDeployment,
+  frozenLocalAuthAttempt,
+  readLocalAuthSources,
+  liveLocalAuthModes,
+  type LocalAuthMode,
+} from './local-auth.js';
+import { inputMessages } from './input-messages.js';
 import { provision, type ProvisionOptions } from './provision.js';
 import type { ProvidersOption } from './providers-file.js';
 import { smoke, type SmokeOptions } from './smoke.js';
@@ -52,6 +61,7 @@ type Env = Readonly<Record<string, string | undefined>>;
 
 export interface SetupOptions extends Omit<ProvisionOptions, 'contract' | 'transaction'> {
   providers?: ProvidersOption;
+  localAuth?: LocalAuthMode;
   orgSlug?: string;
   orgName?: string;
   adminEmail?: string;
@@ -510,6 +520,7 @@ export async function setup(
       ...(o.inventory === undefined ? {} : { inventory: o.inventory }),
     });
     let journal = await store.read();
+    const frozen = frozenLocalAuthAttempt(journal?.deployment?.attempt, 'setup');
     const keyState = journal?.secret_delivery.master_key ?? 'not_started';
     const bootstrapState = journal?.bootstrap.state ?? 'not_started';
     const needsToken =
@@ -546,6 +557,8 @@ export async function setup(
       'DB',
       'DEPLOYMENT_ID',
       'PB_PUBLIC_URL',
+      'PB_AUTH_LOCAL',
+      'PB_IDP_PROVIDERS',
       'ASSETS',
       ...(artifact.ports
         ? [
@@ -570,8 +583,12 @@ export async function setup(
       if (JSON.stringify(await store.read()) !== JSON.stringify(journal))
         throw new CloudflareError('plan_changed', 8, false, 'validate');
     }
-    const { providers, workersPaid, ...sharedOptions }: SetupOptions & { workersPaid?: boolean } =
-      o;
+    const {
+      providers,
+      workersPaid,
+      localAuth: localAuthFlag,
+      ...sharedOptions
+    }: SetupOptions & { workersPaid?: boolean } = o;
     const common = {
       ...sharedOptions,
       workerName: values.workerName!,
@@ -641,6 +658,32 @@ export async function setup(
       installedNames.includes('PB_TOKEN_PEPPER')
     )
       throw new CloudflareError('configuration_conflict', 8, false, 'key_delivery');
+    const base = `/workers/scripts/${identity.script_name}`;
+    const sources = worker
+      ? await readLocalAuthSources({
+          api,
+          base,
+          versions: (await active(api, base)).versions,
+          stage: 'setup',
+        })
+      : [];
+    const localAuth = resolveLocalAuth({
+      flag: localAuthFlag,
+      env: o.env.PB_AUTH_LOCAL,
+      sources: worker ? sources : null,
+      secretNames: [...selectedSecrets, ...installedNames],
+      verified: verifiedDeployment(journal?.deployment),
+      ...(frozen ? { frozen } : {}),
+      stage: 'setup',
+    });
+    liveLocalAuthModes(sources, 'setup');
+    output.checks.push({ name: 'local_auth', status: localAuth });
+    if (localAuth === 'disabled') {
+      const error = new CloudflareError('invalid_input', 2, false, 'setup');
+      error.message = 'Setup with local sign-in disabled is not supported yet';
+      inputMessages.set(error, error.message);
+      throw error;
+    }
     const installed = installedNames.includes('PB_MASTER_KEY');
     journal = await store.read();
     const pending = journal?.deployment?.attempt;
@@ -800,6 +843,7 @@ export async function setup(
       CLOUDFLARE_API_TOKEN: auth.apiToken,
       CLOUDFLARE_ACCOUNT_ID: auth.accountId,
       PB_MASTER_KEY: key,
+      ...(o.env.PB_AUTH_LOCAL === undefined ? {} : { PB_AUTH_LOCAL: o.env.PB_AUTH_LOCAL }),
     };
     for (const name of selectedSecrets) {
       if (name !== 'PB_MASTER_KEY' && !retainedNames.has(name)) deployEnv[name] = o.env[name];
@@ -808,6 +852,7 @@ export async function setup(
     const deployOptions: DeployOptions = {
       contract: cloudflareDeployContract,
       ...deployCommon,
+      ...(localAuthFlag === undefined ? {} : { localAuth: localAuthFlag }),
       ...(providers === undefined ? {} : { providers }),
       ...(workersPaid === undefined ? {} : { workersPaid }),
       env: deployEnv,

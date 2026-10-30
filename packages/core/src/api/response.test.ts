@@ -30,6 +30,7 @@ const statuses = {
   scope: 403,
   not_admitted: 403,
   self_approval: 403,
+  already_decided: 409,
   package_binding: 403,
   no_trusted_publisher: 403,
   claim_in_use: 409,

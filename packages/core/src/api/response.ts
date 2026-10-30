@@ -48,6 +48,7 @@ export const API_ERROR_CODES = {
   token_required: { status: 401, message: 'A token is required to publish' },
   scope: { status: 403, message: 'The token scope does not permit this operation' },
   not_admitted: { status: 403, message: 'The package is not admitted to this project' },
+  already_decided: { status: 409, message: 'Publish approval already decided' },
   self_approval: { status: 403, message: 'You cannot approve your own publish' },
   package_binding: { status: 403, message: 'The token is bound to a different package' },
   no_trusted_publisher: { status: 403, message: 'No trusted publisher matches this workload' },

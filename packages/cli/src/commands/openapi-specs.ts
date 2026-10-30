@@ -11,6 +11,7 @@ import * as servicePrincipals from '@package-broker/core/api/routes/service-prin
 import * as sourceAttachments from '@package-broker/core/api/routes/source-attachment-schemas';
 import * as sourceNames from '@package-broker/core/api/routes/source-names-schemas';
 import * as sources from '@package-broker/core/api/routes/sources-schemas';
+import * as publishes from '@package-broker/core/api/routes/publishes-schemas';
 import * as tokens from '@package-broker/core/api/routes/tokens-schemas';
 import type { ApiSlot } from '@package-broker/core/plugin';
 
@@ -62,6 +63,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
     sourceNames,
     sources,
     tokens,
+    publishes,
   ]) {
     Object.values(module).forEach(collect);
   }

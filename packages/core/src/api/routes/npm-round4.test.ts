@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { PUBLISH_SCHEMAS as publishes } from './publishes-schemas.js';
+import {
+  PUBLISH_SCHEMAS as publishes,
+  publishApproveBody,
+  publishRejectBody,
+} from './publishes-schemas.js';
 import { PACKAGE_ACCESS_REQUEST_SCHEMAS as access } from './package-access-requests-schemas.js';
 import { NPM_IDENTITY_SCHEMAS as identity } from './npm-identity-schemas.js';
 import { generateOpenApi } from '../openapi.js';
 
 describe('npm reviewed schemas', () => {
   it('splits approval and rejection and bounds UTF-8 reasons', () => {
-    const schemas = { ...publishes, ...access } as Record<
-      string,
-      { safeParse(value: unknown): { success: boolean } }
-    >;
+    const schemas = {
+      ...publishes,
+      PublishApproveBody: publishApproveBody,
+      PublishRejectBody: publishRejectBody,
+      ...access,
+    } as Record<string, { safeParse(value: unknown): { success: boolean } }>;
     for (const prefix of ['Publish', 'PackageAccess']) {
       const approve = schemas[`${prefix}ApproveBody`];
       const reject = schemas[`${prefix}RejectBody`];

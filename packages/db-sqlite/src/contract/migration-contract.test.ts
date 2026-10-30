@@ -7,6 +7,7 @@ import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sql
 import {
   describeMigrationContract,
   describeNpmPublishMigrationContract,
+  describeNpmIdentityMigrationContract,
   type OpenedPair,
 } from './migration-contract.js';
 
@@ -53,3 +54,5 @@ it('registers npm publish contracts explicitly at every backend entrypoint', asy
 });
 
 describeNpmPublishMigrationContract('node:sqlite', openPair);
+
+describeNpmIdentityMigrationContract('node:sqlite', openPair);

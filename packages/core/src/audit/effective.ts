@@ -57,6 +57,8 @@ export interface ValidatedAuditBuild {
   readonly policy: AuditPolicy;
   readonly policySource: 'build' | 'env';
   readonly accepted: boolean;
+  /** Build acceptance takes precedence when both sources accept. */
+  readonly acceptanceSource: 'build' | 'env' | null;
   readonly trailPresent: boolean;
   readonly trailToggleConfigured: boolean;
   readonly trailEnabled: boolean;
@@ -156,6 +158,12 @@ export function validateAuditBuild(
     policy,
     policySource: policyEnv === 'required' ? 'env' : 'build',
     accepted,
+    acceptanceSource:
+      captured.audit?.acceptNoDurableAudit === true
+        ? 'build'
+        : acceptanceEnv === 'true'
+          ? 'env'
+          : null,
     trailPresent: trail !== undefined,
     trailToggleConfigured: trail?.toggleEnv !== undefined,
     trailEnabled: trail !== undefined && toggle !== 'off',

@@ -163,7 +163,7 @@ describe('audit coverage inventory', () => {
     }
   });
 
-  it('records logout fallback coverage separately from uncaptured failed security attempts', () => {
+  it('records logout fallback coverage and pins uncaptured actions without producers', () => {
     expect(
       AUDIT_SECURITY_ATTEMPTS.filter(({ captured }) => captured).map(({ attempt }) => attempt),
     ).toEqual([]);

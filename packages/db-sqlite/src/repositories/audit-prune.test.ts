@@ -580,3 +580,23 @@ it.each([1, 2, 3])('logs and counts integrity anchor refusal at row %s', async (
   ]);
   expect(counters).toEqual(['pb.audit.chain_integrity']);
 });
+
+it('commits a pending none cutover only when the successful prune passes its sequence', async () => {
+  await seed();
+  await run(
+    "UPDATE audit_chain SET mode = 'trail', pending_mode = 'none', cutover_seq = 3 WHERE org_id = ?",
+    org.orgId,
+  );
+  expect(await prune()).toEqual({ outcome: 'retained' });
+  expect(await chain()).toMatchObject({ mode: 'trail', pending_mode: 'none' });
+  await disposition('export', null);
+  const repository = createAuditPruneRepository(executor);
+  expect(await repository.prune(org, { ...options, limit: 2 })).toEqual({
+    outcome: 'pruned',
+    pruned: 2,
+    boundarySeq: 3,
+  });
+  expect(await chain()).toMatchObject({ mode: 'trail', pending_mode: 'none', cutover_seq: 3 });
+  expect(await prune()).toEqual({ outcome: 'pruned', pruned: 1, boundarySeq: 4 });
+  expect(await chain()).toMatchObject({ mode: 'none', pending_mode: null, cutover_seq: 3 });
+});

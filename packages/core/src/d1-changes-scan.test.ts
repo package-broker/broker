@@ -680,6 +680,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Loads the shared none persistence suite for Node and D1 tests; it checks RETURNING rows and stored state without reading executor change metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-none-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'Loads the shared export persistence contract suite for Node and D1 tests; the module has no executor count reads.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-export-suite.js') #1",

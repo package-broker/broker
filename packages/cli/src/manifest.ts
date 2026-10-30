@@ -152,6 +152,7 @@ export interface ManifestMigration {
 }
 
 export interface Manifest {
+  localAuth?: LocalAuthCapability;
   identity?: IdentityDescriptor;
   platformPorts?: PlatformPortConfig | null;
   schemaVersion: 1;
@@ -162,6 +163,37 @@ export interface Manifest {
   routes: ManifestRoute[];
 }
 
+export interface LocalAuthCapability {
+  version: 1;
+}
+
+export function snapshotLocalAuthCapability(value: unknown): Readonly<LocalAuthCapability> | null {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 1 ||
+    !Object.hasOwn(value, 'version') ||
+    !('version' in value) ||
+    value.version !== 1
+  )
+    return null;
+  return Object.freeze({ version: 1 });
+}
+
+export function runtimeSupportsLocalAuth(metadata: unknown): boolean {
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return false;
+  if (!('packageBroker' in metadata)) return false;
+  const marker = metadata.packageBroker;
+  return (
+    typeof marker === 'object' &&
+    marker !== null &&
+    !Array.isArray(marker) &&
+    'localAuth' in marker &&
+    marker.localAuth === 1
+  );
+}
+
 export function renderManifestJson(
   plugins: readonly PluginDefinition[],
   versions: ReadonlyMap<string, string>,
@@ -169,19 +201,33 @@ export function renderManifestJson(
   extra: {
     migrations?: readonly MigrationSource[];
     registration?: Registration;
+    runtimeMetadata?: unknown;
   } = {},
 ): Manifest {
   return {
     schemaVersion: 1,
+    ...(runtimeSupportsLocalAuth(extra.runtimeMetadata)
+      ? { localAuth: { version: 1 as const } }
+      : {}),
     ...(extra.registration?.identityDescriptor
       ? {
           identity: {
             runtimeProviders: extra.registration.identityDescriptor.runtimeProviders,
             compiled: extra.registration.identityDescriptor.compiled.map(
-              ({ id, kind, anchor }) => ({
+              ({ id, kind, anchor, policy }) => ({
                 id,
                 kind,
                 anchor,
+                ...(policy === undefined
+                  ? {}
+                  : {
+                      policy: {
+                        verifiedDomains: [...policy.verifiedDomains],
+                        ...(policy.emailAuthoritativeDomains === undefined
+                          ? {}
+                          : { emailAuthoritativeDomains: [...policy.emailAuthoritativeDomains] }),
+                      },
+                    }),
               }),
             ),
           },

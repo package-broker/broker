@@ -1,14 +1,16 @@
 import { createProductFooter } from './components/product-footer-content.js';
 import { encodeQr, type QrMatrix } from './qr.js';
+import { APP_PATH } from './app-path.js';
 
 export const SETUP_START_PATH = '/_pb/auth/local/setup/start';
 export const SETUP_FINISH_PATH = '/_pb/auth/local/setup/finish';
-export const APP_PATH = '/_pb/ui/';
+export { APP_PATH } from './app-path.js';
 
 const SETUP_TOKEN_LENGTH = 43;
 const MAX_FIELD_LENGTH = 1024;
 
-export type SetupStage = 'token' | 'enroll' | 'done' | 'uncertain';
+export type SetupStage =
+  'checking' | 'disabled' | 'unavailable' | 'token' | 'enroll' | 'done' | 'uncertain';
 
 export type PasswordProblem = 'too_short' | 'too_long' | 'equals_email' | 'not_well_formed';
 
@@ -44,6 +46,7 @@ export interface SetupResponse {
 }
 
 export interface SetupTransport {
+  get(path: string): Promise<SetupResponse>;
   post(path: string, body: Readonly<Record<string, string>>): Promise<SetupResponse>;
 }
 
@@ -96,7 +99,7 @@ export function createSetupController(deps: {
   const listeners = new Set<() => void>();
   let token: string | null = null;
   let view: SetupSnapshot = {
-    stage: 'token',
+    stage: 'checking',
     busy: false,
     notice: null,
     problems: [],
@@ -125,6 +128,22 @@ export function createSetupController(deps: {
     }
   };
 
+  void transport.get('/_pb/auth/providers').then(
+    (response) => {
+      if (disposed) return;
+      const body = response.json;
+      publish({
+        stage:
+          response.status === 200 && isRecord(body) && typeof body['local'] === 'boolean'
+            ? body['local']
+              ? 'token'
+              : 'disabled'
+            : 'unavailable',
+      });
+    },
+    () => publish({ stage: 'unavailable' }),
+  );
+
   return {
     snapshot: () => view,
 
@@ -146,6 +165,11 @@ export function createSetupController(deps: {
       const response = await send(SETUP_START_PATH, { token: candidate });
       if (response === null) {
         publish({ busy: false, notice: 'unavailable' });
+        return;
+      }
+      if (localAuthDisabled(response)) {
+        clearSecrets();
+        publish({ busy: false, stage: 'disabled', notice: null, enrollment: null, problems: [] });
         return;
       }
       if (response.status === 200) {
@@ -195,6 +219,11 @@ export function createSetupController(deps: {
         publish({ busy: false, stage: 'uncertain', notice: null, enrollment: null });
         return;
       }
+      if (localAuthDisabled(response)) {
+        clearSecrets();
+        publish({ busy: false, stage: 'disabled', notice: null, enrollment: null, problems: [] });
+        return;
+      }
       if (response.status === 204) {
         clearSecrets();
         publish({ busy: false, stage: 'done', notice: null, enrollment: null });
@@ -225,6 +254,16 @@ export function createSetupController(deps: {
   };
 }
 
+function localAuthDisabled(response: SetupResponse): boolean {
+  const body = response.json;
+  return (
+    response.status === 403 &&
+    isRecord(body) &&
+    isRecord(body['error']) &&
+    body['error']['code'] === 'local_auth_disabled'
+  );
+}
+
 function noticeForStart(status: number): SetupNotice {
   if (status === 401 || status === 400) return 'token_refused';
   if (status === 403) return 'origin_refused';
@@ -237,6 +276,16 @@ export function createFetchTransport(
   signal?: AbortSignal,
 ): SetupTransport {
   return {
+    async get(path) {
+      const response = await fetchImpl(path, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+        ...(signal === undefined ? {} : { signal }),
+      });
+      return { status: response.status, json: await response.json().catch(() => null) };
+    },
     async post(path, body) {
       const response = await fetchImpl(path, {
         method: 'POST',
@@ -544,13 +593,49 @@ export function mountSetup(root: HTMLElement, deps: SetupMountDeps): () => void 
       wipeInputs();
       root.replaceChildren();
       const content =
-        snapshot.stage === 'token'
-          ? buildToken()
-          : snapshot.stage === 'enroll'
-            ? buildEnroll(snapshot)
-            : snapshot.stage === 'done'
-              ? buildDone()
-              : buildUncertain();
+        snapshot.stage === 'checking' ||
+        snapshot.stage === 'disabled' ||
+        snapshot.stage === 'unavailable'
+          ? el(
+              'section',
+              {},
+              heading('Set up the administrator account'),
+              ...(snapshot.stage === 'checking'
+                ? []
+                : [
+                    el(
+                      'h2',
+                      { class: 'mt-4 font-semibold' },
+                      snapshot.stage === 'disabled'
+                        ? "Sign in with your organization's account"
+                        : 'Setup is unavailable',
+                    ),
+                  ]),
+              el(
+                'p',
+                {
+                  role: snapshot.stage === 'unavailable' ? 'alert' : 'status',
+                  class: 'mt-2 text-gray-700',
+                },
+                snapshot.stage === 'checking'
+                  ? 'Checking sign-in options…'
+                  : snapshot.stage === 'disabled'
+                    ? 'Password setup is unavailable. Sign in to continue, or contact your administrator for help.'
+                    : 'Sign-in options could not be loaded. Reload the page to try again.',
+              ),
+              el(
+                'a',
+                { href: `${APP_PATH}#/login`, class: 'mt-4 block text-blue-700 underline' },
+                'Go to sign in',
+              ),
+            )
+          : snapshot.stage === 'token'
+            ? buildToken()
+            : snapshot.stage === 'enroll'
+              ? buildEnroll(snapshot)
+              : snapshot.stage === 'done'
+                ? buildDone()
+                : buildUncertain();
       notice = el('div', { id: 'setup-notice', role: 'alert', class: 'mt-4 text-red-800' });
       status = el('p', { id: 'setup-status', role: 'status', class: 'mt-4 text-gray-700' });
       const main = el(

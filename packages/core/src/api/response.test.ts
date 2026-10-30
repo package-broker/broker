@@ -50,6 +50,7 @@ const statuses = {
   invalid_request: 400,
   unauthorized: 401,
   forbidden: 403,
+  local_auth_disabled: 403,
   reauth_required: 403,
   not_found: 404,
   conflict: 409,

@@ -105,6 +105,16 @@ export default function ssoOidc(options: SsoOidcOptions = {}): PluginDefinition 
             id: c.id,
             kind: c.kind,
             anchor: providerPresentation(c).trustAnchor,
+            policy: Object.freeze({
+              verifiedDomains: Object.freeze([...c.policy.verifiedDomains]),
+              ...(c.policy.emailAuthoritativeDomains === undefined
+                ? {}
+                : {
+                    emailAuthoritativeDomains: Object.freeze([
+                      ...c.policy.emailAuthoritativeDomains,
+                    ]),
+                  }),
+            }),
           }),
         ),
       ),

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
@@ -8,10 +9,25 @@ import type { PluginDefinition } from '@package-broker/core/plugin';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { build, BuildDiagnosticsError, declarationOnlyPackageResolver } from './build.js';
 
+const metadataOverrides = vi.hoisted(() => new Map<string, unknown>());
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      const metadata = metadataOverrides.get(String(args[0]));
+      if (metadata !== undefined) return Promise.resolve(JSON.stringify(metadata));
+      return actual.readFile(...args);
+    },
+  };
+});
+
+const cliRequire = createRequire(import.meta.url);
 const dirs: string[] = [];
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  metadataOverrides.clear();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -167,5 +183,37 @@ describe('build source provenance', () => {
     expect(await info()).toMatchObject({ gitSha: null, dirty: null });
     vi.stubEnv('GITHUB_SHA', 'e'.repeat(40));
     expect(await info()).toMatchObject({ gitSha: 'e'.repeat(40), dirty: null });
+  });
+});
+
+describe('local-auth runtime capability', () => {
+  function metadata(runtimeMarker: boolean) {
+    for (const name of ['cli', 'core', 'runtime-node']) {
+      const supported = name === 'runtime-node' ? runtimeMarker : !runtimeMarker;
+      metadataOverrides.set(cliRequire.resolve(`@package-broker/${name}/package.json`), {
+        version: '2.0.0-rc.4',
+        ...(supported ? { packageBroker: { localAuth: 1 } } : {}),
+      });
+    }
+  }
+
+  it.each([true, false])(
+    'takes default-build capability from the runtime marker: %s',
+    async (supported) => {
+      metadata(supported);
+      const fixtureOptions = await fixture(routeSource(''));
+      const options = { cwd: fixtureOptions.cwd, configPath: fixtureOptions.configPath };
+      const result = await build(options);
+      const manifest = JSON.parse(await readFile(result.manifestJson, 'utf8'));
+      if (supported) expect(manifest.localAuth).toEqual({ version: 1 });
+      else expect(manifest).not.toHaveProperty('localAuth');
+    },
+  );
+
+  it('omits capability for a custom entry even when the runtime has the marker', async () => {
+    metadata(true);
+    const options = await fixture(routeSource(''));
+    const result = await build(options);
+    expect(JSON.parse(await readFile(result.manifestJson, 'utf8'))).not.toHaveProperty('localAuth');
   });
 });

@@ -82,6 +82,55 @@ describe('plugin-sso-oidc', () => {
     expect(buildIdentityProviders(collectRegistrations([plugin]), [plugin], ctx).size).toBe(1);
   });
 
+  it.each([access, oidc])('snapshots only the declared domain policy for $kind', (config) => {
+    const policy = {
+      verifiedDomains: ['example.com', 'other.example.com'],
+      emailAuthoritativeDomains: ['example.com'],
+      autoJoin: false,
+    };
+    const plugin = ssoOidc({ providers: [{ ...config, policy }] });
+    policy.verifiedDomains.push('changed.example.com');
+    policy.emailAuthoritativeDomains.push('other.example.com');
+    const entry = plugin.identityDescriptor!.compiled[0]!;
+    expect(entry.policy).toEqual({
+      verifiedDomains: ['example.com', 'other.example.com'],
+      emailAuthoritativeDomains: ['example.com'],
+    });
+    expect(Object.isFrozen(entry.policy)).toBe(true);
+    expect(Object.isFrozen(entry.policy!.verifiedDomains)).toBe(true);
+    expect(Object.isFrozen(entry.policy!.emailAuthoritativeDomains)).toBe(true);
+    expect(collectRegistrations([plugin]).identityDescriptor?.compiled[0]?.policy).toEqual(
+      entry.policy,
+    );
+  });
+
+  it.each([access, oidc])('retains the runtime override policy for $kind', (config) => {
+    const plugin = ssoOidc({
+      providers: [
+        { ...config, policy: { ...config.policy, emailAuthoritativeDomains: ['example.com'] } },
+      ],
+      runtimeProviders: true,
+    });
+    const runtime = {
+      ...config,
+      policy: {
+        verifiedDomains: ['runtime.example.com'],
+        emailAuthoritativeDomains: ['runtime.example.com'],
+        autoJoin: true,
+      },
+    };
+    const providers = buildIdentityProviders(collectRegistrations([plugin]), [plugin], {
+      ...ctx,
+      env: (name) => (name === 'PB_IDP_PROVIDERS' ? JSON.stringify([runtime]) : undefined),
+    });
+    expect(providers.size).toBe(1);
+    expect(providers.get(config.id)?.policy).toEqual(runtime.policy);
+    expect(plugin.identityDescriptor!.compiled[0]!.policy).toEqual({
+      verifiedDomains: ['example.com'],
+      emailAuthoritativeDomains: ['example.com'],
+    });
+  });
+
   it('lists every configuration problem in one TypeError without secret values', () => {
     const secretish = 'sekrit-value-1234';
     const message = messageOf(() =>

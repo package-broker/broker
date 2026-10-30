@@ -358,6 +358,7 @@ describe('auth wiring on Miniflare D1', () => {
           'PB_MASTER_KEY',
           'PB_MASTER_KEY_PREVIOUS',
           'PB_PUBLIC_URL',
+          'PB_AUTH_LOCAL',
           'DB',
           'PB_IDP_X',
         ]) {
@@ -368,13 +369,14 @@ describe('auth wiring on Miniflare D1', () => {
     });
     const response = await createWorker([plugin]).fetch(
       get('/_pb/auth/providers'),
-      env(db, { PB_IDP_X: 'visible', PB_MASTER_KEY_PREVIOUS: undefined }),
+      env(db, { PB_IDP_X: 'visible', PB_AUTH_LOCAL: 'enabled', PB_MASTER_KEY_PREVIOUS: undefined }),
     );
     expect(response.status).toBe(200);
     expect(seen).toEqual({
       PB_MASTER_KEY: undefined,
       PB_MASTER_KEY_PREVIOUS: undefined,
       PB_PUBLIC_URL: undefined,
+      PB_AUTH_LOCAL: undefined,
       DB: undefined,
       PB_IDP_X: 'visible',
     });
@@ -416,6 +418,49 @@ describe('auth wiring on Miniflare D1', () => {
       expect(JSON.stringify(logged)).not.toContain(fragment);
     }
     expect(builds).toBe(2);
+  });
+});
+
+describe('local auth binding validation', () => {
+  it.each(['', 'ENABLED', 'break-glass', 'credential-sentinel@example.test', null, 42, {}])(
+    'fails closed for malformed binding %j without exposing its value',
+    async (value) => {
+      const db = await sharedDatabase();
+      const sink = collectLog();
+      const worker = createWorker([], { log: sink.log });
+      const environment = { ...env(db), PB_AUTH_LOCAL: value } as unknown as Env;
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          environment,
+        );
+        expect(response.status).toBe(503);
+        const text = await response.text();
+        expect((JSON.parse(text) as { error: { code: string } }).error.code).toBe('misconfigured');
+        expect(text).not.toContain('credential-sentinel');
+      }
+      expect(sink.entries.join('\n')).toContain('auth_local_invalid');
+      expect(sink.entries.join('\n')).not.toContain('credential-sentinel');
+      expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
+    },
+  );
+
+  it('refuses disabled with no identity plugin before serving local login', async () => {
+    const db = await sharedDatabase();
+    const sink = collectLog();
+    const worker = createWorker([], { log: sink.log });
+    const environment = env(db, { PB_AUTH_LOCAL: 'disabled' });
+    for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+      const response = await worker.fetch(
+        path.endsWith('/login') ? post(path, {}) : get(path),
+        environment,
+      );
+      expect(response.status).toBe(503);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+        'misconfigured',
+      );
+    }
+    expect(sink.entries.join('\n')).toContain('auth_no_sign_in_method');
   });
 });
 

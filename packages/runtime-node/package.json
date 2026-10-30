@@ -5,6 +5,9 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "sideEffects": false,
+  "packageBroker": {
+    "localAuth": 1
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

@@ -328,6 +328,9 @@ describe('anonymous entry', () => {
         createElement(App, { client: { request } as unknown as AuthClient }),
       );
       expect(html).toContain(hash === '#/setup' ? 'First-run setup' : 'Sign in');
+      expect(html).toContain('Loading sign-in options');
+      expect(html).not.toContain('name="token"');
+      expect(html).not.toContain('name="password"');
       expect(html).not.toContain('Loading…');
       expect(request).not.toHaveBeenCalled();
     },

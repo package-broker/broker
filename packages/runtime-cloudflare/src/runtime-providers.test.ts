@@ -10,7 +10,10 @@ import type { DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import type { PluginDefinition } from '@package-broker/core/plugin';
-import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
+import {
+  bootstrapAdmin,
+  bootstrapSsoAdmin,
+} from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { rebindProvider } from '@package-broker/db-sqlite/repositories/provider-binding';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -159,6 +162,10 @@ interface SsoOidcModule {
 }
 const ssoModule = '@package-broker/plugin-sso-oidc';
 const { default: ssoOidc } = (await import(ssoModule)) as SsoOidcModule;
+const oidcSpecifier = '@package-broker/plugin-sso-oidc/oidc';
+const oidcModule = (await import(oidcSpecifier)) as {
+  createOidcProvider: (...a: never[]) => unknown;
+};
 
 const KEY = `pbmk_v1_${Buffer.from(Array.from({ length: 32 }, (_, index) => index)).toString('base64url')}`;
 const PUBLIC_URL = 'https://broker.test';
@@ -166,7 +173,7 @@ const ADMIN_EMAIL = 'admin@example.test';
 const PASSWORD = 'correct horse battery staple';
 const SECRET = 'corp-client-secret-value';
 
-const bindings = Array.from({ length: 16 }, (_, index) => `RPDB${index}`);
+const bindings = Array.from({ length: 32 }, (_, index) => `RPDB${index}`);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
@@ -212,7 +219,7 @@ interface Fixture {
   readonly token: string;
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(localAdmin = true): Promise<Fixture> {
   const binding = bindings[next];
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
@@ -230,26 +237,28 @@ async function fixture(): Promise<Fixture> {
   const token = randomBytes(32).toString('base64url');
   const roleIds = {} as Record<DefaultRoleKey, string>;
   for (const { key } of DEFAULT_ROLES) roleIds[key] = ulid();
-  await bootstrapAdmin(executor, orgContext(orgId), {
-    email: ADMIN_EMAIL,
-    userId: ulid(),
-    setupHash: createHash('sha256').update(token).digest('hex'),
-    setupExpiresAt: new Date(now.getTime() + 24 * 3_600_000).toISOString(),
-    grantId: ulid(),
-    roleIds,
-    opId: ulid(),
-    now: now.toISOString(),
-  });
+  if (localAdmin)
+    await bootstrapAdmin(executor, orgContext(orgId), {
+      email: ADMIN_EMAIL,
+      userId: ulid(),
+      setupHash: createHash('sha256').update(token).digest('hex'),
+      setupExpiresAt: new Date(now.getTime() + 24 * 3_600_000).toISOString(),
+      grantId: ulid(),
+      roleIds,
+      opId: ulid(),
+      now: now.toISOString(),
+    });
   return { db, orgId, token };
 }
 
-function env(db: D1DatabaseLike, definitions: readonly unknown[], secrets = true): Env {
+function env(db: D1DatabaseLike, definitions: readonly unknown[]): Env {
   return {
     DB: db,
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
     PB_IDP_PROVIDERS: JSON.stringify(definitions),
-    ...(secrets ? { PB_IDP_CORP_CLIENT_SECRET: SECRET, PB_IDP_OTHER_CLIENT_SECRET: SECRET } : {}),
+    PB_IDP_CORP_CLIENT_SECRET: SECRET,
+    PB_IDP_OTHER_CLIENT_SECRET: SECRET,
   } as unknown as Env;
 }
 
@@ -336,7 +345,7 @@ async function ssoLogin(
   h: Harness,
   environment: Env,
   mock: MockIssuer,
-  who: { subject: string; email: string; provider?: string },
+  who: { subject: string; email: string; provider?: string; groups?: readonly string[] },
 ): Promise<Attempt> {
   const provider = who.provider ?? 'corp';
   const before = h.log.length;
@@ -349,14 +358,15 @@ async function ssoLogin(
   }
   const { location } = (await start.json()) as { location: string };
   const query = new URL(location).searchParams;
-  mock.idToken = await signIdToken(
-    claims(mock, {
+  mock.idToken = await signIdToken({
+    ...claims(mock, {
       nonce: query.get('nonce') as string,
       audience: query.get('client_id') as string,
       subject: who.subject,
       email: who.email,
     }),
-  );
+    ...(who.groups === undefined ? {} : { groups: who.groups }),
+  });
   const cookie = cookies(start);
   const callback = await h.worker.fetch(
     get(`/_pb/auth/sso/${provider}/callback?code=the-code&state=${query.get('state') as string}`, {
@@ -389,6 +399,437 @@ const ISSUER = 'https://idp-a.example.test/dex';
 const OTHER_ISSUER = 'https://idp-b.example.test/dex';
 
 describe('runtime SSO providers on Miniflare D1', () => {
+  it.each(['email', 'group'] as const)(
+    'fresh disabled SSO %s bootstrap admits the invited administrator and a protected write',
+    async (subjectType) => {
+      const { db, orgId } = await fixture(false);
+      const executor = createD1Executor(db);
+      const roleIds = Object.fromEntries(DEFAULT_ROLES.map((role) => [role.key, ulid()])) as Record<
+        DefaultRoleKey,
+        string
+      >;
+      const email = 'admin@corp.example';
+      const common = { grantId: ulid(), roleIds, now: new Date().toISOString() };
+      await bootstrapSsoAdmin(
+        executor,
+        orgContext(orgId),
+        subjectType === 'email'
+          ? { ...common, subject: { type: 'email', value: email }, userId: ulid() }
+          : { ...common, subject: { type: 'group', provider: 'corp', value: 'broker-admins' } },
+      );
+      expect(
+        await executor.all({
+          sql: 'SELECT user_id FROM local_login WHERE org_id = ?',
+          params: [orgId],
+        }),
+      ).toEqual([]);
+      const mock = mockIssuer(ISSUER, 'broker-client', SECRET);
+      installIssuers(mock);
+      const h = harness();
+      const environment = {
+        ...env(db, [
+          oidc(
+            ISSUER,
+            {},
+            {
+              verifiedDomains: ['corp.example'],
+              emailAuthoritativeDomains: ['corp.example'],
+              autoJoin: false,
+            },
+          ),
+        ]),
+        PB_AUTH_LOCAL: 'disabled',
+      };
+      const listed = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({ local: false });
+      expect((await h.worker.fetch(get('/_pb/projects'), environment)).status).toBe(401);
+      const uninvited = await ssoLogin(h, environment, mock, {
+        email: 'uninvited@corp.example',
+        subject: 'uninvited',
+      });
+      expect(uninvited.callback?.status).toBe(401);
+      const signedIn = await ssoLogin(h, environment, mock, {
+        email,
+        subject: 'admin',
+        groups: subjectType === 'group' ? ['broker-admins'] : [],
+      });
+      expect(signedIn.callback?.status).toBe(303);
+      expect((await session(h, environment, signedIn.cookie)).status).toBe(200);
+      const csrf = /__Host-pb_csrf=([^;]+)/.exec(signedIn.cookie)?.[1];
+      expect(csrf).toBeTruthy();
+      const created = await h.worker.fetch(
+        post(
+          '/_pb/projects',
+          { name: 'SSO project', slug: 'sso-project' },
+          {
+            cookie: signedIn.cookie,
+            'x-csrf-token': csrf!,
+            'idempotency-key': ulid(),
+          },
+        ),
+        environment,
+      );
+      expect(created.status).toBe(201);
+      const projects = await h.worker.fetch(
+        get('/_pb/projects', { cookie: signedIn.cookie }),
+        environment,
+      );
+      expect(projects.status).toBe(200);
+      expect(await projects.json()).toMatchObject({
+        items: [expect.objectContaining({ slug: 'sso-project' })],
+      });
+    },
+  );
+
+  it('disabling local sign-in retains both session origins, local PATs and service tokens', async () => {
+    const { db, token } = await fixture();
+    const mock = mockIssuer(ISSUER, 'broker-client', SECRET);
+    installIssuers(mock);
+    const h = harness();
+    const enabled = env(db, [oidc(ISSUER, {}, { verifiedDomains: ['corp.example'] })]);
+    const call = (
+      environment: Env,
+      route: string,
+      body: unknown,
+      headers: Record<string, string> = {},
+    ) => h.worker.fetch(post(route, body, headers), environment);
+    const started = await call(enabled, '/_pb/auth/local/setup/start', { token });
+    expect(started.status).toBe(200);
+    const { secret } = (await started.json()) as { secret: string };
+    const totpSecret = base32Decode(secret);
+    const step = Math.floor(Date.now() / 30_000);
+    expect(
+      (
+        await call(enabled, '/_pb/auth/local/setup/finish', {
+          token,
+          password: PASSWORD,
+          code: await totpCode(totpSecret, step - 1),
+        })
+      ).status,
+    ).toBe(204);
+    const local = await call(enabled, '/_pb/auth/local/login', {
+      email: ADMIN_EMAIL,
+      password: PASSWORD,
+      code: await totpCode(totpSecret, step),
+    });
+    expect(local.status).toBe(204);
+    const cookie = cookies(local);
+    const csrf = /__Host-pb_csrf=([^;]+)/.exec(cookie)?.[1];
+    expect(csrf).toBeTruthy();
+    const headers = { cookie, 'x-csrf-token': csrf! };
+    expect(
+      (
+        await call(
+          enabled,
+          '/_pb/auth/local/reauth',
+          {
+            password: PASSWORD,
+            code: await totpCode(totpSecret, step + 1),
+          },
+          headers,
+        )
+      ).status,
+    ).toBe(204);
+    const issue = (route: string, body: unknown) =>
+      call(enabled, route, body, { ...headers, 'idempotency-key': ulid() });
+    const pat = await issue('/_pb/me/tokens', {
+      name: 'local-admin',
+      scope: 'full',
+      projectMode: 'all',
+      projectIds: [],
+    });
+    expect(pat.status).toBe(201);
+    const patBody = (await pat.json()) as { token: string };
+    const principal = await issue('/_pb/service-principals', {
+      name: 'automation',
+      permissions: ['org:read'],
+    });
+    expect(principal.status).toBe(201);
+    const { id } = (await principal.json()) as { id: string };
+    const service = await issue('/_pb/tokens', {
+      servicePrincipalId: id,
+      name: 'automation',
+      scope: 'full',
+    });
+    expect(service.status).toBe(201);
+    const serviceBody = (await service.json()) as { token: string };
+    const signedIn = await ssoLogin(h, enabled, mock, {
+      email: 'member@corp.example',
+      subject: 'member',
+    });
+    expect(signedIn.callback?.status).toBe(303);
+    const tokens = [patBody.token, serviceBody.token];
+    const disabled = { ...enabled, PB_AUTH_LOCAL: 'disabled' };
+    for (const environment of [enabled, disabled]) {
+      const providers = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(providers.status).toBe(200);
+      expect(await providers.json()).toMatchObject({ local: environment === enabled });
+      for (const retained of [cookie, signedIn.cookie]) {
+        expect((await session(h, environment, retained)).status).toBe(200);
+        expect(
+          (await h.worker.fetch(get('/_pb/projects', { cookie: retained }), environment)).status,
+        ).toBe(200);
+      }
+      for (const bearer of tokens) {
+        const response = await h.worker.fetch(
+          get('/_pb/organization', { authorization: `Bearer ${bearer}` }),
+          environment,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ slug: 'acme' });
+      }
+    }
+    const refused = await call(
+      disabled,
+      '/_pb/auth/local/reauth',
+      { password: PASSWORD, code: await totpCode(totpSecret, step + 2) },
+      headers,
+    );
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+    const loginRefused = await call(disabled, '/_pb/auth/local/login', {}, headers);
+    expect(loginRefused.status).toBe(403);
+    expect(await loginRefused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+  });
+
+  it('keeps local policy immutable per env object and reuses the application for an equal binding set', async () => {
+    const { db } = await fixture();
+    installIssuers(mockIssuer(ISSUER));
+    const h = harness();
+    const base = env(db, [oidc(ISSUER)]);
+    for (const environment of [base, { ...base, PB_AUTH_LOCAL: 'enabled' }]) {
+      const response = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ local: true, providers: [{ id: 'corp' }] });
+    }
+    const disabled = { ...base, PB_AUTH_LOCAL: 'disabled' };
+    const response = await h.worker.fetch(get('/_pb/auth/providers'), disabled);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ local: false, providers: [{ id: 'corp' }] });
+    expect(h.builds()).toBe(3);
+    for (const route of ['login', 'reauth', 'setup/start', 'setup/finish']) {
+      const refused = await h.worker.fetch(post(`/_pb/auth/local/${route}`, {}), disabled);
+      expect(refused.status).toBe(403);
+      expect(refused.headers.get('cache-control')).toBe('no-store');
+      expect(await refused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+    }
+    expect(await ssoStartClient(h, disabled)).toBe('broker-client');
+
+    disabled.PB_AUTH_LOCAL = 'enabled';
+    const unchanged = await h.worker.fetch(get('/_pb/auth/providers'), disabled);
+    expect(await unchanged.json()).toMatchObject({ local: false });
+    expect(h.builds()).toBe(3);
+    const refreshed = await h.worker.fetch(get('/_pb/auth/providers'), { ...disabled });
+    expect(await refreshed.json()).toMatchObject({ local: true });
+    expect(h.builds()).toBe(3);
+  });
+
+  it('allows disabled with a compiled-only provider', async () => {
+    const { db } = await fixture();
+    installIssuers(mockIssuer(ISSUER));
+    const h = harness([oidc(ISSUER)]);
+    const environment = { ...env(db, []), PB_AUTH_LOCAL: 'disabled' };
+    const response = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ local: false, providers: [{ id: 'corp' }] });
+    expect(await ssoStartClient(h, environment)).toBe('broker-client');
+  });
+
+  it('fails closed when disabled providers are empty or rejected', async () => {
+    const { db } = await fixture();
+    const environments = [
+      env(db, []),
+      env(db, [oidc(ISSUER, { issuer: 'http://invalid.example.test' })]),
+    ];
+    for (const base of environments) {
+      const h = harness();
+      const environment = { ...base, PB_AUTH_LOCAL: 'disabled' };
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await h.worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          environment,
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+      }
+      expect(h.log).toContainEqual(
+        expect.objectContaining({
+          event: 'startup.misconfigured',
+          problems: ['auth_no_sign_in_method'],
+        }),
+      );
+      expect(JSON.stringify(h.log)).not.toContain(SECRET);
+    }
+  });
+
+  it('allows disabled with a compiled provider and no runtime providers binding', async () => {
+    const { db } = await fixture();
+    installIssuers(mockIssuer(ISSUER));
+    const h = harness([oidc(ISSUER)]);
+    const base = env(db, []) as unknown as Record<string, unknown>;
+    delete base['PB_IDP_PROVIDERS'];
+    const environment = { ...base, PB_AUTH_LOCAL: 'disabled' } as unknown as Env;
+    const response = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ local: false, providers: [{ id: 'corp' }] });
+    expect(await ssoStartClient(h, environment)).toBe('broker-client');
+  });
+
+  it.each([null, 42, {}, 'Enabled', ''])(
+    'rejects a non-conforming local policy %j after the cache is warm',
+    async (value) => {
+      const { db } = await fixture();
+      installIssuers(mockIssuer(ISSUER));
+      const h = harness();
+      const base = env(db, [oidc(ISSUER)]);
+      for (const warm of [base, { ...base, PB_AUTH_LOCAL: undefined } as unknown as Env]) {
+        const response = await h.worker.fetch(get('/_pb/auth/providers'), warm);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ local: true });
+      }
+      const invalid = { ...base, PB_AUTH_LOCAL: value } as unknown as Env;
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await h.worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          invalid,
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+      }
+      expect(h.log).toContainEqual(
+        expect.objectContaining({
+          event: 'startup.misconfigured',
+          problems: ['auth_local_invalid'],
+        }),
+      );
+    },
+  );
+
+  it('keeps separate applications for disabled and enabled bindings from a warm cache', async () => {
+    const { db } = await fixture();
+    installIssuers(mockIssuer(ISSUER));
+    const h = harness();
+    const base = env(db, [oidc(ISSUER)]);
+    const disabled = { ...base, PB_AUTH_LOCAL: 'disabled' } as unknown as Env;
+    const enabled = { ...base, PB_AUTH_LOCAL: 'enabled' } as unknown as Env;
+    for (const [environment, local] of [
+      [disabled, false],
+      [enabled, true],
+      [disabled, false],
+      [enabled, true],
+    ] as const) {
+      const response = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(await response.json()).toMatchObject({ local });
+    }
+    expect(h.builds()).toBe(2);
+    const refused = await h.worker.fetch(post('/_pb/auth/local/login', {}), disabled);
+    expect(refused.status).toBe(403);
+  });
+
+  it.each(['disabled', 'bogus'])(
+    'fails closed for local policy %j when no database binding exists',
+    async (value) => {
+      const log: Record<string, unknown>[] = [];
+      const worker = createWorker([ssoOidc({ providers: [oidc(ISSUER)] })], {
+        log: (entry) => void log.push({ ...entry }),
+      });
+      const environment = {
+        PB_MASTER_KEY: KEY,
+        PB_PUBLIC_URL: PUBLIC_URL,
+        PB_AUTH_LOCAL: value,
+      } as unknown as Env;
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          environment,
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+      }
+      expect(log).toContainEqual(
+        expect.objectContaining({
+          event: 'startup.misconfigured',
+          problems: [value === 'disabled' ? 'auth_no_sign_in_method' : 'auth_local_invalid'],
+        }),
+      );
+    },
+  );
+
+  it('keeps the unset local policy behaviour without a database binding', async () => {
+    const log: Record<string, unknown>[] = [];
+    const worker = createWorker([], { log: (entry) => void log.push({ ...entry }) });
+    const environment = { PB_MASTER_KEY: KEY, PB_PUBLIC_URL: PUBLIC_URL } as unknown as Env;
+    await worker.fetch(get('/_pb/auth/providers'), environment);
+    expect(JSON.stringify(log)).not.toContain('auth_no_sign_in_method');
+    expect(JSON.stringify(log)).not.toContain('auth_local_invalid');
+  });
+
+  it('fails closed when the factory constructs no providers or throws despite compiled metadata', async () => {
+    const { db } = await fixture();
+    const environment = { ...env(db, []), PB_AUTH_LOCAL: 'disabled' };
+    for (const fails of [false, true]) {
+      const factory = vi.fn(() => {
+        if (fails) throw new TypeError('provider construction failed');
+        return [];
+      });
+      const worker = createWorker([
+        { ...ssoOidc({ providers: [oidc(ISSUER)] }), identityProviders: factory },
+      ]);
+      for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+        const response = await worker.fetch(
+          path.endsWith('/login') ? post(path, {}) : get(path),
+          environment,
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+      }
+      expect(factory).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('fails closed when a runtime provider construction throws, and still offers local sign-in when enabled', async () => {
+    const { db } = await fixture();
+    const sentinel = 'construction-sentinel-value';
+    vi.spyOn(oidcModule, 'createOidcProvider').mockImplementation(() => {
+      throw new TypeError(sentinel);
+    });
+    const definitions = [oidc(ISSUER)];
+    const disabledLog: Record<string, unknown>[] = [];
+    const disabledWorker = createWorker([ssoOidc({ runtimeProviders: true })], {
+      log: (entry) => void disabledLog.push({ ...entry }),
+    });
+    const disabled = { ...env(db, definitions), PB_AUTH_LOCAL: 'disabled' };
+    for (const path of ['/_pb/auth/providers', '/_pb/auth/local/login']) {
+      const response = await disabledWorker.fetch(
+        path.endsWith('/login') ? post(path, {}) : get(path),
+        disabled,
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ error: { code: 'misconfigured' } });
+    }
+    expect(disabledLog).toContainEqual(
+      expect.objectContaining({
+        event: 'startup.misconfigured',
+        problems: ['auth_no_sign_in_method'],
+      }),
+    );
+    expect(console.warn).toHaveBeenCalled();
+    for (const text of [
+      JSON.stringify(disabledLog),
+      JSON.stringify(vi.mocked(console.warn).mock.calls),
+    ]) {
+      expect(text).not.toContain(SECRET);
+      expect(text).not.toContain(sentinel);
+    }
+
+    const enabledWorker = createWorker([ssoOidc({ runtimeProviders: true })]);
+    const enabled = { ...env(db, definitions), PB_AUTH_LOCAL: 'enabled' };
+    const response = await enabledWorker.fetch(get('/_pb/auth/providers'), enabled);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ local: true, providers: [] });
+  });
+
   it('lists an env-only provider and completes a login that binds the anchor', async () => {
     const { db } = await fixture();
     const mock = mockIssuer(ISSUER);
@@ -616,7 +1057,7 @@ async function ssoStartClient(h: Harness, environment: Env): Promise<string | nu
     post('/_pb/auth/sso/corp/start', { purpose: 'login' }, { accept: 'application/json' }),
     environment,
   );
-  if (start.status !== 200) return null;
+  expect(start.status).toBe(200);
   const { location } = (await start.json()) as { location: string };
   return new URL(location).searchParams.get('client_id');
 }

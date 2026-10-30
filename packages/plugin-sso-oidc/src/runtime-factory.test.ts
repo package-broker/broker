@@ -392,11 +392,17 @@ describe('static identity descriptor', () => {
       expect(plugin.identityDescriptor).toEqual({
         runtimeProviders: flag === true,
         compiled: [
-          { id: oidc.id, kind: 'oidc', anchor: `oidc:${oidc.issuer}` },
+          {
+            id: oidc.id,
+            kind: 'oidc',
+            anchor: `oidc:${oidc.issuer}`,
+            policy: { verifiedDomains: ['example.com'] },
+          },
           {
             id: access.id,
             kind: 'cloudflare-access',
             anchor: `access:${access.teamDomain}/${access.audience}`,
+            policy: { verifiedDomains: ['example.com'] },
           },
         ],
       });
@@ -406,7 +412,9 @@ describe('static identity descriptor', () => {
       const providers = build([plugin], () => undefined);
       for (const entry of plugin.identityDescriptor!.compiled) {
         expect(entry.anchor).toBe(providers.get(entry.id)?.trustAnchor);
-        expect(Reflect.ownKeys(entry)).toEqual(['id', 'kind', 'anchor']);
+        expect(Reflect.ownKeys(entry)).toEqual(['id', 'kind', 'anchor', 'policy']);
+        expect(Object.isFrozen(entry.policy)).toBe(true);
+        expect(Object.isFrozen(entry.policy!.verifiedDomains)).toBe(true);
         expect(Object.isFrozen(entry)).toBe(true);
       }
       expect(() => collectRegistrations([plugin])).not.toThrow();

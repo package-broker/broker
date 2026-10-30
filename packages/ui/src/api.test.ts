@@ -202,6 +202,7 @@ describe('error mapping', () => {
   it.each([
     [401, 'unauthorized'],
     [403, 'forbidden'],
+    [403, 'local_auth_disabled'],
     [404, 'not_found'],
     [409, 'conflict'],
     [412, 'precondition_failed'],

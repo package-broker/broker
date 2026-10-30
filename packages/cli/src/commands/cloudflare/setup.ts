@@ -5,6 +5,7 @@ import { dirname, isAbsolute, parse, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { promisify } from 'node:util';
 import { ORG_SLUG_PATTERN } from '@package-broker/core/db/organization';
+import { providerSecretName } from '@package-broker/core/plugin';
 import { normalizeEmail } from '@package-broker/core/identity/policy';
 import { createOtlpExporter } from '@package-broker/core/platform/otlp';
 import {
@@ -31,6 +32,10 @@ import {
 import {
   active,
   assertProvidersAccepted,
+  assertLocalAuthAccepted,
+  setupProviderCandidate,
+  resolveProviderText,
+  checkSetupManagedProviders,
   cloudflareDeployContract,
   deploy,
   deploymentDomain,
@@ -42,8 +47,18 @@ import {
   InventoryStore,
   InventoryTransaction,
   installIdentity,
+  emptyInventory,
   type Inventory,
 } from './inventory.js';
+import {
+  resolveLocalAuth,
+  verifiedDeployment,
+  frozenLocalAuthAttempt,
+  readLocalAuthSources,
+  liveLocalAuthModes,
+  type LocalAuthMode,
+} from './local-auth.js';
+import { inputMessages } from './input-messages.js';
 import { provision, type ProvisionOptions } from './provision.js';
 import type { ProvidersOption } from './providers-file.js';
 import { smoke, type SmokeOptions } from './smoke.js';
@@ -52,6 +67,7 @@ type Env = Readonly<Record<string, string | undefined>>;
 
 export interface SetupOptions extends Omit<ProvisionOptions, 'contract' | 'transaction'> {
   providers?: ProvidersOption;
+  localAuth?: LocalAuthMode;
   orgSlug?: string;
   orgName?: string;
   adminEmail?: string;
@@ -510,12 +526,23 @@ export async function setup(
       ...(o.inventory === undefined ? {} : { inventory: o.inventory }),
     });
     let journal = await store.read();
+    const frozen = frozenLocalAuthAttempt(journal?.deployment?.attempt, 'setup');
     const keyState = journal?.secret_delivery.master_key ?? 'not_started';
     const bootstrapState = journal?.bootstrap.state ?? 'not_started';
     const needsToken =
       bootstrapState === 'not_started' ||
       (o.refreshSetupToken && bootstrapState !== 'already_set_up');
-    if (needsToken && !tty && !o.tokenFile) invalid();
+    if (
+      needsToken &&
+      !tty &&
+      !o.tokenFile &&
+      ((o.localAuth ?? o.env.PB_AUTH_LOCAL) === 'enabled' ||
+        o.refreshSetupToken === true ||
+        (!journal &&
+          !o.adoptResource?.length &&
+          (o.localAuth ?? o.env.PB_AUTH_LOCAL) !== 'disabled'))
+    )
+      invalid();
     if (keyState === 'not_started' && !tty && !o.keyFile && !o.masterKeyEnv) invalid();
     const checkout = (
       await promisify(execFile)('git', ['rev-parse', '--show-toplevel'], { cwd: project })
@@ -546,6 +573,8 @@ export async function setup(
       'DB',
       'DEPLOYMENT_ID',
       'PB_PUBLIC_URL',
+      'PB_AUTH_LOCAL',
+      'PB_IDP_PROVIDERS',
       'ASSETS',
       ...(artifact.ports
         ? [
@@ -570,8 +599,12 @@ export async function setup(
       if (JSON.stringify(await store.read()) !== JSON.stringify(journal))
         throw new CloudflareError('plan_changed', 8, false, 'validate');
     }
-    const { providers, workersPaid, ...sharedOptions }: SetupOptions & { workersPaid?: boolean } =
-      o;
+    const {
+      providers,
+      workersPaid,
+      localAuth: localAuthFlag,
+      ...sharedOptions
+    }: SetupOptions & { workersPaid?: boolean } = o;
     const common = {
       ...sharedOptions,
       workerName: values.workerName!,
@@ -641,6 +674,121 @@ export async function setup(
       installedNames.includes('PB_TOKEN_PEPPER')
     )
       throw new CloudflareError('configuration_conflict', 8, false, 'key_delivery');
+    const base = `/workers/scripts/${identity.script_name}`;
+    const sources = worker
+      ? await readLocalAuthSources({
+          api,
+          base,
+          versions: (await active(api, base)).versions,
+          stage: 'setup',
+        })
+      : [];
+    const localAuth = resolveLocalAuth({
+      flag: localAuthFlag,
+      env: o.env.PB_AUTH_LOCAL,
+      sources: worker ? sources : null,
+      secretNames: [...selectedSecrets, ...installedNames],
+      verified: verifiedDeployment(journal?.deployment),
+      ...(frozen ? { frozen } : {}),
+      stage: 'setup',
+    });
+    liveLocalAuthModes(sources, 'setup');
+    output.checks.push({ name: 'local_auth', status: localAuth });
+    try {
+      assertLocalAuthAccepted(localAuth, artifact.localAuth);
+      output.checks.push({ name: 'local_auth_capability', status: 'accepted' });
+    } catch (error) {
+      output.checks.push({ name: 'local_auth_capability', status: 'rejected' });
+      throw error;
+    }
+    if (localAuth === 'disabled') {
+      if (o.tokenFile !== undefined || o.refreshSetupToken === true) invalid();
+      const providersText = await resolveProviderText(
+        artifact.identity,
+        providers,
+        sources,
+        frozen,
+        () =>
+          checkSetupManagedProviders(
+            api,
+            journal ?? emptyInventory(identity, (o.now ?? Date.now)()),
+            o.routes,
+            o.domain,
+          ),
+      );
+      const candidate = setupProviderCandidate(artifact.identity, providersText);
+      const domain = normalizeEmail(email)!.split('@')[1]!;
+      if (
+        !candidate.some(
+          (provider) =>
+            provider.policy?.verifiedDomains.includes(domain) &&
+            provider.policy?.emailAuthoritativeDomains?.includes(domain),
+        )
+      ) {
+        const error = new CloudflareError('invalid_input', 2, false, 'setup');
+        inputMessages.set(
+          error,
+          'SSO setup requires a verified and authoritative admin domain in the effective providers',
+        );
+        throw error;
+      }
+      if (
+        candidate.some(
+          (provider) =>
+            provider.kind === 'cloudflare-access' &&
+            (!('trustEmailVerification' in provider) || provider.trustEmailVerification !== true),
+        )
+      ) {
+        const error = new CloudflareError('invalid_input', 2, false, 'setup');
+        inputMessages.set(
+          error,
+          'Disabled local sign-in requires Cloudflare Access trustEmailVerification=true; compiled descriptors without this flag cannot prove trust; use a trusted runtime providers document',
+        );
+        throw error;
+      }
+      const available = new Set([
+        ...installedNames,
+        ...(frozen &&
+        ['upload_pending', 'uploaded', 'configuring', 'activation_pending'].includes(frozen.phase)
+          ? frozen.secret_names
+          : []),
+        ...selectedSecrets.filter((name) => o.env[name]),
+      ]);
+      const missing = candidate
+        .filter((provider) => provider.kind === 'oidc')
+        .map((provider) => providerSecretName(provider.id, 'CLIENT_SECRET'))
+        .filter((name) => !available.has(name));
+      if (missing.length) {
+        const error = new CloudflareError('invalid_input', 2, false, 'setup');
+        inputMessages.set(
+          error,
+          `Missing provider secrets: ${[...new Set(missing)].join(', ')}; deliver with --secret <ENV_NAME> or --secrets <ENV_NAMES>`,
+        );
+        throw error;
+      }
+      if (
+        !['not_started', 'sso_issuing', 'sso_unknown', 'sso_failed', 'sso_complete'].includes(
+          bootstrapState,
+        )
+      ) {
+        const error = new CloudflareError('configuration_conflict', 8, false, 'setup');
+        inputMessages.set(
+          error,
+          'Local enrollment has already started; finish setup with local sign-in enabled, then use pb cloudflare deploy --local-auth disabled',
+        );
+        throw error;
+      }
+    } else {
+      if (bootstrapState.startsWith('sso_')) {
+        const error = new CloudflareError('configuration_conflict', 8, false, 'setup');
+        inputMessages.set(
+          error,
+          'This installation uses SSO bootstrap; rerun setup with --local-auth disabled to finish it, or use pb cloudflare deploy --local-auth enabled, then pb admin bootstrap to provision local enrollment',
+        );
+        throw error;
+      }
+      if (needsToken && !tty && !o.tokenFile) invalid();
+    }
     const installed = installedNames.includes('PB_MASTER_KEY');
     journal = await store.read();
     const pending = journal?.deployment?.attempt;
@@ -695,9 +843,10 @@ export async function setup(
     progress(JSON.stringify(output.plan));
     if (o.dryRun) {
       output.plan.push(
-        ...['migrate', 'org_bootstrap', 'key_delivery', 'deploy', 'smoke', 'admin_bootstrap'].map(
-          (stage) => ({ stage, action: 'plan' }),
-        ),
+        ...(localAuth === 'disabled'
+          ? ['migrate', 'org_bootstrap', 'admin_bootstrap', 'key_delivery', 'deploy', 'smoke']
+          : ['migrate', 'org_bootstrap', 'key_delivery', 'deploy', 'smoke', 'admin_bootstrap']
+        ).map((stage) => ({ stage, action: 'plan' })),
       );
       output.status = 'planned';
       return (completed = { exitCode: 0, output });
@@ -741,6 +890,52 @@ export async function setup(
       ...(o.fetch ? { fetch: o.fetch } : {}),
     });
     if (organization.exitCode) return merge(organization);
+    stage = 'admin_bootstrap';
+    journal = await store.read();
+    const ssoState = journal?.bootstrap.state;
+    if (localAuth === 'disabled') {
+      if (ssoState !== 'sso_complete') {
+        await save((j) => {
+          j.bootstrap = { state: 'sso_issuing', expires_at: null };
+        });
+        const result = await operations.admin(
+          {
+            email,
+            signIn: 'sso',
+            localAuth,
+            target: {
+              kind: 'cloudflare',
+              databaseId,
+              env: o.env,
+              ...(o.fetch ? { fetch: o.fetch } : {}),
+            },
+          },
+          { diagnostic: progress, output: () => undefined },
+        );
+        await save((j) => {
+          j.bootstrap = {
+            state:
+              result.exitCode === 0 && result.state === 'sso_complete'
+                ? 'sso_complete'
+                : result.state === 'unknown'
+                  ? 'sso_unknown'
+                  : 'sso_failed',
+            expires_at: null,
+          };
+        });
+        if (result.exitCode !== 0 || result.state !== 'sso_complete')
+          throw new CloudflareError(
+            result.exitCode === 5
+              ? 'organization_not_found'
+              : result.exitCode === 7
+                ? 'outcome_unknown'
+                : 'provider_failure',
+            result.exitCode || 1,
+            false,
+            stage,
+          );
+      }
+    }
     stage = 'key_delivery';
     let key: string | undefined = recoveredKey;
     if (installed) {
@@ -800,6 +995,7 @@ export async function setup(
       CLOUDFLARE_API_TOKEN: auth.apiToken,
       CLOUDFLARE_ACCOUNT_ID: auth.accountId,
       PB_MASTER_KEY: key,
+      ...(o.env.PB_AUTH_LOCAL === undefined ? {} : { PB_AUTH_LOCAL: o.env.PB_AUTH_LOCAL }),
     };
     for (const name of selectedSecrets) {
       if (name !== 'PB_MASTER_KEY' && !retainedNames.has(name)) deployEnv[name] = o.env[name];
@@ -808,6 +1004,7 @@ export async function setup(
     const deployOptions: DeployOptions = {
       contract: cloudflareDeployContract,
       ...deployCommon,
+      ...(localAuthFlag === undefined ? {} : { localAuth: localAuthFlag }),
       ...(providers === undefined ? {} : { providers }),
       ...(workersPaid === undefined ? {} : { workersPaid }),
       env: deployEnv,
@@ -838,55 +1035,58 @@ export async function setup(
     stage = 'admin_bootstrap';
     journal = await store.read();
     const state = journal?.bootstrap.state;
-    if ((state === 'issuing' || state === 'unknown') && !o.refreshSetupToken)
-      throw new CloudflareError('token_refresh_required', 7, false, stage);
-    if (
-      state === 'not_started' ||
-      ((state === 'issued' || state === 'issuing' || state === 'unknown') && o.refreshSetupToken)
-    ) {
-      if (o.tokenFile) await safeDeliveryPath(o.tokenFile, roots, false);
-      await save((j) => {
-        j.bootstrap.state = 'issuing';
-      });
-      const result = await operations.admin(
-        {
-          email,
-          target: {
-            kind: 'cloudflare',
-            databaseId,
-            env: o.env,
-            ...(o.fetch ? { fetch: o.fetch } : {}),
+    if (localAuth === 'enabled') {
+      if ((state === 'issuing' || state === 'unknown') && !o.refreshSetupToken)
+        throw new CloudflareError('token_refresh_required', 7, false, stage);
+      if (
+        state === 'not_started' ||
+        ((state === 'issued' || state === 'issuing' || state === 'unknown') && o.refreshSetupToken)
+      ) {
+        if (o.tokenFile) await safeDeliveryPath(o.tokenFile, roots, false);
+        await save((j) => {
+          j.bootstrap.state = 'issuing';
+        });
+        const result = await operations.admin(
+          {
+            email,
+            localAuth,
+            target: {
+              kind: 'cloudflare',
+              databaseId,
+              env: o.env,
+              ...(o.fetch ? { fetch: o.fetch } : {}),
+            },
+            ...(o.tokenFile ? { tokenFile: o.tokenFile } : {}),
+            stdoutIsTTY: tty,
           },
-          ...(o.tokenFile ? { tokenFile: o.tokenFile } : {}),
-          stdoutIsTTY: tty,
-        },
-        {
-          diagnostic: () => undefined,
-          output: () => undefined,
-          ...(!o.tokenFile ? { deliver: o.reveal ?? reveal } : {}),
-        },
-      );
-      if (result.state === 'issued' || result.state === 'already_set_up') {
-        await save((j) => {
-          j.bootstrap = {
-            state: result.state === 'issued' ? 'issued' : 'already_set_up',
-            expires_at: result.expiresAt,
-          };
-        });
-      } else {
-        await save((j) => {
-          j.bootstrap.state = 'unknown';
-        });
-        throw new CloudflareError(
-          result.exitCode === 5
-            ? 'organization_not_found'
-            : result.exitCode === 7
-              ? 'outcome_unknown'
-              : 'provider_failure',
-          result.exitCode || 1,
-          false,
-          stage,
+          {
+            diagnostic: progress,
+            output: () => undefined,
+            ...(!o.tokenFile ? { deliver: o.reveal ?? reveal } : {}),
+          },
         );
+        if (result.state === 'issued' || result.state === 'already_set_up') {
+          await save((j) => {
+            j.bootstrap = {
+              state: result.state === 'issued' ? 'issued' : 'already_set_up',
+              expires_at: result.expiresAt,
+            };
+          });
+        } else {
+          await save((j) => {
+            j.bootstrap.state = 'unknown';
+          });
+          throw new CloudflareError(
+            result.exitCode === 5
+              ? 'organization_not_found'
+              : result.exitCode === 7
+                ? 'outcome_unknown'
+                : 'provider_failure',
+            result.exitCode || 1,
+            false,
+            stage,
+          );
+        }
       }
     }
     if (!output.worker_url) throw new CloudflareError('configuration_conflict', 8, false, 'deploy');
@@ -900,6 +1100,14 @@ export async function setup(
       url.pathname !== '/'
     )
       throw new CloudflareError('configuration_conflict', 8, false, 'deploy');
+    if (localAuth === 'disabled') {
+      output.login_url = `${url.origin}/_pb/ui/#/login`;
+      output.status = 'ok';
+      progress(
+        'Open login_url and sign in with the configured SSO provider using the provisioned administrator identity.',
+      );
+      return (completed = { exitCode: 0, output });
+    }
     output.bootstrap_url = `${url.origin}/_pb/ui/setup`;
     journal = await store.read();
     if (journal?.bootstrap.expires_at)
@@ -912,6 +1120,8 @@ export async function setup(
     );
     return (completed = { exitCode: 0, output });
   } catch (error) {
+    if (error instanceof CloudflareError && inputMessages.has(error))
+      error.message = inputMessages.get(error)!;
     return (completed = failCommand(
       output,
       error instanceof CloudflareError

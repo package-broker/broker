@@ -263,12 +263,13 @@ function checkTokens(input: StartOptions['tokens']): void {
   }
 }
 
-function identityEnv(env: Env): Env {
-  return Object.freeze(
-    Object.fromEntries(
+function authEnv(env: Env): Env {
+  return Object.freeze({
+    ...Object.fromEntries(
       Object.entries(env).filter(([name]) => name.startsWith(IDENTITY_ENV_PREFIX)),
     ),
-  );
+    ...(env['PB_AUTH_LOCAL'] === undefined ? {} : { PB_AUTH_LOCAL: env['PB_AUTH_LOCAL'] }),
+  });
 }
 
 async function bootstrapOrganization(
@@ -289,6 +290,7 @@ export const AUTH_EVENTS = Object.freeze([
   'auth.hook.denied',
   'auth.hook.error',
   'auth.local.locked',
+  'auth.local.refused_disabled',
   'auth.local.setup.completed',
   'auth.local.setup.refused',
   'auth.login.refused',
@@ -778,7 +780,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
-      auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
+      auth: { keyring, publicOrigin: origin, env: authEnv(options.env) },
       ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined
         ? { log: sinkLog(telemetry.observe) }

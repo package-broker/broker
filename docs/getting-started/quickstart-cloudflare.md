@@ -97,6 +97,8 @@ Answer the prompts below; the prompt text is quoted verbatim:
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:451 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:471 -->
 
+Local sign-in is enabled by default. To start with SSO only, configure the provider and its secrets before setup, and add `--local-auth disabled`. The administrator domain must be verified and authoritative at that provider; Cloudflare Access also requires explicit e-mail verification trust. Follow [local sign-in policy and SSO bootstrap](../reference/authentication.md#first-administrator-through-sso) before choosing this mode.
+
 Setup creates the key file with mode `0600`. Alternatively, `terminal` delivery reveals the key once and asks you to re-enter its last six characters without echoing them. The `env` option prompts `Saved master key environment variable:` and reads an already saved key from that named variable. Retain the key in a secret manager; losing it prevents recovery of encrypted credentials. After verifying that storage, delete the local key file.
 
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:145 -->
@@ -105,7 +107,7 @@ Setup creates the key file with mode `0600`. Alternatively, `terminal` delivery 
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:657 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:719 -->
 
-Review the resource plan and type `yes` when asked. Setup builds the Worker, provisions D1, an R2 bucket, a jobs queue and a dead-letter queue, applies migrations, creates the organization, uploads the master key as a Worker secret, deploys the Worker with its UI assets and Analytics Engine binding, runs readiness and unauthenticated registry checks, and issues the first administrator's setup token. It does not yet test an authenticated package install; you do that below.
+Review the resource plan and type `yes` when asked. Setup builds the Worker, provisions D1, an R2 bucket, a jobs queue and a dead-letter queue, applies migrations, creates the organization, uploads the master key as a Worker secret, deploys the Worker with its UI assets and Analytics Engine binding, runs readiness and unauthenticated registry checks, and provisions the first administrator. With local sign-in enabled it issues a setup token; with local sign-in disabled it provisions an SSO administrator grant before deploying and issues no token. It does not yet test an authenticated package install; you do that below.
 
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:485 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:675 -->
@@ -115,13 +117,13 @@ Review the resource plan and type `yes` when asked. Setup builds the Worker, pro
 <!-- source: packages/cli/src/commands/cloudflare/provision.ts:926 -->
 <!-- source: packages/cli/src/commands/cloudflare/smoke.ts:605 -->
 
-Success prints a JSON result with `status: "ok"`, `worker_url`, `bootstrap_url`, resource identifiers and smoke checks. The setup token is delivered separately to the terminal, never embedded in the URL. Keep the private `.pb/state/cloudflare` inventory for safe reruns and recovery. If delivery is lost, rerun the same setup with `--refresh-setup-token` to request a replacement; this invalidates the previous unused token and cannot reset an enrolled login.
+Success prints a JSON result with `status: "ok"`, `worker_url`, resource identifiers and smoke checks. Local enrollment returns `bootstrap_url`; SSO-only setup returns `login_url` ending in `/_pb/ui/#/login`. When issued, the local setup token is delivered separately to the terminal, never embedded in the URL. Keep the private `.pb/state/cloudflare` inventory for safe reruns and recovery. If local setup token delivery is lost, rerun the same setup with `--refresh-setup-token` to request a replacement; this invalidates the previous unused token and cannot reset an enrolled login.
 
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:815 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:867 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:910 -->
 
-For unattended setup, the CLI also supports `--worker-name`, `--org-slug`, `--org-name`, `--admin-email`, `--non-interactive`, `--yes`, `--key-file` (or `--master-key-env`) and `--token-file`. Noninteractive first setup requires explicit key delivery and a token output file; use distinct unused paths outside the checkout. Preserve the same deployment identity on reruns.
+For unattended setup, the CLI also supports `--worker-name`, `--org-slug`, `--org-name`, `--admin-email`, `--non-interactive`, `--yes`, `--key-file` (or `--master-key-env`) and `--token-file`. Noninteractive first setup requires explicit key delivery and, when local sign-in is enabled, a token output file; use distinct unused paths outside the checkout. Preserve the same deployment identity on reruns.
 
 <!-- source: packages/cli/src/cli.ts:172 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:499 -->
@@ -138,7 +140,9 @@ If setup reports `domain_zone_not_found`, check the hostname, activate its zone 
 
 ## First administrator
 
-Open the returned `bootstrap_url` and use the separately delivered setup token to enroll your password and authenticator. The token expires after 24 hours and works once. Follow [Set up the first administrator](../workers-install.md) for the browser steps or the curl alternative, then return here signed in.
+If you chose `--local-auth disabled`, open the returned `login_url` (`<broker-origin>/_pb/ui/#/login`) and sign in through the configured provider as the provisioned administrator. There is no setup token. Keep the same CLI release for reruns with `sso_*` inventory states.
+
+With the default local sign-in mode, open the returned `bootstrap_url` and use the separately delivered setup token to enroll your password and authenticator. The token expires after 24 hours and works once. Follow [Set up the first administrator](../workers-install.md) for the browser steps or the curl alternative, then return here signed in.
 
 <!-- source: packages/cli/src/commands/admin.ts:51 -->
 <!-- source: packages/cli/src/commands/cloudflare/setup.ts:876 -->
@@ -358,6 +362,22 @@ To change a provider later, edit the file and deploy it again with `--providers 
 
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:137 -->
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:136 -->
+
+## Change local sign-in policy
+
+After verifying SSO in a private browser window, disable new local sign-ins with:
+
+```sh
+pnpm pb cloudflare deploy --worker-name '<worker-name>' --local-auth disabled --rollout 100 --json
+```
+
+Add `--prebuilt` if that is how you installed. Deploy preserves the live mode when the setting is omitted. `PB_AUTH_LOCAL=enabled|disabled` is also accepted, but re-enabling always needs `--local-auth enabled`, explicitly repeated on resume, reinstall from an old journal, and a second deploy before smoke passes. Conflicting flag and environment values are refused. The managed plain-text Worker binding uses one variable slot. A successful deployment is required to apply a change.
+
+Disabling retains existing local and SSO sessions until their normal expiry (12 hours maximum, or 1 hour idle); local reauthentication stops, with existing freshness lasting at most 10 minutes. PATs and service tokens keep working. Keep SSO provider secrets available and test an administrator action after sign-in.
+
+Use matching CLI and runtime releases. An artifact without the runtime `packageBroker.localAuth: 1` capability marker cannot disable local sign-in. Finish a frozen deployment started before the upgrade with the previous release's CLI, then deploy again. The first rebuilt deploy after upgrading records provider trust policy as an SSO change and requires `--rollout 100`.
+
+If active versions disagree on local sign-in mode, deploy refuses the split. Restore one known version to 100% through Cloudflare's deployment controls, then retry the full deployment. The early restrictive guard can turn off `workers.dev` before a later refusal; a successful deploy restores the intended exposure. See [refusals and recovery](../reference/authentication.md#deployment-refusals-and-recovery) for configuration errors, bootstrap warnings and recovery steps.
 
 ## What you operate
 

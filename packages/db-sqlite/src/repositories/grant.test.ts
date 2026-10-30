@@ -1,3 +1,4 @@
+import { bootstrapAdmin, bootstrapSsoAdmin } from './admin-bootstrap.js';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { idempotencyInsertStatement } from './idempotency.js';
 import { auditEvent, type AuditAction } from '@package-broker/core/audit/actions';
@@ -3133,6 +3134,76 @@ describe('fenced grant mutators', () => {
     ).toBe('last_holder');
     expect(await worldState()).toBe(before);
   });
+
+  it.each(['local', 'email', 'group'] as const)(
+    '3: %s bootstrap promotion refuses an edit holding the old grant revision',
+    async (variant) => {
+      const admin = await actingAs('boss', WRITER, true);
+      await seed([
+        variant === 'group'
+          ? groupGrant(a, G1, 'oidc', 'bootstrap-admins', LOW)
+          : emailGrant(a, G1, 'u1@example.test', LOW),
+        stmt('UPDATE access_grant SET last_op_id = ? WHERE id = ?', 'OLD', G1),
+      ]);
+      const stale = fenceOfActing(admin, 1);
+      const shared = {
+        grantId: 'unused-bootstrap-grant',
+        roleIds: {
+          organization_admin: ADMIN,
+          organization_auditor: 'bootstrap-auditor',
+          organization_publisher: 'bootstrap-publisher',
+          project_owner: 'bootstrap-owner',
+          project_developer: 'bootstrap-developer',
+          project_auditor: 'bootstrap-project-auditor',
+        },
+        now: NOW,
+      };
+      if (variant === 'local') {
+        await bootstrapAdmin(executor, a, {
+          ...shared,
+          email: 'u1@example.test',
+          userId: U1,
+          setupHash: 'a'.repeat(64),
+          setupExpiresAt: '2026-10-16T12:00:00.000Z',
+          opId: 'BOOTSTRAP',
+        });
+      } else {
+        expect(
+          await bootstrapSsoAdmin(
+            executor,
+            a,
+            variant === 'group'
+              ? {
+                  ...shared,
+                  subject: { type: 'group', provider: 'oidc', value: 'bootstrap-admins' },
+                }
+              : {
+                  ...shared,
+                  subject: { type: 'email', value: 'u1@example.test' },
+                  userId: U1,
+                },
+          ),
+        ).toEqual({ result: 'promoted', toppedUp: 0 });
+      }
+      expect(
+        await rows('SELECT revision, last_op_id, role_id FROM access_grant WHERE id = ?', G1),
+      ).toEqual([{ revision: 2, last_op_id: expect.any(String), role_id: ADMIN }]);
+      expect(
+        await rows('SELECT id FROM access_grant WHERE id = ? AND last_op_id = ?', G1, 'OLD'),
+      ).toEqual([]);
+      const before = await worldState();
+      expect(
+        await fenced.changeRole(a, stale, {
+          audit: mutationAudit('grant.role_change', G1),
+          id: G1,
+          roleId: LOW,
+          now: LATER,
+          opId: 'STALE',
+        }),
+      ).toBe('conflict');
+      expect(await worldState()).toBe(before);
+    },
+  );
 
   it('3: a stale grant revision answers conflict and leaves no delta', async () => {
     const writer = await actingAs('writer', WRITER);

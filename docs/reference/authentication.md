@@ -6,6 +6,65 @@ description: Local accounts, single sign-on, sessions and the auth HTTP routes.
 
 People sign in to Package Broker with a local account (password and TOTP) or through a single sign-on provider from the `sso-oidc` plugin. A successful sign-in creates a browser session held in cookies. Tokens, roles and grants are described in the [Access model](access-model.md).
 
+## Enable or disable local sign-in
+
+Local sign-in is **enabled by default**. Set `PB_AUTH_LOCAL=disabled` to require SSO for new browser sign-ins, or `PB_AUTH_LOCAL=enabled` to allow password and TOTP again. Only these two values are accepted; an empty value or `break-glass` is invalid. Node reads the setting at startup: restart the process or container after changing it. Workers read it when the application is initialized for a deployment: deploy the change rather than changing a running environment object.
+
+For Cloudflare, use `pb cloudflare setup --local-auth enabled|disabled` or `pb cloudflare deploy --local-auth enabled|disabled`. The CLI also reads `PB_AUTH_LOCAL` from its environment. Conflicting environment and flag values are refused. An omitted setting preserves the live mode; a fresh installation defaults to enabled. The CLI manages `PB_AUTH_LOCAL` as a plain-text Worker variable, using **one variable slot**. Do not store it as a Worker secret.
+
+Changing disabled to enabled requires the explicit **`--local-auth enabled`** flag; the environment variable alone cannot authorize it. Supply the flag again when resuming an attempt, reinstalling from an old installation journal, or deploying a second time before smoke has passed. Every mode change prints a notice. Keep the private installation inventory so the CLI can check the last verified deployment.
+
+Disabling refuses all four local auth POST routes with `403 local_auth_disabled`, including setup and reauthentication. The routes remain registered. The login and reauthentication screens hide the password form after reading `local: false` from `GET /_pb/auth/providers`. Local credentials and unused setup tokens remain stored; disabling does not reset accounts or consume tokens.
+
+Existing **local and SSO sessions remain valid** until logout, revocation or their normal expiry: at most 12 hours from sign-in, or 1 hour idle. A local session cannot refresh its reauthentication while local sign-in is disabled; its existing freshness lasts at most 10 minutes, after which sensitive actions require a new SSO session. Plan for this retained-session window when disabling local sign-in. Personal access tokens (including those issued through a local account) and service tokens keep working under their usual expiry, revocation and permission checks.
+
+<!-- source: packages/core/src/auth/module.ts:125 -->
+<!-- source: packages/core/src/auth/routes-local.ts:93 -->
+<!-- source: packages/cli/src/commands/cloudflare/local-auth.ts:19 -->
+<!-- source: packages/core/src/auth/session.ts:165 -->
+
+### First administrator through SSO
+
+Before disabling local sign-in on a fresh installation, configure a working SSO provider, its required secrets and administrative access. The administrator's domain must appear in both `policy.verifiedDomains` and `policy.emailAuthoritativeDomains` in the **effective** provider configuration, including any runtime override. The provider must assert a verified e-mail address and control that domain. Authoritative-domain trust allows the first SSO callback to link the administrator account provisioned by setup; do not grant it to a provider that does not control those addresses.
+
+Cloudflare Access additionally needs `trustEmailVerification: true`. Enable that only when you trust Access to verify the addresses it asserts. Disabled setup refuses Access providers without this trust, including compiled provider descriptors that omit the flag; use a trusted runtime providers document that explicitly carries it.
+
+Run Cloudflare setup with `--local-auth disabled` and your providers configuration. Setup provisions the SSO administrator grant **before deploying** the disabled Worker. It issues no local setup token. The success JSON contains `login_url`, pointing to `<broker-origin>/_pb/ui/#/login`, instead of the local enrollment `bootstrap_url`. Open `login_url`, choose the provider and sign in with the provisioned administrator identity. Do not pass `--token-file` or `--refresh-setup-token` in disabled mode. Noninteractive setup still needs explicit master key delivery, but needs no token output file in this mode.
+
+For a group administrator, use `pb admin bootstrap --sign-in sso --group broker-admins --provider corp` with your database target (`--sqlite <file>` or `--cloudflare --database-id <id>`). With `autoJoin: false`, that grant acts as an invitation: a verified member of the named provider group can complete the callback and administer the organization. Restrict membership at the provider before issuing the grant. See the [CLI reference](cli.md#pb-admin-bootstrap) for bootstrap options.
+
+Keep setup and recovery on the **same CLI release** when the inventory contains an `sso_*` bootstrap state. Older CLIs cannot interpret those states. Use matching CLI, runtime and prebuilt releases for deployment; older versions also reject provider descriptors carrying the new trust policy fields.
+
+<!-- source: packages/cli/src/commands/cloudflare/setup.ts:782 -->
+<!-- source: packages/db-sqlite/src/repositories/admin-bootstrap.ts:48 -->
+
+### Deployment refusals and recovery
+
+| Refusal or warning                                           | Operator action                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth_local_invalid` (CLI: `invalid_input` with this reason) | Set exactly `enabled` or `disabled`, or remove the setting to use the default at runtime. Resolve any disagreement with `--local-auth`.                                                                                                                                                                                                                    |
+| `auth_no_sign_in_method`                                     | No SSO provider survived construction with local sign-in disabled. Fix provider configuration and restart or deploy, or explicitly re-enable local sign-in. A nonempty providers file alone does not prove the provider was constructed.                                                                                                                   |
+| `local_auth_disabled`                                        | Use SSO. To restore local enrollment, login or reauthentication, explicitly re-enable and restart or deploy.                                                                                                                                                                                                                                               |
+| Missing provider secret or `provider_error`                  | Supply the required secret and check provider discovery and availability. Runtime construction can succeed even when a secret needed at sign-in is missing; setup and deploy check required secrets separately.                                                                                                                                            |
+| `invalid_input` during SSO setup                             | Check the accompanying reason: verified and authoritative admin domain, Access verification trust, required secrets, supported artifact, and incompatible local token options. Fix that configuration and retry.                                                                                                                                           |
+| Re-enabling requires `--local-auth enabled`                  | Pass that flag explicitly again, including on resume. Remove a conflicting ambient `PB_AUTH_LOCAL`.                                                                                                                                                                                                                                                        |
+| `configuration_conflict` naming `local_auth`                 | Check every active Worker version and the frozen attempt. An enabled/disabled split is refused even with an explicit flag. Restore a single known version at 100% through Cloudflare's deployment controls, then retry a full CLI deploy with the intended mode. If the frozen plan disagrees, complete or recover that attempt before starting a new one. |
+| Secret, malformed or duplicate `PB_AUTH_LOCAL` binding       | Remove the secret with `wrangler secret delete PB_AUTH_LOCAL`, or repair malformed/duplicate bindings, then deploy with the intended mode. The managed binding must be plain text.                                                                                                                                                                         |
+| Existing local enrollment or unused local setup token        | Finish an enrollment already in progress with local sign-in enabled, then disable through deploy. A warning about an unused token means it remains usable if local sign-in is re-enabled; disabling does not revoke it. `pb admin bootstrap` and `reset-local` warn when local enrollment is unavailable and do not change deployment policy.              |
+
+A mode change requires `--rollout 100`; partial rollouts are refused. The first deploy of a rebuilt artifact after upgrading also counts as an SSO configuration change because the deployment now records provider trust policy. Deploy it at 100% first, then resume partial rollouts for later compatible changes.
+
+An in-progress frozen deploy attempt created before local-auth support cannot be resumed with the new CLI. **Finish it with the previous release's CLI, then deploy again with the new release.** Retain the inventory; do not edit its frozen plan to bypass the refusal.
+
+The deployment's early restrictive guard may disable the `workers.dev` endpoint and preview URLs before a later configuration check refuses the command. This can leave `workers.dev` unavailable until a successful deploy restores the intended exposure. Fix the reported configuration and complete the deployment; inspect endpoint settings if access is still unavailable.
+
+The bundled runtime must declare **`packageBroker.localAuth: 1`** in its package metadata. The CLI checks this capability marker rather than inferring support from a version number. An older artifact without the marker might ignore the setting and still accept local passwords, so it cannot be used to disable local sign-in. Rebuild with a supporting runtime or select the matching current prebuilt release, then deploy again.
+
+<!-- source: packages/cli/src/commands/cloudflare/deploy.ts:499 -->
+<!-- source: packages/cli/src/commands/cloudflare/local-auth.ts:100 -->
+<!-- source: packages/runtime-node/package.json:9 -->
+<!-- source: packages/runtime-cloudflare/package.json:9 -->
+
 ## Routes
 
 | Method and path                         | Purpose                                                                                                     |
@@ -38,6 +97,7 @@ Errors use one JSON shape: `{"error":{"code":"...","message":"...","requestId":"
 | 401    | `invalid_credentials`          | Wrong password, TOTP code or setup token, an expired setup token, or a locked account.                                                                                    |
 | 401    | `login_failed`                 | A single sign-on login was refused, or a single sign-on re-authentication was started without a valid session.                                                            |
 | 401    | `unauthorized`                 | No valid session (`/_pb/session`, `logout`, `local/reauth`).                                                                                                              |
+| 403    | `local_auth_disabled`          | Local setup, login or reauthentication is disabled for this deployment. Use SSO or explicitly re-enable local sign-in.                                                    |
 | 403    | `forbidden`                    | The origin check or the CSRF token check failed.                                                                                                                          |
 | 404    | `not_found`                    | Unknown route, or an unknown provider ID in `sso/{provider}/start` or `callback`.                                                                                         |
 | 502    | `provider_error`               | The provider could not be used, for example its client secret is missing or discovery failed.                                                                             |

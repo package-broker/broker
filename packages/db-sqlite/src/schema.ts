@@ -746,6 +746,7 @@ export interface AuditLedgerTable {
   created_at: Generated<string>;
   superseded_by: string | null;
   resolves_id: string | null;
+  capacity_json: string | null;
 }
 
 export interface Database {

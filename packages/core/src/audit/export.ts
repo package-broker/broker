@@ -39,7 +39,22 @@ export interface AuditExportSnapshot {
   readonly sink: AuditExportState;
 }
 
+export interface AuditCapacityGap {
+  readonly id: string;
+  readonly fromSeq: number;
+  readonly toSeq: number;
+  readonly count: number;
+  readonly modeGeneration: number;
+  readonly prevHash: string;
+  readonly hash: string;
+}
+
 export interface AuditExportPort {
+  capacityGap(
+    org: OrgContext,
+    snapshot: AuditExportSnapshot,
+    afterSeq: number,
+  ): Promise<AuditCapacityGap | null>;
   read(org: OrgContext, sinkId: string): Promise<AuditExportSnapshot>;
   /** Return only this organization’s sealed rows (seq <= audit_chain.head_seq), in seq order. */
   page(org: OrgContext, afterSeq: number, limit: number): Promise<readonly AuditRow[]>;
@@ -57,6 +72,8 @@ export interface AuditExportPort {
    * covered by persisted durableAckRanges, at most 100 ledger rows per save, even
    * after durableAck is disabled. durableCustodySeq counts dispositions as accounted
    * progress; only ACK ranges establish replay coverage. Custody is computed in core.
+   * A capacity effect disposes the sink's frozen capacity marker range; it must lie inside
+   * a recorded capacity gap and never adds ACK coverage.
    * Receivers must be idempotent per throughSeq when frozen batches are replayed.
    */
   save(
@@ -71,6 +88,8 @@ export interface AuditExportPort {
       })[];
       readonly replayCreatedAt?: string;
       readonly durableAck?: { readonly from: number; readonly to: number } | undefined;
+      /** Accepted or passed capacity marker: a disposition backed by the recorded capacity gap. */
+      readonly capacity?: { readonly fromSeq: number; readonly toSeq: number } | undefined;
     },
   ): Promise<boolean>;
 }
@@ -111,7 +130,8 @@ function representation(raw: string | null): Representation {
 export function auditInflightEventRange(sink: AuditSinkState): { from: number; to: number } | null {
   if (sink.inflightBody === null) return null;
   const repr = representation(sink.inflightRepr);
-  if (['registry_markers', 'marker', 'disposition'].includes(repr.purpose ?? '')) return null;
+  if (['registry_markers', 'marker', 'disposition', 'capacity'].includes(repr.purpose ?? ''))
+    return null;
   try {
     const batch = JSON.parse(sink.inflightBody) as AuditBatchV1;
     if (!batch.records.some((record) => record.kind === 'event' || record.kind === 'withheld'))
@@ -204,6 +224,19 @@ function frozenBatch(body: string, org: OrgContext, snapshot: AuditExportSnapsho
           : marker.fromSeq !== snapshot.sink.inflightFrom || marker.toSeq !== batch.throughSeq)
       )
         throw new Error();
+    } else if (representation(snapshot.sink.inflightRepr).purpose === 'capacity') {
+      const gap = batch.records[0];
+      if (
+        batch.records.length !== 1 ||
+        gap?.kind !== 'gap' ||
+        gap.fromSeq > snapshot.sink.progressSeq + 1 ||
+        gap.toSeq <= snapshot.sink.progressSeq ||
+        batch.throughSeq !== gap.toSeq ||
+        batch.throughHash !== gap.hash ||
+        (gap.fromSeq === snapshot.sink.progressSeq + 1 &&
+          gap.prevHash !== snapshot.sink.progressHash)
+      )
+        throw new Error();
     } else if (last === undefined) {
       if (
         batch.throughSeq !== snapshot.sink.progressSeq ||
@@ -225,6 +258,42 @@ function frozenBatch(body: string, org: OrgContext, snapshot: AuditExportSnapsho
   } catch {
     throw new Error('Audit sink in-flight batch malformed');
   }
+}
+
+/** Retries a post-delivery save when only capacity eviction moved the boundary since `expected`. */
+async function reconcileEviction(
+  port: AuditExportPort,
+  org: OrgContext,
+  expected: AuditExportSnapshot,
+  signal: AbortSignal,
+  deadline: number,
+  save: (current: AuditExportSnapshot) => Promise<boolean>,
+): Promise<boolean> {
+  const current = await port.read(org, expected.sink.id);
+  const fields = (snapshot: AuditExportSnapshot) =>
+    JSON.stringify({ ...snapshot, boundarySeq: 0, boundaryPrevHash: '', replayPending: undefined });
+  const { boundarySeq: oldBoundary, boundaryPrevHash: oldHash } = expected;
+  const { boundarySeq: newBoundary, boundaryPrevHash: newHash } = current;
+  if (newBoundary <= oldBoundary || fields(expected) !== fields(current)) return false;
+  let cursor = oldBoundary - 1;
+  let hash = oldHash;
+  for (
+    let lookups = 0;
+    cursor < newBoundary - 1 && lookups < 100 && !signal.aborted && Date.now() < deadline;
+    lookups++
+  ) {
+    const gap = await port.capacityGap(org, current, cursor);
+    if (
+      gap === null ||
+      gap.fromSeq > cursor + 1 ||
+      (gap.fromSeq === cursor + 1 && gap.prevHash !== hash) ||
+      gap.toSeq >= newBoundary
+    )
+      break;
+    cursor = gap.toSeq;
+    hash = gap.hash;
+  }
+  return cursor === newBoundary - 1 && hash === newHash && save(current);
 }
 
 export async function exportAuditBatch(
@@ -287,65 +356,108 @@ export async function exportAuditBatch(
     sink = { ...sink, inflightRepr: JSON.stringify(repr) };
   } else if (body === null) {
     const limit = batchLimit(options);
-    const rows = await port.page(org, sink.progressSeq, limit);
-    const records: AuditBatchV1['records'][number][] = [];
-    let throughSeq = sink.progressSeq;
-    let throughHash = sink.progressHash;
-    for (const row of rows.slice(0, limit)) {
-      if (row.org_id !== org.orgId || row.seq !== throughSeq + 1 || row.prev_hash !== throughHash)
+    const gap = await port.capacityGap(org, snapshot, sink.progressSeq);
+    if (gap != null) {
+      const count = gap.count - (sink.progressSeq + 1 - gap.fromSeq);
+      if (
+        count < 1 ||
+        gap.fromSeq > sink.progressSeq + 1 ||
+        gap.toSeq <= sink.progressSeq ||
+        (gap.fromSeq === sink.progressSeq + 1 && gap.prevHash !== sink.progressHash)
+      )
         throw new Error('Audit delivery range unavailable');
-      const record = await auditWireRecord(
-        { chainId: snapshot.chainId, epoch: snapshot.epoch, orgId: org.orgId },
-        row,
-        options.sourceIp,
-      );
-      const candidate: AuditBatchV1 = {
+      body = JSON.stringify({
         v: 1,
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: org.orgId,
-        records: [...records, record],
-        throughSeq: row.seq,
-        throughHash: row.hash,
+        records: [
+          {
+            kind: 'gap',
+            markerId: gap.id,
+            chainId: snapshot.chainId,
+            epoch: snapshot.epoch,
+            fromSeq: sink.progressSeq + 1,
+            toSeq: gap.toSeq,
+            count,
+            prevHash: sink.progressHash,
+            hash: gap.hash,
+            reason: 'capacity',
+            policyGeneration: gap.modeGeneration,
+          },
+        ],
+        throughSeq: gap.toSeq,
+        throughHash: gap.hash,
+      });
+      repr = { ...repr, purpose: 'capacity' };
+      sink = {
+        ...sink,
+        inflightFrom: sink.progressSeq + 1,
+        inflightTo: gap.toSeq,
+        inflightBody: body,
+        inflightRepr: JSON.stringify(repr),
       };
-      if (new TextEncoder().encode(JSON.stringify(candidate)).length > 512 * 1024) break;
-      records.push(record);
-      throughSeq = row.seq;
-      throughHash = row.hash;
+    } else {
+      const rows = await port.page(org, sink.progressSeq, limit);
+      const records: AuditBatchV1['records'][number][] = [];
+      let throughSeq = sink.progressSeq;
+      let throughHash = sink.progressHash;
+      for (const row of rows.slice(0, limit)) {
+        if (row.org_id !== org.orgId || row.seq !== throughSeq + 1 || row.prev_hash !== throughHash)
+          throw new Error('Audit delivery range unavailable');
+        const record = await auditWireRecord(
+          { chainId: snapshot.chainId, epoch: snapshot.epoch, orgId: org.orgId },
+          row,
+          options.sourceIp,
+        );
+        const candidate: AuditBatchV1 = {
+          v: 1,
+          chainId: snapshot.chainId,
+          epoch: snapshot.epoch,
+          orgId: org.orgId,
+          records: [...records, record],
+          throughSeq: row.seq,
+          throughHash: row.hash,
+        };
+        if (new TextEncoder().encode(JSON.stringify(candidate)).length > 512 * 1024) break;
+        records.push(record);
+        throughSeq = row.seq;
+        throughHash = row.hash;
+      }
+      if (records.length === 0) {
+        if (rows.length > 0) throw new Error('Audit delivery record too large');
+        if (snapshot.replayPending)
+          return (await port.save(org, fence, snapshot, sink, options.generation))
+            ? 'resolved'
+            : 'contended';
+        return 'idle';
+      }
+      body = JSON.stringify({
+        v: 1,
+        chainId: snapshot.chainId,
+        epoch: snapshot.epoch,
+        orgId: org.orgId,
+        records,
+        throughSeq,
+        throughHash,
+      });
+      repr = {
+        ...repr,
+        v: 1,
+        sanitizerVersion: AUDIT_SANITIZER_VERSION,
+        pluginVersion: options.pluginVersion,
+        sourceIp: options.sourceIp,
+        purpose: 'events',
+      };
+      ledger = withheldAuditEntries(snapshot, records, options.now());
+      sink = {
+        ...sink,
+        inflightFrom: sink.progressSeq + 1,
+        inflightTo: throughSeq,
+        inflightBody: body,
+        inflightRepr: JSON.stringify(repr),
+      };
     }
-    if (records.length === 0) {
-      if (rows.length > 0) throw new Error('Audit delivery record too large');
-      if (snapshot.replayPending)
-        return (await port.save(org, fence, snapshot, sink, options.generation))
-          ? 'resolved'
-          : 'contended';
-      return 'idle';
-    }
-    body = JSON.stringify({
-      v: 1,
-      chainId: snapshot.chainId,
-      epoch: snapshot.epoch,
-      orgId: org.orgId,
-      records,
-      throughSeq,
-      throughHash,
-    });
-    repr = {
-      ...repr,
-      v: 1,
-      sanitizerVersion: AUDIT_SANITIZER_VERSION,
-      pluginVersion: options.pluginVersion,
-      sourceIp: options.sourceIp,
-      purpose: 'events',
-    };
-    ledger = withheldAuditEntries(snapshot, records, options.now());
-    sink = {
-      ...sink,
-      inflightFrom: sink.progressSeq + 1,
-      inflightTo: throughSeq,
-      inflightBody: body,
-      inflightRepr: JSON.stringify(repr),
-    };
   }
   const markersOnly = queued !== undefined && queued.length > 0;
   const batch = frozenBatch(body!, org, {
@@ -376,6 +488,17 @@ export async function exportAuditBatch(
     return 'contended';
   if (ledger.length > 0) options.alert?.('withheld');
   snapshot = { ...snapshot, sink: sending };
+  // Outcomes of a completed delivery survive a concurrent capacity eviction; a retry schedule
+  // does not need to, because contention re-sends the same frozen batch.
+  const sendingPort = port;
+  const reconciling: AuditExportPort = {
+    ...port,
+    save: async (org, fence, expected, next, generation, effects) =>
+      (await sendingPort.save(org, fence, expected, next, generation, effects)) ||
+      (await reconcileEviction(sendingPort, org, expected, signal, deadline, (current) =>
+        sendingPort.save(org, fence, current, next, generation, effects),
+      )),
+  };
   if (signal.aborted || Date.now() >= deadline) return 'idle';
   let result: AuditDelivery;
   const controller = new AbortController();
@@ -405,7 +528,7 @@ export async function exportAuditBatch(
   if (result?.outcome === 'rejected' && !codes.includes(result.code))
     result = { outcome: 'retry', code: 'bad_response' };
   if (result?.outcome === 'rejected' || result?.outcome === 'uncertain') {
-    return (await resolveAuditRejection(port, org, fence, snapshot, batch, result, options))
+    return (await resolveAuditRejection(reconciling, org, fence, snapshot, batch, result, options))
       ? 'resolved'
       : 'contended';
   }
@@ -439,11 +562,15 @@ export async function exportAuditBatch(
     }
     // Marker acceptance recomputes the ledger-backed custody frontier idempotently.
     const disposed = repr.purpose === 'disposition';
+    const capacityLoss = !markersOnly && repr.purpose === 'capacity';
+    const capacity = capacityLoss
+      ? { fromSeq: sending.progressSeq + 1, toSeq: batch.throughSeq }
+      : undefined;
     const durableAck =
       !markersOnly && !disposed && sending.durableAck && auditInflightEventRange(sending) !== null
         ? { from: sending.inflightFrom!, to: batch.throughSeq }
         : undefined;
-    Object.assign(rest, auditDurableCoverage(sending, durableAck));
+    Object.assign(rest, auditDurableCoverage(sending, durableAck, capacity ? [capacity] : []));
     const next = {
       ...sending,
       retryCountForSeq: markersOnly ? sending.retryCountForSeq : 0,
@@ -457,11 +584,11 @@ export async function exportAuditBatch(
       progressSeq: markersOnly ? sending.progressSeq : batch.throughSeq,
       progressHash: markersOnly ? sending.progressHash : batch.throughHash,
       custodySeq:
-        !markersOnly && (disposed || auditInflightEventRange(sending) !== null)
+        !markersOnly && (disposed || capacityLoss || auditInflightEventRange(sending) !== null)
           ? auditCustodySeq(sending, {
-              from: sending.inflightFrom!,
+              from: capacity ? capacity.fromSeq : sending.inflightFrom!,
               to: batch.throughSeq,
-              kind: disposed ? 'disposed' : 'durable_ack',
+              kind: disposed || capacityLoss ? 'disposed' : 'durable_ack',
             })
           : sending.custodySeq,
       inflightFrom: markersOnly ? sending.inflightFrom : tail ? batch.throughSeq + 1 : null,
@@ -471,7 +598,10 @@ export async function exportAuditBatch(
         markersOnly ? rest : { ...rest, purpose: tail ? 'events' : 'idle' },
       ),
     };
-    const saved = await port.save(org, fence, snapshot, next, options.generation, { durableAck });
+    const saved = await reconciling.save(org, fence, snapshot, next, options.generation, {
+      durableAck,
+      capacity,
+    });
     if (saved && result.outcome === 'accepted_with_warning') options.warning?.(result.code);
     return saved ? 'accepted' : 'contended';
   }

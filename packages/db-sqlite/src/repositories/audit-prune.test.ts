@@ -600,3 +600,375 @@ it('commits a pending none cutover only when the successful prune passes its seq
   expect(await prune()).toEqual({ outcome: 'pruned', pruned: 1, boundarySeq: 4 });
   expect(await chain()).toMatchObject({ mode: 'none', pending_mode: null, cutover_seq: 3 });
 });
+
+const evict = (maxJournalBytes = 1, limit = 500, storage = executor) =>
+  createAuditPruneRepository(storage).evict(org, { generation: 1, maxJournalBytes, limit });
+
+it.each([1, 2])(
+  'stops capacity eviction before a recorded hole at sequence %s',
+  async (missing) => {
+    await seed();
+    await run('DELETE FROM audit_event WHERE org_id = ? AND seq = ?', org.orgId, missing);
+    await run('UPDATE audit_chain SET journal_rows = journal_rows - 1 WHERE org_id = ?', org.orgId);
+    await createAuditSealRepository(executor).seal(org);
+    const before = await chain();
+    const ledger = createAuditLedgerRepository(executor);
+    const holes = await ledger.effectiveGaps(org);
+    expect(holes).toMatchObject([{ fromSeq: missing, toSeq: missing, reasonCode: 'seq_gap' }]);
+    expect(await evict()).toEqual(
+      missing === 1 ? { outcome: 'retained' } : { outcome: 'evicted', evicted: 1, boundarySeq: 2 },
+    );
+    const gaps = await ledger.effectiveGaps(org);
+    expect(gaps.filter((gap) => gap.reasonCode === 'seq_gap')).toEqual(holes);
+    const losses = gaps.filter((gap) => gap.reasonCode === 'capacity');
+    expect(losses).toHaveLength(missing - 1);
+    for (const gap of losses) {
+      expect(gap).toMatchObject({ fromSeq: 1, toSeq: 1, count: 1 });
+      expect(gap.count).toBe(gap.toSeq - gap.fromSeq + 1);
+    }
+    expect((await rows()).map((row) => row.seq)).toEqual(missing === 1 ? [2, 3] : [3]);
+    expect(await chain()).toMatchObject({ head_seq: before.head_seq, head_hash: before.head_hash });
+    expect(await evict()).toEqual({ outcome: 'retained' });
+    expect(await ledger.effectiveGaps(org)).toEqual(gaps);
+  },
+);
+
+it('includes disabled sinks that lag the evicted range as possibly affected', async () => {
+  await seed();
+  await run(
+    "UPDATE audit_sink SET state = 'disabled', progress_seq = 0 WHERE org_id = ?",
+    org.orgId,
+  );
+  expect(await evict()).toMatchObject({ outcome: 'evicted', evicted: 3 });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toMatchObject([
+    { capacity: { affectedSinkIds: ['archive'] } },
+  ]);
+});
+
+it('evicts with an active trail, records the gap atomically and never reuses a sequence', async () => {
+  await seed();
+  await seed(3, database.orgs!.b);
+  await run(
+    "UPDATE audit_chain SET mode = 'trail', verified_at = '2026-10-30T00:00:00.000Z' WHERE org_id = ?",
+    org.orgId,
+  );
+  const foreign = await chain(database.orgs!.b);
+  const foreignRows = await rows(database.orgs!.b);
+  const head = await chain();
+  await run(
+    `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+    VALUES ('next', ?, '2026-10-30T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+    org.orgId,
+  );
+  expect(await evict()).toEqual({ outcome: 'evicted', evicted: 3, boundarySeq: 4 });
+  expect(await chain()).toMatchObject({
+    head_seq: head.head_seq,
+    head_hash: head.head_hash,
+    boundary_seq: 4,
+    boundary_prev_hash: head.head_hash,
+    boundary_reason: 'capacity',
+    journal_rows: 0,
+    journal_bytes: 0,
+    verified_at: null,
+  });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toMatchObject([
+    {
+      fromSeq: 1,
+      toSeq: 3,
+      count: 3,
+      reasonCode: 'capacity',
+      sinkId: null,
+      policy: 'availability',
+      modeGeneration: 0,
+    },
+  ]);
+  await createAuditSealRepository(executor).seal(org);
+  expect(await rows()).toMatchObject([{ seq: 4, prev_hash: head.head_hash }]);
+  expect(await chain(database.orgs!.b)).toEqual(foreign);
+  expect(await rows(database.orgs!.b)).toEqual(foreignRows);
+});
+it.each([
+  "UPDATE audit_chain SET policy = 'required' WHERE org_id = ?",
+  'UPDATE audit_chain SET restore_pending = 1 WHERE org_id = ?',
+  'UPDATE audit_sink SET generation = 2 WHERE org_id = ?',
+])('retains capacity rows when eviction is forbidden: %s', async (sql) => {
+  await seed();
+  await run(sql, org.orgId);
+  const before = await chain();
+  expect(await evict()).toEqual({ outcome: 'retained' });
+  expect(await rows()).toHaveLength(3);
+  expect(await chain()).toEqual(before);
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toEqual([]);
+});
+it('does not spend the incident reserve as journal budget and retains below the limit', async () => {
+  await seed();
+  const bytes = (await chain()).journal_bytes as number;
+  expect(await evict(Math.ceil(bytes / 0.98))).toEqual({ outcome: 'retained' });
+  expect(await evict(bytes + 1)).toEqual({ outcome: 'evicted', evicted: 1, boundarySeq: 2 });
+  expect((await chain()).journal_bytes).toBeLessThan(bytes);
+});
+it('drops the oldest acknowledged prefix before unacknowledged events', async () => {
+  await seed();
+  await run('UPDATE audit_sink SET progress_seq = 1, custody_seq = 1 WHERE org_id = ?', org.orgId);
+  expect(await evict(1, 1)).toEqual({ outcome: 'evicted', evicted: 1, boundarySeq: 2 });
+  expect((await rows()).map((row) => row.seq)).toEqual([2, 3]);
+  expect(await evict()).toEqual({ outcome: 'evicted', evicted: 2, boundarySeq: 4 });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toMatchObject([
+    { fromSeq: 1, toSeq: 3, count: 3 },
+  ]);
+});
+it.each(['events', 'marker', 'registry_markers'])(
+  'keeps frozen %s batch bytes and cursor, including when their event range is evicted',
+  async (purpose) => {
+    await seed();
+    await run(
+      `UPDATE audit_sink SET progress_seq = 0, custody_seq = 0,
+      inflight_from = 1, inflight_to = 3, inflight_body = '{"frozen":true}', inflight_repr = ? WHERE org_id = ?`,
+      JSON.stringify({ custodyFromSeq: 1, purpose }),
+      org.orgId,
+    );
+    const [before] = await executor.all({
+      sql: 'SELECT * FROM audit_sink WHERE org_id = ?',
+      params: [org.orgId],
+    });
+    expect(await evict()).toMatchObject({ outcome: 'evicted', evicted: 3 });
+    expect(
+      await executor.all({ sql: 'SELECT * FROM audit_sink WHERE org_id = ?', params: [org.orgId] }),
+    ).toEqual([before]);
+    expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toHaveLength(1);
+  },
+);
+it.each([
+  'UPDATE audit_sink SET inflight_from = 1, inflight_to = 2 WHERE org_id = ?',
+  'UPDATE audit_sink SET generation = 0 WHERE org_id = ?',
+  'UPDATE audit_chain SET mode_generation = mode_generation + 1 WHERE org_id = ?',
+  'UPDATE audit_event SET payload_json = \'{"changed":true}\' WHERE org_id = ?',
+])('rolls back the gap and deletion on concurrent changes: %s', async (sql) => {
+  await seed();
+  const wrapped: SqlExecutor = {
+    driver: executor.driver,
+    all: (s) => executor.all(s),
+    async batch(statements) {
+      await run(sql, org.orgId);
+      return executor.batch(statements);
+    },
+  };
+  expect(await evict(1, 500, wrapped)).toEqual({ outcome: 'contended' });
+  expect(await rows()).toHaveLength(3);
+  expect(await chain()).toMatchObject({ boundary_seq: 1, journal_rows: 3 });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toEqual([]);
+});
+it('keeps concurrent sealing and subtracts counters from their current values', async () => {
+  await seed();
+  await run(
+    `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+    VALUES ('next', ?, '2026-10-30T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+    org.orgId,
+  );
+  const wrapped: SqlExecutor = {
+    driver: executor.driver,
+    all: (s) => executor.all(s),
+    async batch(statements) {
+      await createAuditSealRepository(executor).seal(org);
+      return executor.batch(statements);
+    },
+  };
+  expect(await evict(1, 500, wrapped)).toMatchObject({ outcome: 'evicted', evicted: 3 });
+  expect(await chain()).toMatchObject({ head_seq: 4, journal_rows: 1 });
+  expect(await rows()).toMatchObject([{ seq: 4 }]);
+  expect((await chain()).journal_bytes).toBeGreaterThan(0);
+});
+it('aborts eviction if the ledger cannot record the loss', async () => {
+  await seed();
+  await disposition('gap', null, { reasonCode: 'capacity' });
+  const before = await chain();
+  await expect(evict()).rejects.toThrow('audit ledger overlapping report');
+  expect(await chain()).toEqual(before);
+  expect(await rows()).toHaveLength(3);
+});
+it.each([1, 2, 3])('retains broken hash links at seq %s during eviction', async (seq) => {
+  await seed();
+  await run(
+    'UPDATE audit_event SET prev_hash = ? WHERE org_id = ? AND seq = ?',
+    'f'.repeat(64),
+    org.orgId,
+    seq,
+  );
+  expect(await evict()).toEqual({ outcome: 'retained' });
+  expect(await rows()).toHaveLength(3);
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toEqual([]);
+});
+it('bounds eviction to 500 rows and keeps exact counters through repeated batches', async () => {
+  await seed(501);
+  const wrapped: SqlExecutor = {
+    driver: executor.driver,
+    all: (s) => executor.all(s),
+    batch(statements) {
+      expect(statements.length).toBeLessThanOrEqual(200);
+      for (const s of statements) expect(s.params.length).toBeLessThanOrEqual(100);
+      return executor.batch(statements);
+    },
+  };
+  expect(await evict(1, 500, wrapped)).toEqual({
+    outcome: 'evicted',
+    evicted: 500,
+    boundarySeq: 501,
+  });
+  expect(await chain()).toMatchObject({ journal_rows: 1 });
+  expect(await evict()).toEqual({ outcome: 'evicted', evicted: 1, boundarySeq: 502 });
+  expect(await chain()).toMatchObject({ journal_rows: 0, journal_bytes: 0 });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toMatchObject([
+    { count: 501, fromSeq: 1, toSeq: 501 },
+  ]);
+});
+it('pruning also ignores the marker purpose used by disposition batches', async () => {
+  await seed();
+  await run(
+    `UPDATE audit_sink SET inflight_from = 1, inflight_to = 1,
+    inflight_body = '{"v":1,"records":[]}', inflight_repr = '{"purpose":"marker"}' WHERE org_id = ?`,
+    org.orgId,
+  );
+  expect(await prune()).toMatchObject({ outcome: 'pruned', pruned: 3 });
+});
+it('does not let concurrent marker-only frontiers hold eviction', async () => {
+  await seed();
+  await run(
+    `UPDATE audit_sink SET inflight_from = 1, inflight_to = 1,
+    inflight_body = '{"records":[]}', inflight_repr = '{"purpose":"marker"}' WHERE org_id = ?`,
+    org.orgId,
+  );
+  const wrapped: SqlExecutor = {
+    driver: executor.driver,
+    all: (s) => executor.all(s),
+    async batch(statements) {
+      await run(
+        'UPDATE audit_sink SET inflight_from = 2, inflight_to = 2 WHERE org_id = ?',
+        org.orgId,
+      );
+      return executor.batch(statements);
+    },
+  };
+  expect(await evict(1, 500, wrapped)).toMatchObject({ outcome: 'evicted', evicted: 3 });
+});
+it('alerts using fixed codes only after a committed capacity loss', async () => {
+  await seed();
+  const logs: unknown[] = [];
+  const counters: unknown[] = [];
+  const repository = createAuditPruneRepository(executor, {
+    log: (record) => {
+      logs.push(record);
+    },
+    counter: (...args) => {
+      counters.push(args);
+    },
+    histogram: () => {},
+  });
+  expect(await repository.evict(org, { generation: 1, maxJournalBytes: 1 })).toMatchObject({
+    outcome: 'evicted',
+    evicted: 3,
+  });
+  expect(logs).toEqual([{ level: 'warn', event: 'audit.loss', reason_code: 'capacity' }]);
+  expect(counters).toEqual([['pb.audit.loss_events_total', { kind: 'gap' }, 3]]);
+});
+
+it('permits concurrent sink progress, custody and state changes during eviction', async () => {
+  await seed();
+  const wrapped: SqlExecutor = {
+    driver: executor.driver,
+    all: (s) => executor.all(s),
+    async batch(statements) {
+      await run(
+        "UPDATE audit_sink SET progress_seq = 2, custody_seq = 2, state = 'blocked' WHERE org_id = ?",
+        org.orgId,
+      );
+      return executor.batch(statements);
+    },
+  };
+  expect(await evict(1, 500, wrapped)).toMatchObject({ outcome: 'evicted', evicted: 3 });
+});
+it('evicts to the low-water mark and merges repeated losses at a steady budget', async () => {
+  await seed(100);
+  const budget = (await chain()).journal_bytes as number;
+  const firstLoss = await evict(budget);
+  expect(firstLoss).toMatchObject({ outcome: 'evicted' });
+  if (firstLoss.outcome !== 'evicted') throw new Error('expected eviction');
+  let lost = firstLoss.evicted;
+  expect(lost).toBeGreaterThanOrEqual(5);
+  expect(lost).toBeLessThanOrEqual(6);
+  expect((await chain()).journal_bytes).toBeLessThanOrEqual(budget - Math.ceil(budget / 20));
+  expect(await evict(budget)).toEqual({ outcome: 'retained' });
+  for (let i = 0; i < 3; i++) {
+    await executor.batch(
+      Array.from({ length: 10 }, (_, n) => ({
+        sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+        VALUES (?, ?, '2026-10-29T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+        params: [`refill-${i}-${n}`, org.orgId],
+      })),
+    );
+    await createAuditSealRepository(executor).seal(org);
+    const loss = await evict(budget);
+    expect(loss).toMatchObject({ outcome: 'evicted' });
+    if (loss.outcome !== 'evicted') throw new Error('expected eviction');
+    lost += loss.evicted;
+  }
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toMatchObject([
+    { fromSeq: 1, count: lost, toSeq: lost },
+  ]);
+});
+it('bounds the atomic batch even when each row requires a snapshot chunk', async () => {
+  await seed(500);
+  await run(
+    'UPDATE audit_event SET payload_json = ? WHERE org_id = ?',
+    JSON.stringify({ data: 'x'.repeat(256 * 1024) }),
+    org.orgId,
+  );
+  await run(
+    'UPDATE audit_chain SET journal_bytes = journal_bytes + ? WHERE org_id = ?',
+    500 * (JSON.stringify({ data: 'x'.repeat(256 * 1024) }).length - 2),
+    org.orgId,
+  );
+  const wrapped: SqlExecutor = {
+    driver: executor.driver,
+    all: (s) => executor.all(s),
+    batch(statements) {
+      expect(statements.length).toBeLessThan(200);
+      for (const statement of statements) expect(statement.params.length).toBeLessThanOrEqual(100);
+      return executor.batch(statements);
+    },
+  };
+  expect(await evict(1, 500, wrapped)).toMatchObject({ outcome: 'evicted', evicted: 180 });
+});
+
+it('caps sorted possibly affected sinks and records overflow without blocking loss accounting', async () => {
+  await seed();
+  await run(
+    `WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM ids WHERE n < 1000)
+    INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint,
+      durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq)
+    SELECT ?, printf('sink-%04d', n), 'audit', 'webhook', 1, 'fingerprint', 0, 'build', 'active', 0, ?, 0 FROM ids`,
+    org.orgId,
+    '0'.repeat(64),
+  );
+  expect(await evict()).toMatchObject({ outcome: 'evicted' });
+  const [gap] = await createAuditLedgerRepository(executor).effectiveGaps(org);
+  expect(gap!.capacity).toMatchObject({ affectedSinkIdsOverflow: true });
+  expect(gap!.capacity!.affectedSinkIds).toHaveLength(1000);
+  expect(gap!.capacity!.affectedSinkIds).toEqual(
+    Array.from({ length: 1000 }, (_, i) => `sink-${String(i).padStart(4, '0')}`),
+  );
+});
+
+it('does not complete a pending none cutover through capacity eviction', async () => {
+  await seed();
+  await run(
+    "UPDATE audit_chain SET mode = 'trail', pending_mode = 'none', cutover_seq = 2 WHERE org_id = ?",
+    org.orgId,
+  );
+  expect(await evict()).toEqual({ outcome: 'evicted', evicted: 3, boundarySeq: 4 });
+  expect(await chain()).toMatchObject({
+    boundary_reason: 'capacity',
+    mode: 'trail',
+    pending_mode: 'none',
+    cutover_seq: 2,
+  });
+});

@@ -96,6 +96,12 @@ export async function resolveAuditRejection(
       if (tails && tails.length > 1) rest.rejectionTail = tails.slice(1);
       rest.purpose = tail ? 'events' : 'idle';
     }
+    // A passed capacity marker still accounts for the evicted range, like an accepted one.
+    const capacity =
+      !queued && !required && repr.purpose === 'capacity'
+        ? { fromSeq: sink.progressSeq + 1, toSeq: batch.throughSeq }
+        : undefined;
+    if (capacity) Object.assign(rest, auditDurableCoverage(sink, undefined, [capacity]));
     const saved = await port.save(
       org,
       fence,
@@ -112,6 +118,13 @@ export async function resolveAuditRejection(
             ...sink,
             progressSeq: queued ? sink.progressSeq : batch.throughSeq,
             progressHash: queued ? sink.progressHash : batch.throughHash,
+            custodySeq: capacity
+              ? auditCustodySeq(sink, {
+                  from: capacity.fromSeq,
+                  to: capacity.toSeq,
+                  kind: 'disposed',
+                })
+              : sink.custodySeq,
             attempt: queued ? (repr.registryMarkerOriginalAttempt as number) : 0,
             nextAttemptAt: null,
             lastErrorCode: queued
@@ -123,6 +136,7 @@ export async function resolveAuditRejection(
             inflightRepr: JSON.stringify(rest),
           },
       options.generation,
+      capacity ? { capacity } : undefined,
     );
     if (saved) options.alert?.(required ? 'blocked' : 'marker_rejected');
     return saved;

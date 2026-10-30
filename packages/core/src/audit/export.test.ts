@@ -103,6 +103,7 @@ async function setup(durableAck = true) {
   };
   const saves: AuditExportSnapshot[] = [];
   const port: AuditExportPort = {
+    capacityGap: async () => null,
     read: vi.fn(async (ctx) => {
       expect(ctx).toEqual(org);
       return structuredClone(stored);
@@ -1247,3 +1248,48 @@ describe('audit rejection delivery', () => {
     expect(f.alert).toHaveBeenCalledExactlyOnceWith('withheld');
   });
 });
+
+it('bounds capacity reconciliation even when the port returns one row per sequence', async () => {
+  const f = await setup();
+  const capacityGap = vi.fn<AuditExportPort['capacityGap']>(
+    async (_org, _snapshot, afterSeq: number) => ({
+      id: 'gap',
+      fromSeq: afterSeq + 1,
+      toSeq: afterSeq + 1,
+      count: 1,
+      modeGeneration: 0,
+      prevHash: hash,
+      hash,
+    }),
+  );
+  f.port.capacityGap = capacityGap;
+  // The initial lookup must still allow the event batch to freeze.
+  capacityGap.mockResolvedValueOnce(null);
+  f.deliver.mockImplementation(async (batch) => {
+    f.change({ boundarySeq: 102, boundaryPrevHash: hash });
+    return ack(batch);
+  });
+  expect(await f.run()).toBe('contended');
+  expect(capacityGap).toHaveBeenCalledTimes(101);
+  expect(f.get().sink.progressSeq).toBe(0);
+});
+
+it.each([1, 2])(
+  'rejects a clipped capacity marker with original count %s before delivery',
+  async (count) => {
+    const f = await setup();
+    f.change({ sink: { ...f.get().sink, progressSeq: 2 } });
+    f.port.capacityGap = async () => ({
+      id: 'gap',
+      fromSeq: 1,
+      toSeq: 3,
+      count,
+      modeGeneration: 0,
+      prevHash: hash,
+      hash,
+    });
+    await expect(f.run()).rejects.toThrow('Audit delivery range unavailable');
+    expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.port.save).not.toHaveBeenCalled();
+  },
+);

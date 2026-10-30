@@ -93,6 +93,24 @@ export function createAuditExportRepository(executor: SqlExecutor): AuditExportP
     });
   }
   return {
+    async capacityGap(org, snapshot, afterSeq) {
+      const gap = await createAuditLedgerRepository(executor).capacityGap(
+        org,
+        snapshot.chainId,
+        snapshot.epoch,
+        afterSeq,
+      );
+      if (gap === null || gap.capacity === undefined) return null;
+      return {
+        id: gap.id,
+        fromSeq: gap.fromSeq,
+        toSeq: gap.toSeq,
+        count: gap.count,
+        modeGeneration: gap.modeGeneration,
+        prevHash: gap.capacity.prevHash,
+        hash: gap.capacity.hash,
+      };
+    },
     async read(org, sinkId) {
       const [row] = await executor.all<Omit<AuditExportSnapshot, 'sink'> & AuditExportState>({
         sql: `SELECT c.chain_id AS chainId, c.epoch, c.incarnation, c.mode_generation AS modeGeneration,
@@ -182,7 +200,36 @@ export function createAuditExportRepository(executor: SqlExecutor): AuditExportP
         )
           throw new TypeError('Invalid audit durable acknowledgement');
       }
-      const coverage = auditDurableCoverage(expected.sink, ack, effects?.ledger);
+      const capacity = effects?.capacity;
+      if (capacity !== undefined) {
+        let purpose: unknown;
+        try {
+          purpose = (JSON.parse(expected.sink.inflightRepr ?? 'null') as { purpose?: unknown })
+            ?.purpose;
+        } catch {
+          purpose = undefined;
+        }
+        const gap =
+          purpose === 'capacity' &&
+          ack === undefined &&
+          capacity.fromSeq === expected.sink.progressSeq + 1 &&
+          capacity.fromSeq === expected.sink.inflightFrom &&
+          capacity.toSeq === expected.sink.inflightTo &&
+          next.progressSeq === capacity.toSeq
+            ? await createAuditLedgerRepository(executor).capacityGap(
+                org,
+                expected.chainId,
+                expected.epoch,
+                capacity.fromSeq - 1,
+              )
+            : null;
+        if (gap === null || gap.fromSeq > capacity.fromSeq || gap.toSeq < capacity.toSeq)
+          throw new TypeError('Invalid audit capacity disposition');
+      }
+      const coverage = auditDurableCoverage(expected.sink, ack, [
+        ...(effects?.ledger ?? []),
+        ...(capacity === undefined ? [] : [capacity]),
+      ]);
       const nextCoverage = auditDurableCoverage(next);
       if (nextCoverage.durableCustodySeq !== coverage.durableCustodySeq)
         throw new TypeError('Invalid audit durable custody frontier');

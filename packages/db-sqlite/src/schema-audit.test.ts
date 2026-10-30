@@ -77,6 +77,7 @@ const declared: { [T in AuditTable]: Nullability<T> } = {
     created_at: 1,
     superseded_by: 0,
     resolves_id: 0,
+    capacity_json: 0,
   },
 };
 let database: MigratedDatabase;

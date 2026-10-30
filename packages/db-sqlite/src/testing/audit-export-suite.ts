@@ -14,6 +14,10 @@ import {
 import { systemMutationFence } from '@package-broker/core/authz/fence';
 import { orgContext, type SqlExecutor, type Statement } from '@package-broker/core/db/port';
 import { createAuditExportRepository } from '../repositories/audit-export.js';
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
+import { createAuditPruneRepository } from '../repositories/audit-prune.js';
+import { createAuditSealRepository } from '../repositories/audit-seal.js';
 import type { MigratedDatabase } from './migrated-database.js';
 
 export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>): void {
@@ -58,6 +62,382 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
       lastErrorCode: 'timeout',
     };
   }
+  async function journal(count = 3) {
+    for (let i = 0; i < count; i++) {
+      const event = auditEvent({
+        id: ulid(),
+        now: '2026-10-30T00:00:00.000Z',
+        actor: { type: 'system', id: null },
+        action: 'source.update',
+        target: { type: 'source', id: 'source' },
+        changes: { url: { new: 'https://host.test/repo' } },
+        context: {
+          opId: '01JZZZZZZZZZZZZZZZZZZZZZZY',
+          requestId: '01JZZZZZZZZZZZZZZZZZZZZZZX',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      });
+      if (!event.ok) throw new Error('Invalid journal fixture');
+      await seed(
+        `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type, target_id, payload_json)
+        VALUES (?, ?, '2026-10-30T00:00:00.000Z', 'system', 'source.update', 'source', 'source', ?)`,
+        event.event.id,
+        org().orgId,
+        event.event.payloadJson,
+      );
+    }
+    await createAuditSealRepository(database.executor).seal(org());
+  }
+  const evict = (limit = 500) =>
+    createAuditPruneRepository(database.executor).evict(org(), {
+      generation: 1,
+      maxJournalBytes: 1,
+      limit,
+    });
+  const runExport = (
+    deliver: import('@package-broker/core/audit/plugin-api').AuditSink['deliver'],
+    maxBatchEvents = 100,
+  ) =>
+    exportAuditBatch(
+      port(),
+      org(),
+      fence(),
+      {
+        id: 'archive',
+        generation: 1,
+        pluginVersion: '1.0',
+        sourceIp: 'omit',
+        now: () => new Date(),
+        random: () => 0,
+        sink: { deliver },
+        maxBatchEvents,
+        rejectionRetries: 'terminal',
+      },
+      new AbortController().signal,
+    );
+  const ack = (batch: import('@package-broker/core/audit/plugin-api').AuditBatchV1) => ({
+    outcome: 'accepted' as const,
+    chainId: batch.chainId,
+    epoch: batch.epoch,
+    throughSeq: batch.throughSeq,
+    throughHash: batch.throughHash,
+  });
+  describe('audit export capacity reconciliation', () => {
+    it('delivers each durable gap before the surviving page and advances disposition custody', async () => {
+      await journal();
+      const foreignBefore = await port().read(foreign(), 'archive');
+      const original = await port().page(org(), 0, 100);
+      expect(await evict(1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+      expect(await evict(1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+      const gaps = await createAuditLedgerRepository(database.executor).effectiveGaps(org());
+      expect(gaps).toMatchObject([
+        {
+          fromSeq: 1,
+          toSeq: 2,
+          count: 2,
+          capacity: {
+            prevHash: original[0]!.prev_hash,
+            hash: original[1]!.hash,
+            affectedSinkIds: ['archive'],
+          },
+        },
+      ]);
+      for (const seq of [2, 3]) {
+        expect(
+          await runExport(async (batch) => {
+            expect(batch.throughSeq).toBe(seq);
+            expect(batch.records[0]!.kind).toBe(seq < 3 ? 'gap' : 'event');
+            return ack(batch);
+          }),
+        ).toBe('accepted');
+        expect((await port().read(org(), 'archive')).sink).toMatchObject({
+          progressSeq: seq,
+          custodySeq: seq,
+        });
+      }
+      expect(await port().read(foreign(), 'archive')).toEqual(foreignBefore);
+    });
+    it('delivers a capacity gap even when no events remain', async () => {
+      await journal();
+      await evict();
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records).toMatchObject([{ kind: 'gap', fromSeq: 1, toSeq: 3 }]);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+      });
+    });
+    it.each([1, 3])('reconciles a late exact ACK racing eviction of %s events', async (limit) => {
+      await journal();
+      expect(
+        await runExport(async (batch) => {
+          const sending = (await port().read(org(), 'archive')).sink;
+          expect(await evict(limit)).toMatchObject({ outcome: 'evicted', evicted: limit });
+          expect((await port().read(org(), 'archive')).sink).toEqual(sending);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+        inflightBody: null,
+      });
+    });
+    it('retries the original frozen bytes after eviction and a lost ACK', async () => {
+      await journal();
+      let original = '';
+      expect(
+        await runExport(async (batch) => {
+          original = JSON.stringify(batch);
+          await evict();
+          return { outcome: 'retry', code: 'network' };
+        }),
+      ).toBe('contended');
+      expect(
+        await runExport(async (batch) => {
+          expect(JSON.stringify(batch)).toBe(original);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+    });
+    it('consumes the remaining gap after a late ACK stops inside the evicted range', async () => {
+      await journal();
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.throughSeq).toBe(1);
+          await evict();
+          return ack(batch);
+        }, 1),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink.progressSeq).toBe(1);
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records).toMatchObject([
+            {
+              kind: 'gap',
+              fromSeq: 2,
+              toSeq: 3,
+              count: 2,
+              prevHash: (await port().read(org(), 'archive')).sink.progressHash,
+            },
+          ]);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+      });
+    });
+    it('keeps a frozen gap marker while another eviction moves the boundary', async () => {
+      await journal();
+      await evict(1);
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records[0]!.kind).toBe('gap');
+          const before = (await port().read(org(), 'archive')).sink;
+          expect(auditInflightEventRange(before)).toBeNull();
+          expect(await evict()).toMatchObject({ outcome: 'evicted', evicted: 2 });
+          expect((await port().read(org(), 'archive')).sink).toEqual(before);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records).toMatchObject([{ kind: 'gap', fromSeq: 2, toSeq: 3 }]);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+    });
+    it('does not reconcile an ACK across an intervening sink change', async () => {
+      await journal();
+      expect(
+        await runExport(async (batch) => {
+          await evict();
+          await seed(
+            "UPDATE audit_sink SET state = 'blocked', blocked_reason = 'rejected' WHERE org_id = ?",
+            org().orgId,
+          );
+          return ack(batch);
+        }),
+      ).toBe('contended');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 0,
+        custodySeq: 0,
+        state: 'blocked',
+      });
+    });
+  });
+  describe('audit export capacity with delivery rejections', () => {
+    const coverage = async () =>
+      JSON.parse((await port().read(org(), 'archive')).sink.inflightRepr!) as {
+        durableCustodySeq: number;
+        durableAckRanges: { from: number; to: number }[];
+      };
+    const runWith = (
+      deliver: import('@package-broker/core/audit/plugin-api').AuditSink['deliver'],
+      alert: (reason: string) => void = () => {},
+    ) =>
+      exportAuditBatch(
+        port(),
+        org(),
+        fence(),
+        {
+          id: 'archive',
+          generation: 1,
+          pluginVersion: '1.0',
+          sourceIp: 'omit',
+          now: () => new Date(),
+          random: () => 0,
+          sink: { deliver },
+          rejectionRetries: 'terminal',
+          alert,
+        },
+        new AbortController().signal,
+      );
+    it('advances the durable custody frontier through an accepted gap without ACK coverage', async () => {
+      await journal();
+      await evict(1);
+      await evict(1);
+      expect(await runExport(async (batch) => ack(batch))).toBe('accepted');
+      expect(await coverage()).toMatchObject({ durableCustodySeq: 2, durableAckRanges: [] });
+      expect(await runExport(async (batch) => ack(batch))).toBe('accepted');
+      expect(await coverage()).toMatchObject({
+        durableCustodySeq: 3,
+        durableAckRanges: [{ from: 3, to: 3 }],
+      });
+    });
+    it('passes a rejected capacity marker under availability and still accounts for the loss', async () => {
+      await journal();
+      await evict(1);
+      await evict(1);
+      const alerts: string[] = [];
+      expect(
+        await runWith(
+          async (batch) => {
+            expect(batch.records).toMatchObject([{ kind: 'gap', fromSeq: 1, toSeq: 2 }]);
+            return { outcome: 'rejected', code: 'http_status' };
+          },
+          (reason) => alerts.push(reason),
+        ),
+      ).toBe('resolved');
+      expect(alerts).toEqual(['marker_rejected']);
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        state: 'active',
+        progressSeq: 2,
+        custodySeq: 2,
+        inflightBody: null,
+      });
+      expect(await coverage()).toMatchObject({ durableCustodySeq: 2, durableAckRanges: [] });
+      expect(await runExport(async (batch) => ack(batch))).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+      });
+    });
+    it('blocks on a rejected capacity marker once the policy was raised to required', async () => {
+      await journal();
+      await evict(1);
+      await seed("UPDATE audit_chain SET policy = 'required' WHERE org_id = ?", org().orgId);
+      const alerts: string[] = [];
+      expect(
+        await runWith(
+          async () => ({ outcome: 'rejected', code: 'http_status' }),
+          (reason) => alerts.push(reason),
+        ),
+      ).toBe('resolved');
+      expect(alerts).toEqual(['blocked']);
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        state: 'blocked',
+        progressSeq: 0,
+        custodySeq: 0,
+      });
+    });
+    it('keeps an uncertain disposition when eviction moves the boundary during delivery', async () => {
+      await journal();
+      const delivered: string[] = [];
+      expect(
+        await runWith(async (batch) => {
+          delivered.push(batch.records.map((record) => record.kind).join());
+          expect(await evict()).toMatchObject({ outcome: 'evicted', evicted: 3 });
+          return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+        }),
+      ).toBe('resolved');
+      const ledger = await database.executor.all<{ kind: string; count: number }>({
+        sql: "SELECT kind, count FROM audit_ledger WHERE org_id = ? AND kind IN ('uncertain', 'gap') ORDER BY kind",
+        params: [org().orgId],
+      });
+      expect(ledger).toEqual([
+        { kind: 'gap', count: 3 },
+        { kind: 'uncertain', count: 1 },
+      ]);
+      expect(
+        await runWith(async (batch) => {
+          delivered.push(batch.records.map((record) => record.kind).join());
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect(delivered).toEqual(['event,event,event', 'delivery_uncertain']);
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+        inflightBody: null,
+      });
+      expect(await runWith(async () => Promise.reject(new Error('unexpected')))).toBe('idle');
+    });
+    it('accepts a capacity disposition only for the frozen marker inside a recorded gap', async () => {
+      const capacityRepr = '{"custodyFromSeq":1,"purpose":"capacity"}';
+      await seed(
+        `UPDATE audit_sink SET inflight_from = 1, inflight_to = 2, inflight_body = '{}',
+          inflight_repr = ? WHERE org_id = ? AND sink_id = 'archive'`,
+        capacityRepr,
+        org().orgId,
+      );
+      const save = async () => {
+        const expected = await port().read(org(), 'archive');
+        const range = { fromSeq: 1, toSeq: 2 };
+        const next: AuditExportState = {
+          ...expected.sink,
+          progressSeq: 2,
+          custodySeq: 2,
+          inflightFrom: null,
+          inflightTo: null,
+          inflightBody: null,
+          inflightRepr: JSON.stringify({
+            custodyFromSeq: 1,
+            purpose: 'idle',
+            ...auditDurableCoverage(expected.sink, undefined, [range]),
+          }),
+        };
+        return {
+          plain: () => port().save(org(), fence(), expected, next, 1),
+          wide: () =>
+            port().save(org(), fence(), expected, next, 1, {
+              capacity: { fromSeq: 1, toSeq: 3 },
+            }),
+          capacity: () => port().save(org(), fence(), expected, next, 1, { capacity: range }),
+        };
+      };
+      await expect((await save()).capacity()).rejects.toThrow('Invalid audit capacity disposition');
+      await journal();
+      await evict(1);
+      await expect((await save()).capacity()).rejects.toThrow('Invalid audit capacity disposition');
+      await evict(1);
+      const ready = await save();
+      await expect(ready.plain()).rejects.toThrow('Invalid audit durable custody frontier');
+      await expect(ready.wide()).rejects.toThrow('Invalid audit capacity disposition');
+      expect(await ready.capacity()).toBe(true);
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 2,
+        custodySeq: 2,
+      });
+    });
+  });
   describe('audit export persistence', () => {
     function incident(
       snapshot: AuditExportSnapshot,

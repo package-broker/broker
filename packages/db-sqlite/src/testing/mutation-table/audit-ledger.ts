@@ -51,9 +51,12 @@ async function seed(context: CaseContext) {
 const readerIsolation: ContractCase = {
   name: 'ledger readers see only the organization and its own visible gaps',
   async run(context) {
-    const { ownOrg, mutating } = await seed(context);
+    const { ownOrg, repository, mutating } = await seed(context);
     await expect(mutating.page(ownOrg, null, 500)).resolves.toEqual([own.first]);
     await expect(mutating.effectiveGaps(ownOrg)).resolves.toEqual([own.first]);
+    const covering = at(6, 4, 8);
+    await repository.append(ownOrg, [covering]);
+    await expect(mutating.capacityGap(ownOrg, gap.chainId, 0, 5)).resolves.toEqual(covering);
   },
 };
 
@@ -97,14 +100,14 @@ export const entries: readonly MutationEntry[] = [
         name: 'ledger readers belong to the organization',
         locate: /current\.org_id = \?/,
         neutral: '(? is not null)',
-        copies: 2,
+        copies: 3,
         caseName: readerIsolation.name,
       },
       {
         name: 'reader conflict checks see only the organization visible gaps',
         locate: /visible_gap\.org_id = \?/,
         neutral: '(? is not null)',
-        copies: 2,
+        copies: 3,
         caseName: readerIsolation.name,
       },
       {

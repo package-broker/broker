@@ -51,6 +51,7 @@ export const API_ERROR_CODES = {
   self_approval: { status: 403, message: 'You cannot approve your own publish' },
   package_binding: { status: 403, message: 'The token is bound to a different package' },
   no_trusted_publisher: { status: 403, message: 'No trusted publisher matches this workload' },
+  claim_in_use: { status: 409, message: 'This claim still covers hosted packages' },
   claim_overlap: { status: 409, message: 'This package name is already published or proxied' },
   name_public: { status: 409, message: 'This package name is already published publicly' },
   name_public_unverified: { status: 409, message: 'The public package name could not be verified' },
@@ -96,6 +97,10 @@ export const SERVICE_ERROR_TABLE = {
     invalid_pattern: { status: 400, code: 'invalid_request' },
     proxy_source: { status: 400, code: 'invalid_request' },
     pattern_taken: { status: 409, code: 'conflict' },
+    claim_in_use: { status: 409, code: 'claim_in_use' },
+    claim_overlap: { status: 409, code: 'claim_overlap' },
+    name_public: { status: 409, code: 'name_public' },
+    name_public_unverified: { status: 409, code: 'name_public_unverified' },
     invalid_name: { status: 400, code: 'invalid_request' },
   } satisfies Record<SourceError, ServiceErrorMapping>,
   VisibilityError: {

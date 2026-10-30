@@ -40,7 +40,7 @@ export function vcsProviderOptions(
 }
 export const SOURCE_TYPES = {
   composer: ['packagist_proxy', 'composer_repository', 'vcs'],
-  npm: ['npmjs_proxy', 'npm_registry'],
+  npm: ['npmjs_proxy', 'npm_registry', 'hosted'],
 } as const;
 const DEFAULT_URL = {
   packagist_proxy: 'https://repo.packagist.org',
@@ -61,6 +61,7 @@ const TYPE_DESCRIPTIONS: Partial<Record<CreateSource['type'], string>> = {
   vcs: 'Import a Composer package from GitHub or another Git repository.',
   npmjs_proxy: 'Fetch public npm packages on demand.',
   npm_registry: 'Fetch packages in selected scopes from another npm registry.',
+  hosted: 'Publish private npm packages into this organization.',
 };
 const FIELD_LABELS: Record<string, string> = {
   name: 'Source name',
@@ -281,6 +282,7 @@ function sourceChanges(
       case 'packagist_proxy':
         changes.config = { githubToken: editing && checked('config/githubToken') };
         break;
+      case 'hosted':
       case 'npmjs_proxy':
         changes.config = {};
         break;
@@ -388,7 +390,9 @@ export function SourceForm({
   vcsProviders = DEFAULT_VCS_PROVIDERS,
   initialType,
   initialProvider,
+  organization = true,
 }: {
+  organization?: boolean;
   source: Source | null;
   initialType?: CreateSource['type'] | undefined;
   initialProvider?: VcsProvider | undefined;
@@ -400,7 +404,7 @@ export function SourceForm({
   vcsProviders?: readonly VcsProvider[] | undefined;
 }) {
   const [ecosystem, setEcosystem] = useState<CreateSource['ecosystem']>(
-    source?.ecosystem ?? 'composer',
+    source?.ecosystem ?? (initialType === 'hosted' ? 'npm' : 'composer'),
   );
   const [type, setType] = useState<CreateSource['type']>(
     source?.type ?? initialType ?? 'packagist_proxy',
@@ -680,7 +684,11 @@ export function SourceForm({
                     'type',
                     type,
                     SOURCE_TYPES[ecosystem]
-                      .filter((value) => value !== 'vcs' || providerOptions.length > 0)
+                      .filter(
+                        (value) =>
+                          (value !== 'vcs' || providerOptions.length > 0) &&
+                          (value !== 'hosted' || organization),
+                      )
                       .map(
                         (value) =>
                           [value, SOURCE_TYPE_LABELS[value], TYPE_DESCRIPTIONS[value]] as const,
@@ -716,7 +724,7 @@ export function SourceForm({
                   value={DEFAULT_URL[type as keyof typeof DEFAULT_URL]}
                 />
               ) : null}
-              {!proxy && type !== 'vcs' ? (
+              {!proxy && type !== 'vcs' && type !== 'hosted' ? (
                 <div key={`network:${type}`}>
                   {input('url', {
                     required: !editing || source.url !== null,
@@ -864,7 +872,14 @@ export function SourceForm({
                   ) : null}
                 </div>
               ) : null}
-              {!editing ? (
+              {type === 'hosted' ? (
+                <p className="text-sm text-neutral-600">
+                  Register package names, then enable this source to publish. Use an exact lowercase
+                  npm name or @scope/*. A scope claim hides public packages in that scope that are
+                  not yet cached.
+                </p>
+              ) : null}
+              {!editing && type !== 'hosted' ? (
                 <p className="text-sm text-neutral-600">
                   {proxy
                     ? 'No credentials are needed to add this proxy.'

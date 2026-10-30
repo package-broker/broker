@@ -246,6 +246,7 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/sources/:source/names',
       'POST /_pb/sources/:source/names',
       'DELETE /_pb/sources/:source/names/:name',
+      'PATCH /_pb/sources/:source/names/:name',
     ],
     jobs: [],
     ownerPacket: 'T531',

@@ -13,13 +13,15 @@ const EXPECTED_MATCHES: Record<string, number> = {
   'db-sqlite/src/contract/migration-lock-contract.ts': 1,
   'db-sqlite/src/repositories/blob-references.ts': 1,
   'db-sqlite/src/repositories/catalogue-list.ts': 1,
-  'db-sqlite/src/repositories/catalogue-predicates.ts': 4,
+  'db-sqlite/src/repositories/catalogue-predicates.ts': 5,
   'db-sqlite/src/repositories/job-schedule.ts': 2,
-  'db-sqlite/src/repositories/registered-name.ts': 2,
+  'db-sqlite/src/repositories/registered-name.ts': 3,
   'db-sqlite/src/repositories/source-selection.ts': 2,
 };
 
 const DYNAMIC: Record<string, string> = {
+  'db-sqlite/src/repositories/registered-name.ts:existing.pattern':
+    'legacy registered-name overlap operand; CASE checks only that length(existing.pattern) is at most 50 characters before GLOB; it does not check ASCII or byte length',
   'db-sqlite/src/repositories/source-selection.ts:selected_pattern.value':
     'current source-selection pattern; restricted to ASCII and MAX_PATTERN_BYTES with MAX_PATTERN_WILDCARDS before matching',
   'db-sqlite/src/repositories/catalogue-list.ts:${pattern}':

@@ -29,6 +29,7 @@ import * as packageManage from './routes/package-manage.js';
 import * as importRuns from './routes/import.js';
 
 const EXPECTED_ROUTES = [
+  'PATCH /_pb/sources/:source/names/:name',
   'GET /_pb/organization',
   'GET /_pb/users',
   'PATCH /_pb/users/:user',

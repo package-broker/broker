@@ -5,6 +5,7 @@ export type SourcePackageProbe = (
   sourceId: string,
   key: string,
   signal: AbortSignal,
+  mode?: 'claim',
 ) => Promise<
   'found' | 'not_found' | 'unsupported_package' | 'unavailable' | 'upstream_refused' | 'bad_gateway'
 >;

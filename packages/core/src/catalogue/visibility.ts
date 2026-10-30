@@ -1,6 +1,6 @@
 import type { CatalogueSourceType, WinnerCandidate } from '../db/catalogue.js';
-import type { NameEcosystem } from './names.js';
-import { isValidPattern, matchesPattern, patternAdmits } from './patterns.js';
+import { MAX_NPM_NAME_LENGTH, type NameEcosystem } from './names.js';
+import { MAX_PATTERN_BYTES, isValidPattern, matchesPattern, patternAdmits } from './patterns.js';
 
 export type VisibilityOrigin = 'explicit' | 'pattern' | 'subscription';
 export type VisibilityPackageStatus = 'active' | 'removed_upstream';
@@ -74,7 +74,19 @@ const servesProject = (source: VisibilitySource, project: VisibilityProject): bo
 
 const compare = (a: string | number, b: string | number): number => (a < b ? -1 : a > b ? 1 : 0);
 
-function patternHits(pattern: string, key: string): boolean {
+function patternHits(pattern: string, key: string, ecosystem: NameEcosystem): boolean {
+  if (
+    ecosystem === 'npm' &&
+    pattern.length > MAX_PATTERN_BYTES &&
+    pattern.length <= MAX_NPM_NAME_LENGTH &&
+    /^[a-z0-9._~@!/*-]+$/.test(pattern) &&
+    (!pattern.includes('*') ||
+      (pattern.startsWith('@') &&
+        pattern.endsWith('/*') &&
+        pattern.indexOf('*') === pattern.length - 1))
+  ) {
+    return pattern === key || (pattern.endsWith('/*') && key.startsWith(pattern.slice(0, -1)));
+  }
   return !isValidPattern(pattern) || matchesPattern(pattern, key);
 }
 
@@ -133,7 +145,8 @@ function proxyBlocked(
         p.orgId === orgId && p.ecosystem === ecosystem && p.key === key && nonProxy.has(p.sourceId),
     ) ||
     config.registeredNames.some(
-      (r) => r.orgId === orgId && r.ecosystem === ecosystem && patternHits(r.pattern, key),
+      (r) =>
+        r.orgId === orgId && r.ecosystem === ecosystem && patternHits(r.pattern, key, ecosystem),
     )
   );
 }

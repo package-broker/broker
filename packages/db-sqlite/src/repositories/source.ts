@@ -336,6 +336,7 @@ export function dueStatement(ctx: OrgContext, limit: number): Statement {
       .select([...SOURCE_COLUMNS])
       .where('org_id', '=', ctx.orgId)
       .where('status', '<>', sql.lit('paused'))
+      .where('type', '<>', sql.lit('hosted'))
       .where('next_poll_at', '<=', DB_NOW)
       .orderBy('next_poll_at')
       .orderBy('id')
@@ -482,6 +483,7 @@ export function deferPollStatement(
       .where('org_id', '=', ctx.orgId)
       .where('id', '=', id)
       .where('status', '<>', sql.lit('paused'))
+      .where('type', '<>', sql.lit('hosted'))
       .where('next_poll_at', '=', expectedNextPollAt),
   );
 }

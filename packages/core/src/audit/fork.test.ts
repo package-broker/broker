@@ -41,6 +41,7 @@ function sink(overrides: Partial<AuditExportState> = {}): AuditExportState {
     inflightFrom: null,
     inflightTo: null,
     attempt: 0,
+    retryCountForSeq: 0,
     nextAttemptAt: null,
     lastErrorCode: null,
     ...overrides,
@@ -427,6 +428,8 @@ describe('restore confirmation', () => {
     const port: AuditExportPort = {
       read: async () => stored,
       page,
+      capacityGap: async () => null,
+      hold: async () => false,
       save: async (_org, _fence, expected, next) => {
         if (expected.sink !== stored.sink) return false;
         stored = { ...stored, sink: next };
@@ -446,6 +449,7 @@ describe('restore confirmation', () => {
       generation: 3,
       pluginVersion: '1.0.0',
       sourceIp: 'include' as const,
+      rejectionRetries: 'terminal' as const,
       sink: { deliver },
       now: () => now,
       resolve: vi.fn(),

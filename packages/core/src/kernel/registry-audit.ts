@@ -1,3 +1,4 @@
+import { validateAuditSkipAfter } from '../audit/export-state.js';
 import type { AuditSinkDefinition, AuditTrailDefinition, PluginDefinition } from '../plugin.js';
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/;
@@ -160,15 +161,13 @@ function snapshotSink(value: unknown): AuditSinkDefinition {
     typeof entry.create !== 'function'
   )
     throw new Error();
-  for (const [key, max] of [
-    ['maxBatchEvents', 100],
-    ['skipAfter', 10],
-  ] as const) {
+  for (const [key, max] of [['maxBatchEvents', 100]] as const) {
     const n = entry[key];
     if (n !== undefined && (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > max)) {
       throw new Error();
     }
   }
+  if (entry.skipAfter !== undefined) validateAuditSkipAfter(entry.skipAfter);
   const destination = object(entry.destination, [
     'protocol',
     'urlEnv',

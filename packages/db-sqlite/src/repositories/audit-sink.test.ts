@@ -160,6 +160,8 @@ describe('SQLite audit sink registry', () => {
       v: 1,
       sourceIp: 'omit',
       custodyFromSeq: 1,
+      durableCustodySeq: 0,
+      durableAckRanges: [],
       registryMarkers: [expect.objectContaining({ kind: 'receiver_changed' })],
     });
   });

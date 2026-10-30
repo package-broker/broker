@@ -637,3 +637,27 @@ describe('effective audit configuration', () => {
     expect(lengthReads).toBe(1);
   });
 });
+
+it.each([
+  [true, undefined, 'build'],
+  [false, 'true', 'env'],
+  [true, 'true', 'build'],
+  [true, 'false', 'build'],
+  [false, 'false', null],
+  [false, undefined, null],
+] as const)(
+  'records acceptance provenance for build %s and environment %s',
+  (accepted, environment, source) => {
+    const build = validateAuditBuild(
+      {
+        platform: 'cloudflare',
+        plugins: [trail],
+        audit: accepted ? { acceptNoDurableAudit: true } : {},
+      },
+      (name) => (name === 'PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT' ? environment : undefined),
+      'cloudflare',
+    );
+    expect(build.acceptanceSource).toBe(source);
+    expect(build.accepted).toBe(source !== null);
+  },
+);

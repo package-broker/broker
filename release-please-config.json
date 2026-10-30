@@ -79,6 +79,21 @@
       "component": "dist-cloudflare",
       "prerelease": true,
       "prerelease-type": "rc"
+    },
+    "packages/plugin-audit-trail": {
+      "component": "plugin-audit-trail",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/plugin-audit-otlp": {
+      "component": "plugin-audit-otlp",
+      "prerelease": true,
+      "prerelease-type": "rc"
+    },
+    "packages/plugin-audit-webhook": {
+      "component": "plugin-audit-webhook",
+      "prerelease": true,
+      "prerelease-type": "rc"
     }
   },
   "versioning": "prerelease",

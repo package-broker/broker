@@ -388,6 +388,24 @@ importers:
         specifier: 'catalog:'
         version: 1.4.0
 
+  packages/plugin-audit-otlp:
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
+
+  packages/plugin-audit-trail:
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
+
+  packages/plugin-audit-webhook:
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
+
   packages/plugin-github:
     devDependencies:
       '@package-broker/core':

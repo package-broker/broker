@@ -876,6 +876,7 @@ describe('runtime error path', () => {
       createKernel: () =>
         Promise.resolve({
           fetch: () => Promise.reject(new Error('kernel exploded')),
+          routeTemplates: new Set<string>(),
           registration: { routes: [], hooks: { 'access.check': [] }, bindings: new Map() },
         }),
     }));

@@ -1,4 +1,5 @@
 import { entries as auditForkEntries } from './mutation-table/audit-fork.js';
+import { entries as auditNoneEntries } from './mutation-table/audit-none.js';
 import { entries as auditPruneEntries } from './mutation-table/audit-prune.js';
 import { entries as auditJournalEntries } from './mutation-table/audit-journal.js';
 import { entries as auditTrailServicesEntries } from './mutation-table/audit-trail-services.js';
@@ -124,6 +125,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...auditNoneEntries,
   ...auditPruneEntries,
   ...sourceAttachmentCountsEntries,
   ...sourceSelectionRevisionEntries,

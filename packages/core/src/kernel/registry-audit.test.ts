@@ -248,6 +248,7 @@ describe('audit registration', () => {
     { maxBatchEvents: NaN },
     { skipAfter: 0 },
     { skipAfter: 11 },
+    { skipAfter: 'terminal' },
     { skipAfter: Infinity },
     { destination: null },
     { destination: {} },

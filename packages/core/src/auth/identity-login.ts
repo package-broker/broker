@@ -1,3 +1,8 @@
+import {
+  recordLoginFailure,
+  type LoginFailureRecorder,
+  type LoginFailureReason,
+} from './login-failure.js';
 import { auditEvent } from '../audit/actions.js';
 import { SESSION_ABSOLUTE_MS, newSessionSecrets } from './session.js';
 import type { SessionMeta, SessionService } from './session.js';
@@ -51,6 +56,7 @@ export type LoginOutcome =
   | { readonly ok: false; readonly reason: LoginRefusal };
 
 export interface IdentityLoginDeps {
+  readonly recordFailure?: LoginFailureRecorder;
   readonly users: UserRepository;
   readonly writer: LoginWriter;
   readonly sessions: SessionService;
@@ -174,6 +180,7 @@ function groupsFit(groups: readonly string[]): LoginRefusal | undefined {
 
 interface ProviderSnapshot {
   readonly id: string;
+  readonly kind: unknown;
   readonly trustAnchor: string;
   readonly policy: Required<DomainPolicy>;
 }
@@ -223,6 +230,7 @@ function snapshotProvider(provider: unknown): ProviderSnapshot {
     const emailAuthoritativeDomains = authoritative === undefined ? [] : copyDomains(authoritative);
     return {
       id,
+      kind: dataValue(provider, 'kind')?.value,
       trustAnchor,
       policy: {
         verifiedDomains,
@@ -241,6 +249,7 @@ async function attempt(
   provider: ProviderSnapshot,
   candidate: Candidate,
   meta: SessionMeta,
+  resolved: { userId: string | null },
 ): Promise<LoginOutcome | 'retry'> {
   const found: LoginLookup = await deps.users.lookupForLogin(ctx, {
     provider: provider.id,
@@ -248,6 +257,8 @@ async function attempt(
     email: candidate.email,
     groups: candidate.groups,
   });
+
+  resolved.userId = found.identityUser?.id ?? null;
 
   if (found.boundAnchor !== null && found.boundAnchor !== provider.trustAnchor) {
     return refuse('provider_rebound');
@@ -372,18 +383,20 @@ async function attempt(
  * A lost write race repeats the lookup and the `auth.resolveIdentity` hooks once, so a hook can
  * run twice for one login, possibly with another user id.
  */
-export async function completeIdentityLogin(
+async function completeIdentityLoginAttempt(
   deps: IdentityLoginDeps,
   ctx: OrgContext,
-  provider: IdentityProvider,
+  provider: { ok: true; snapshot: ProviderSnapshot } | { ok: false; error: unknown },
   identity: VerifiedIdentity,
   meta: SessionMeta,
+  resolved: { userId: string | null },
 ): Promise<LoginOutcome> {
   const copy = snapshotIdentity(identity);
   if (copy === undefined) return refuse('invalid_identity');
   const email = typeof copy.email === 'string' ? normalizeEmail(copy.email) : null;
   if (email === null) return refuse('email_missing');
-  const fixed = snapshotProvider(provider);
+  if (!provider.ok) throw provider.error;
+  const fixed = provider.snapshot;
   if (copy.provider !== fixed.id) throw new TypeError('identity was verified by another provider');
   if (!isValidSubject(copy.subject)) return refuse('invalid_identity');
   if (typeof copy.emailVerified !== 'boolean') return refuse('invalid_identity');
@@ -419,8 +432,76 @@ export async function completeIdentityLogin(
     mayCreate: decision.mayCreate,
   };
   for (let round = 0; round < WRITE_ATTEMPTS; round += 1) {
-    const result = await attempt(deps, ctx, fixed, candidate, meta);
+    const result = await attempt(deps, ctx, fixed, candidate, meta, resolved);
     if (result !== 'retry') return result;
   }
   return refuse('conflict');
+}
+
+const FAILURE_REASONS = {
+  email_missing: 'provider_error',
+  email_unverified: 'blocked',
+  domain_not_verified: 'blocked',
+  not_invited: 'unknown_account',
+  user_suspended: 'suspended',
+  hook_denied: 'blocked',
+  too_many_groups: 'blocked',
+  already_linked: 'blocked',
+  link_requires_admin: 'blocked',
+  invalid_identity: 'provider_error',
+  provider_rebound: 'state_mismatch',
+  email_changed: 'state_mismatch',
+  conflict: 'state_mismatch',
+} as const satisfies Record<LoginRefusal, LoginFailureReason>;
+
+export async function completeIdentityLogin(
+  deps: IdentityLoginDeps,
+  ctx: OrgContext,
+  provider: IdentityProvider,
+  identity: VerifiedIdentity,
+  meta: SessionMeta,
+): Promise<LoginOutcome> {
+  let captured: { ok: true; snapshot: ProviderSnapshot } | { ok: false; error: unknown };
+  try {
+    captured = { ok: true, snapshot: snapshotProvider(provider) };
+  } catch (error) {
+    captured = { ok: false, error };
+  }
+  const resolved = {
+    userId: null as string | null,
+    method:
+      captured.ok && captured.snapshot.kind === 'cloudflare-access'
+        ? ('cloudflare_access' as const)
+        : ('oidc' as const),
+  };
+  try {
+    const result = await completeIdentityLoginAttempt(
+      deps,
+      ctx,
+      captured,
+      identity,
+      meta,
+      resolved,
+    );
+    if (!result.ok)
+      recordLoginFailure(
+        deps.recordFailure,
+        ctx,
+        meta,
+        resolved.method,
+        FAILURE_REASONS[result.reason],
+        resolved.userId,
+      );
+    return result;
+  } catch (error) {
+    recordLoginFailure(
+      deps.recordFailure,
+      ctx,
+      meta,
+      resolved.method,
+      'provider_error',
+      resolved.userId,
+    );
+    throw error;
+  }
 }

@@ -96,12 +96,14 @@ async function setup(durableAck = true) {
       inflightBody: null,
       inflightRepr: JSON.stringify({ custodyFromSeq: 1, custom: 'preserved' }),
       attempt: 0,
+      retryCountForSeq: 0,
       nextAttemptAt: null,
       lastErrorCode: null,
     },
   };
   const saves: AuditExportSnapshot[] = [];
   const port: AuditExportPort = {
+    capacityGap: async () => null,
     read: vi.fn(async (ctx) => {
       expect(ctx).toEqual(org);
       return structuredClone(stored);
@@ -124,6 +126,20 @@ async function setup(durableAck = true) {
       saves.push(structuredClone(stored));
       return true;
     }),
+    hold: vi.fn(async (ctx, guard, expected, next, buildGeneration) => {
+      expect(ctx).toEqual(org);
+      expect(guard).toEqual(fence);
+      const fields = (snapshot: AuditExportSnapshot) =>
+        JSON.stringify({ ...snapshot, boundarySeq: 0, boundaryPrevHash: '' });
+      if (
+        buildGeneration < stored.highestGeneration ||
+        !active ||
+        fields(expected) !== fields(stored)
+      )
+        return false;
+      stored = { ...stored, sink: structuredClone(next) };
+      return true;
+    }),
   };
   const deliver = vi.fn<(batch: AuditBatchV1) => Promise<AuditDelivery>>(async (batch) =>
     ack(batch),
@@ -133,10 +149,10 @@ async function setup(durableAck = true) {
     generation: 1,
     pluginVersion: '1.2.3',
     sourceIp: 'omit',
+    rejectionRetries: 3,
     sink: { deliver },
     now: () => now,
     random: () => 1,
-    resolve: vi.fn(async () => {}),
   };
   return {
     port,
@@ -611,18 +627,25 @@ describe('audit delivery', () => {
   it.each([
     { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 },
     { outcome: 'rejected', code: 'http_status' },
-  ] as const)('delegates $outcome to G15b without treating it as an ACK', async (result) => {
+  ] as const)('resolves $outcome without treating it as an ACK', async (result) => {
     const f = await setup();
     f.deliver.mockResolvedValue(result);
-    expect(await f.run()).toBe('resolved');
-    expect(f.options.resolve).toHaveBeenCalledWith(
-      org,
-      fence,
-      f.get(),
-      f.deliver.mock.calls[0]![0],
-      result,
-    );
+    expect(
+      await exportAuditBatch(
+        f.port,
+        org,
+        fence,
+        { ...f.options, rejectionRetries: 'terminal' },
+        signal,
+      ),
+    ).toBe('resolved');
     expect(f.get().sink.progressSeq).toBe(0);
+    expect(JSON.parse(f.get().sink.inflightBody!).records[0].kind).toBe(
+      result.outcome === 'uncertain' ? 'delivery_uncertain' : 'tombstone',
+    );
+    expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger?.[0]?.kind).toBe(
+      result.outcome === 'uncertain' ? 'uncertain' : 'skipped',
+    );
   });
 
   it('one stalled sink does not prevent a healthy sink delivering', async () => {
@@ -810,19 +833,22 @@ describe('audit delivery', () => {
     expect(await f.run()).toBe('idle');
     expect(f.deliver).toHaveBeenCalledTimes(1);
   });
-  it.each([null, undefined, {}, { outcome: 'unexpected' }])(
-    'retries a malformed ACK without response data',
-    async (result) => {
-      const f = await setup();
-      f.deliver.mockResolvedValue(result as AuditDelivery);
-      expect(await f.run()).toBe('retry');
-      expect(f.get().sink).toMatchObject({
-        progressSeq: 0,
-        custodySeq: 0,
-        lastErrorCode: 'bad_response',
-      });
-    },
-  );
+  it.each([
+    null,
+    undefined,
+    {},
+    { outcome: 'unexpected' },
+    { outcome: 'rejected', code: 'unexpected' },
+  ])('retries a malformed ACK without response data', async (result) => {
+    const f = await setup();
+    f.deliver.mockResolvedValue(result as AuditDelivery);
+    expect(await f.run()).toBe('retry');
+    expect(f.get().sink).toMatchObject({
+      progressSeq: 0,
+      custodySeq: 0,
+      lastErrorCode: 'bad_response',
+    });
+  });
 
   it('refuses a frozen batch with a foreign record before HTTP', async () => {
     const f = await setup();
@@ -838,4 +864,542 @@ describe('audit delivery', () => {
     await expect(f.run()).rejects.toThrow('Audit sink in-flight batch malformed');
     expect(f.deliver).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('audit rejection delivery', () => {
+  async function fixture(kind = 'webhook', policy: 'availability' | 'required' = 'availability') {
+    const f = await setup(false);
+    f.change({ policy, sink: { ...f.get().sink, kind } });
+    const alert = vi.fn();
+    const options = {
+      ...f.options,
+      rejectionRetries: kind === 'otlp' ? ('terminal' as const) : 3,
+      alert,
+    };
+    const run = () => exportAuditBatch(f.port, org, fence, options, signal);
+    return { ...f, run, alert, options };
+  }
+
+  it.each(['webhook', 'otlp'])(
+    'disposes %s rejections with an independent tombstone before advancing',
+    async (kind) => {
+      const f = await fixture(kind);
+      f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'http_status' });
+      const attempts = kind === 'otlp' ? 1 : 4;
+      for (let i = 1; i <= attempts; i++) {
+        expect(await f.run()).toBe('resolved');
+        expect(f.get().sink.progressSeq).toBe(0);
+        if (i < attempts) {
+          expect(f.get().sink.retryCountForSeq).toBe(i);
+          expect(f.alert).not.toHaveBeenCalled();
+          f.advance();
+        }
+      }
+      expect(f.alert).toHaveBeenCalledExactlyOnceWith('skipped');
+      const save = vi.mocked(f.port.save).mock.calls.at(-1)!;
+      expect(save[5]?.ledger).toEqual([
+        expect.objectContaining({ kind: 'skipped', sinkId: 'test', fromSeq: 1, toSeq: 1 }),
+      ]);
+      expect(f.get().sink.custodySeq).toBe(1);
+      const marker = JSON.parse(f.get().sink.inflightBody!).records[0];
+      expect(marker).toMatchObject({ kind: 'tombstone', seq: 1 });
+      expect(marker.markerId).not.toBe(f.row.id);
+      f.deliver.mockImplementation(async (batch) => ack(batch));
+      expect(await f.run()).toBe('accepted');
+      expect(f.get().sink).toMatchObject({ progressSeq: 1, custodySeq: 1, retryCountForSeq: 0 });
+      // A late duplicate of the original cannot replace the recorded disposition.
+      expect(await f.run()).toBe('idle');
+      expect(f.deliver.mock.calls.at(-1)![0].records[0]?.kind).toBe('tombstone');
+    },
+  );
+
+  it.each([
+    ['custom-otlp', 'terminal', 1],
+    ['otlp', 1, 2],
+  ] as const)(
+    'uses protocol retry policy for kind %s',
+    async (kind, rejectionRetries, attempts) => {
+      const f = await fixture(kind);
+      f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'too_large' });
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        await exportAuditBatch(f.port, org, fence, { ...f.options, rejectionRetries }, signal);
+        expect(f.get().sink.lastErrorCode).toBe('too_large');
+        expect(f.alert).toHaveBeenCalledTimes(attempt === attempts ? 1 : 0);
+        f.advance();
+      }
+      expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger?.[0]?.reasonCode).toBe(
+        'too_large',
+      );
+    },
+  );
+
+  it.each(['range', 'prevHash'])('refuses a corrupt frozen tombstone %s', async (corruption) => {
+    const f = await fixture('otlp');
+    f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'refused' });
+    await f.run();
+    const sink = f.get().sink;
+    const batch = JSON.parse(sink.inflightBody!);
+    if (corruption === 'prevHash') batch.records[0].prevHash = 'f'.repeat(64);
+    f.change({
+      sink: {
+        ...sink,
+        inflightFrom: corruption === 'range' ? 0 : sink.inflightFrom,
+        inflightBody: JSON.stringify(batch),
+      },
+    });
+    await expect(f.run()).rejects.toThrow('Audit sink in-flight batch malformed');
+    expect(f.deliver).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['availability', 'required'] as const)(
+    'handles a rejected registry marker under %s',
+    async (policy) => {
+      const f = await fixture('otlp', policy);
+      f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+      await f.run();
+      const sink = f.get().sink;
+      const marker = { kind: 'cutover', chainId, epoch: 0, markerId: 'marker' };
+      f.change({
+        sink: {
+          ...sink,
+          nextAttemptAt: null,
+          inflightRepr: JSON.stringify({
+            ...JSON.parse(sink.inflightRepr!),
+            registryMarkers: [marker],
+          }),
+        },
+      });
+      f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'refused' });
+      await f.run();
+      expect(f.get().sink.state).toBe(policy === 'required' ? 'blocked' : 'active');
+      expect(f.get().sink.inflightBody).toBe(sink.inflightBody);
+      expect(f.alert).toHaveBeenCalledWith(policy === 'required' ? 'blocked' : 'marker_rejected');
+      if (policy === 'availability') {
+        expect(JSON.parse(f.get().sink.inflightRepr!).registryMarkers).toBeUndefined();
+        expect(f.get().sink.lastErrorCode).toBe('network');
+      }
+    },
+  );
+
+  it('retains registry markers queued after a frozen rejected marker batch', async () => {
+    const f = await fixture('otlp');
+    const first = { kind: 'cutover', chainId, epoch: 0, markerId: 'first' };
+    const later = { ...first, markerId: 'later' };
+    const sink = f.get().sink;
+    f.change({
+      sink: {
+        ...sink,
+        inflightRepr: JSON.stringify({
+          custodyFromSeq: 1,
+          registryMarkers: [first, later],
+          registryMarkerOriginalAttempt: 0,
+          registryMarkerBody: JSON.stringify({
+            v: 1,
+            orgId: org.orgId,
+            chainId,
+            epoch: 0,
+            records: [first],
+            throughSeq: 0,
+            throughHash: hash,
+          }),
+        }),
+      },
+    });
+    f.deliver.mockResolvedValue({
+      outcome: 'uncertain',
+      code: 'partial_rejected',
+      rejectedCount: 1,
+    });
+    await f.run();
+    expect(JSON.parse(f.get().sink.inflightRepr!).registryMarkers).toEqual([later]);
+    expect(f.get().sink.state).toBe('active');
+    expect(f.alert).toHaveBeenCalledWith('marker_rejected');
+  });
+
+  it('passes a rejected tombstone under availability without disposing evidence again', async () => {
+    const f = await fixture('otlp');
+    f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'http_status' });
+    await f.run();
+    await f.run();
+    expect(f.get().sink).toMatchObject({ state: 'active', progressSeq: 1, inflightBody: null });
+    expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger).toBeUndefined();
+    expect(f.alert.mock.calls).toEqual([['skipped'], ['marker_rejected']]);
+  });
+
+  it.each(['availability', 'required'] as const)(
+    'never replays a partially accepted request under %s',
+    async (policy) => {
+      const f = await fixture('otlp', policy);
+      f.deliver.mockResolvedValueOnce({
+        outcome: 'uncertain',
+        code: 'partial_rejected',
+        rejectedCount: 1,
+      });
+      await f.run();
+      expect(f.alert.mock.calls).toEqual(
+        policy === 'required' ? [['uncertain'], ['blocked']] : [['uncertain']],
+      );
+      expect(f.get().sink).toMatchObject({
+        progressSeq: 0,
+        custodySeq: 1,
+        state: policy === 'required' ? 'blocked' : 'active',
+      });
+      expect(JSON.parse(f.get().sink.inflightBody!).records[0].kind).toBe('delivery_uncertain');
+      expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger?.[0]?.kind).toBe('uncertain');
+      if (policy === 'required') {
+        expect(await f.run()).toBe('idle');
+        f.change({ sink: { ...f.get().sink, state: 'active', blockedReason: null } });
+      }
+      expect(await f.run()).toBe('accepted');
+      expect(f.deliver.mock.calls[1]![0].records[0]?.kind).toBe('delivery_uncertain');
+      expect(f.get().sink.progressSeq).toBe(1);
+    },
+  );
+
+  it('records the known rejected count rather than the uncertain span', async () => {
+    const f = await fixture('otlp');
+    const second = { ...f.row, seq: 2, id: '01J00000000000000000000009', prev_hash: f.row.hash };
+    second.hash = await hashRow(second.prev_hash, second);
+    f.port.page = async () => [f.row, second];
+    f.deliver.mockResolvedValue({
+      outcome: 'uncertain',
+      code: 'partial_rejected',
+      rejectedCount: 1,
+    });
+    await f.run();
+    expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger).toEqual([
+      expect.objectContaining({ kind: 'uncertain', fromSeq: 1, toSeq: 2, count: 1 }),
+    ]);
+  });
+
+  it('blocks a required single-record rejection without disposing it', async () => {
+    const f = await fixture('webhook', 'required');
+    f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'http_status' });
+    await f.run();
+    expect(f.get().sink).toMatchObject({
+      state: 'blocked',
+      blockedReason: 'rejected',
+      progressSeq: 0,
+      custodySeq: 0,
+    });
+    expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger).toBeUndefined();
+    expect(f.alert).toHaveBeenCalledExactlyOnceWith('blocked');
+  });
+
+  it('bisects a poison batch and preserves the frozen suffix through nested splits', async () => {
+    const f = await fixture('otlp');
+    const rows = [f.row];
+    for (let seq = 2; seq <= 4; seq++) {
+      const row = {
+        ...f.row,
+        seq,
+        id: `01J0000000000000000000000${seq + 3}`,
+        prev_hash: rows.at(-1)!.hash,
+      };
+      row.hash = await hashRow(row.prev_hash, row);
+      rows.push(row);
+    }
+    f.port.page = async (_org, after) => rows.filter((row) => row.seq > after);
+    f.deliver.mockImplementation(async (batch) =>
+      batch.records.some((record) => record.kind === 'event' && record.seq === 2)
+        ? { outcome: 'rejected', code: 'http_status' }
+        : ack(batch),
+    );
+    await f.run();
+    const frozen = f.deliver.mock.calls[0]![0];
+    await f.run();
+    expect(await f.run()).toBe('accepted');
+    rows[2]!.payload_json = '{}';
+    await f.run();
+    expect(await f.run()).toBe('accepted');
+    expect(await f.run()).toBe('accepted');
+    expect(
+      f.deliver.mock.calls.map(([batch]) =>
+        batch.records.map((r) => (r.kind === 'event' ? r.seq : r.kind)),
+      ),
+    ).toEqual([[1, 2, 3, 4], [1, 2], [1], [2], ['tombstone'], [3, 4]]);
+    expect(f.deliver.mock.calls.at(-1)![0].records).toEqual(frozen.records.slice(2));
+    expect(f.get().sink.progressSeq).toBe(4);
+  });
+
+  it('rejects a late original ACK after another worker commits the tombstone', async () => {
+    const f = await fixture('otlp');
+    let release!: (result: AuditDelivery) => void;
+    f.deliver.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const late = f.run();
+    await vi.waitFor(() => expect(f.deliver).toHaveBeenCalledTimes(1));
+    f.deliver.mockResolvedValueOnce({ outcome: 'rejected', code: 'http_status' });
+    expect(await f.run()).toBe('resolved');
+    expect(await f.run()).toBe('accepted');
+    const committed = structuredClone(f.get());
+    release(ack(f.deliver.mock.calls[0]![0]));
+    expect(await late).toBe('contended');
+    expect(f.get()).toEqual(committed);
+    expect(f.alert).toHaveBeenCalledExactlyOnceWith('skipped');
+  });
+
+  it('recovers a lost disposition commit response by sending only the marker', async () => {
+    const f = await fixture('otlp');
+    f.deliver.mockResolvedValueOnce({
+      outcome: 'uncertain',
+      code: 'partial_rejected',
+      rejectedCount: 1,
+    });
+    const save = f.port.save;
+    f.port.save = async (...args) => {
+      const saved = await save(...args);
+      if (args[5]?.ledger?.some((entry) => entry.kind === 'uncertain'))
+        throw new Error('lost commit response');
+      return saved;
+    };
+    await expect(f.run()).rejects.toThrow('lost commit response');
+    f.port.save = save;
+    expect(await f.run()).toBe('accepted');
+    expect(f.deliver.mock.calls[1]![0].records[0]?.kind).toBe('delivery_uncertain');
+    expect(f.get().sink.progressSeq).toBe(1);
+  });
+
+  it('retryable transport failures never increment the rejection counter or skip', async () => {
+    const f = await fixture('otlp');
+    f.deliver.mockResolvedValue({ outcome: 'retry', code: 'network' });
+    for (let i = 0; i < 12; i++) {
+      await f.run();
+      f.advance();
+    }
+    expect(f.get().sink).toMatchObject({ progressSeq: 0, retryCountForSeq: 0 });
+    expect(f.alert).not.toHaveBeenCalled();
+  });
+
+  it('does not record or alert a disposition after lease expiry during HTTP', async () => {
+    const f = await fixture('otlp');
+    f.deliver.mockImplementation(async () => {
+      f.expire();
+      return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+    });
+    await f.run();
+    expect(f.get().sink).toMatchObject({ progressSeq: 0, custodySeq: 0, state: 'active' });
+    expect(f.alert).not.toHaveBeenCalled();
+    expect(JSON.parse(f.get().sink.inflightBody!).records[0].kind).toBe('event');
+  });
+
+  it.each([0, -1, 11, 1.5])('refuses invalid skipAfter %s before delivery', async (skipAfter) => {
+    const f = await fixture();
+    expect(() => auditExportJob(f.port, { ...f.options, rejectionRetries: skipAfter })).toThrow(
+      'Invalid audit rejection configuration',
+    );
+    expect(f.deliver).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, 2, 1.5, NaN])(
+    'disposes an invalid partial-success count %s as unknown uncertainty',
+    async (rejectedCount) => {
+      const f = await fixture('otlp');
+      f.deliver.mockResolvedValue({
+        outcome: 'uncertain',
+        code: 'partial_rejected',
+        rejectedCount,
+      });
+      await f.run();
+      expect(f.get().sink).toMatchObject({
+        progressSeq: 0,
+        custodySeq: 1,
+        lastErrorCode: 'partial_rejected',
+      });
+      expect(f.alert).toHaveBeenCalledWith('uncertain');
+      expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger?.[0]?.count).toBe(1);
+      expect(JSON.parse(f.get().sink.inflightBody!).records[0].kind).toBe('delivery_uncertain');
+    },
+  );
+
+  it('emits allowlisted loss alerts through production observability', async () => {
+    const f = await fixture('otlp');
+    f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'http_status' });
+    const emit = vi.fn();
+    const observability = createObservability(
+      { emit },
+      {
+        deploymentId: 'test',
+        runtime: 'node',
+        requestId: '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11',
+      },
+      { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+    );
+    await auditExportJob(f.port, f.options).handler({}, {
+      org,
+      signal,
+      fences: jobFences(lease),
+      observability,
+    } as unknown as JobContext);
+    expect(emit).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenNthCalledWith(1, {
+      kind: 'log',
+      record: expect.objectContaining({
+        event: 'audit.delivery_loss',
+        reason_code: 'audit.skipped',
+        sink_id: 'test',
+      }),
+    });
+  });
+
+  it('records withheld payloads once with the frozen representation and alerts', async () => {
+    const f = await fixture();
+    f.row.payload_json = '{}';
+    f.deliver.mockResolvedValue({ outcome: 'retry', code: 'network' });
+    await f.run();
+    expect(vi.mocked(f.port.save).mock.calls[0]![5]?.ledger?.[0]).toMatchObject({
+      kind: 'withheld',
+      fromSeq: 1,
+      toSeq: 1,
+      reasonCode: JSON.parse(f.get().sink.inflightBody!).records[0].reasonCode,
+    });
+    f.advance();
+    await f.run();
+    expect(f.alert).toHaveBeenCalledExactlyOnceWith('withheld');
+  });
+});
+
+it('bounds capacity reconciliation even when the port returns one row per sequence', async () => {
+  const f = await setup();
+  const capacityGap = vi.fn<AuditExportPort['capacityGap']>(
+    async (_org, _snapshot, afterSeq: number) => ({
+      id: 'gap',
+      fromSeq: afterSeq + 1,
+      toSeq: afterSeq + 1,
+      count: 1,
+      modeGeneration: 0,
+      prevHash: hash,
+      hash,
+    }),
+  );
+  f.port.capacityGap = capacityGap;
+  // The initial lookup must still allow the event batch to freeze.
+  capacityGap.mockResolvedValueOnce(null);
+  f.deliver.mockImplementation(async (batch) => {
+    f.change({ boundarySeq: 102, boundaryPrevHash: hash });
+    return ack(batch);
+  });
+  expect(await f.run()).toBe('contended');
+  expect(capacityGap).toHaveBeenCalledTimes(101);
+  expect(f.get().sink.progressSeq).toBe(0);
+});
+
+it.each([1, 2])(
+  'rejects a clipped capacity marker with original count %s before delivery',
+  async (count) => {
+    const f = await setup();
+    f.change({ sink: { ...f.get().sink, progressSeq: 2 } });
+    f.port.capacityGap = async () => ({
+      id: 'gap',
+      fromSeq: 1,
+      toSeq: 3,
+      count,
+      modeGeneration: 0,
+      prevHash: hash,
+      hash,
+    });
+    await expect(f.run()).rejects.toThrow('Audit delivery range unavailable');
+    expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.port.save).not.toHaveBeenCalled();
+  },
+);
+
+describe('held partial success behind queued registry markers', () => {
+  it.each([
+    { outcome: 'rejected', code: 'refused' },
+    { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 },
+  ] as const)('keeps the held outcome when a queued marker is $outcome', async (markerResult) => {
+    const f = await setup(false);
+    const alert = vi.fn();
+    const options: AuditExportOptions = { ...f.options, rejectionRetries: 'terminal', alert };
+    const run = () => exportAuditBatch(f.port, org, fence, options, signal);
+    f.deliver.mockImplementationOnce(async () => {
+      f.change({ boundarySeq: 2, boundaryPrevHash: f.row.hash });
+      return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+    });
+    expect(await run()).toBe('contended');
+    const held = f.get().sink;
+    expect(JSON.parse(held.inflightRepr!)).toMatchObject({
+      purpose: 'events',
+      uncertainOutcome: { rejectedCount: 1 },
+    });
+    const marker = { kind: 'cutover', chainId, epoch: 0, markerId: 'marker' };
+    f.change({
+      sink: {
+        ...held,
+        inflightRepr: JSON.stringify({
+          ...JSON.parse(held.inflightRepr!),
+          registryMarkers: [marker],
+        }),
+      },
+    });
+    f.deliver.mockResolvedValueOnce(markerResult);
+    expect(await run()).toBe('resolved');
+    expect(f.deliver.mock.calls[1]![0].records).toEqual([marker]);
+    expect(alert).toHaveBeenCalledWith('marker_rejected');
+    const after = JSON.parse(f.get().sink.inflightRepr!);
+    expect(after.registryMarkers).toBeUndefined();
+    expect(after).toMatchObject({ purpose: 'events', uncertainOutcome: { rejectedCount: 1 } });
+    expect(f.get().sink.inflightBody).toBe(held.inflightBody);
+    expect(await run()).toBe('resolved');
+    expect(f.deliver).toHaveBeenCalledTimes(2);
+    expect(alert).toHaveBeenCalledWith('uncertain');
+    const disposition = JSON.parse(f.get().sink.inflightRepr!);
+    expect(disposition.purpose).toBe('disposition');
+    expect(disposition.uncertainOutcome).toBeUndefined();
+    expect(JSON.parse(f.get().sink.inflightBody!).records).toMatchObject([
+      { kind: 'delivery_uncertain', fromSeq: 1, toSeq: 1 },
+    ]);
+  });
+});
+
+it('logs and counts a partial success that could not be held', async () => {
+  const f = await setup(false);
+  f.deliver.mockImplementationOnce(async () => {
+    f.expire();
+    return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+  });
+  const emit = vi.fn();
+  const observability = createObservability(
+    { emit },
+    {
+      deploymentId: 'test',
+      runtime: 'node',
+      requestId: '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11',
+    },
+    { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+  );
+  const alert = vi.fn();
+  const holdFailed = vi.fn();
+  await auditExportJob(f.port, {
+    ...f.options,
+    rejectionRetries: 'terminal',
+    alert,
+    holdFailed,
+  }).handler({}, {
+    org,
+    signal,
+    fences: jobFences(lease),
+    observability,
+  } as unknown as JobContext);
+  expect(f.port.hold).toHaveBeenCalledTimes(1);
+  expect(holdFailed).toHaveBeenCalledTimes(1);
+  expect(alert).not.toHaveBeenCalled();
+  expect(emit.mock.calls.map(([record]) => record)).toEqual([
+    {
+      kind: 'log',
+      record: expect.objectContaining({
+        level: 'error',
+        event: 'audit.delivery_loss',
+        reason_code: 'audit.hold_failed',
+        sink_id: 'test',
+      }),
+    },
+    { kind: 'counter', name: 'pb.audit.hold_failed_total', labels: {}, value: 1 },
+  ]);
+  expect(JSON.parse(f.get().sink.inflightRepr!).uncertainOutcome).toBeUndefined();
 });

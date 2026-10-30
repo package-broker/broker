@@ -1,3 +1,4 @@
+import type { LoginFailureRecorder } from './login-failure.js';
 import { reauthenticateWithIdentity } from './identity-reauth.js';
 import type { IdentityReauthDeps } from './identity-reauth.js';
 import { completeIdentityLogin } from './identity-login.js';
@@ -50,6 +51,7 @@ export interface AuthRepositories {
 }
 
 export interface AuthModuleOptions {
+  readonly recordFailure?: LoginFailureRecorder;
   readonly repositories: AuthRepositories;
   readonly keyring: Keyring;
   readonly clock: Clock;
@@ -223,7 +225,10 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   });
   const stateCipher = createSecretCipher(keyring, 'login-state');
 
+  const failure =
+    options.recordFailure === undefined ? {} : { recordFailure: options.recordFailure };
   const loginDeps: IdentityLoginDeps = {
+    ...failure,
     users: repositories.users,
     writer: repositories.login,
     sessions,
@@ -232,6 +237,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     ids,
   };
   const reauthDeps: IdentityReauthDeps = {
+    ...failure,
     users: repositories.users,
     sessions: repositories.sessions,
     clock,
@@ -239,6 +245,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   };
 
   const localService = createLocalLoginService({
+    ...failure,
     reader: localReader,
     writer: repositories.localSuccess,
     credentials,

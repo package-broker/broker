@@ -1,3 +1,10 @@
+import {
+  auditCapacityReserveBytes,
+  evictAudit,
+  type AuditCapacityOptions,
+  type AuditCapacityPort,
+} from '@package-broker/core/audit/capacity';
+import { ulid } from '@package-broker/core/ids';
 import { AUDIT_VERIFIED_EXPORT } from '@package-broker/core/audit/ledger';
 import type {
   AuditPruneOptions,
@@ -10,6 +17,7 @@ import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db
 import { sql } from 'kysely';
 import { noopObservability, type Observability } from '@package-broker/core/platform/observability';
 import { assertCheck } from '../kysely.js';
+import { auditLedgerError, createAuditLedgerRepository } from './audit-ledger.js';
 import { clearAuditVerificationStatements } from './audit-verify.js';
 
 const columns = [
@@ -52,6 +60,7 @@ type Chain = {
   head_hash: string;
   journal_rows: number;
   journal_bytes: number;
+  capacity_evict_to: number | null;
 };
 type Candidate = { seq: number; hash: string; bytes: number; row_json: string };
 
@@ -83,7 +92,7 @@ function eligible(ctx: OrgContext, options: AuditPruneOptions, through: number):
         AND s.state NOT IN ('inactive', 'retired') AND s.progress_seq < ?)
       AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ?
         AND s.state NOT IN ('inactive', 'retired') AND s.inflight_from <= ?
-        AND coalesce(json_extract(s.inflight_repr, '$.purpose'), '') != 'registry_markers')
+        AND coalesce(json_extract(s.inflight_repr, '$.purpose'), '') NOT IN ('marker', 'registry_markers', 'disposition', 'capacity'))
       AND (
         (coalesce(c.pending_mode, c.mode) = 'none' AND c.policy = 'availability'
           AND EXISTS (SELECT 1 FROM audit_ledger l WHERE l.org_id = ?
@@ -122,16 +131,87 @@ function eligible(ctx: OrgContext, options: AuditPruneOptions, through: number):
   };
 }
 
+const sinkFence = `SELECT json_group_array(json(snapshot)) AS snapshot FROM (
+  SELECT json_object('id', s.sink_id, 'generation', s.generation,
+    'from', CASE WHEN coalesce(json_extract(s.inflight_repr, '$.purpose'), '')
+      NOT IN ('marker', 'registry_markers', 'disposition', 'capacity') THEN s.inflight_from END,
+    'to', CASE WHEN coalesce(json_extract(s.inflight_repr, '$.purpose'), '')
+      NOT IN ('marker', 'registry_markers', 'disposition', 'capacity') THEN s.inflight_to END) AS snapshot
+  FROM audit_sink s WHERE s.org_id = ? ORDER BY s.sink_id)`;
+
+const sinkSnapshot = `SELECT json_group_array(json(snapshot)) AS snapshot FROM (
+  SELECT json_object('id', s.sink_id, 'state', s.state, 'progress', s.progress_seq) AS snapshot
+  FROM audit_sink s WHERE s.org_id = ? ORDER BY s.sink_id)`;
+
+function capacityLowWater(options: AuditCapacityOptions): number {
+  return options.maxJournalBytes - Math.ceil(options.maxJournalBytes / 20);
+}
+
+/** A budget raised during a cycle lifts its target to the new low-water mark. */
+function effectiveTarget(chain: Chain, options: AuditCapacityOptions): number {
+  return Math.max(chain.capacity_evict_to ?? 0, capacityLowWater(options));
+}
+
+/** A cycle starts at the reserve and continues across bounded batches until its stored target. */
+function capacityEligible(ctx: OrgContext, options: AuditCapacityOptions): Statement {
+  return {
+    sql: `c.restore_pending = 0 AND c.policy = 'availability'
+      AND (c.journal_bytes >= ? OR c.journal_bytes > max(c.capacity_evict_to, ?))
+      AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ? AND s.generation > ?)`,
+    params: [
+      options.maxJournalBytes - auditCapacityReserveBytes(options.maxJournalBytes),
+      capacityLowWater(options),
+      ctx.orgId,
+      options.generation,
+    ],
+  };
+}
+
 export function createAuditPruneRepository(
   executor: SqlExecutor,
   observability: Observability = noopObservability,
-): AuditPrunePort {
-  async function prune(ctx: OrgContext, options: AuditPruneOptions): Promise<AuditPruneOutcome> {
-    const [chain] = await executor.all<Chain>({
-      sql: 'SELECT * FROM audit_chain WHERE org_id = ?',
-      params: [ctx.orgId],
-    });
-    if (chain === undefined) throw new Error('Audit chain unavailable');
+): AuditPrunePort & AuditCapacityPort {
+  async function prune(
+    ctx: OrgContext,
+    options: AuditPruneOptions | AuditCapacityOptions,
+  ): Promise<AuditPruneOutcome> {
+    const capacity = 'maxJournalBytes' in options ? options : undefined;
+    const retention = 'configuredSinkIds' in options ? options : undefined;
+    const readChain = async () => {
+      const [row] = await executor.all<Chain>({
+        sql: 'SELECT * FROM audit_chain WHERE org_id = ?',
+        params: [ctx.orgId],
+      });
+      if (row === undefined) throw new Error('Audit chain unavailable');
+      return row;
+    };
+    let chain = await readChain();
+    if (
+      capacity !== undefined &&
+      chain.capacity_evict_to !== null &&
+      chain.journal_bytes <= Math.max(chain.capacity_evict_to, capacityLowWater(capacity))
+    ) {
+      await executor.batch([
+        {
+          sql: `UPDATE audit_chain SET capacity_evict_to = NULL
+            WHERE org_id = ? AND journal_bytes <= max(capacity_evict_to, ?)`,
+          params: [ctx.orgId, capacityLowWater(capacity)],
+        },
+      ]);
+      chain = await readChain();
+    }
+    const capacityGuard = capacity === undefined ? undefined : capacityEligible(ctx, capacity);
+    const [fence] =
+      capacity === undefined
+        ? []
+        : await executor.all<{ snapshot: string }>({ sql: sinkFence, params: [ctx.orgId] });
+    const [sinks] =
+      capacity === undefined
+        ? []
+        : await executor.all<{ snapshot: string }>({
+            sql: sinkSnapshot,
+            params: [ctx.orgId],
+          });
     const candidates = await executor.all<Candidate>({
       sql: `WITH snapshot AS MATERIALIZED (SELECT e.seq, e.hash, ${rowJson} AS row_json
         FROM audit_event e WHERE e.org_id = ? AND e.seq >= ? AND e.seq <= ? AND e.seq < 9007199254740991 ORDER BY e.seq LIMIT ?)
@@ -142,9 +222,9 @@ export function createAuditPruneRepository(
     let selected: readonly Candidate[] = [];
     let low = 0;
     let high = candidates.length - 1;
-    while (low <= high) {
+    while (capacity === undefined && low <= high) {
       const middle = Math.floor((low + high) / 2);
-      const guard = eligible(ctx, options, candidates.at(middle)!.seq);
+      const guard = eligible(ctx, retention!, candidates.at(middle)!.seq);
       const rows = await executor.all({
         sql: `SELECT 1 FROM audit_chain c WHERE c.org_id = ? AND ${guard.sql}`,
         params: [ctx.orgId, ...guard.params],
@@ -154,10 +234,40 @@ export function createAuditPruneRepository(
         low = middle + 1;
       } else high = middle - 1;
     }
+    if (capacity !== undefined) {
+      const allowed = await executor.all({
+        sql: `SELECT 1 FROM audit_chain c WHERE c.org_id = ? AND ${capacityGuard!.sql}`,
+        params: [ctx.orgId, ...capacityGuard!.params],
+      });
+      if (allowed.length === 0) return { outcome: 'retained' };
+      const lowWater = effectiveTarget(chain, capacity);
+      let removed = 0;
+      const prefix: Candidate[] = [];
+      for (const row of candidates) {
+        if (row.seq !== chain.boundary_seq + prefix.length) break;
+        if (removed >= chain.journal_bytes - lowWater) break;
+        prefix.push(row);
+        removed += row.bytes;
+      }
+      selected = prefix;
+    }
+    // One snapshot assertion per chunk leaves room for all other atomic statements.
+    selected = snapshotChunks(selected).slice(0, 180).flat();
     const last = selected.at(-1);
     if (last === undefined) return { outcome: 'retained' };
-    const guard = eligible(ctx, options, last.seq);
+    const guard = capacity === undefined ? eligible(ctx, retention!, last.seq) : capacityGuard!;
+    const sinkGuard: Statement =
+      capacity === undefined
+        ? { sql: '1', params: [] }
+        : {
+            sql: `(${sinkFence}) = ?`,
+            params: [ctx.orgId, fence!.snapshot],
+          };
     const bytes = selected.reduce((sum, row) => sum + row.bytes, 0);
+    // Capacity loss is not an export: only a retention prune completes a pending cutover.
+    const capacityCutover = capacity === undefined ? last.seq : null;
+    // Any journal reduction that reaches the stored target ends the eviction cycle in the same CAS.
+    const cycleTarget = capacity === undefined ? null : effectiveTarget(chain, capacity);
     const integrity: Statement = {
       sql: `NOT EXISTS (SELECT 1 FROM audit_event anchor WHERE anchor.org_id = ?
             AND anchor.seq = c.boundary_seq AND anchor.prev_hash != c.boundary_prev_hash)
@@ -191,17 +301,31 @@ export function createAuditPruneRepository(
     };
     const statements: Statement[] = [
       {
-        sql: `UPDATE audit_chain AS c SET boundary_seq = ?, boundary_prev_hash = ?, boundary_reason = 'prune',
-          journal_rows = journal_rows - ?, journal_bytes = max(0, journal_bytes - ?)
+        sql: `UPDATE audit_chain AS c SET boundary_seq = ?, boundary_prev_hash = ?, boundary_reason = ?,
+          journal_rows = journal_rows - ?, journal_bytes = max(0, journal_bytes - ?),
+          mode = CASE WHEN ? >= c.cutover_seq THEN coalesce(c.pending_mode, c.mode) ELSE c.mode END,
+          pending_mode = CASE WHEN ? >= c.cutover_seq THEN NULL ELSE c.pending_mode END,
+          capacity_evict_to = CASE WHEN ? IS NOT NULL THEN
+              CASE WHEN max(0, c.journal_bytes - ?) > ? THEN ? END
+            WHEN max(0, c.journal_bytes - ?) <= c.capacity_evict_to THEN NULL
+            ELSE c.capacity_evict_to END
           WHERE c.org_id = ? AND ${chainFields.map((key) => `c.${key} IS ?`).join(' AND ')}
-          AND ${guard.sql}
+          AND ${guard.sql} AND ${sinkGuard.sql}
           AND c.journal_rows >= ? AND ${integrity.sql}
           AND (SELECT count(*) FROM audit_event prefix WHERE prefix.org_id = ?
             AND prefix.seq >= ? AND prefix.seq <= ?) = ?`,
         params: [
           last.seq + 1,
           last.hash,
+          capacity === undefined ? 'prune' : 'capacity',
           selected.length,
+          bytes,
+          capacityCutover,
+          capacityCutover,
+          cycleTarget,
+          bytes,
+          cycleTarget,
+          cycleTarget,
           bytes,
           ctx.orgId,
           chain.chain_id,
@@ -212,6 +336,7 @@ export function createAuditPruneRepository(
           chain.boundary_seq,
           chain.boundary_prev_hash,
           ...guard.params,
+          ...sinkGuard.params,
           selected.length,
           ...integrity.params,
           ctx.orgId,
@@ -228,6 +353,40 @@ export function createAuditPruneRepository(
         )) = ${`[${chunk.map((row) => row.row_json).join(',')}]`}`),
       ),
     ];
+    if (capacity !== undefined) {
+      const affectedSinkIds = (
+        JSON.parse(sinks!.snapshot) as { id: string; state: string; progress: number }[]
+      )
+        .filter((s) => !['inactive', 'retired'].includes(s.state) && s.progress < last.seq)
+        .map((s) => s.id)
+        .sort();
+      statements.push(
+        ...createAuditLedgerRepository(executor).statements(ctx, [
+          {
+            id: ulid(),
+            kind: 'gap',
+            chainId: chain.chain_id,
+            epoch: chain.epoch,
+            fromSeq: chain.boundary_seq,
+            toSeq: last.seq,
+            count: selected.length,
+            sinkId: null,
+            reasonCode: 'capacity',
+            capacity: {
+              prevHash: chain.boundary_prev_hash,
+              hash: last.hash,
+              affectedSinkIds: affectedSinkIds.slice(0, 1000),
+              ...(affectedSinkIds.length > 1000 ? { affectedSinkIdsOverflow: true as const } : {}),
+            },
+            policy: 'availability',
+            modeGeneration: chain.mode_generation,
+            actorType: 'system',
+            actorId: null,
+            createdAt: new Date().toISOString(),
+          },
+        ]),
+      );
+    }
     const deleteIndex = statements.length;
     statements.push(
       {
@@ -239,6 +398,10 @@ export function createAuditPruneRepository(
     try {
       const results = await executor.batch(statements);
       const deleted = results.at(deleteIndex)!.rows.length;
+      if (capacity !== undefined) {
+        observability.log({ level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' });
+        observability.counter('pb.audit.loss_events_total', { kind: 'gap' }, deleted);
+      }
       return { outcome: 'pruned', pruned: deleted, boundarySeq: last.seq + 1 };
     } catch (error) {
       if (
@@ -263,7 +426,7 @@ export function createAuditPruneRepository(
           observability.log({
             level: 'error',
             event: 'audit.chain_integrity',
-            reason_code: 'prune_anchor',
+            reason_code: 'audit.prune_anchor',
           });
           observability.counter('pb.audit.chain_integrity');
         }
@@ -281,13 +444,27 @@ export function createAuditPruneRepository(
           current.integrity_incidents !== chain.integrity_incidents ||
           current.boundary_seq !== chain.boundary_seq ||
           current.boundary_prev_hash !== chain.boundary_prev_hash ||
+          (capacity !== undefined &&
+            (await executor.all<{ snapshot: string }>({ sql: sinkFence, params: [ctx.orgId] }))[0]
+              ?.snapshot !== fence!.snapshot) ||
           JSON.stringify(currentRows.map((row) => row.row_json)) !==
             JSON.stringify(selected.map((row) => row.row_json));
         return { outcome: changed ? 'contended' : 'retained' };
       }
-      throw error;
+      throw auditLedgerError(error);
     }
   }
-  const port: AuditPrunePort = { prune };
-  return { prune: (ctx, options) => pruneAudit(port, ctx, options) };
+  const port: AuditPrunePort & AuditCapacityPort = {
+    prune,
+    async evict(ctx, options) {
+      const result = await prune(ctx, options);
+      return result.outcome === 'pruned'
+        ? { outcome: 'evicted', evicted: result.pruned, boundarySeq: result.boundarySeq }
+        : result;
+    },
+  };
+  return {
+    prune: (ctx, options) => pruneAudit(port, ctx, options),
+    evict: (ctx, options) => evictAudit(port, ctx, options),
+  };
 }

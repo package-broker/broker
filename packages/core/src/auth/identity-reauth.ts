@@ -1,3 +1,8 @@
+import {
+  recordLoginFailure,
+  type LoginFailureRecorder,
+  type LoginFailureReason,
+} from './login-failure.js';
 import { REAUTH_WINDOW_MS, SESSION_IDLE_MS } from './session.js';
 import type { AuthCallMeta, AuthenticatedSession } from './session.js';
 import type { OrgContext } from '../db/port.js';
@@ -29,6 +34,7 @@ export type ReauthResult =
   { readonly ok: true } | { readonly ok: false; readonly reason: ReauthRefusal };
 
 export interface IdentityReauthDeps {
+  readonly recordFailure?: LoginFailureRecorder;
   readonly users: UserRepository;
   readonly sessions: Pick<SessionRepository, 'findActiveById' | 'markReauthenticatedByIdentity'>;
   readonly clock: Clock;
@@ -96,7 +102,7 @@ function snapshotTrustAnchor(provider: IdentityProvider): string {
  * re-authentication started or not after the session was created counts as stale. `onDenied` receives the denying plugin and code; the
  * result never carries them.
  */
-export async function reauthenticateWithIdentity(
+async function reauthenticateWithIdentityAttempt(
   deps: IdentityReauthDeps,
   ctx: OrgContext,
   session: AuthenticatedSession,
@@ -204,4 +210,60 @@ export async function reauthenticateWithIdentity(
     now: now.toISOString(),
   });
   return updated ? { ok: true } : refuse('not_updated');
+}
+
+const FAILURE_REASONS = {
+  session_inactive: 'expired',
+  not_sso_session: 'blocked',
+  not_supported: 'provider_error',
+  state_mismatch: 'state_mismatch',
+  identity_mismatch: 'state_mismatch',
+  anchor_mismatch: 'state_mismatch',
+  no_auth_time: 'provider_error',
+  stale_auth_time: 'expired',
+  policy: 'blocked',
+  hook_denied: 'blocked',
+  not_updated: 'state_mismatch',
+} as const satisfies Record<ReauthRefusal, LoginFailureReason>;
+
+export async function reauthenticateWithIdentity(
+  deps: IdentityReauthDeps,
+  ctx: OrgContext,
+  session: AuthenticatedSession,
+  provider: IdentityProvider,
+  identity: VerifiedIdentity,
+  loginState: ReauthLoginState,
+  meta: AuthCallMeta,
+): Promise<ReauthResult> {
+  try {
+    const result = await reauthenticateWithIdentityAttempt(
+      deps,
+      ctx,
+      session,
+      provider,
+      identity,
+      loginState,
+      meta,
+    );
+    if (!result.ok)
+      recordLoginFailure(
+        deps.recordFailure,
+        ctx,
+        meta,
+        'reauth',
+        FAILURE_REASONS[result.reason],
+        session.session.userId,
+      );
+    return result;
+  } catch (error) {
+    recordLoginFailure(
+      deps.recordFailure,
+      ctx,
+      meta,
+      'reauth',
+      'provider_error',
+      session.session.userId,
+    );
+    throw error;
+  }
 }

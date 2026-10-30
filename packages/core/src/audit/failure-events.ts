@@ -15,7 +15,7 @@ export interface AuditFailurePort {
 }
 
 export type FailureAttempt = {
-  readonly context: AuditContext;
+  readonly context: Pick<AuditContext, 'sourceIp'>;
 } & (
   | {
       readonly action: 'session.login_failed';
@@ -77,16 +77,16 @@ function counterCache(): Cache {
 }
 
 /** Create one recorder per isolate, never per request or organization; limiter state lives here. */
-export function createFailureEvents(options: FailureEventsOptions): {
-  record(ctx: OrgContext, attempt: FailureAttempt): Promise<void>;
+export function createFailureEvents(options?: FailureEventsOptions): {
+  record(ctx: OrgContext, attempt: FailureAttempt, binding?: FailureEventsOptions): Promise<void>;
   /** Runtime background-lifetime tracking; never awaited by authentication. */
   drain(ctx: OrgContext): Promise<void>;
 } {
   // Cache read/modify/write is serialized here; across isolates the limiter is best effort.
   const queues = new Map<string, { tail: Promise<void>; depth: number }>();
-  const cache = options.cache ?? counterCache();
-  const now = options.now ?? (() => new Date());
+  const cache = options?.cache ?? counterCache();
   function report(
+    options: FailureEventsOptions,
     event: string,
     level: 'warn' | 'error' = 'error',
     reasonCode?: 'no_ip_key_saturated' | 'org_cap_reached',
@@ -101,14 +101,18 @@ export function createFailureEvents(options: FailureEventsOptions): {
       /* Observability cannot affect auth. */
     }
   }
-  function suppressed(): void {
+  function suppressed(options: FailureEventsOptions): void {
     try {
       options.observability.counter('pb.audit.failure_events_suppressed');
     } catch {
       /* Same boundary as logging. */
     }
   }
-  async function key(ctx: OrgContext, parts: readonly unknown[]): Promise<BoundCacheKey> {
+  async function key(
+    options: FailureEventsOptions,
+    ctx: OrgContext,
+    parts: readonly unknown[],
+  ): Promise<BoundCacheKey> {
     const bytes = await crypto.subtle.digest(
       'SHA-256',
       encoder.encode(
@@ -147,15 +151,19 @@ export function createFailureEvents(options: FailureEventsOptions): {
     });
     return count;
   }
-  async function record(ctx: OrgContext, attempt: FailureAttempt): Promise<void> {
+  async function record(
+    ctx: OrgContext,
+    attempt: FailureAttempt,
+    options: FailureEventsOptions,
+  ): Promise<void> {
     try {
-      const at = now();
+      const at = options.now?.() ?? new Date();
       const start = new Date(Math.floor(at.getTime() / 60_000) * 60_000).toISOString();
       const end = new Date(Date.parse(start) + 60_000).toISOString();
       const login = attempt.action === 'session.login_failed';
       if (!login && !options.routeTemplates.has(attempt.routeTemplate)) {
-        suppressed();
-        report('audit.failure_event_invalid');
+        suppressed(options);
+        report(options, 'audit.failure_event_invalid');
         return;
       }
       const id = ulid(at.getTime());
@@ -187,8 +195,8 @@ export function createFailureEvents(options: FailureEventsOptions): {
         },
       });
       if (!result.ok) {
-        suppressed();
-        report('audit.failure_event_invalid');
+        suppressed(options);
+        report(options, 'audit.failure_event_invalid');
         return;
       }
       const actorId = login ? attempt.userId : attempt.actor.id;
@@ -196,7 +204,7 @@ export function createFailureEvents(options: FailureEventsOptions): {
         actorId !== null ? 'actor' : attempt.context.sourceIp !== null ? 'ip' : 'no-ip';
       const count = await increment(
         ctx,
-        await key(ctx, [
+        await key(options, ctx, [
           start,
           attempt.action,
           keyClass,
@@ -208,15 +216,15 @@ export function createFailureEvents(options: FailureEventsOptions): {
         end,
       );
       if (keyClass === 'no-ip' && count === 1000)
-        report('audit.failure_events_cap', 'warn', 'no_ip_key_saturated');
+        report(options, 'audit.failure_events_cap', 'warn', 'no_ip_key_saturated');
       if (!THRESHOLDS.has(count)) {
-        suppressed();
+        suppressed(options);
         return;
       }
-      const total = await increment(ctx, await key(ctx, [start, 'org-cap']), start, end);
+      const total = await increment(ctx, await key(options, ctx, [start, 'org-cap']), start, end);
       if (total > 600) {
-        suppressed();
-        if (total === 601) report('audit.failure_events_cap', 'warn', 'org_cap_reached');
+        suppressed(options);
+        if (total === 601) report(options, 'audit.failure_events_cap', 'warn', 'org_cap_reached');
         return;
       }
       const payload = JSON.parse(result.event.payloadJson) as {
@@ -225,15 +233,16 @@ export function createFailureEvents(options: FailureEventsOptions): {
       payload.changes.count.new = count;
       await options.staging.stage(ctx, { ...result.event, payloadJson: JSON.stringify(payload) });
     } catch {
-      suppressed();
-      report('audit.failure_event_failed');
+      suppressed(options);
+      report(options, 'audit.failure_event_failed');
     }
   }
   return {
-    async record(ctx, attempt) {
+    async record(ctx, attempt, binding = options) {
+      if (binding === undefined) throw new TypeError('Failure events binding is not wired');
       let queue = queues.get(ctx.orgId);
       if (queue !== undefined && queue.depth >= MAX_QUEUE_DEPTH) {
-        suppressed();
+        suppressed(binding);
         return;
       }
       if (queue === undefined) {
@@ -243,7 +252,7 @@ export function createFailureEvents(options: FailureEventsOptions): {
       queue.depth++;
       const current = queue;
       current.tail = current.tail
-        .then(() => record(ctx, attempt))
+        .then(() => record(ctx, attempt, binding))
         .finally(() => {
           current.depth--;
           if (current.depth === 0) queues.delete(ctx.orgId);

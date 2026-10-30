@@ -24,6 +24,7 @@ const declared: { [T in AuditTable]: Nullability<T> } = {
     pending_mode: 0,
     cutover_seq: 0,
     capacity_state: 1,
+    capacity_evict_to: 0,
     journal_rows: 1,
     journal_bytes: 1,
     restore_pending: 1,
@@ -77,6 +78,7 @@ const declared: { [T in AuditTable]: Nullability<T> } = {
     created_at: 1,
     superseded_by: 0,
     resolves_id: 0,
+    capacity_json: 0,
   },
 };
 let database: MigratedDatabase;

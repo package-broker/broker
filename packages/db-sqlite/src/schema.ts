@@ -676,6 +676,7 @@ export interface AuditChainTable {
   pending_mode: 'trail' | 'export' | 'none' | null;
   cutover_seq: number | null;
   capacity_state: Generated<'ok' | 'warning' | 'refusing'>;
+  capacity_evict_to: number | null;
   journal_rows: Generated<number>;
   journal_bytes: Generated<number>;
   restore_pending: Generated<0 | 1>;
@@ -746,6 +747,7 @@ export interface AuditLedgerTable {
   created_at: Generated<string>;
   superseded_by: string | null;
   resolves_id: string | null;
+  capacity_json: string | null;
 }
 
 export interface Database {

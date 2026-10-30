@@ -96,6 +96,8 @@ type ChainState = Pick<
   | 'journal_bytes'
 >;
 type SeqRange = { readonly from_seq: number; readonly to_seq: number };
+/** A capacity gap carries the hash of its last evicted row; a seq_gap has none. */
+type GapTop = { readonly top: number; readonly hash: string | null };
 
 const GAPS_SQL = `SELECT from_seq, to_seq FROM audit_ledger
   WHERE org_id = ? AND chain_id = ? AND epoch = ? AND reason_code = 'seq_gap' AND sink_id IS NULL
@@ -109,8 +111,9 @@ const GAP_FENCE = ` AND NOT EXISTS (SELECT 1 FROM audit_ledger g JOIN json_each(
   ON g.from_seq <= json_extract(ranges.value, '$[1]') AND g.to_seq >= json_extract(ranges.value, '$[0]')
   WHERE g.org_id = ? AND g.chain_id = ? AND g.epoch = ? AND g.kind = 'gap'
   AND g.sink_id IS NULL AND g.reason_code = 'seq_gap' AND g.superseded_by IS NULL)`;
+/** Recorded seq holes and capacity evictions both consume their seqs; neither is allocated again. */
 const GAP_ABOVE_SQL = `FROM audit_ledger t
-  WHERE t.org_id = ? AND t.chain_id = ? AND t.epoch = ? AND t.reason_code = 'seq_gap'
+  WHERE t.org_id = ? AND t.chain_id = ? AND t.epoch = ? AND t.reason_code IN ('seq_gap', 'capacity')
   AND t.sink_id IS NULL AND t.kind = 'gap' AND t.superseded_by IS NULL`;
 const GAP_ABOVE_FENCE = ` AND NOT EXISTS (SELECT 1 ${GAP_ABOVE_SQL} AND t.to_seq > ?)`;
 /** Two ledger statements per gap plus the CAS and its assertion stay below 200 with a reset. */
@@ -225,7 +228,7 @@ function consistent(head: Head, gaps: readonly SeqRange[]): boolean {
  */
 function target(
   head: Head,
-  gapTop: number | null,
+  gapTop: GapTop | null,
 ): {
   next: Omit<ChainState, 'journal_rows' | 'journal_bytes'>;
   reasons: AuditIntegrityReason[];
@@ -242,9 +245,10 @@ function target(
     headSeq = head.last_seq;
     headHash = head.last_hash;
   }
-  if (gapTop !== null && gapTop > headSeq) {
+  if (gapTop !== null && gapTop.top > headSeq) {
     if (!reasons.includes('head_mismatch')) reasons.push('head_mismatch');
-    headSeq = gapTop;
+    headSeq = gapTop.top;
+    if (gapTop.hash !== null) headHash = gapTop.hash;
   }
   let boundarySeq = head.boundary_seq;
   let boundaryHash = head.boundary_prev_hash;
@@ -372,12 +376,14 @@ export function createAuditSealRepository(
     }
   }
 
-  async function gapTop(ctx: OrgContext, head: Head): Promise<number | null> {
-    const [row] = await executor.all<{ top: number | null }>({
-      sql: `SELECT max(t.to_seq) AS top ${GAP_ABOVE_SQL}`,
+  async function gapTop(ctx: OrgContext, head: Head): Promise<GapTop | null> {
+    const [row] = await executor.all<{ top: number; hash: string | null }>({
+      sql: `SELECT t.to_seq AS top, CASE WHEN t.reason_code = 'capacity'
+          THEN json_extract(t.capacity_json, '$.hash') END AS hash ${GAP_ABOVE_SQL}
+        ORDER BY t.to_seq DESC, t.reason_code = 'capacity' DESC LIMIT 1`,
       params: [ctx.orgId, head.chain_id, head.epoch],
     });
-    return row?.top ?? null;
+    return row ?? null;
   }
 
   /**
@@ -391,7 +397,7 @@ export function createAuditSealRepository(
     ctx: OrgContext,
     head: Head,
     committed: AuditIntegrityReason[],
-    top?: number | null,
+    top?: GapTop | null,
   ): Promise<{ head: Head; repaired: boolean } | null> {
     const [summary] = await executor.all<{ actual_rows: number; actual_bytes: number }>({
       sql: SUMMARY_SQL,
@@ -588,7 +594,7 @@ export function createAuditSealRepository(
       if (current === undefined || !sameHead(current, head))
         return { outcome: 'contended', ...extra() };
       const top = await gapTop(ctx, head);
-      if (top !== null && top > head.head_seq) {
+      if (top !== null && top.top > head.head_seq) {
         const recovery = await recover(ctx, head, committed, top);
         if (recovery === null) return { outcome: 'contended', ...extra() };
         head = recovery.head;

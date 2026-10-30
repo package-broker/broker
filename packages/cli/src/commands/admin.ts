@@ -46,6 +46,7 @@ export interface AdminOptions {
 
 type Command =
   | 'audit sink'
+  | 'audit cutover'
   | 'audit epoch bump'
   | 'admin bootstrap'
   | 'admin reset-local'

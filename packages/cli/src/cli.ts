@@ -11,6 +11,8 @@ import {
   runGenerateMasterKey,
   type AdminTarget,
 } from './commands/admin.js';
+import { runAuditExport } from './commands/audit-export.js';
+import { runAuditCutover } from './commands/audit-cutover.js';
 import { runAuditSink } from './commands/audit-sink.js';
 import { runCloudflareBootstrap, runCloudflareMigrate } from './commands/cloudflare.js';
 import { runCloudflareProvision } from './commands/cloudflare/provision.js';
@@ -44,6 +46,8 @@ const USAGE =
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
   '       pb sqlite restore --sqlite <file> --snapshot <file> [--out <build>]\n' +
   '       pb audit sink list|rebind|retire|unblock|skip|replay|resolve|confirm-restore [<sink>] (--sqlite <file> | --cloudflare --database-id <id>) --generation <n> --actor-type user|service_principal --actor-id <id> [--from <seq> | --seq <seq> | --confirm <sink:from-to> | --ledger-id <id>]\n' +
+  '       pb audit export --broker <origin> --cookie-env <VAR> (--output <file> | --resume <file>) --format jsonl\n' +
+  '       pb audit cutover --register <artifact> [--org-id <id>] (--sqlite <file> | --cloudflare --database-id <id>) --generation <n> --actor-type user|service_principal --actor-id <id>\n' +
   '       pb audit policy set required|availability (same target and actor flags)\n' +
   '       pb audit epoch bump --sqlite <file> (or --cloudflare --database-id <id>)\n' +
   '       pb cloudflare setup [--workers-paid] [--prebuilt] [--providers <file|none>] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
@@ -409,6 +413,8 @@ export async function run(argv: readonly string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
+  if (argv[0] === 'audit' && argv[1] === 'export') return runAuditExport(argv.slice(2));
+  if (argv[0] === 'audit' && argv[1] === 'cutover') return runAuditCutover(argv.slice(2));
   if (argv[0] === 'audit' && (argv[1] === 'sink' || argv[1] === 'policy'))
     return runAuditSink(argv.slice(1));
   const parsed = parseCliArgs([...argv]);

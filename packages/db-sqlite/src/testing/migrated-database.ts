@@ -188,3 +188,10 @@ export async function auditApiExportSuite(open: () => Promise<MigratedDatabase>)
   const { auditApiExportSuite: run } = await import('./audit-api-export-suite.js');
   run(open);
 }
+
+export async function auditCutoverRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditCutoverRepositorySuite: run } = await import('./audit-cutover-suite.js');
+  run(open);
+}

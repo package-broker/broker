@@ -668,6 +668,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Loads the shared cutover persistence suite; registration counts RETURNING rows and never executor changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-cutover-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'Destructures validated audit ledger SELECT fields; the rest object contains no executor result metadata.',
       sites: ['db-sqlite/src/repositories/audit-api-export.ts:object rest access: ...row #1'],
     },
@@ -4040,6 +4047,13 @@ function inboundForeignKeys(sql: readonly string[], parents: readonly string[]) 
 
 describe('D1 changes read-site scan', () => {
   const sources = sourcesUnder(ROOT);
+
+  it('inventories cutover registration as RETURNING-counted writes without changes metadata', () => {
+    const source = sources['db-sqlite/src/repositories/audit-cutover.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(source).toContain('RETURNING id');
+    expect(source).toContain('result.at(-1)?.rows.length === 1');
+  });
 
   it('inventories health persistence as RETURNING-counted writes without changes metadata', () => {
     const source = sources['db-sqlite/src/repositories/audit-health.ts']!;

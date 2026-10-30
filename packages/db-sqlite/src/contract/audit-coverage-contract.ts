@@ -39,6 +39,16 @@ interface CoverageEntry {
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
     actions: ['audit.export'],
+    callers: ['core/src/audit/cutover.ts'],
+    repository: 'audit-cutover',
+    batchGuard:
+      'executor.batch; artifact head and boundary, chain identity, restore state, incarnation, mode generation, policy, active organization operator and build generation assertions',
+    cardinality:
+      '1 per verified artifact registration; invalid artifacts and contended batches stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['audit.export'],
     callers: ['core/src/api/routes/audit-export.ts'],
     repository: 'audit-api-export',
     batchGuard:

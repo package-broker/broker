@@ -781,6 +781,10 @@ function buildRegistryModule(input: {
     policyFetch,
     deploymentId: input.deploymentId,
     providers,
+    npmAudit: {
+      sources: registrySources,
+      provenance: createVulnerabilityRepository(executor, systemClock),
+    },
     catalogue: {
       reader: reads.reader,
       scopedAdmission: createScopedAdmission(executor),

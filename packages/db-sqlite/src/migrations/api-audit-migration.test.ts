@@ -107,7 +107,9 @@ describe('baseline schema', () => {
     expect(
       await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name NOT LIKE 'source_sync_%'
       AND name NOT IN ('package_ecosystem_matches_source_insert',
-        'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages')`),
+        'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages',
+        'token_trusted_publisher_insert', 'token_trusted_publisher_update',
+        'trusted_publisher_token_org_update')`),
     ).toEqual([]);
     for (const [index, columns] of [
       ['audit_pending_org_id', ['org_id', 'id']],

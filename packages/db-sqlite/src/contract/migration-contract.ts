@@ -19,6 +19,8 @@ import { countCalls } from './count-calls.js';
 import type { OpenedExecutor } from './executor-contract.js';
 import { describeOrgKeyContract } from './org-key-contract.js';
 
+export { describeNpmIdentityMigrationContract } from './npm-identity-migration-contract.js';
+
 export { describeNpmPublishMigrationContract } from './npm-publish-migration-contract.js';
 
 export interface OpenedPair extends OpenedExecutor {
@@ -611,7 +613,7 @@ export function describeMigrationContract(
         expect(await readLock(executor)).toEqual(lockBefore);
       });
     });
-    it('8. fresh schema with foreign keys on: two bookkeeping rows, all tables, lock free', async () => {
+    it('8. fresh schema with foreign keys on: three bookkeeping rows, all tables, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         await enableForeignKeys(executor);
         const sources = await discoveredMigrations();
@@ -624,7 +626,7 @@ export function describeMigrationContract(
         );
         const names = await tableNames(executor);
         for (const table of NEW_TABLES) expect(names).toContain(table);
-        expect(names).toHaveLength(59);
+        expect(names).toHaveLength(62);
         expect(await lockHolder(executor)).toBeNull();
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
         for (const table of ['token_project', 'service_principal_permission']) {
@@ -777,7 +779,11 @@ export function describeMigrationContract(
           holder: 'contract-fresh',
         });
 
-        expect(result.applied).toEqual(['core:0001_init', 'core:0002_npm_publish']);
+        expect(result.applied).toEqual([
+          'core:0001_init',
+          'core:0002_npm_publish',
+          'core:0003_npm_identity',
+        ]);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
       });
@@ -789,7 +795,11 @@ export function describeMigrationContract(
         const result = await migrate(executor, await discoveredMigrations(), {
           holder: 'contract-fresh',
         });
-        expect(result.applied).toEqual(['core:0001_init', 'core:0002_npm_publish']);
+        expect(result.applied).toEqual([
+          'core:0001_init',
+          'core:0002_npm_publish',
+          'core:0003_npm_identity',
+        ]);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
           { name: 'project_id', type: 'TEXT', notnull: 0, dflt_value: null },
@@ -807,7 +817,7 @@ export function describeMigrationContract(
           { from: 'project_id', table: 'project', to: 'id' },
         ]);
         expect(await tableNames(executor)).not.toContain('job_attempt_0006');
-        expect(await countTables(executor)).toBe(59);
+        expect(await countTables(executor)).toBe(62);
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
 
         await seedPopulated(executor);
@@ -1092,7 +1102,11 @@ export function describeVulnerabilityMigrationContract(
       await withPair(open, async ({ executor }) => {
         const all = await discoveredMigrations();
         const migrated = await migrate(executor, all, { holder: 'vulnerability-migration' });
-        expect(migrated.applied).toEqual(['core:0001_init', 'core:0002_npm_publish']);
+        expect(migrated.applied).toEqual([
+          'core:0001_init',
+          'core:0002_npm_publish',
+          'core:0003_npm_identity',
+        ]);
         expect(
           await executor.all({
             sql: "SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,14) = 'vulnerability_' ORDER BY name",
@@ -1172,7 +1186,7 @@ export function describeSchemaEquivalenceContract(
   open: () => Promise<OpenedExecutor>,
 ): void {
   describe(`baseline schema equivalence: ${name}`, () => {
-    it('matches the recorded schema including npm publish and per-table index order', async () => {
+    it('matches the recorded schema including npm publish and identity and per-table index order', async () => {
       const oldChain = JSON.parse(
         readFileSync(new URL('../migrations/old-chain-schema.json', import.meta.url), 'utf8'),
       ) as SchemaDump;
@@ -1180,6 +1194,7 @@ export function describeSchemaEquivalenceContract(
       expect(sources.map(({ id, phase }) => ({ id, phase }))).toEqual([
         { id: 'core:0001_init', phase: 'expand' },
         { id: 'core:0002_npm_publish', phase: 'expand' },
+        { id: 'core:0003_npm_identity', phase: 'expand' },
       ]);
       const opened = await open();
       try {

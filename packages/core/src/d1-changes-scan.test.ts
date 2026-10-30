@@ -668,6 +668,77 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Named constant batch indices select UPDATE RETURNING rows; success uses rows.length and never executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[chainUpdateIndex] #1',
+        'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[sinkUpdateIndex] #1',
+      ],
+    },
+    {
+      reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(fields) #1',
+      ],
+    },
+    {
+      reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(chain) #1',
+      ],
+    },
+    {
+      reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(sink) #1',
+      ],
+    },
+    {
+      reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(sink) #2',
+      ],
+    },
+    {
+      reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        'db-sqlite/src/testing/audit-fork-suite.ts:opaque object access: Object.entries(expected) #1',
+      ],
+    },
+    {
+      reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        "db-sqlite/src/testing/audit-fork-suite.ts:unresolved computed key: expect(\n          await port.save(\n            org,\n            {\n              ...expected,\n              [key]:\n                typeof value === 'number'\n                  ? value + 1\n                  : typeof value === 'boolean'\n                    ? !value\n                    : 'moved',\n            },\n            [],\n            change,\n            2,\n          ),\n          key,\n        ).toBe(false); #1",
+      ],
+    },
+    {
+      reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        'db-sqlite/src/testing/audit-fork-suite.ts:opaque object access: Object.entries(expected.sinks[0]!) #1',
+      ],
+    },
+    {
+      reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        "db-sqlite/src/testing/audit-fork-suite.ts:unresolved computed key: const moved = {\n          ...expected.sinks[0]!,\n          [key]:\n            typeof value === 'number' ? value + 1 : typeof value === 'boolean' ? !value : 'moved',\n        }; #1",
+      ],
+    },
+    {
+      reason:
+        'Loads the shared fork persistence suite for Node and D1 tests; no executor change counts are read.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-fork-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'Destructures chain fields from a single SELECT snapshot; the remaining sink fields are SELECT data, never executor change metadata.',
       sites: ['db-sqlite/src/repositories/audit-export.ts:object rest access: ...sink #1'],
     },

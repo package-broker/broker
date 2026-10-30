@@ -38,6 +38,16 @@ interface CoverageEntry {
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
+    actions: ['audit.sink_admin'],
+    callers: ['core/src/audit/fork.ts'],
+    repository: 'audit-fork',
+    batchGuard:
+      'executor.batch; full chain and sink-set CAS, observed journal hashes and organization build-generation fence',
+    cardinality:
+      '1 per new fork detection or restore confirmation; tooling-marked restores stage zero on detection',
+    stagingCalls: 1,
+  },
+  {
     actions: ['session.login_failed', 'access.denied'],
     callers: ['core/src/audit/failure-events.ts'],
     repository: 'audit-failure',

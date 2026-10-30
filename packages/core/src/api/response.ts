@@ -11,6 +11,7 @@ import { errorEnvelope } from '../envelope.js';
 import type { ValidationDetail } from './validate.js';
 
 export const API_ERROR_CODES = {
+  rate_limited: { status: 429, message: 'Too many requests' },
   unsupported_package: { status: 400, message: 'Unsupported package' },
   unsupported_source_kind: { status: 400, message: 'Unsupported source kind' },
   package_not_found: { status: 404, message: 'Package not found' },

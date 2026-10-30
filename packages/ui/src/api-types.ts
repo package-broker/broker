@@ -21,6 +21,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/audit/export': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Export retained audit records */
+    get: operations['exportAudit'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/audit/head': {
     parameters: {
       query?: never;
@@ -1520,6 +1537,150 @@ export interface operations {
               targetType: string;
             }[];
             next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  exportAudit: {
+    parameters: {
+      query?: {
+        from_seq?: string;
+        to_seq?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            dispositions: {
+              actorId: string | null;
+              actorType: string;
+              capacity?: {
+                affectedSinkIds: string[];
+                /** @constant */
+                affectedSinkIdsOverflow?: true;
+                hash: string;
+                prevHash: string;
+              };
+              chainId: string;
+              count: number;
+              createdAt: string;
+              epoch: number;
+              fromSeq: number;
+              id: string;
+              kind: string;
+              modeGeneration: number;
+              policy: string;
+              reasonCode: string;
+              resolvesId?: string | null;
+              sinkId: string | null;
+              toSeq: number;
+            }[];
+            fromSeq: number;
+            items: (
+              | {
+                  action: string;
+                  actor_id: string | null;
+                  actor_type: string;
+                  chain_id: string;
+                  created_at: string;
+                  epoch: number;
+                  hash: string;
+                  id: string;
+                  /** @constant */
+                  kind: 'event';
+                  org_id: string;
+                  payload_json: string;
+                  prev_hash: string;
+                  project_id: string | null;
+                  seq: number;
+                  source_ip?: string | null;
+                  target_id: string | null;
+                  target_type: string;
+                  token_selector: string | null;
+                }
+              | {
+                  action: string;
+                  actor_id: string | null;
+                  actor_type: string;
+                  chain_id: string;
+                  created_at: string;
+                  epoch: number;
+                  hash: string;
+                  id: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  marker_id: string;
+                  org_id: string;
+                  prev_hash: string;
+                  project_id: string | null;
+                  reason_code: string;
+                  seq: number;
+                  target_id: string | null;
+                  target_type: string;
+                }
+              | {
+                  chain_id: string;
+                  epoch: number;
+                  hash: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  marker_id: string;
+                  org_id: string;
+                  prev_hash: string;
+                  /** @constant */
+                  reason_code: 'unreadable';
+                  seq: number;
+                }
+            )[];
+            next_from_seq: number | null;
+            /** @constant */
+            schema: 'audit-chain/1';
+            snapshot: {
+              boundaryPrevHash: string;
+              boundarySeq: number;
+              chainId: string;
+              epoch: number;
+              headHash: string;
+              headSeq: number;
+            };
+            toSeq: number;
           };
         };
       };
@@ -5634,6 +5795,7 @@ export interface operations {
             | 'org:import:write'
             | 'org:import:approve'
             | 'org:audit:read'
+            | 'org:audit:export'
             | 'project:read'
             | 'project:settings:write'
             | 'project:grants:read'
@@ -8052,6 +8214,7 @@ export interface operations {
             | 'org:import:write'
             | 'org:import:approve'
             | 'org:audit:read'
+            | 'org:audit:export'
             | 'project:read'
             | 'project:settings:write'
             | 'project:grants:read'
@@ -8274,6 +8437,7 @@ export interface operations {
             | 'org:import:write'
             | 'org:import:approve'
             | 'org:audit:read'
+            | 'org:audit:export'
             | 'project:read'
             | 'project:settings:write'
             | 'project:grants:read'

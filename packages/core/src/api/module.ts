@@ -1,6 +1,7 @@
 import { routesConflict } from '../kernel/routes.js';
 import type { RouteDefinition } from '../plugin.js';
 import { accessRoutes } from './routes/access.js';
+import { auditExportRoutes } from './routes/audit-export.js';
 import { auditRoutes } from './routes/audit.js';
 import { importRoutes } from './routes/import.js';
 import { organizationRoutes } from './routes/organization.js';
@@ -34,6 +35,7 @@ export interface ApiModuleDeps {
   readonly sourceNames: Parameters<typeof sourceNameRoutes>[0];
   readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
   readonly packages: Parameters<typeof packageRoutes>[0];
+  readonly auditExport?: Parameters<typeof auditExportRoutes>[0];
   readonly audit: Parameters<typeof auditRoutes>[0];
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
@@ -263,6 +265,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
     ...auditRoutes(deps.audit),
+    ...auditExportRoutes(deps.auditExport),
     ...packageManageRoutes(deps.packageManage),
     ...(deps.imports == null ? [] : importRoutes(deps.imports)),
     myPermissionsRoute(),

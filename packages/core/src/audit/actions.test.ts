@@ -69,11 +69,12 @@ describe('audit control action registration', () => {
   const cases = [
     {
       action: 'audit.export',
-      fields: ['from_seq', 'to_seq', 'count', 'format'],
+      fields: ['from_seq', 'to_seq', 'count', 'withheld', 'format'],
       changes: {
         from_seq: { new: 1 },
         to_seq: { new: 10 },
         count: { new: 10 },
+        withheld: { new: 2 },
         format: { new: 'jsonl' },
       },
     },
@@ -245,6 +246,7 @@ describe('audit control action registration', () => {
           'from_seq',
           'to_seq',
           'count',
+          'withheld',
           'mode_generation',
           'cutover_seq',
           'epoch',

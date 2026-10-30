@@ -1,4 +1,9 @@
-import { noopObservability, type Observability } from '@package-broker/core/platform/observability';
+import {
+  createObservability,
+  noopObservability,
+  type Observability,
+} from '@package-broker/core/platform/observability';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
 import type { AuditTrailContext } from '@package-broker/core/audit/plugin-api';
 import { requestVerification } from '@package-broker/core/audit/verify';
 import type { Jobs } from '@package-broker/core/platform/jobs';
@@ -15,6 +20,7 @@ import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
+import { createAuditApiExportStore } from './audit-api-export.js';
 import { createAuditJournalReader, createAuditQueryRepository } from './audit-query.js';
 import { createPackageAdminReader } from './package-admin-read.js';
 import { createProjectSourceReader } from './project-source-read.js';
@@ -81,6 +87,8 @@ export interface ApiRoutesOptions {
   readonly policy: OutboundPolicy;
   readonly lifetime: TokenLifetimePolicy;
   readonly log: KernelLog;
+  readonly observability?: Observability;
+  readonly auditAlerts?: { raise(org: OrgContext, reason: 'withheld'): void };
   readonly blob: BlobStore | undefined;
   readonly sourcePackageProbe?: SourcePackageProbe;
   /** The VCS providers the runtime has registered and serves, read per request. */
@@ -90,6 +98,17 @@ export interface ApiRoutesOptions {
 
 export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefinition[] {
   const { executor, access, packages, lifetime, log, blob } = input;
+  const observability =
+    input.observability ??
+    createObservability(
+      {
+        emit: (record) => {
+          if (record.kind === 'log') log({ ...record.record });
+        },
+      },
+      { deploymentId: 'unconfigured', runtime: input.runtime, requestId: null, plugin: 'core' },
+      { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+    );
   const { services } = access;
   const anchors = access.anchors;
   const common = { ids: { ulid }, clock: systemClock, clientIp: input.clientIp };
@@ -208,6 +227,19 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         readStatuses: input.vulnerability.readStatuses,
       },
       audit: auditReader(executor),
+      auditExport: {
+        ...common,
+        store: createAuditApiExportStore(executor, anchors),
+        sessions: services.sessions,
+        alert: (org) => {
+          observability.log({
+            level: 'error',
+            event: 'audit.delivery_loss',
+            reason_code: 'audit.withheld',
+          });
+          input.auditAlerts?.raise(org, 'withheld');
+        },
+      },
       packageManage: {
         ...common,
         service: createPackageManageService({

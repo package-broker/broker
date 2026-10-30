@@ -72,6 +72,7 @@ CREATE TABLE audit_ledger (
   actor_id         TEXT,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   superseded_by    TEXT,
+  resolves_id      TEXT,
   PRIMARY KEY (org_id, id),
   FOREIGN KEY (org_id) REFERENCES organization (id),
   FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id),
@@ -87,6 +88,7 @@ WHEN NOT (
   AND NEW.from_seq = OLD.from_seq AND NEW.to_seq = OLD.to_seq AND NEW.count = OLD.count
   AND NEW.sink_id IS OLD.sink_id AND NEW.reason_code = OLD.reason_code AND NEW.policy = OLD.policy
   AND NEW.mode_generation = OLD.mode_generation AND NEW.actor_type = OLD.actor_type
+  AND NEW.resolves_id IS OLD.resolves_id
   AND NEW.actor_id IS OLD.actor_id AND NEW.created_at = OLD.created_at
   AND EXISTS (
     SELECT 1 FROM audit_ledger AS covering
@@ -108,7 +110,17 @@ END;
 
 CREATE TRIGGER audit_ledger_insert_visible
 BEFORE INSERT ON audit_ledger
-WHEN NEW.superseded_by IS NOT NULL
+WHEN NEW.superseded_by IS NOT NULL OR (
+  NEW.resolves_id IS NOT NULL AND (
+    NEW.kind <> 'replay' OR NOT EXISTS (
+      SELECT 1 FROM audit_ledger AS resolved
+      WHERE resolved.org_id = NEW.org_id AND resolved.id = NEW.resolves_id
+        AND resolved.kind = 'uncertain' AND resolved.chain_id = NEW.chain_id
+        AND resolved.epoch = NEW.epoch AND resolved.sink_id IS NEW.sink_id
+        AND NEW.from_seq <= resolved.from_seq AND NEW.to_seq >= resolved.to_seq
+    )
+  )
+)
 BEGIN
   SELECT RAISE(ABORT, 'audit ledger rows are inserted visible');
 END;

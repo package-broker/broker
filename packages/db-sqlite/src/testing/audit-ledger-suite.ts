@@ -77,6 +77,94 @@ export function auditLedgerRepositorySuite(open: () => Promise<MigratedDatabase>
     };
   }
 
+  it.each([
+    { resolvesId: '01K7R5V0000000000000000099' },
+    { kind: 'withheld' as const },
+    { chainId: 'b'.repeat(32) },
+    { epoch: 1 },
+    { sinkId: 'archive' },
+    { fromSeq: 2 },
+    { toSeq: 1 },
+  ])('rejects invalid resolution references in the database: %j', async (change) => {
+    const { a } = orgs();
+    await seedSink(a.orgId);
+    const repository = createAuditLedgerRepository(database.executor);
+    await repository.append(a, [{ ...entry, kind: 'uncertain' }]);
+    const replay = {
+      ...entry,
+      id: '01K7R5V0000000000000000002',
+      kind: 'replay' as const,
+      resolvesId: entry.id,
+      ...change,
+    };
+    const raw = rawRow(a.orgId, replay);
+    await expect(
+      database.executor.batch([
+        {
+          sql: raw.sql
+            .replace('superseded_by)', 'superseded_by, resolves_id)')
+            .replace('?, ?)', '?, ?, ?)'),
+          params: [...raw.params, replay.resolvesId],
+        },
+      ]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+    expect(await repository.page(a, null, 100)).toEqual([{ ...entry, kind: 'uncertain' }]);
+  });
+  it('resolution references cannot name foreign organization evidence', async () => {
+    const { a, b } = orgs();
+    const repository = createAuditLedgerRepository(database.executor);
+    await repository.append(b, [{ ...entry, kind: 'uncertain' }]);
+    await expect(
+      repository.append(a, [
+        {
+          ...entry,
+          kind: 'replay',
+          resolvesId: entry.id,
+          id: '01K7R5V0000000000000000002',
+        },
+      ]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+    expect(await repository.page(a, null, 100)).toEqual([]);
+  });
+  it('a resolution must name uncertainty rather than withholding', async () => {
+    const { a } = orgs();
+    const repository = createAuditLedgerRepository(database.executor);
+    await repository.append(a, [{ ...entry, kind: 'withheld' }]);
+    await expect(
+      repository.append(a, [
+        {
+          ...entry,
+          kind: 'replay',
+          resolvesId: entry.id,
+          id: '01K7R5V0000000000000000002',
+        },
+      ]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+  });
+
+  it('persists a covering resolution and keeps it immutable and idempotent', async () => {
+    const { a } = orgs();
+    const repository = createAuditLedgerRepository(database.executor);
+    await repository.append(a, [{ ...entry, kind: 'uncertain' }]);
+    const replay: AuditLedgerEntry = {
+      ...entry,
+      kind: 'replay',
+      resolvesId: entry.id,
+      id: '01K7R5V0000000000000000002',
+    };
+    await repository.append(a, [replay]);
+    await repository.append(a, [replay]);
+    expect(await repository.page(a, entry.id, 100)).toEqual([replay]);
+    await expect(
+      database.executor.batch([
+        {
+          sql: 'UPDATE audit_ledger SET resolves_id = NULL WHERE org_id = ? AND id = ?',
+          params: [a.orgId, replay.id],
+        },
+      ]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+  });
+
   function supersede(orgId: string, id: string, by: string) {
     return {
       sql: 'UPDATE audit_ledger SET superseded_by = ? WHERE org_id = ? AND id = ?',

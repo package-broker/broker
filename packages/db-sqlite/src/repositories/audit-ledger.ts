@@ -27,7 +27,7 @@ const OVERLAP_SENTINEL = 'audit_ledger.count';
 
 const COLUMNS = `current.id, current.kind, current.chain_id AS chainId, current.epoch,
   current.from_seq AS fromSeq, current.to_seq AS toSeq, current.count, current.sink_id AS sinkId,
-  current.reason_code AS reasonCode, current.policy, current.mode_generation AS modeGeneration,
+  current.resolves_id AS resolvesId, current.reason_code AS reasonCode, current.policy, current.mode_generation AS modeGeneration,
   current.actor_type AS actorType, current.actor_id AS actorId, current.created_at AS createdAt`;
 
 const OPEN_GAPS = `open AS NOT MATERIALIZED (
@@ -51,8 +51,8 @@ const CONFLICT = `current.kind = 'gap' AND (
   ) AS conflict`;
 
 const APPEND = `WITH incoming (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count, sink_id,
-    reason_code, policy, mode_generation, actor_type, actor_id, created_at)
-    AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)),
+    reason_code, policy, mode_generation, actor_type, actor_id, created_at, resolves_id)
+    AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)),
   open AS NOT MATERIALIZED (
     SELECT open_gap.id, open_gap.from_seq, open_gap.to_seq, open_gap.count
     FROM audit_ledger AS open_gap
@@ -97,7 +97,7 @@ const APPEND = `WITH incoming (org_id, id, kind, chain_id, epoch, from_seq, to_s
     WHERE hidden.org_id = ? AND hidden.superseded_by = i.id
   )
 INSERT INTO audit_ledger (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count, sink_id,
-  reason_code, policy, mode_generation, actor_type, actor_id, created_at)
+  reason_code, policy, mode_generation, actor_type, actor_id, created_at, resolves_id)
 SELECT i.org_id, i.id, i.kind, i.chain_id, i.epoch,
   CASE WHEN EXISTS (SELECT 1 FROM existing) THEN i.from_seq
     ELSE min(i.from_seq, coalesce(t.from_seq, i.from_seq)) END,
@@ -105,14 +105,14 @@ SELECT i.org_id, i.id, i.kind, i.chain_id, i.epoch,
     ELSE max(i.to_seq, coalesce(t.to_seq, i.to_seq)) END,
   CASE WHEN EXISTS (SELECT 1 FROM existing) THEN i.count
     WHEN t.overlaps THEN NULL ELSE i.count + t.count END,
-  i.sink_id, i.reason_code, i.policy, i.mode_generation, i.actor_type, i.actor_id, i.created_at
+  i.sink_id, i.reason_code, i.policy, i.mode_generation, i.actor_type, i.actor_id, i.created_at, i.resolves_id
 FROM incoming AS i CROSS JOIN touched AS t CROSS JOIN conflict AS c
 WHERE c.found OR NOT EXISTS (
   SELECT 1 FROM existing AS e CROSS JOIN absorbed AS a
   WHERE e.kind = i.kind AND e.chain_id = i.chain_id AND e.epoch = i.epoch
     AND e.sink_id IS i.sink_id AND e.reason_code = i.reason_code AND e.policy = i.policy
     AND e.mode_generation = i.mode_generation AND e.actor_type = i.actor_type
-    AND e.actor_id IS i.actor_id AND e.created_at = i.created_at
+    AND e.resolves_id IS i.resolves_id AND e.actor_id IS i.actor_id AND e.created_at = i.created_at
     AND e.from_seq <= i.from_seq AND e.to_seq >= i.to_seq AND NOT a.overlaps
     AND e.count = i.count + a.count
     AND e.to_seq - e.from_seq = i.to_seq - i.from_seq + a.span
@@ -162,6 +162,7 @@ export function auditLedgerError(error: unknown): unknown {
 
 function validatedRows(rows: readonly Row[]): readonly AuditLedgerEntry[] {
   return rows.map(({ conflict, ...row }) => {
+    if (row.resolvesId === null) delete row.resolvesId;
     if (conflict !== 0) throw new AuditLedgerIntegrityError();
     try {
       assertAuditLedgerEntry(row);
@@ -192,6 +193,7 @@ function appendStatements(ctx: OrgContext, entry: AuditLedgerEntry): readonly Sc
       entry.actorType,
       entry.actorId,
       entry.createdAt,
+      entry.resolvesId ?? null,
       ctx.orgId,
       entry.kind,
       ...key,

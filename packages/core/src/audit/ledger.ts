@@ -34,6 +34,13 @@ export const AUDIT_LEDGER_KINDS = [
   'epoch_bump',
 ] as const;
 
+/** G37 registers this shape only after verifying the artifact's final chain, epoch, seq and hash. */
+export const AUDIT_VERIFIED_EXPORT = {
+  kind: 'export',
+  sinkId: null,
+  reasonCode: 'verified_export',
+} as const;
+
 export interface AuditLedgerEntry {
   readonly id: string;
   readonly kind: (typeof AUDIT_LEDGER_KINDS)[number];
@@ -43,6 +50,7 @@ export interface AuditLedgerEntry {
   readonly toSeq: number;
   readonly count: number;
   readonly sinkId: string | null;
+  readonly resolvesId?: string | null;
   readonly reasonCode: string;
   readonly policy: 'availability' | 'required';
   readonly modeGeneration: number;
@@ -71,6 +79,7 @@ export function assertAuditLedgerEntry(entry: AuditLedgerEntry): void {
     Number.isSafeInteger(value) && value >= minimum;
   if (
     !isUlid(entry.id) ||
+    (entry.resolvesId != null && (entry.kind !== 'replay' || !isUlid(entry.resolvesId))) ||
     !AUDIT_LEDGER_KINDS.includes(entry.kind) ||
     !/^[a-f0-9]{32}$/.test(entry.chainId) ||
     !integer(entry.epoch, 0) ||
@@ -96,7 +105,10 @@ export function assertAuditLedgerEntry(entry: AuditLedgerEntry): void {
 }
 
 const sameEntry = (a: AuditLedgerEntry, b: AuditLedgerEntry) =>
-  (Object.keys(a) as (keyof AuditLedgerEntry)[]).every((key) => a[key] === b[key]);
+  (a.resolvesId ?? null) === (b.resolvesId ?? null) &&
+  (Object.keys(a) as (keyof AuditLedgerEntry)[]).every(
+    (key) => key === 'resolvesId' || a[key] === b[key],
+  );
 
 /**
  * Validates a batch and drops exact repeats; a changed report under a repeated id is a duplicate.

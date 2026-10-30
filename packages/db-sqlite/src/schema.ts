@@ -745,6 +745,7 @@ export interface AuditLedgerTable {
   actor_id: string | null;
   created_at: Generated<string>;
   superseded_by: string | null;
+  resolves_id: string | null;
 }
 
 export interface Database {

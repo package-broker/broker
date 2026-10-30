@@ -44,6 +44,7 @@ const row = (projectId: string | null): AuditRow => ({
 
 async function fixture(
   options: {
+    stub?: boolean;
     permissions?: string[];
     rows?: AuditRow[];
     projects?: {
@@ -94,7 +95,7 @@ async function fixture(
   const kernel = await createKernel({
     platform: 'node',
     plugins: [],
-    coreRoutes: auditRoutes({ list, head }),
+    coreRoutes: auditRoutes(options.stub ? undefined : { list, head }),
     ports: {
       organizations: { get: () => Promise.resolve(null) },
       clock: fixedClock('2026-10-16T00:00:00.000Z'),
@@ -344,3 +345,15 @@ it('refuses a project handler without a resolved project', async () => {
   expect(response.status).toBe(404);
   expect(reader.list).not.toHaveBeenCalled();
 });
+
+it.each(['/_pb/audit', '/_pb/audit/head', '/_pb/projects/demo/audit'])(
+  'returns the unavailable trail stub for %s without reading the journal',
+  async (path) => {
+    const f = await fixture({ stub: true });
+    const response = await f.request(path);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'audit_trail_unavailable' } });
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.head).not.toHaveBeenCalled();
+  },
+);

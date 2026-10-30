@@ -4055,6 +4055,12 @@ describe('D1 changes read-site scan', () => {
     expect(source).toContain('result.at(-1)?.rows.length === 1');
   });
 
+  it('inventories status as read-only organization-scoped queries', () => {
+    const source = sources['db-sqlite/src/repositories/audit-status.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(mutationTargets(source)).toEqual([]);
+  });
+
   it('inventories health persistence as RETURNING-counted writes without changes metadata', () => {
     const source = sources['db-sqlite/src/repositories/audit-health.ts']!;
     expect(reads(source)).toEqual([]);

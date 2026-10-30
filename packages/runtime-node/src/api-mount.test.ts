@@ -231,6 +231,7 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/audit',
       'GET /_pb/audit/head',
       'GET /_pb/audit/health',
+      'GET /_pb/audit/status',
       'GET /_pb/projects/:project/audit',
     ],
     jobs: ['audit-seal', 'audit-verify'],

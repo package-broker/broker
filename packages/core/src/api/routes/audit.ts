@@ -75,7 +75,7 @@ function publicItem(row: AuditRow) {
   };
 }
 
-export function auditRoutes(reader: AuditReader): readonly RouteDefinition[] {
+export function auditRoutes(reader?: AuditReader): readonly RouteDefinition[] {
   const list = async (
     ctx: RequestContext,
     query: {
@@ -86,6 +86,7 @@ export function auditRoutes(reader: AuditReader): readonly RouteDefinition[] {
     },
     projectId: string | null,
   ): Promise<ApiOutcome> => {
+    if (reader === undefined) return { error: 'audit_trail_unavailable' };
     const limit = validateInput(auditLimit, Number(query.limit ?? 50));
     if (!limit.ok)
       return {
@@ -131,7 +132,10 @@ export function auditRoutes(reader: AuditReader): readonly RouteDefinition[] {
           responses: { 200: auditHeadResponse },
         },
       },
-      async ({ ctx }) => ({ status: 200, body: await reader.head(ctx) }),
+      async ({ ctx }) =>
+        reader === undefined
+          ? { error: 'audit_trail_unavailable' }
+          : { status: 200, body: await reader.head(ctx) },
     ),
     apiRoute(
       {

@@ -18,13 +18,14 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
-  it('has exactly the 16 audit events', () => {
+  it('has exactly the 17 audit events', () => {
     expect([...AUDIT_EVENTS].sort()).toEqual([
       'audit.alert',
       'audit.chain_broken',
       'audit.chain_integrity',
       'audit.delivery_loss',
       'audit.delivery_partial_success',
+      'audit.effective_unavailable',
       'audit.failure_event_failed',
       'audit.failure_event_invalid',
       'audit.failure_events_cap',
@@ -42,7 +43,7 @@ describe('vocabularies', () => {
     expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
-    expect(AUDIT_EVENTS.size).toBe(16);
+    expect(AUDIT_EVENTS.size).toBe(17);
   });
 
   it('has exactly the 5 kernel events', () => {
@@ -51,9 +52,10 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 49 reason codes', () => {
+  it('has exactly the 50 reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
+        'audit.effective_unavailable',
         'no_ip_key_saturated',
         'org_cap_reached',
         'authz.unauthenticated',
@@ -105,7 +107,7 @@ describe('vocabularies', () => {
         'audit.chain_integrity',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(49);
+    expect(KERNEL_REASON_CODES.size).toBe(50);
   });
 
   it('matches the port CODE pattern for every value', () => {

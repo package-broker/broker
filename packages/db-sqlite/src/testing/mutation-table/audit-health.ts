@@ -1,4 +1,5 @@
 import { expect } from 'vitest';
+import { AuditHealthConflictError } from '@package-broker/core/audit/health';
 import { createAuditHealthRepository } from '../../repositories/audit-health.js';
 import { orgOf, type CaseContext, type ContractCase, type MutationEntry } from './harness.js';
 
@@ -99,11 +100,48 @@ const raise: ContractCase = {
     expect((await normal.observe(foreign, [])).alerts).toEqual([]);
   },
 };
+const outcome = (write: Promise<unknown>) =>
+  write.then(
+    () => 'written',
+    (error: unknown) => {
+      if (error instanceof AuditHealthConflictError) return 'conflict';
+      throw error;
+    },
+  );
+const guardCount: ContractCase = {
+  name: 'health observation guards count only their organization',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    await createAuditHealthRepository(context.executor).observe(foreign, [observation]);
+    expect(await outcome(mutating(context).observe(own, [observation], []))).toBe('written');
+  },
+};
+const guardRows: ContractCase = {
+  name: 'health observation guards cannot match a foreign twin',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const normal = createAuditHealthRepository(context.executor);
+    await normal.observe(foreign, [observation]);
+    await normal.observe(own, [observation]);
+    const stale = (await normal.snapshot(own)).alerts;
+    await normal.observe(own, [{ ...observation, fingerprint: 'refusing', failing: true }]);
+    expect(await outcome(mutating(context).observe(own, [], stale))).toBe('conflict');
+  },
+};
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditHealthRepository',
     file: 'repositories/audit-health.ts',
-    cases: [snapshot, observe, read, acknowledge, acknowledgeRevision, raise],
+    cases: [
+      snapshot,
+      observe,
+      read,
+      acknowledge,
+      acknowledgeRevision,
+      raise,
+      guardCount,
+      guardRows,
+    ],
     predicates: [
       ...['audit_chain', 'audit_pending', 'audit_sink', 'audit_ledger'].map((table) => ({
         name: `health snapshot scopes ${table}`,
@@ -119,15 +157,27 @@ export const entries: readonly MutationEntry[] = [
       },
       {
         name: 'health alert reads are scoped',
-        locate: /(?<=FROM audit_health WHERE )org_id = \?/,
+        locate: /(?<=FROM audit_health WHERE )org_id = \?(?= ORDER BY)/,
         neutral: '(? IS NOT NULL)',
         caseName: read.name,
       },
       {
         name: 'health acknowledgement revision is scoped',
-        locate: /h.org_id = \?/,
+        locate: /h\.org_id = \?(?= AND h\.code = \?)/,
         neutral: '(? IS NOT NULL)',
         caseName: acknowledgeRevision.name,
+      },
+      {
+        name: 'health observation guard counts its organization',
+        locate: /(?<=SELECT count\(\*\) FROM audit_health WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: guardCount.name,
+      },
+      {
+        name: 'health observation guard matches its organization',
+        locate: /h\.org_id = \?(?=\s+AND h\.code = json_extract)/,
+        neutral: '(? IS NOT NULL)',
+        caseName: guardRows.name,
       },
       {
         name: 'health acknowledgement is scoped',

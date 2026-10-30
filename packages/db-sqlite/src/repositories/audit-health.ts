@@ -1,12 +1,16 @@
 import {
   AUDIT_ALERT_CODES,
+  AuditHealthConflictError,
   type AuditAlertCode,
   type AuditHealthPort,
   type AuditHealthSnapshot,
   type AuditHealthObservation,
   type AuditHealthStoredAlert,
 } from '@package-broker/core/audit/health';
+import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import type { ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
+import { sql } from 'kysely';
+import { assertCheck } from '../kysely.js';
 
 const LEDGER_ALERT_CODES: Readonly<Record<string, AuditAlertCode | undefined>> = {
   chain_reset: 'audit.chain_integrity',
@@ -35,6 +39,23 @@ function stored(row: Record<string, unknown>): AuditHealthStoredAlert {
 }
 const nextRevision = `(SELECT coalesce(max(revision), 0) + 1 FROM audit_health
   WHERE org_id = ? AND code = ?)`;
+
+function members(fingerprint: string): Set<string> {
+  return new Set(fingerprint.split('|'));
+}
+
+/** A live condition that only lost members is the same incident; a new member is a new one. */
+function newOccurrence(
+  row: AuditHealthStoredAlert | undefined,
+  item: AuditHealthObservation,
+): boolean {
+  if (row === undefined) return true;
+  if (row.active && item.active === false) return false;
+  if (!row.active || (item.origin ?? 'live') !== 'live') return true;
+  const before = members(row.fingerprint);
+  const after = members(item.fingerprint);
+  return after.size >= before.size || [...after].some((member) => !before.has(member));
+}
 
 export function createAuditHealthRepository(executor: ScalarSqlExecutor): AuditHealthPort {
   return {
@@ -122,8 +143,10 @@ export function createAuditHealthRepository(executor: ScalarSqlExecutor): AuditH
       const prior =
         current ??
         (await executor.batch([{ sql: healthSelect, params: [ctx.orgId] }]))[0]!.rows.map(stored);
+      const key = (code: string, origin: string) => `${code}\u0000${origin}`;
+      const byKey = new Map(prior.map((row) => [key(row.code, row.origin), row]));
       const changed = observations.filter((item) => {
-        const row = prior.find((r) => r.code === item.code && r.origin === (item.origin ?? 'live'));
+        const row = byKey.get(key(item.code, item.origin ?? 'live'));
         return (
           row === undefined ||
           row.active !== (item.active !== false) ||
@@ -137,49 +160,69 @@ export function createAuditHealthRepository(executor: ScalarSqlExecutor): AuditH
           !observations.some((o) => o.code === row.code && (o.origin ?? 'live') === row.origin),
       );
       if (changed.length === 0 && absent.length === 0) return { alerts: prior, raised: [] };
-      const statements: ScalarStatement[] = changed.map((item) => ({
-        sql: `INSERT INTO audit_health (org_id, code, origin, fingerprint, revision, acknowledged_revision, active, failing)
-          VALUES (?, ?, ?, ?, ${nextRevision}, 0, ?, ?)
+      const latest = new Map<AuditAlertCode, number>();
+      for (const row of prior)
+        latest.set(row.code, Math.max(latest.get(row.code) ?? 0, row.revision));
+      const writes = changed.map((item) => {
+        const row = byKey.get(key(item.code, item.origin ?? 'live'));
+        const occurrence = newOccurrence(row, item);
+        const revision = occurrence ? (latest.get(item.code) ?? 0) + 1 : row!.revision;
+        if (occurrence) latest.set(item.code, revision);
+        return { item, occurrence, revision };
+      });
+      const statements: ScalarStatement[] = [
+        ...(assertCheck(sql`((SELECT count(*) FROM audit_health WHERE org_id = ${ctx.orgId}) = ${prior.length}
+          AND NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(
+            prior.map((row) => [
+              row.code,
+              row.origin,
+              row.fingerprint,
+              row.revision,
+              Number(row.active),
+              Number(row.failing),
+            ]),
+          )}) e WHERE NOT EXISTS (SELECT 1 FROM audit_health h WHERE h.org_id = ${ctx.orgId}
+            AND h.code = json_extract(e.value, '$[0]') AND h.origin = json_extract(e.value, '$[1]')
+            AND h.fingerprint = json_extract(e.value, '$[2]') AND h.revision = json_extract(e.value, '$[3]')
+            AND h.active = json_extract(e.value, '$[4]') AND h.failing = json_extract(e.value, '$[5]'))))`) as readonly ScalarStatement[]),
+      ];
+      for (const { item, revision } of writes)
+        statements.push({
+          sql: `INSERT INTO audit_health (org_id, code, origin, fingerprint, revision, acknowledged_revision, active, failing)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?)
           ON CONFLICT (org_id, code, origin) DO UPDATE SET fingerprint = excluded.fingerprint,
-            revision = CASE WHEN audit_health.active = 1 AND excluded.active = 0
-              THEN audit_health.revision ELSE excluded.revision END,
-            active = excluded.active, failing = excluded.failing
-          WHERE audit_health.active != excluded.active OR audit_health.fingerprint != excluded.fingerprint
-            OR audit_health.failing != excluded.failing
-          RETURNING code, revision, active, origin`,
-        params: [
-          ctx.orgId,
-          item.code,
-          item.origin ?? 'live',
-          item.fingerprint,
-          ctx.orgId,
-          item.code,
-          Number(item.active !== false),
-          Number(item.failing),
-        ],
-      }));
+            revision = excluded.revision, active = excluded.active, failing = excluded.failing
+          RETURNING code`,
+          params: [
+            ctx.orgId,
+            item.code,
+            item.origin ?? 'live',
+            item.fingerprint,
+            revision,
+            Number(item.active !== false),
+            Number(item.failing),
+          ],
+        });
       for (const row of absent)
         statements.push({
           sql: `UPDATE audit_health SET active = 0, failing = 0 WHERE org_id = ? AND code = ? AND origin = ? AND active = 1 RETURNING code`,
           params: [ctx.orgId, row.code, row.origin],
         });
       statements.push({ sql: healthSelect, params: [ctx.orgId] });
-      const results = await executor.batch(statements);
+      let results;
+      try {
+        results = await executor.batch(statements);
+      } catch (error) {
+        if (
+          error instanceof DbError &&
+          error.kind === 'unique' &&
+          error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+        )
+          throw new AuditHealthConflictError();
+        throw error;
+      }
       return {
-        raised: [
-          ...new Set(
-            results.slice(0, changed.length).flatMap((result) =>
-              result.rows
-                .filter((row) => {
-                  const old = prior.find(
-                    (r) => r.code === row['code'] && r.origin === row['origin'],
-                  );
-                  return old === undefined || Number(row['revision']) > old.revision;
-                })
-                .map((row) => row['code'] as AuditAlertCode),
-            ),
-          ),
-        ],
+        raised: [...new Set(writes.filter((w) => w.occurrence).map((w) => w.item.code))],
         alerts: results.at(-1)!.rows.map(stored),
       };
     },

@@ -1,6 +1,13 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { createAuditHealthService } from '@package-broker/core/audit/health';
+import {
+  AuditHealthConflictError,
+  createAuditHealthService,
+  type AuditHealthPort,
+} from '@package-broker/core/audit/health';
+import type { OrgContext } from '@package-broker/core/db/port';
 import { fixedClock } from '@package-broker/core/ids';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import { createObservability, type ObsRecord } from '@package-broker/core/platform/observability';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createAuditHealthRepository } from './audit-health.js';
 
@@ -292,4 +299,161 @@ it('excludes superseded gaps from ledger spike bands', async () => {
     params: [a.orgId],
   });
   expect((await port.snapshot(a)).incidents[0]!.fingerprint).toBe('gap:seq_gap:2');
+});
+
+async function setSink(org: OrgContext, id: string, state: string, reason: string | null = null) {
+  await database.executor.batch([
+    {
+      sql: `INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source, state, blocked_reason, progress_seq, progress_hash, custody_seq, created_at, updated_at)
+        VALUES (?, ?, 'sink', 'webhook', 0, 'fingerprint', 1, 'build', ?, ?, 0, ?, 0, 'now', 'now')
+        ON CONFLICT (org_id, sink_id) DO UPDATE SET state = excluded.state, blocked_reason = excluded.blocked_reason`,
+      params: [org.orgId, id, state, reason, '0'.repeat(64)],
+    },
+  ]);
+}
+function productionService(port: AuditHealthPort) {
+  const records: ObsRecord[] = [];
+  const observability = createObservability(
+    { emit: (record) => records.push(record) },
+    { deploymentId: 'deployment', runtime: 'node', requestId: null },
+    { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+  );
+  const counters = () =>
+    records.flatMap((record) =>
+      record.kind === 'counter' && record.name === 'pb.audit.alerts_total'
+        ? [record.labels['code']]
+        : [],
+    );
+  const service = createAuditHealthService({
+    port,
+    clock: fixedClock('2026-10-30T01:00:00.000Z'),
+    observability,
+  });
+  return { service, counters };
+}
+async function revisions(port: AuditHealthPort, org: OrgContext) {
+  return Object.fromEntries(
+    ((await port.snapshot(org)).alerts ?? []).map((alert) => [
+      `${alert.code}:${alert.origin}`,
+      [alert.revision, alert.acknowledgedRevision, alert.active],
+    ]),
+  );
+}
+
+it('a stale recovery cannot clear a newer incident recorded by another reader', async () => {
+  const { a, port } = await fixture();
+  await setSink(a, 'first', 'blocked', 'rejected');
+  const { service, counters } = productionService(port);
+  expect(await service.read(a)).toEqual({ status: 'failing', codes: ['audit.blocked'] });
+  await setSink(a, 'first', 'active');
+  const stale = await port.snapshot(a);
+  await setSink(a, 'second', 'blocked', 'rejected');
+  expect(await service.read(a)).toEqual({ status: 'failing', codes: ['audit.blocked'] });
+  expect(await revisions(port, a)).toEqual({ 'audit.blocked:live': [2, 0, true] });
+  await expect(port.observe(a, [], stale.alerts)).rejects.toThrow(AuditHealthConflictError);
+  await expect(
+    port.observe(
+      a,
+      [{ code: 'audit.blocked', origin: 'live', fingerprint: 'first|third', failing: true }],
+      stale.alerts,
+    ),
+  ).rejects.toThrow(AuditHealthConflictError);
+  expect(await revisions(port, a)).toEqual({ 'audit.blocked:live': [2, 0, true] });
+  expect(await port.acknowledge(a, 'audit.blocked', 2)).toBe(true);
+  expect(await service.read(a)).toEqual({ status: 'failing', codes: ['audit.blocked'] });
+  expect(counters()).toEqual(['audit.blocked', 'audit.blocked']);
+});
+
+it('an interleaved reader retries from a fresh snapshot instead of writing stale state', async () => {
+  const { a, port } = await fixture();
+  await setSink(a, 'first', 'blocked', 'rejected');
+  const { service: other } = productionService(port);
+  await other.read(a);
+  await setSink(a, 'first', 'active');
+  const stale = await port.snapshot(a);
+  await setSink(a, 'second', 'blocked', 'rejected');
+  let snapshots = 0;
+  const interleaved: AuditHealthPort = {
+    ...port,
+    snapshot: async (org) => (++snapshots === 1 ? stale : port.snapshot(org)),
+  };
+  await other.read(a);
+  const { service, counters } = productionService(interleaved);
+  expect(await service.read(a)).toEqual({ status: 'failing', codes: ['audit.blocked'] });
+  expect(snapshots).toBe(2);
+  expect(counters()).toEqual([]);
+  expect(await revisions(port, a)).toEqual({ 'audit.blocked:live': [2, 0, true] });
+});
+
+it('gives up after a bounded number of conflicting observations', async () => {
+  const { a, port } = await fixture();
+  const observe = vi.fn<AuditHealthPort['observe']>(async () => {
+    throw new AuditHealthConflictError();
+  });
+  const { service, counters } = productionService({ ...port, observe });
+  await database.executor.all({
+    sql: "UPDATE audit_chain SET capacity_state = 'warning' WHERE org_id = ?",
+    params: [a.orgId],
+  });
+  await expect(service.read(a)).rejects.toThrow(AuditHealthConflictError);
+  expect(observe).toHaveBeenCalledTimes(3);
+  expect(counters()).toEqual([]);
+});
+
+it('partial recovery keeps the occurrence and its acknowledgement; a returning member raises again', async () => {
+  const { a, port } = await fixture();
+  const { service, counters } = productionService(port);
+  await setSink(a, 'first', 'blocked', 'fork');
+  await setSink(a, 'second', 'blocked', 'fork');
+  expect(await service.read(a)).toEqual({
+    status: 'failing',
+    codes: ['audit.blocked', 'audit.fork'],
+  });
+  expect(counters()).toEqual(['audit.blocked', 'audit.fork']);
+  expect(await port.acknowledge(a, 'audit.blocked', 1)).toBe(true);
+  expect(await port.acknowledge(a, 'audit.fork', 1)).toBe(true);
+  await setSink(a, 'first', 'active');
+  expect(await service.read(a)).toEqual({
+    status: 'failing',
+    codes: ['audit.blocked', 'audit.fork'],
+  });
+  expect(counters()).toEqual(['audit.blocked', 'audit.fork']);
+  expect(await revisions(port, a)).toEqual({
+    'audit.blocked:live': [1, 1, true],
+    'audit.fork:live': [1, 1, true],
+  });
+  expect((await port.snapshot(a)).alerts?.map((alert) => alert.fingerprint)).toEqual([
+    'second',
+    'second',
+  ]);
+  await setSink(a, 'first', 'blocked', 'fork');
+  await service.read(a);
+  expect(counters()).toEqual(['audit.blocked', 'audit.fork', 'audit.blocked', 'audit.fork']);
+  expect(await revisions(port, a)).toEqual({
+    'audit.blocked:live': [2, 1, true],
+    'audit.fork:live': [2, 1, true],
+  });
+  await setSink(a, 'first', 'active');
+  await setSink(a, 'second', 'active');
+  expect(await service.read(a)).toEqual({
+    status: 'degraded',
+    codes: ['audit.blocked', 'audit.fork'],
+  });
+  expect(counters()).toHaveLength(4);
+  expect(await revisions(port, a)).toEqual({
+    'audit.blocked:live': [2, 1, false],
+    'audit.fork:live': [2, 1, false],
+  });
+});
+
+it('a replaced member is a new occurrence even when the member count is unchanged', async () => {
+  const { a, port } = await fixture();
+  const { service, counters } = productionService(port);
+  await setSink(a, 'first', 'blocked', 'rejected');
+  await service.read(a);
+  await setSink(a, 'first', 'active');
+  await setSink(a, 'second', 'blocked', 'rejected');
+  await service.read(a);
+  expect(counters()).toEqual(['audit.blocked', 'audit.blocked']);
+  expect(await revisions(port, a)).toEqual({ 'audit.blocked:live': [2, 0, true] });
 });

@@ -40,7 +40,10 @@ export interface AuditHealthPort {
   /** Capture transient alerts at their source even if no monitor is polling. */
   raise(ctx: OrgContext, code: AuditAlertCode): Promise<void>;
   snapshot(ctx: OrgContext): Promise<AuditHealthSnapshot>;
-  /** Atomically latch observations, resolve absent conditions and return the persistent state. */
+  /**
+   * Atomically latch observations, resolve absent conditions and return the persistent state.
+   * Throws AuditHealthConflictError without writing when stored health no longer matches `current`.
+   */
   observe(
     ctx: OrgContext,
     observations: readonly AuditHealthObservation[],
@@ -55,6 +58,15 @@ export interface AuditHealthPort {
 export interface AuditHealth {
   readonly status: 'ok' | 'degraded' | 'failing';
   readonly codes: readonly AuditAlertCode[];
+}
+
+const OBSERVE_ATTEMPTS = 3;
+
+export class AuditHealthConflictError extends Error {
+  constructor() {
+    super('Audit health changed concurrently');
+    this.name = 'AuditHealthConflictError';
+  }
 }
 
 export function createAuditHealthService(deps: {
@@ -81,74 +93,84 @@ export function createAuditHealthService(deps: {
       await deps.port.raise(ctx, code);
     },
     async read(ctx: OrgContext): Promise<AuditHealth> {
-      const snapshot = await deps.port.snapshot(ctx);
-      const observations = [...snapshot.incidents];
-      const live = new Map<AuditAlertCode, AuditHealthObservation>();
-      const add = (code: AuditAlertCode, fingerprint = 'active', failing = false) => {
-        const prior = live.get(code);
-        live.set(code, {
-          code,
-          origin: 'live',
-          fingerprint: prior === undefined ? fingerprint : `${prior.fingerprint}|${fingerprint}`,
-          failing: failing || prior?.failing === true,
-        });
-      };
-      if (snapshot.mode === 'none') add('audit.mode_none');
-      if (snapshot.capacityState !== 'ok')
-        add('audit.capacity', snapshot.capacityState, snapshot.capacityState === 'refusing');
-      if (snapshot.restorePending) add('audit.fork', 'restore', true);
-      const blocked = snapshot.sinks.filter((sink) => sink.state === 'blocked');
-      if (blocked.length > 0)
-        add(
-          'audit.blocked',
-          blocked
-            .map((sink) => sink.id)
-            .sort()
-            .join('|'),
-          true,
-        );
-      const forked = blocked.filter((sink) => sink.blockedReason === 'fork');
-      if (forked.length > 0)
-        add(
-          'audit.fork',
-          forked
-            .map((sink) => sink.id)
-            .sort()
-            .join('|'),
-          true,
-        );
-      const inactive = snapshot.sinks.filter((sink) => sink.state === 'inactive');
-      if (inactive.length > 0)
-        add(
-          'audit.sink_inactive',
-          inactive
-            .map((sink) => `${sink.id}:${sink.state}`)
-            .sort()
-            .join('|'),
-        );
-      if (snapshot.oldestPendingAt !== null) {
-        const age = deps.clock.now().getTime() - Date.parse(snapshot.oldestPendingAt);
-        if (!Number.isFinite(age) || age > 300_000) add('audit.pending_old');
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await observe(ctx);
+        } catch (error) {
+          if (!(error instanceof AuditHealthConflictError) || attempt === OBSERVE_ATTEMPTS)
+            throw error;
+        }
       }
-      const state = await deps.port.observe(
-        ctx,
-        [...observations, ...live.values()],
-        snapshot.alerts,
-      );
-      for (const code of state.raised) emit(code);
-      const outstanding = state.alerts.filter(
-        (alert) => alert.active || alert.revision > alert.acknowledgedRevision,
-      );
-      return {
-        status: outstanding.some((alert) => alert.active && alert.failing)
-          ? 'failing'
-          : outstanding.length > 0
-            ? 'degraded'
-            : 'ok',
-        codes: [...new Set(outstanding.map((alert) => alert.code))].sort(),
-      };
     },
   };
+  async function observe(ctx: OrgContext): Promise<AuditHealth> {
+    const snapshot = await deps.port.snapshot(ctx);
+    const observations = [...snapshot.incidents];
+    const live = new Map<AuditAlertCode, AuditHealthObservation>();
+    const add = (code: AuditAlertCode, fingerprint = 'active', failing = false) => {
+      const prior = live.get(code);
+      live.set(code, {
+        code,
+        origin: 'live',
+        fingerprint: prior === undefined ? fingerprint : `${prior.fingerprint}|${fingerprint}`,
+        failing: failing || prior?.failing === true,
+      });
+    };
+    if (snapshot.mode === 'none') add('audit.mode_none');
+    if (snapshot.capacityState !== 'ok')
+      add('audit.capacity', snapshot.capacityState, snapshot.capacityState === 'refusing');
+    if (snapshot.restorePending) add('audit.fork', 'restore', true);
+    const blocked = snapshot.sinks.filter((sink) => sink.state === 'blocked');
+    if (blocked.length > 0)
+      add(
+        'audit.blocked',
+        blocked
+          .map((sink) => sink.id)
+          .sort()
+          .join('|'),
+        true,
+      );
+    const forked = blocked.filter((sink) => sink.blockedReason === 'fork');
+    if (forked.length > 0)
+      add(
+        'audit.fork',
+        forked
+          .map((sink) => sink.id)
+          .sort()
+          .join('|'),
+        true,
+      );
+    const inactive = snapshot.sinks.filter((sink) => sink.state === 'inactive');
+    if (inactive.length > 0)
+      add(
+        'audit.sink_inactive',
+        inactive
+          .map((sink) => `${sink.id}:${sink.state}`)
+          .sort()
+          .join('|'),
+      );
+    if (snapshot.oldestPendingAt !== null) {
+      const age = deps.clock.now().getTime() - Date.parse(snapshot.oldestPendingAt);
+      if (!Number.isFinite(age) || age > 300_000) add('audit.pending_old');
+    }
+    const state = await deps.port.observe(
+      ctx,
+      [...observations, ...live.values()],
+      snapshot.alerts,
+    );
+    for (const code of state.raised) emit(code);
+    const outstanding = state.alerts.filter(
+      (alert) => alert.active || alert.revision > alert.acknowledgedRevision,
+    );
+    return {
+      status: outstanding.some((alert) => alert.active && alert.failing)
+        ? 'failing'
+        : outstanding.length > 0
+          ? 'degraded'
+          : 'ok',
+      codes: [...new Set(outstanding.map((alert) => alert.code))].sort(),
+    };
+  }
 }
 
 export async function raiseAuditAlert(

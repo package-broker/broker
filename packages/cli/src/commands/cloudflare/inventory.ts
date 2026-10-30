@@ -121,7 +121,16 @@ export interface Inventory {
     secret_name: 'PB_MASTER_KEY';
   };
   bootstrap: {
-    state: 'not_started' | 'issuing' | 'issued' | 'unknown' | 'already_set_up';
+    state:
+      | 'not_started'
+      | 'issuing'
+      | 'issued'
+      | 'unknown'
+      | 'already_set_up'
+      | 'sso_issuing'
+      | 'sso_failed'
+      | 'sso_unknown'
+      | 'sso_complete';
     expires_at: string | null;
   };
   migrations: {
@@ -868,9 +877,17 @@ export function validateInventory(raw: unknown, expected: InstallIdentity): Inve
       'unknown',
     ].includes(data.secret_delivery.master_key) ||
     data.secret_delivery.secret_name !== 'PB_MASTER_KEY' ||
-    !['not_started', 'issuing', 'issued', 'unknown', 'already_set_up'].includes(
-      data.bootstrap.state,
-    ) ||
+    ![
+      'not_started',
+      'issuing',
+      'issued',
+      'unknown',
+      'already_set_up',
+      'sso_issuing',
+      'sso_failed',
+      'sso_unknown',
+      'sso_complete',
+    ].includes(data.bootstrap.state) ||
     (data.bootstrap.expires_at !== null && !iso(data.bootstrap.expires_at))
   )
     return bad();

@@ -207,6 +207,102 @@ function providerPlan(descriptor: IdentityDescriptor, providersText: string | nu
   )(descriptor.compiled.map(planned), runtime);
   return { runtime, plan };
 }
+export async function resolveProviderText(
+  descriptor: IdentityDescriptor | null,
+  option: ProvidersOption | undefined,
+  sources: readonly { bindings: readonly unknown[] }[],
+  frozen: DeploymentAttempt | undefined,
+  checkManaged: () => void | Promise<void>,
+): Promise<string | null> {
+  if (frozen) {
+    const text = frozenProviders(frozen);
+    if (option?.kind === 'set' || option?.kind === 'remove') {
+      const requested = desiredProviders(option, descriptor, null);
+      if (
+        requested !== text &&
+        !(
+          option.kind === 'set' &&
+          text !== null &&
+          validateProvidersDocument(text).value === requested
+        )
+      )
+        return conflict('settings_sha256');
+    }
+    return text;
+  }
+  if (option?.kind === 'set' || option?.kind === 'remove')
+    return desiredProviders(option, descriptor, null);
+  if (
+    sources.some((source) => source.bindings.map(object).some((b) => b.name === 'PB_IDP_PROVIDERS'))
+  )
+    await checkManaged();
+  const values = sources.map((source) => desiredProviders(option, descriptor, source));
+  if (new Set(values).size > 1) return conflict('providers');
+  return values[0] ?? null;
+}
+
+export function setupProviderCandidate(descriptor: IdentityDescriptor | null, text: string | null) {
+  return descriptor === null ? [] : providerPlan(descriptor, text).plan.effective;
+}
+
+export async function checkSetupManagedProviders(
+  api: CloudflareApi,
+  journal: Inventory,
+  routes: string | undefined,
+  domain: string | undefined,
+) {
+  const requested = routeInput(routes, journal.identity.script_name);
+  const deployment = journal.deployment;
+  const zones = [
+    ...new Set(
+      [
+        deployment?.attempt.prior_settings,
+        deployment?.attempt.intended_settings,
+        deployment?.last_verified?.intended_settings,
+      ].flatMap((settings) => settings?.routes.map((r) => r.zone_id) ?? []),
+    ),
+  ];
+  const base = `/workers/scripts/${journal.identity.script_name}`;
+  const live = await readSettings(api, base, journal, requested, domain, true, zones);
+  const current = await active(api, base);
+  checkManagedSettings(
+    journal.deployment?.attempt,
+    verifiedDeployment(deployment),
+    live,
+    current,
+    requested,
+  );
+}
+
+function checkManagedSettings(
+  priorAttempt: DeploymentAttempt | undefined,
+  recordedVerified: DeploymentAttempt | null,
+  live: ManagedSettings,
+  current: ActiveDeployment,
+  requestedRoutes: ManagedRoute[],
+) {
+  let managed = priorAttempt?.intended_settings ?? recordedVerified?.intended_settings;
+  if (priorAttempt?.phase === 'failed' || priorAttempt?.phase === 'rolled_back')
+    managed =
+      restoredSnapshot(
+        priorAttempt,
+        priorAttempt.phase === 'failed' && equal(current, beforeCandidate(priorAttempt))
+          ? live
+          : undefined,
+      ) ?? conflict('managed_settings');
+  if (
+    live.routes.some(
+      (r) => !requestedRoutes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
+    )
+  )
+    return conflict('routes', 'routes:unmanaged_own');
+  // Never take over pre-existing attachments without a previous managed receipt.
+  if (
+    (live.consumer || live.schedules.length || live.routes.length || live.domain) &&
+    (!managed || !matchesManaged(live, managed))
+  )
+    return conflict('managed_settings');
+}
 type EffectiveAnchor = { readonly id: string; readonly anchor: string };
 function effectiveAnchors(
   descriptor: IdentityDescriptor | null,
@@ -1925,33 +2021,13 @@ export async function deploy(
       });
     assertLocalAuthAccepted(localAuth, artifact.localAuth);
     output.checks.push({ name: 'local_auth', status: localAuth });
-    const frozen = resuming ? frozenProviders(priorAttempt) : null;
-    let providersText = frozen;
-    if (o.providers?.kind === 'set' || o.providers?.kind === 'remove') {
-      providersText = desiredProviders(o.providers, artifact.identity, null);
-      if (resuming) {
-        if (
-          providersText !== frozen &&
-          !(
-            o.providers.kind === 'set' &&
-            frozen !== null &&
-            validateProvidersDocument(frozen).value === providersText
-          )
-        )
-          return conflict('settings_sha256');
-        providersText = frozen;
-      }
-    } else if (!resuming) {
-      if (
-        sources.some((r) =>
-          (r.bindings as unknown[]).map(object).some((b) => b.name === 'PB_IDP_PROVIDERS'),
-        )
-      )
-        checkManaged();
-      const values = sources.map((r) => desiredProviders(o.providers, artifact.identity, r));
-      if (new Set(values).size > 1) return conflict('providers');
-      providersText = values[0] ?? null;
-    }
+    const providersText = await resolveProviderText(
+      artifact.identity,
+      o.providers,
+      sources,
+      resuming ? priorAttempt : undefined,
+      checkManaged,
+    );
     const identityHash = identityDigest(artifact.identity, providersText);
     if (
       recordedVerified &&
@@ -2176,28 +2252,9 @@ export async function deploy(
     checkManaged();
     function checkManaged() {
       if (resuming) return;
-      let managed = priorAttempt?.intended_settings ?? recordedVerified?.intended_settings;
-      if (priorAttempt?.phase === 'failed' || priorAttempt?.phase === 'rolled_back')
-        managed =
-          restoredSnapshot(
-            priorAttempt,
-            priorAttempt.phase === 'failed' && equal(current, beforeCandidate(priorAttempt))
-              ? live
-              : undefined,
-          ) ?? conflict('managed_settings');
-      if (
-        live.routes.some(
-          (r) => !requestedRoutes.some((x) => x.zone_id === r.zone_id && x.pattern === r.pattern),
-        )
-      )
-        return conflict('routes', 'routes:unmanaged_own');
-      // Never take over pre-existing attachments without a previous managed receipt.
-      if (
-        (live.consumer || live.schedules.length || live.routes.length || live.domain) &&
-        (!managed || !matchesManaged(live, managed))
-      )
-        return conflict('managed_settings');
+      checkManagedSettings(priorAttempt, recordedVerified, live, current, requestedRoutes);
     }
+
     if (priorJournal) {
       const pendingHistory = structuredClone(priorJournal);
       recordDeploymentHistory(pendingHistory, {

@@ -165,6 +165,12 @@ beforeEach(async () => {
             result: { id: path.split('/').at(-1), resources: { bindings: [] } },
           }),
         );
+      if (path.endsWith('/schedules'))
+        return new Response(JSON.stringify({ success: true, result: { schedules: [] } }));
+      if (path.endsWith('/subdomain'))
+        return new Response(
+          JSON.stringify({ success: true, result: { enabled: true, previews_enabled: false } }),
+        );
       if (path.endsWith('/deployments'))
         return new Response(JSON.stringify({ success: true, result: { deployments: [] } }));
       if (path.endsWith('/settings'))
@@ -2155,6 +2161,12 @@ it.each(['domain', 'publicUrl'] as const)(
     const send = options.fetch!;
     options.fetch = vi.fn(async (input, init) => {
       const path = new URL(String(input)).pathname;
+      if (path.endsWith('/schedules'))
+        return new Response(JSON.stringify({ success: true, result: { schedules: [] } }));
+      if (path.endsWith('/subdomain'))
+        return new Response(
+          JSON.stringify({ success: true, result: { enabled: true, previews_enabled: false } }),
+        );
       if (path.endsWith('/deployments'))
         return new Response(
           JSON.stringify({
@@ -2254,7 +2266,7 @@ function liveLocalAuth(modes: string[]) {
 }
 
 it.each([false, true])(
-  'preserves live disabled and refuses setup before mutations (dry-run %s)',
+  'preserves live disabled and rejects artifacts without local-auth capability before mutations (dry-run %s)',
   async (dryRun) => {
     options.dryRun = dryRun;
     liveLocalAuth(['disabled']);
@@ -2265,7 +2277,7 @@ it.each([false, true])(
         checks: expect.arrayContaining([{ name: 'local_auth', status: 'disabled' }]),
         error: {
           code: 'invalid_input',
-          message: 'Setup with local sign-in disabled is not supported yet',
+          message: 'Cannot disable local sign-in on an artifact without local-auth support',
         },
       },
     });
@@ -2278,15 +2290,22 @@ it.each([false, true])(
   },
 );
 
-it.each(['flag', 'env'])('refuses explicit disabled setup from %s', async (source) => {
-  if (source === 'flag') options.localAuth = 'disabled';
-  else options.env = { ...options.env, PB_AUTH_LOCAL: 'disabled' };
-  expect(await setup(options, ops)).toMatchObject({
-    exitCode: 2,
-    output: { error: { message: 'Setup with local sign-in disabled is not supported yet' } },
-  });
-  expect(ops.deploy).not.toHaveBeenCalled();
-});
+it.each(['flag', 'env'])(
+  'rejects disabled setup without artifact capability from %s',
+  async (source) => {
+    if (source === 'flag') options.localAuth = 'disabled';
+    else options.env = { ...options.env, PB_AUTH_LOCAL: 'disabled' };
+    expect(await setup(options, ops)).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: {
+          message: 'Cannot disable local sign-in on an artifact without local-auth support',
+        },
+      },
+    });
+    expect(ops.deploy).not.toHaveBeenCalled();
+  },
+);
 
 it('requires explicit re-enabling and forwards the flag and environment to deploy', async () => {
   liveLocalAuth(['disabled']);
@@ -2483,4 +2502,544 @@ it('refuses a legacy frozen attempt before provisioning or key delivery', async 
   expect(options.reveal).not.toHaveBeenCalled();
   expect(options.fetch).not.toHaveBeenCalled();
   await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+function disabledSetup() {
+  options.localAuth = 'disabled';
+  delete options.tokenFile;
+  options.providers = {
+    kind: 'set',
+    value: runtimeAccess({
+      verifiedDomains: ['example.test'],
+      emailAuthoritativeDomains: ['example.test'],
+    }),
+    ids: ['access'],
+  };
+  vi.mocked(ops.validateArtifact).mockResolvedValue({
+    localAuth: { version: 1 },
+    identity: {
+      runtimeProviders: true,
+      compiled: [
+        {
+          id: 'access',
+          kind: 'cloudflare-access',
+          anchor: `access:team.cloudflareaccess.com/${'a'.repeat(64)}`,
+          policy: {
+            verifiedDomains: ['example.test'],
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        },
+      ],
+    },
+  } as unknown as Awaited<ReturnType<SetupOperations['validateArtifact']>>);
+  vi.mocked(ops.admin).mockImplementation(async (o, sink) => {
+    expect(o).toMatchObject({ signIn: 'sso', localAuth: 'disabled' });
+    expect(o).not.toHaveProperty('tokenFile');
+    expect(sink).not.toHaveProperty('deliver');
+    expect((await journal()).bootstrap.state).toBe('sso_issuing');
+    sink!.diagnostic('deployment local sign-in mode is disabled');
+    return { exitCode: 0, state: 'sso_complete', expiresAt: null };
+  });
+}
+
+it.each([false, true])(
+  'completes disabled SSO setup including prebuilt %s without local enrollment',
+  async (prebuilt) => {
+    disabledSetup();
+    if (prebuilt) {
+      options.prebuilt = true;
+      delete options.configPath;
+      ops.materializePrebuilt = vi.fn(async () => ({
+        outDir: join(project, '.pb/materialized'),
+        gitSha: 'test',
+        artifactSha256: 'a'.repeat(64),
+        package: '@package-broker/prebuilt-cloudflare',
+        version: '1.0.0',
+      }));
+    }
+    const r = await setup(options, ops);
+    expect(r).toMatchObject({
+      exitCode: 0,
+      output: {
+        login_url: 'https://broker.example.test/_pb/ui/#/login',
+        bootstrap_url: null,
+        checks: expect.arrayContaining([
+          { name: 'local_auth', status: 'disabled' },
+          { name: 'local_auth_capability', status: 'accepted' },
+        ]),
+      },
+    });
+    expect((await journal()).bootstrap).toEqual({ state: 'sso_complete', expires_at: null });
+    const text =
+      JSON.stringify(r) +
+      JSON.stringify(vi.mocked(options.progress!).mock.calls) +
+      (await readFile(store.path, 'utf8'));
+    for (const privateValue of [
+      'admin@example.test',
+      'API_SENTINEL',
+      sentKey!,
+      '/_pb/ui/setup',
+      'setupToken',
+    ])
+      expect(text).not.toContain(privateValue);
+    expect(options.progress).toHaveBeenCalledWith('deployment local sign-in mode is disabled');
+    expect(ops.admin).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ops.organization).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ops.admin).mock.invocationCallOrder[0]!,
+    );
+    expect(vi.mocked(ops.admin).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ops.deploy).mock.invocationCallOrder[0]!,
+    );
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(ops.admin).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(['sso_issuing', 'sso_failed', 'sso_unknown'] as const)(
+  'safely retries interrupted %s SSO bootstrap',
+  async (state) => {
+    disabledSetup();
+    await update((j) => {
+      j.bootstrap.state = state;
+    });
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect(ops.admin).toHaveBeenCalledTimes(1);
+    expect((await journal()).bootstrap.state).toBe('sso_complete');
+  },
+);
+
+it.each([1, 7])(
+  'journals unsuccessful SSO bootstrap with exit %s for safe retry',
+  async (exitCode) => {
+    disabledSetup();
+    vi.mocked(ops.admin).mockResolvedValueOnce({
+      exitCode,
+      state: exitCode === 7 ? 'unknown' : 'error',
+      expiresAt: null,
+    });
+    expect((await setup(options, ops)).exitCode).toBe(exitCode);
+    expect((await journal()).bootstrap.state).toBe(exitCode === 7 ? 'sso_unknown' : 'sso_failed');
+    expect(ops.deploy).not.toHaveBeenCalled();
+    expect(ops.smoke).not.toHaveBeenCalled();
+    expect((await setup(options, ops)).exitCode).toBe(0);
+    expect((await journal()).bootstrap.state).toBe('sso_complete');
+  },
+);
+
+it.each(['token', 'refresh'])(
+  'rejects disabled setup local %s flag before mutation',
+  async (flag) => {
+    disabledSetup();
+    if (flag === 'token') options.tokenFile = join(outside, 'unused.token');
+    else options.refreshSetupToken = true;
+    expect((await setup(options, ops)).exitCode).toBe(2);
+    expect(ops.deploy).not.toHaveBeenCalled();
+    expect(ops.admin).not.toHaveBeenCalled();
+    expect(await store.read()).toBeNull();
+  },
+);
+
+it.each([
+  undefined,
+  { verifiedDomains: ['example.test'] },
+  { verifiedDomains: ['other.test'], emailAuthoritativeDomains: ['example.test'] },
+  { verifiedDomains: ['example.test'], emailAuthoritativeDomains: ['other.test'] },
+])('rejects insufficient compiled admin domain policy %j', async (policy) => {
+  disabledSetup();
+  delete options.providers;
+  const artifact = await ops.validateArtifact('unused');
+  vi.mocked(ops.validateArtifact).mockResolvedValue({
+    ...artifact,
+    identity: {
+      runtimeProviders: true,
+      compiled: [
+        {
+          id: 'access',
+          kind: 'cloudflare-access',
+          anchor: `access:team.cloudflareaccess.com/${'a'.repeat(64)}`,
+          ...(policy ? { policy } : {}),
+        },
+      ],
+    },
+  } as typeof artifact);
+  const r = await setup(options, ops);
+  expect(r).toMatchObject({
+    exitCode: 2,
+    output: {
+      error: {
+        message:
+          'SSO setup requires a verified and authoritative admin domain in the effective providers',
+      },
+    },
+  });
+  expect(ops.deploy).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+});
+
+it('plans disabled SSO setup without mutation or token delivery', async () => {
+  disabledSetup();
+  options.dryRun = true;
+  expect(await setup(options, ops)).toMatchObject({
+    exitCode: 0,
+    output: {
+      status: 'planned',
+      checks: expect.arrayContaining([{ name: 'local_auth', status: 'disabled' }]),
+    },
+  });
+  for (const operation of [ops.migrate, ops.organization, ops.deploy, ops.smoke, ops.admin])
+    expect(operation).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+  await expect(stat(options.keyFile!)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('retries safely after an SSO bootstrap exception with unknown outcome', async () => {
+  disabledSetup();
+  vi.mocked(ops.admin).mockRejectedValueOnce(new Error('PRIVATE_RESPONSE_SENTINEL'));
+  const result = await setup(options, ops);
+  expect(result).toMatchObject({ exitCode: 7, output: { error: { code: 'outcome_unknown' } } });
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_RESPONSE_SENTINEL');
+  expect((await journal()).bootstrap.state).toBe('sso_issuing');
+  expect((await setup(options, ops)).exitCode).toBe(0);
+});
+
+function runtimeAccess(policy: {
+  verifiedDomains: string[];
+  emailAuthoritativeDomains?: string[];
+}) {
+  return JSON.stringify([
+    {
+      id: 'access',
+      kind: 'cloudflare-access',
+      teamDomain: 'team.cloudflareaccess.com',
+      audience: 'a'.repeat(64),
+      trustEmailVerification: true,
+      policy: { ...policy, autoJoin: false },
+    },
+  ]);
+}
+
+it.each(['flag', 'live'])(
+  'uses the effective %s runtime override instead of compiled admin trust',
+  async (source) => {
+    disabledSetup();
+    delete options.providers;
+    const value = runtimeAccess({
+      verifiedDomains: ['other.test'],
+      emailAuthoritativeDomains: ['other.test'],
+    });
+    if (source === 'flag') options.providers = { kind: 'set', value, ids: ['access'] };
+    else {
+      exists = true;
+      const fallback = options.fetch!;
+      options.fetch = vi.fn(async (input, init) => {
+        if (new URL(String(input)).pathname.endsWith('/settings'))
+          return new Response(
+            JSON.stringify({
+              success: true,
+              result: { bindings: [{ name: 'PB_IDP_PROVIDERS', type: 'plain_text', text: value }] },
+            }),
+          );
+        return fallback(input, init);
+      });
+    }
+    expect(await setup(options, ops)).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: {
+          message:
+            'SSO setup requires a verified and authoritative admin domain in the effective providers',
+        },
+      },
+    });
+    expect(ops.deploy).not.toHaveBeenCalled();
+    expect(ops.admin).not.toHaveBeenCalled();
+    expect(await store.read()).toBeNull();
+  },
+);
+
+it('accepts a matching runtime provider when compiled policy is unknown', async () => {
+  disabledSetup();
+  vi.mocked(ops.validateArtifact).mockResolvedValue({
+    localAuth: { version: 1 },
+    identity: { runtimeProviders: true, compiled: [] },
+  } as unknown as Awaited<ReturnType<SetupOperations['validateArtifact']>>);
+  options.providers = {
+    kind: 'set',
+    value: runtimeAccess({
+      verifiedDomains: ['example.test'],
+      emailAuthoritativeDomains: ['example.test'],
+    }),
+    ids: ['access'],
+  };
+  expect((await setup(options, ops)).exitCode).toBe(0);
+});
+
+it('requires effective OIDC provider secrets before disabled setup mutations', async () => {
+  disabledSetup();
+  delete options.providers;
+  vi.mocked(ops.validateArtifact).mockResolvedValue({
+    localAuth: { version: 1 },
+    identity: {
+      runtimeProviders: false,
+      compiled: [
+        {
+          id: 'dex',
+          kind: 'oidc',
+          anchor: 'oidc:https://idp.example.test',
+          policy: {
+            verifiedDomains: ['example.test'],
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        },
+      ],
+    },
+  } as unknown as Awaited<ReturnType<SetupOperations['validateArtifact']>>);
+  expect(await setup(options, ops)).toMatchObject({
+    exitCode: 2,
+    output: {
+      error: {
+        message:
+          'Missing provider secrets: PB_IDP_DEX_CLIENT_SECRET; deliver with --secret <ENV_NAME> or --secrets <ENV_NAMES>',
+      },
+    },
+  });
+  expect(ops.deploy).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+  options.secret = ['PB_IDP_DEX_CLIENT_SECRET'];
+  options.env = { ...options.env, PB_IDP_DEX_CLIENT_SECRET: 'PROVIDER_SECRET_SENTINEL' };
+  expect((await setup(options, ops)).exitCode).toBe(0);
+  expect(JSON.stringify(vi.mocked(options.progress!).mock.calls)).not.toContain(
+    'PROVIDER_SECRET_SENTINEL',
+  );
+});
+
+it('validates frozen runtime policy before retrying a disabled deployment', async () => {
+  disabledSetup();
+  delete options.providers;
+  await seedLegacyFrozenAttempt();
+  const value = runtimeAccess({
+    verifiedDomains: ['other.test'],
+    emailAuthoritativeDomains: ['other.test'],
+  });
+  await update((j) => {
+    j.deployment!.attempt.local_auth = 'disabled';
+    j.deployment!.attempt.providers_text = value;
+    j.deployment!.attempt.providers_sha256 = digest(value);
+  });
+  expect(await setup(options, ops)).toMatchObject({
+    exitCode: 2,
+    output: {
+      error: {
+        message:
+          'SSO setup requires a verified and authoritative admin domain in the effective providers',
+      },
+    },
+  });
+  expect(ops.deploy).not.toHaveBeenCalled();
+  expect(ops.admin).not.toHaveBeenCalled();
+});
+
+it('retains SSO completion after login instructions are lost and skips bootstrap on retry', async () => {
+  disabledSetup();
+  options.progress = vi.fn((message: string) => {
+    if (message.startsWith('Open login_url')) throw new Error('PRIVATE_OUTPUT_SENTINEL');
+  });
+  const outcome = await setup(options, ops);
+  expect(outcome).toMatchObject({ exitCode: 7, output: { error: { code: 'outcome_unknown' } } });
+  expect(JSON.stringify(outcome)).not.toContain('PRIVATE_OUTPUT_SENTINEL');
+  expect((await journal()).bootstrap.state).toBe('sso_complete');
+  options.progress = vi.fn();
+  expect((await setup(options, ops)).exitCode).toBe(0);
+  expect(ops.admin).toHaveBeenCalledTimes(1);
+});
+
+it.each(['compiled', false, undefined] as const)(
+  'refuses Access without provable email verification trust (%s) before mutations',
+  async (trust) => {
+    disabledSetup();
+    if (trust === 'compiled') delete options.providers;
+    else {
+      const document = JSON.parse(
+        options.providers!.kind === 'set' ? options.providers!.value : '[]',
+      );
+      document[0].trustEmailVerification = trust;
+      options.providers = { kind: 'set', value: JSON.stringify(document), ids: ['access'] };
+    }
+    expect(await setup(options, ops)).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: {
+          message: expect.stringContaining(
+            trust === undefined
+              ? 'SSO setup requires a verified and authoritative admin domain'
+              : 'trustEmailVerification=true',
+          ),
+        },
+      },
+    });
+    for (const op of [ops.migrate, ops.organization, ops.admin, ops.deploy])
+      expect(op).not.toHaveBeenCalled();
+    expect(await store.read()).toBeNull();
+  },
+);
+
+it.each(['sso_issuing', 'sso_failed', 'sso_unknown', 'sso_complete'] as const)(
+  'explains enabled recovery over an %s journal',
+  async (state) => {
+    disabledSetup();
+    options.localAuth = 'enabled';
+    await update((j) => {
+      j.bootstrap.state = state;
+    });
+    expect(await setup(options, ops)).toMatchObject({
+      exitCode: 8,
+      output: {
+        error: {
+          message: expect.stringContaining('pb cloudflare deploy --local-auth enabled'),
+        },
+      },
+    });
+    expect(ops.migrate).not.toHaveBeenCalled();
+    expect(ops.deploy).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['issuing', 'issued', 'unknown', 'already_set_up'] as const)(
+  'points disabled recovery from local %s enrollment to deploy',
+  async (state) => {
+    disabledSetup();
+    await update((j) => {
+      j.bootstrap.state = state;
+    });
+    expect(await setup(options, ops)).toMatchObject({
+      exitCode: 8,
+      output: {
+        error: {
+          message: expect.stringContaining('pb cloudflare deploy --local-auth disabled'),
+        },
+      },
+    });
+    expect(ops.admin).not.toHaveBeenCalled();
+    expect(ops.deploy).not.toHaveBeenCalled();
+  },
+);
+
+it('refuses inherited providers on unmanaged live attachments before SSO mutations', async () => {
+  disabledSetup();
+  const providers = options.providers!;
+  delete options.providers;
+  exists = true;
+  const fallback = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.endsWith('/settings'))
+      return new Response(
+        JSON.stringify({
+          success: true,
+          result: {
+            bindings: [
+              {
+                name: 'PB_IDP_PROVIDERS',
+                type: 'plain_text',
+                text: providers.kind === 'set' ? providers.value : '',
+              },
+            ],
+          },
+        }),
+      );
+    if (path.endsWith('/schedules'))
+      return new Response(
+        JSON.stringify({ success: true, result: { schedules: [{ cron: '* * * * *' }] } }),
+      );
+    return fallback(input, init);
+  });
+  const result = await setup(options, ops);
+  expect(result).toMatchObject({
+    exitCode: 8,
+    output: {
+      error: { code: 'configuration_conflict' },
+      checks: expect.arrayContaining([
+        { name: 'managed_settings', status: 'configuration_conflict' },
+      ]),
+    },
+  });
+  for (const op of [ops.migrate, ops.organization, ops.admin, ops.deploy])
+    expect(op).not.toHaveBeenCalled();
+  expect(await store.read()).toBeNull();
+});
+
+it('uses deploy’s settings conflict code for changed frozen providers before mutations', async () => {
+  disabledSetup();
+  await seedLegacyFrozenAttempt();
+  await update((j) => {
+    j.deployment!.attempt.local_auth = 'disabled';
+    const text = runtimeAccess({
+      verifiedDomains: ['other.test'],
+      emailAuthoritativeDomains: ['other.test'],
+    });
+    j.deployment!.attempt.providers_text = text;
+    j.deployment!.attempt.providers_sha256 = digest(text);
+  });
+  expect(await setup(options, ops)).toMatchObject({
+    exitCode: 8,
+    output: {
+      checks: expect.arrayContaining([
+        { name: 'settings_sha256', status: 'configuration_conflict' },
+      ]),
+    },
+  });
+  expect(ops.admin).not.toHaveBeenCalled();
+  expect(ops.deploy).not.toHaveBeenCalled();
+});
+
+it.each([
+  'preparing_upload',
+  'upload_pending',
+  'uploaded',
+  'configuring',
+  'activation_pending',
+] as const)('counts frozen provider secrets only after upload submission (%s)', async (phase) => {
+  disabledSetup();
+  delete options.providers;
+  const artifact = await ops.validateArtifact('unused');
+  vi.mocked(ops.validateArtifact).mockResolvedValue({
+    ...artifact,
+    identity: {
+      runtimeProviders: false,
+      compiled: [
+        {
+          id: 'dex',
+          kind: 'oidc',
+          anchor: 'oidc:https://idp.example.test',
+          policy: {
+            verifiedDomains: ['example.test'],
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        },
+      ],
+    },
+  } as typeof artifact);
+  await seedLegacyFrozenAttempt();
+  installed = true;
+  await update((j) => {
+    j.deployment!.attempt.phase = phase;
+    j.deployment!.attempt.local_auth = 'disabled';
+    j.deployment!.attempt.secret_names.push('PB_IDP_DEX_CLIENT_SECRET');
+  });
+  const result = await setup(options, ops);
+  if (phase === 'preparing_upload') {
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: {
+          message: expect.stringContaining('Missing provider secrets: PB_IDP_DEX_CLIENT_SECRET'),
+        },
+      },
+    });
+    expect(ops.admin).not.toHaveBeenCalled();
+    expect(ops.deploy).not.toHaveBeenCalled();
+  } else {
+    expect(result.exitCode).toBe(0);
+    expect(ops.deploy).toHaveBeenCalledOnce();
+  }
 });

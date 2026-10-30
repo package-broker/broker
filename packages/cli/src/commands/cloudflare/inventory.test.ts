@@ -376,3 +376,14 @@ it('rejects invalid local mode history while retaining legacy plain binding rece
   };
   expect(validateInventory(inventory, identity)).toBe(inventory);
 });
+
+it.each(['sso_issuing', 'sso_failed', 'sso_unknown', 'sso_complete'] as const)(
+  'persists explicit %s bootstrap state',
+  async (state) => {
+    const store = await stores();
+    const inventory = emptyInventory(identity, Date.now());
+    inventory.bootstrap = { state, expires_at: null };
+    await store.write(inventory);
+    expect((await store.read())!.bootstrap).toEqual({ state, expires_at: null });
+  },
+);

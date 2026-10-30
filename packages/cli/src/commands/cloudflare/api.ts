@@ -178,6 +178,7 @@ export function commandEnvelope(command: string, dryRun = false) {
     checks: [] as CommandCheck[],
     rollback: { status: 'not_needed' as string, target_version_id: null as string | null },
     bootstrap_url: null as string | null,
+    login_url: null as string | null,
     error: null as { code: ErrorCode; message: string; retryable: boolean; stage: string } | null,
   };
   return output as typeof output & {

@@ -1225,7 +1225,7 @@ it('SSO email bootstrap completes without token delivery, local credentials or i
     signIn: 'sso',
     result: 'created',
     toppedUp: 0,
-    next: [expect.stringContaining('/_pb/ui/login')],
+    next: [expect.stringContaining('/_pb/ui/#/login')],
   });
   expect(await sqliteQuery(file, 'SELECT email FROM user_account')).toEqual([{ email: EMAIL }]);
   expect(await sqliteQuery(file, 'SELECT subject_type, subject_value FROM access_grant')).toEqual([
@@ -1365,33 +1365,50 @@ it.each(['enabled', 'disabled', undefined] as const)(
   },
 );
 
-it('SSO rerun warns about unused setup tokens before mutation and preserves them', async () => {
-  const file = await sqliteFile();
-  expect(
-    await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
-  ).toBe(0);
-  const before = await sqliteQuery(file, 'SELECT * FROM local_login');
-  const diagnostics: string[] = [];
-  const original = adminRepository.bootstrapSsoAdmin;
-  let checked = false;
-  vi.spyOn(adminRepository, 'bootstrapSsoAdmin').mockImplementationOnce(async (...args) => {
-    expect(diagnostics).toContainEqual(
-      expect.stringContaining('existing unused local setup token unchanged'),
-    );
-    checked = true;
-    return original(...args);
-  });
-  expect(
-    (
-      await bootstrapAdmin(
-        { email: EMAIL, signIn: 'sso', target: sqliteTarget(file) },
-        { diagnostic: (text) => diagnostics.push(text), output: vi.fn(), deliver: vi.fn() },
-      )
-    ).state,
-  ).toBe('sso_complete');
-  expect(checked).toBe(true);
-  expect(await sqliteQuery(file, 'SELECT * FROM local_login')).toEqual(before);
-});
+it.each(['enabled', 'disabled', undefined] as const)(
+  'SSO rerun in mode %s warns about unused setup tokens before mutation and preserves them',
+  async (localAuth) => {
+    const file = await sqliteFile();
+    expect(
+      await runAdminBootstrap({ email: EMAIL, target: sqliteTarget(file), stdoutIsTTY: true }),
+    ).toBe(0);
+    const before = await sqliteQuery(file, 'SELECT * FROM local_login');
+    const diagnostics: string[] = [];
+    const original = adminRepository.bootstrapSsoAdmin;
+    let checked = false;
+    vi.spyOn(adminRepository, 'bootstrapSsoAdmin').mockImplementationOnce(async (...args) => {
+      expect(diagnostics).toContainEqual(
+        expect.stringContaining('existing unused local setup token unchanged'),
+      );
+      expect(diagnostics).toContainEqual(
+        expect.stringContaining(
+          localAuth === 'disabled'
+            ? 'it is unusable while local sign-in is disabled'
+            : localAuth === 'enabled'
+              ? 'it remains usable while local sign-in is enabled'
+              : 'may remain usable while it is enabled',
+        ),
+      );
+      checked = true;
+      return original(...args);
+    });
+    expect(
+      (
+        await bootstrapAdmin(
+          {
+            email: EMAIL,
+            signIn: 'sso',
+            ...(localAuth ? { localAuth } : {}),
+            target: sqliteTarget(file),
+          },
+          { diagnostic: (text) => diagnostics.push(text), output: vi.fn(), deliver: vi.fn() },
+        )
+      ).state,
+    ).toBe('sso_complete');
+    expect(checked).toBe(true);
+    expect(await sqliteQuery(file, 'SELECT * FROM local_login')).toEqual(before);
+  },
+);
 
 it('reset-local warns about revocation before the operation and ignores ambient Worker mode', async () => {
   let checked = false;
@@ -1509,3 +1526,44 @@ it('SSO bootstrap refuses suspended accounts without changing grants or local cr
   expect(console.log).not.toHaveBeenCalled();
   expect(output().stderr).not.toContain(EMAIL);
 });
+
+it.each(['failed', 'lost'])(
+  'SSO unused-token read %s exits without mutation or private output',
+  async (failure) => {
+    const mutation = vi.spyOn(adminRepository, 'bootstrapSsoAdmin');
+    const unusedRead = vi.spyOn(adminRepository, 'hasUnusedLocalSetupToken');
+    const harness = await createHarness({
+      override: (call) => {
+        if (call === 2) {
+          if (failure === 'lost') return Promise.reject(new Error(SENTINEL + EMAIL + API_TOKEN));
+          return d1Failure(SENTINEL + EMAIL + API_TOKEN);
+        }
+        return undefined;
+      },
+    });
+    const sink = { diagnostic: vi.fn(), output: vi.fn(), deliver: vi.fn() };
+    try {
+      expect(
+        await bootstrapAdmin(
+          {
+            email: EMAIL,
+            signIn: 'sso',
+            localAuth: 'disabled',
+            target: cloudflareTarget(harness.fetch),
+          },
+          sink,
+        ),
+      ).toMatchObject({ exitCode: failure === 'lost' ? 7 : 1 });
+      expect(unusedRead).toHaveBeenCalledTimes(1);
+      expect(mutation).not.toHaveBeenCalled();
+      expect(sink.output).not.toHaveBeenCalled();
+      expect(sink.deliver).not.toHaveBeenCalled();
+      for (const table of ['user_account', 'access_grant', 'local_login', 'session', 'credential'])
+        expect(await harness.query(`SELECT * FROM ${table}`)).toEqual([]);
+      for (const value of [EMAIL, API_TOKEN, SENTINEL])
+        expect(JSON.stringify(sink.diagnostic.mock.calls)).not.toContain(value);
+    } finally {
+      await harness.database.close();
+    }
+  },
+);

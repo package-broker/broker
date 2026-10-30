@@ -330,10 +330,13 @@ async function issue(
           ? 'SSO provider configuration is not validated here; configure the named provider to supply verified identities and the named group; test administrator sign-in'
           : 'SSO provider configuration is not validated here; require verifiedDomains and emailAuthoritativeDomains to include the exact admin email domain; test administrator sign-in',
       );
+      const mode =
+        o.localAuth === 'enabled' ? 'enabled' : o.localAuth === 'disabled' ? 'disabled' : 'unknown';
+      say(command, `deployment local sign-in mode is ${mode}`);
       if (!group && (await hasUnusedLocalSetupToken(opened.executor, ctx, email!)))
         say(
           command,
-          'warning: SSO bootstrap leaves the existing unused local setup token unchanged; it is unusable while local sign-in is disabled',
+          `warning: SSO bootstrap leaves the existing unused local setup token unchanged; ${mode === 'disabled' ? 'it is unusable while local sign-in is disabled' : mode === 'enabled' ? 'it remains usable while local sign-in is enabled' : 'it is unusable while local sign-in is disabled and may remain usable while it is enabled'}`,
         );
       const outcome = await bootstrapSsoAdmin(opened.executor, ctx, {
         ...(group
@@ -347,7 +350,7 @@ async function issue(
       sink.output({
         signIn: 'sso',
         ...outcome,
-        next: ['Open /_pb/ui/login on the broker and sign in with the configured SSO provider'],
+        next: ['Open /_pb/ui/#/login on the broker and sign in with the configured SSO provider'],
       });
       return finish(0, 'sso_complete');
     }

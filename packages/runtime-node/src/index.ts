@@ -805,6 +805,10 @@ function assembleRegistry(input: {
     policyFetch,
     deploymentId: input.deploymentId,
     providers,
+    npmAudit: {
+      sources,
+      provenance: createVulnerabilityRepository(executor, systemClock),
+    },
     catalogue: {
       reader: input.reader,
       scopedAdmission: createScopedAdmission(executor),

@@ -472,7 +472,14 @@ describe('sink fixture runner', () => {
     expect(result.passed).toHaveLength(15);
   });
 
-  it.each(['none', 'number', 'null'] as const)(
+  it.each([
+    'none',
+    'number',
+    'null',
+    'missing_qualifier',
+    'wrong_qualifier',
+    'extra_qualifier',
+  ] as const)(
     'checks OTLP string attributes and omitted nulls (corruption: %s)',
     async (corrupt) => {
       const base = adapter();
@@ -496,21 +503,23 @@ describe('sink fixture runner', () => {
               ...parsed,
               records: wireRecords(body).map((record) =>
                 Object.fromEntries(
-                  Object.entries(record).map(([key, value]) => [
-                    key,
-                    [
-                      'epoch',
-                      'seq',
-                      'boundary_seq',
-                      'from_seq',
-                      'to_seq',
-                      'count',
-                      'policy_generation',
-                      'last_common_seq',
-                    ].includes(key)
-                      ? Number(value)
-                      : value,
-                  ]),
+                  Object.entries(record)
+                    .filter(([key]) => key !== 'source_ip.hashed')
+                    .map(([key, value]) => [
+                      key,
+                      [
+                        'epoch',
+                        'seq',
+                        'boundary_seq',
+                        'from_seq',
+                        'to_seq',
+                        'count',
+                        'policy_generation',
+                        'last_common_seq',
+                      ].includes(key)
+                        ? Number(value)
+                        : value,
+                    ]),
                 ),
               ),
             }),
@@ -529,7 +538,16 @@ describe('sink fixture runner', () => {
                     ...(parsed.records
                       ? {
                           records: parsed.records.map((record) => ({
-                            attributes: Object.entries(record)
+                            attributes: Object.entries({
+                              ...record,
+                              ...(corrupt !== 'missing_qualifier' &&
+                              (record['source_ip'] != null || corrupt === 'extra_qualifier')
+                                ? {
+                                    'source_ip.hashed':
+                                      corrupt === 'wrong_qualifier' ? 'true' : 'false',
+                                  }
+                                : {}),
+                            })
                               .filter(([, value]) => value !== null || corrupt === 'null')
                               .map(([key, value]) => ({
                                 key: 'audit.' + key,

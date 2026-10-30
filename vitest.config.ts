@@ -29,6 +29,8 @@ const packages = [
   'ui-assets',
   'plugin-sso-oidc',
   'plugin-github',
+  'plugin-audit-trail',
+  'plugin-audit-otlp',
   'plugin-audit-webhook',
 ];
 

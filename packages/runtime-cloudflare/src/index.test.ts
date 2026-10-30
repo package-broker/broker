@@ -53,6 +53,7 @@ describe('runtime-cloudflare', () => {
       createKernel: () =>
         Promise.resolve({
           fetch: () => Promise.reject(new Error('kernel exploded')),
+          routeTemplates: new Set<string>(),
           registration: { routes: [], hooks: { 'access.check': [] }, bindings: new Map() },
         }),
     }));
@@ -76,6 +77,23 @@ describe('runtime-cloudflare', () => {
     const first = await worker.services();
     expect(await worker.services()).toBe(first);
     expect(await first.providerAnchors.anchors({ orgId: 'org' } as never)).toEqual([]);
+  });
+
+  it('rejects a kernel without route templates with a clear configuration error', async () => {
+    vi.resetModules();
+    vi.doMock('@package-broker/core/kernel/kernel', () => ({
+      createKernel: () => Promise.resolve({}),
+    }));
+    try {
+      const { createWorker: createWorkerWithoutTemplates } = await import('./index.js');
+      await expect(createWorkerWithoutTemplates([]).services()).rejects.toMatchObject({
+        name: 'KernelConfigError',
+        message: 'kernel.routeTemplates is required',
+      });
+    } finally {
+      vi.doUnmock('@package-broker/core/kernel/kernel');
+      vi.resetModules();
+    }
   });
 
   it('runs work dispatched outside a request and logs that nothing keeps it alive', async () => {
@@ -117,6 +135,7 @@ describe('runtime-cloudflare', () => {
             if (path === '/a') shared.dispatch?.(() => workA);
             return new Response(path);
           },
+          routeTemplates: new Set<string>(),
         }),
     }));
     try {
@@ -173,6 +192,7 @@ describe('runtime-cloudflare', () => {
             }, 20);
             return Promise.resolve(new Response('ok'));
           },
+          routeTemplates: new Set<string>(),
         }),
     }));
     try {

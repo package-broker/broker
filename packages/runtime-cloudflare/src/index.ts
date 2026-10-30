@@ -2013,6 +2013,9 @@ export function createWorker(
               },
             }),
       });
+      if (kernel.routeTemplates == null) {
+        throw new KernelConfigError(['kernel.routeTemplates is required']);
+      }
       for (const template of kernel.routeTemplates) failureRouteTemplates.add(template);
       if (services === undefined)
         return {

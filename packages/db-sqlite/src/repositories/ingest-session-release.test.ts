@@ -17,7 +17,7 @@ import {
 } from './ingest-session.js';
 import { packageUpsertStatements } from './catalogue-write-package.js';
 import { createHash } from 'node:crypto';
-import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
+import { parseSha256, type CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import type { Codecs } from '@package-broker/core/platform/codec';
 import { describeNpmPackument, NpmPackumentError } from '@package-broker/core/ingest/npm/packument';
 import { SnapshotCorruptError } from '@package-broker/core/ingest/snapshot';
@@ -420,6 +420,18 @@ it('restarts a missing staged snapshot in a new generation before fetching again
   ).toBe(true);
   expect(await deps.sessions.release(org, old)).toBe(true);
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     put: async () => {
       throw new Error('unexpected write');
     },
@@ -510,6 +522,18 @@ it('hands staged validators through a 400-version continuation within the statem
     purgeAfter: null,
   };
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     put: async () => {
       throw new Error('unexpected write');
     },

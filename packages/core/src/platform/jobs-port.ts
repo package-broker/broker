@@ -13,7 +13,7 @@ import {
   type EnqueueInput,
   type JobDefinition,
   type JobStatus,
-  type Jobs,
+  type CoreJobs as Jobs,
 } from './jobs.js';
 
 export const MAX_RUN_AT_AHEAD_SECONDS = 30 * 24 * 60 * 60;
@@ -113,6 +113,9 @@ export function createRepositoryJobs(input: RepositoryJobsInput): JobsFactory {
     const { projectId, tokenId } = initiator;
 
     return Object.freeze({
+      async enqueueStatements() {
+        throw new Error('not_implemented');
+      },
       async enqueue(ctx, type, payload, rawInput) {
         assertOwner(pluginId, type);
         const definition = definitions.get(type);

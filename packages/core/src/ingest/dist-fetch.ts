@@ -6,7 +6,12 @@ import type {
   WriteEffect,
 } from '../db/catalogue.js';
 import type { OrgContext } from '../db/port.js';
-import { BlobTooLargeError, parseSha256, type BlobStore, type Sha256 } from '../platform/blob.js';
+import {
+  BlobTooLargeError,
+  parseSha256,
+  type CoreBlobStore as BlobStore,
+  type Sha256,
+} from '../platform/blob.js';
 import { UpstreamError } from '../sources/policy-fetch.js';
 import type { ProviderContext, ProviderSource, SourceProvider } from '../sources/provider.js';
 import {

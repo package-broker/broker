@@ -25,7 +25,7 @@ import {
   type BlobHasher,
   type BlobLifecycle,
   type BlobMetadataPort,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
   type BlobStoreOptions,
   type PurgeGeneration,
   type ByteRange,
@@ -130,6 +130,22 @@ function fixture(): Fixture {
     now: 1_000,
     betweenRecheckAndRemove: null,
     byteStore: {
+      async putStaged() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discardStaged() {
+        throw new Error('not_implemented');
+      },
+      async listStaged() {
+        throw new Error('not_implemented');
+      },
+
       async putVerified(storageKey, body, input) {
         if (f.fail.put) throw f.fail.put;
         const bytes = await drain(body);
@@ -803,13 +819,21 @@ describe('lifecycle visibility', () => {
     expect((await store.head(ctx, key))?.purgeAfter).toBeNull();
   });
 
-  it('exposes only put, get and head on the public port', () => {
+  it('exposes the read, put and staged-write public port methods', () => {
     const f = fixture();
     const store = createBlobStore(f.byteStore, f.metadata, opts()) as unknown as Record<
       string,
       unknown
     >;
-    expect(Object.keys(store).sort()).toEqual(['get', 'head', 'put']);
+    expect(Object.keys(store).sort()).toEqual([
+      'discard',
+      'get',
+      'head',
+      'openStaged',
+      'promote',
+      'put',
+      'stage',
+    ]);
   });
 });
 
@@ -1626,6 +1650,22 @@ describe('createBlobProbe', () => {
 
 describe('digest mismatch', () => {
   const stubStore = (fail: (body: ReadableStream<Uint8Array>) => Promise<never>): ByteStore => ({
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
+
     putVerified: (_k, body) => fail(body),
     get: async () => null,
     head: async () => null,

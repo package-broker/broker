@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import { fixedClock, type Clock } from '../ids.js';
-import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
+import { JobError, type JobContext, type CoreJobs as Jobs } from '../platform/jobs.js';
 import { PAT_OFFBOARDING_JOB_TYPE } from './pat-offboarding.js';
 import {
   createPatOffboardingSweepJob,

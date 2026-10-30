@@ -40,6 +40,7 @@ const S_OWNED = uid('SW');
 const S_FOREIGN = uid('SF');
 const NO_CREATE_ROLE = uid('R2');
 const ROLES: Record<DefaultRoleKey, string> = {
+  organization_publisher: uid('RP'),
   organization_admin: uid('RA'),
   organization_auditor: uid('RU'),
   project_owner: uid('R0'),
@@ -47,6 +48,7 @@ const ROLES: Record<DefaultRoleKey, string> = {
   project_auditor: uid('RX'),
 };
 const FOREIGN_ROLES: Record<DefaultRoleKey, string> = {
+  organization_publisher: uid('QP'),
   organization_admin: uid('QA'),
   organization_auditor: uid('QU'),
   project_owner: uid('QO'),

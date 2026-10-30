@@ -105,6 +105,21 @@ async function sqliteFixture(): Promise<SqliteFixture> {
   let referenceCounter = 0;
 
   const byteStore: ByteStore = {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     async putVerified(storageKey, body, input) {
       state.staged += 1;
       try {

@@ -101,6 +101,7 @@ const RESET_GRANT = mint();
 const BOOT_GRANT = mint();
 
 const ROLE_IDS: Readonly<Record<DefaultRoleKey, string>> = {
+  organization_publisher: mint(),
   organization_admin: mint(),
   organization_auditor: mint(),
   project_owner: mint(),

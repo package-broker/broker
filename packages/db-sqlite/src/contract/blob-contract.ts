@@ -13,7 +13,7 @@ import {
 import type {
   BlobInfo,
   BlobLifecycle,
-  BlobStore,
+  CoreBlobStore as BlobStore,
   ByteRange,
   PurgeGeneration,
   Sha256,

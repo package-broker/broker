@@ -3,7 +3,7 @@ import type { DelegatedMutationFence } from '../authz/fence.js';
 import { PERMISSIONS } from '../authz/permissions.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
-import type { BlobStore, Sha256 } from '../platform/blob.js';
+import type { CoreBlobStore as BlobStore, Sha256 } from '../platform/blob.js';
 import { JobError } from '../platform/jobs.js';
 import { MAX_MANIFEST_BYTES, parseManifest, planHash, type Manifest } from './manifest.js';
 import {

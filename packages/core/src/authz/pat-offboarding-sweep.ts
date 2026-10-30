@@ -1,6 +1,6 @@
 import type { OrgContext } from '../db/port.js';
 import { isoTimestamp, type Clock } from '../ids.js';
-import { JobError, type Jobs } from '../platform/jobs.js';
+import { JobError, type CoreJobs as Jobs } from '../platform/jobs.js';
 import { registerCoreJob, type RegisteredCoreJob } from '../runtime/core-jobs.js';
 import type { AdminLog } from './administration.js';
 import { PAT_OFFBOARDING_JOB_TYPE } from './pat-offboarding.js';

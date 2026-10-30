@@ -28,6 +28,36 @@ export interface BlobPutInput {
   readonly refetchable: boolean;
 }
 
+export type StagedBlobHandle = string & { readonly __stagedBlobHandle: true };
+
+export interface StagedBlob {
+  /** Opaque handle bound to the organization and reserve generation. */
+  readonly handle: StagedBlobHandle;
+  readonly sha256: Sha256;
+  readonly size: number;
+  readonly mediaType: string;
+}
+
+export interface StagedByteObject {
+  readonly handle: StagedBlobHandle;
+  readonly createdAt: string;
+}
+
+export interface CoreBlobStore extends BlobStore {
+  stage(
+    ctx: OrgContext,
+    body: ReadableStream<Uint8Array>,
+    input: { readonly maxBytes: number; readonly mediaType: string },
+  ): Promise<StagedBlob>;
+  openStaged(ctx: OrgContext, staged: StagedBlob): Promise<ReadableStream<Uint8Array>>;
+  promote(
+    ctx: OrgContext,
+    staged: StagedBlob,
+    input: { readonly refetchable: false },
+  ): Promise<BlobInfo>;
+  discard(ctx: OrgContext, staged: StagedBlob): Promise<void>;
+}
+
 export interface BlobStore {
   put(
     ctx: OrgContext,
@@ -50,6 +80,16 @@ export interface BlobStore {
  * - `get` with a range echoes the range actually served in `range` (null for a full read).
  */
 export interface ByteStore {
+  putStaged(
+    handle: StagedBlobHandle,
+    body: ReadableStream<Uint8Array>,
+    maxBytes: number,
+    mediaType: string,
+  ): Promise<{ readonly sha256: Sha256; readonly size: number }>;
+  openStaged(handle: StagedBlobHandle): Promise<ReadableStream<Uint8Array>>;
+  promote(handle: StagedBlobHandle, sha256: Sha256, size: number, mediaType: string): Promise<void>;
+  discardStaged(handle: StagedBlobHandle): Promise<void>;
+  listStaged(olderThan: string): Promise<readonly StagedByteObject[]>;
   putVerified(
     storageKey: string,
     body: ReadableStream<Uint8Array>,
@@ -455,7 +495,7 @@ export function createBlobStore(
   byteStore: ByteStore,
   metadata: BlobMetadataPort,
   options: BlobStoreOptions,
-): BlobStore {
+): CoreBlobStore {
   const admission = options?.admission;
   if (admission === undefined || typeof admission.tryAcquire !== 'function') {
     throw new BlobValidationError();
@@ -471,6 +511,18 @@ export function createBlobStore(
   if (!Number.isSafeInteger(totalMs) || totalMs < 1) throw new BlobValidationError();
 
   return Object.freeze({
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     async put(ctx, key, body, input) {
       const digest = parseSha256(key);
       validatePutInput(input, maxBytes);
@@ -591,7 +643,7 @@ export function createBlobStore(
       if (found.size !== row.size) throw new BlobSizeMismatchError();
       return row;
     },
-  } satisfies BlobStore);
+  } satisfies CoreBlobStore);
 }
 
 function toHex(bytes: Uint8Array): string {

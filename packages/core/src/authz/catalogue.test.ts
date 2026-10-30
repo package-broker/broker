@@ -66,6 +66,7 @@ describe('step 5 catalogue additions', () => {
       'org:roles:read',
       'org:grants:read',
       'org:sources:read',
+      'org:packages:publish',
       'org:import:write',
       'org:audit:read',
       'project:read',

@@ -8,7 +8,7 @@ import {
   type PurgeGeneration,
   type Sha256,
 } from './blob.js';
-import type { Jobs } from './jobs.js';
+import type { CoreJobs as Jobs } from './jobs.js';
 import type { Observability } from './observability.js';
 
 export interface DuePage {

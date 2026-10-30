@@ -111,7 +111,7 @@ import {
   tokenWiring,
   type TokenWiring,
 } from './token-jobs.js';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import { SEAMS_KEY } from './internal/seams-key.js';
 import type { RegistrySeams } from './testing/node-server.js';
 import { PlatformUnavailableError } from '@package-broker/core/platform/errors';
@@ -259,6 +259,11 @@ function retentionRegistrations(
             const removal = createBlobLifecycle({
               metadata,
               store: {
+                putStaged: (...args) => store.putStaged(...args),
+                openStaged: (...args) => store.openStaged(...args),
+                promote: (...args) => store.promote(...args),
+                discardStaged: (...args) => store.discardStaged(...args),
+                listStaged: (...args) => store.listStaged(...args),
                 putVerified: (...args) => store.putVerified(...args),
                 head: (...args) => store.head(...args),
                 get: (...args) => store.get(...args),
@@ -725,6 +730,7 @@ function assembleRegistry(input: {
     return jobsFactory('core', unattended);
   };
   const jobs: Jobs = seams.jobs ?? {
+    enqueueStatements: (...args) => coreJobs().enqueueStatements(...args),
     enqueue: (ctx, type, payload, enqueueInput) =>
       coreJobs().enqueue(ctx, type, payload, enqueueInput),
     get: (ctx, id) => coreJobs().get(ctx, id),

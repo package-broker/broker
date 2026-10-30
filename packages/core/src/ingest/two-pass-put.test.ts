@@ -10,7 +10,7 @@ import {
   type BlobMetadataPort,
   type ByteStore,
   type BlobInfo,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
   type Sha256,
 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
@@ -77,6 +77,19 @@ function fakeStore(): { store: BlobStore; stored: Map<string, Uint8Array>; puts:
   const stored = new Map<string, Uint8Array>();
   const puts: number[] = [];
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
+
     async put(_ctx, key, body, input): Promise<BlobInfo> {
       puts.push(input.size);
       const bytes = await drain(body);
@@ -178,6 +191,19 @@ describe('twoPassPut', () => {
   it('does not treat an unrelated store failure as instability', async () => {
     const failure = new Error('disk');
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, _k, body) => {
         await body.cancel();
         throw failure;
@@ -210,6 +236,19 @@ describe('twoPassPut', () => {
   it('exposes a branded sha256 key to the store', async () => {
     let seen: Sha256 | null = null;
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, key, body, input) => {
         seen = key;
         await drain(body);
@@ -299,6 +338,19 @@ describe('twoPassPut', () => {
   it('surfaces a generic store failure after the last byte instead of calling it unstable', async () => {
     const failure = new Error('commit');
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, _k, body) => {
         await drain(body);
         throw failure;
@@ -320,6 +372,19 @@ describe('twoPassPut', () => {
   ] as const)('propagates %s without retrying', async (_name, makeError, second) => {
     const failure = makeError();
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, _k, body) => {
         await drain(body);
         throw failure;
@@ -341,6 +406,19 @@ describe('twoPassPut', () => {
 
   it('treats a typed digest mismatch from the store as instability', async () => {
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, _k, body) => {
         await body.cancel();
         throw new BlobDigestMismatchError('a'.repeat(64), 'b'.repeat(64));
@@ -385,6 +463,19 @@ describe('twoPassPut', () => {
     const open = async (): Promise<ReadableStream<Uint8Array>> =>
       streamOf([enc.encode(opens++ % 2 === 0 ? 'aaaa' : 'bbbb')]);
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, _k, body, input) => {
         const reader = body.getReader();
         let got = 0;
@@ -407,6 +498,19 @@ describe('twoPassPut', () => {
   it('surfaces a store-side size mismatch when pass 2 delivered the expected bytes', async () => {
     const failure = new BlobSizeMismatchError();
     const store: BlobStore = {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
+
       put: async (_c, _k, body) => {
         await drain(body);
         throw failure;
@@ -430,6 +534,22 @@ describe('twoPassPut', () => {
       const objects = new Map<string, Uint8Array>();
       const rows = new Map<string, BlobInfo>();
       const byteStore: ByteStore = {
+        async putStaged() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discardStaged() {
+          throw new Error('not_implemented');
+        },
+        async listStaged() {
+          throw new Error('not_implemented');
+        },
+
         async putVerified(key, body, input) {
           const bytes = await drain(body);
           if (bytes.length !== input.size) throw new Error('size');
@@ -648,6 +768,19 @@ describe('twoPassPut with a supplied first pass', () => {
         { highWaterMark: 0 },
       );
       const store: BlobStore = {
+        async stage() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discard() {
+          throw new Error('not_implemented');
+        },
+
         async put(_ctx, _key, body) {
           const reader = body.getReader();
           await reader.read();

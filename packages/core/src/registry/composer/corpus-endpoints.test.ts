@@ -13,7 +13,7 @@ import { orgContext, type OrgId } from '../../db/port.js';
 import { setContextPackageActor } from '../../internal/package-actor.js';
 import { setResolvedPackage } from '../../internal/package-context.js';
 import type { RequestContext } from '../../plugin.js';
-import { parseSha256, type BlobStore, type Sha256 } from '../../platform/blob.js';
+import { parseSha256, type CoreBlobStore as BlobStore, type Sha256 } from '../../platform/blob.js';
 import type { FetchLeases } from '../../ingest/coalesce.js';
 import { systemClock } from '../../ids.js';
 import type { OnDemandFill } from '../../ingest/on-demand.js';

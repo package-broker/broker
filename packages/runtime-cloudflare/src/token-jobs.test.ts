@@ -16,7 +16,7 @@ import * as kernelModule from '@package-broker/core/kernel/kernel';
 import { projectGrantKey } from '@package-broker/db-sqlite/repositories/project-grant';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import type { JobClaim } from '@package-broker/core/platform/job-repository';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import {
@@ -363,6 +363,9 @@ describe('Worker personal-token offboarding wiring', () => {
 
 describe('Worker personal-token job holder', () => {
   const jobs: Jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
     enqueue: async () => ({ id: ulid(), created: true }),
     get: async () => null,
   };

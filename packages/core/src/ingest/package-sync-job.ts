@@ -13,7 +13,7 @@ import {
 } from '../platform/job-repository.js';
 import type { JobGuard } from '../platform/job-repository.js';
 import { canonicalPayload, defineJob, JobError } from '../platform/jobs.js';
-import type { EnqueueInput, Jobs } from '../platform/jobs.js';
+import type { EnqueueInput, CoreJobs as Jobs } from '../platform/jobs.js';
 import type { SourceType } from '../sources/config.js';
 import { assertDescribeResult } from '../sources/provider.js';
 import { applyChunk, type ApplyDeps } from './apply-description.js';

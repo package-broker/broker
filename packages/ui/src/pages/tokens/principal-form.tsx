@@ -18,6 +18,10 @@ export const permissionCopy: Record<string, [string, string]> = {
   'project:grants:read': ['Read project grants', 'View who has access to this project.'],
   'project:sources:read': ['Read project sources', "View this project's package sources."],
   'project:audit:read': ['Read project audit records', 'View recorded changes in this project.'],
+  'org:packages:publish': [
+    'Include organization publish permission',
+    'Include permission to publish packages to the organization. Publishing is not available in this version.',
+  ],
   'org:read': ['Read organization details', 'View organization information.'],
   'org:users:read': ['Read organization users', 'Read user information allowed by the API.'],
   'org:roles:read': ['Read organization roles', 'View organization role definitions.'],

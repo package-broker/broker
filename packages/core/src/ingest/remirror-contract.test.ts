@@ -4,7 +4,7 @@ import type { ProjectActor } from '../authz/project-actor.js';
 import type { CatalogueWriteGuard, DistTarget, FetchDescriptor } from '../db/catalogue.js';
 import { orgContext } from '../db/port.js';
 import { systemClock } from '../ids.js';
-import { parseSha256, type BlobStore, type Sha256 } from '../platform/blob.js';
+import { parseSha256, type CoreBlobStore as BlobStore, type Sha256 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
 import type { ProviderContext, ProviderSource } from '../sources/provider.js';
 import { createDistService, type DistServeResult } from '../registry/dist-service.js';
@@ -97,6 +97,19 @@ function rig(
   const quarantine = vi.fn();
   const opens = vi.fn(async () => ({ body: streamOf(upstream), size: null }));
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
+
     async put(_ctx, key, body, input) {
       const value = await drain(body);
       expect(sha(value)).toBe(key);

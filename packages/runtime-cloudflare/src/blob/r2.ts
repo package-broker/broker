@@ -120,6 +120,21 @@ export function createR2ByteStore(
   const fixedLengthStream = options.fixedLengthStream ?? defaultFixedLengthStream;
 
   return Object.freeze({
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     async putVerified(storageKey, source, input) {
       const body = input.size === 0 ? await drainEmpty(source) : source;
       const existing = asObject(await bucket.head(storageKey));

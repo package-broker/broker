@@ -77,6 +77,22 @@ function memoryStore() {
   const rows = new Map<string, BlobInfo>();
   const published: BlobPutInput[] = [];
   const byteStore: ByteStore = {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
+
     async putVerified(key, body, input) {
       const bytes = await drain(body);
       if (bytes.length !== input.size || sha256(bytes) !== input.sha256)

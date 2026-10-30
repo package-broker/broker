@@ -114,6 +114,21 @@ describe('import run routes on the SQLite store', () => {
     barrier = null;
     const blobs = createBlobStore(
       {
+        async putStaged() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discardStaged() {
+          throw new Error('not_implemented');
+        },
+        async listStaged() {
+          throw new Error('not_implemented');
+        },
         async putVerified(key, body, input) {
           const gate = barrier;
           if (gate !== null) {

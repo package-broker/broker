@@ -1,6 +1,6 @@
 import type { OrgContext } from '@package-broker/core/db/port';
 import type { SourceRecord } from '@package-broker/core/db/source';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import type { SourceCredential } from '@package-broker/core/registry/module';

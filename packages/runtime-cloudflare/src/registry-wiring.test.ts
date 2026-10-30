@@ -820,11 +820,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       await gate;
       return { id: 'job-1', created: true };
     });
-    const spy = vi
-      .spyOn(moduleNamespace, 'createRegistryModule')
-      .mockImplementation((deps) =>
-        original({ ...deps, ports: { ...deps.ports, jobs: { enqueue, get: async () => null } } }),
-      );
+    const spy = vi.spyOn(moduleNamespace, 'createRegistryModule').mockImplementation((deps) =>
+      original({
+        ...deps,
+        ports: {
+          ...deps.ports,
+          jobs: {
+            async enqueueStatements() {
+              throw new Error('not_implemented');
+            },
+            enqueue,
+            get: async () => null,
+          },
+        },
+      }),
+    );
     try {
       const { fetch, cookie, seed, orgId } = await boot({
         sources: [
@@ -894,11 +904,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       await gate;
       return { id: 'job-2', created: true };
     });
-    const spy = vi
-      .spyOn(moduleNamespace, 'createRegistryModule')
-      .mockImplementation((deps) =>
-        original({ ...deps, ports: { ...deps.ports, jobs: { enqueue, get: async () => null } } }),
-      );
+    const spy = vi.spyOn(moduleNamespace, 'createRegistryModule').mockImplementation((deps) =>
+      original({
+        ...deps,
+        ports: {
+          ...deps.ports,
+          jobs: {
+            async enqueueStatements() {
+              throw new Error('not_implemented');
+            },
+            enqueue,
+            get: async () => null,
+          },
+        },
+      }),
+    );
     try {
       const { fetch, cookie, seed } = await boot();
       const first = await fetch(request('/p1/npm/left-pad', { headers: { cookie } }));

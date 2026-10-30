@@ -1,7 +1,7 @@
 import type { FencedOutcome, SystemMutationFence } from '../authz/fence.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
-import type { BlobStore } from '../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../platform/blob.js';
 import { JobError } from '../platform/jobs.js';
 import { readImportManifest, type ImportApplyRun } from './apply.js';
 import { planHash, type Manifest } from './manifest.js';

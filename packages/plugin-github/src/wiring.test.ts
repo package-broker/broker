@@ -561,7 +561,13 @@ describe('GitHub plugin wiring', () => {
       validatorsPublished: 0,
     }));
     const writer = {
-      statementBudget: { openListing: 1, markListing: 1, finalizeListing: 1, quarantine: 1 },
+      statementBudget: {
+        publishVersion: 40,
+        openListing: 1,
+        markListing: 1,
+        finalizeListing: 1,
+        quarantine: 1,
+      },
       syncPackageCost: ({ versions }: { versions: number }) => 10 + versions * 300,
       syncPayloadLimit: 1024 * 1024,
       syncPayloadBytes: () => 1,

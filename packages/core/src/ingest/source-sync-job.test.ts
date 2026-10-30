@@ -259,6 +259,10 @@ function setup(options: {
   };
 
   const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     async enqueue(_ctx: OrgContext, type: string, payload: unknown, input: Enqueued) {
       const failure = options.enqueueError?.(type, payload as Record<string, unknown>);
       if (failure !== undefined) throw failure;

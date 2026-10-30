@@ -108,7 +108,13 @@ function harness(ecosystem: 'npm' | 'composer' = 'npm') {
     release: vi.fn(async () => true),
     discard: vi.fn(async () => true),
   };
-  const jobs = { enqueue: vi.fn(), get: vi.fn() };
+  const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+    enqueue: vi.fn(),
+    get: vi.fn(),
+  };
   const markPackageAbsent = vi.fn();
   const packageId = vi.fn(async (): Promise<string | null> => 'pkg-1');
   const batch = vi.fn(async () => []);

@@ -15,6 +15,9 @@ import {
   type MapGroupsResult,
   type PlatformPorts,
   type PluginDefinition,
+  type PublishPolicyDefinition,
+  type PublishInspection,
+  type PublishPolicyVerdict,
   type PluginPorts,
   type PluginRegistry,
   type RequestContext,
@@ -50,6 +53,33 @@ const ports: PluginPorts = {
 };
 
 describe('plugin contract', () => {
+  it('accepts an optional asynchronous publish policy without changing plugin versions or ports', () => {
+    const policy: PublishPolicyDefinition = {
+      id: 'scanner',
+      inspect: (_ctx, input) => {
+        expectTypeOf(input).toEqualTypeOf<PublishInspection>();
+        expectTypeOf(input.openTarball()).toEqualTypeOf<Promise<ReadableStream<Uint8Array>>>();
+        return Promise.resolve({ verdict: 'deny', reason: 'policy' });
+      },
+    };
+    const plugin = definePlugin({
+      id: 'scanner',
+      package: '@package-broker/plugin-scanner',
+      apiVersion: 3,
+      platforms: ['node'],
+      publishPolicy: policy,
+    });
+    expect(plugin.publishPolicy).toBe(policy);
+    expectTypeOf<PluginDefinition['publishPolicy']>().toEqualTypeOf<
+      PublishPolicyDefinition | undefined
+    >();
+    expectTypeOf<ReturnType<PublishPolicyDefinition['inspect']>>().toEqualTypeOf<
+      Promise<PublishPolicyVerdict>
+    >();
+    expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
+    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity']);
+  });
+
   it('exports an optional asynchronous reauth capability resolver', () => {
     expectTypeOf<IdentityProvider['reauthCapability']>().toEqualTypeOf<
       (() => Promise<boolean>) | undefined

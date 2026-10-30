@@ -1,7 +1,7 @@
 import { isRegistryNotFound } from '../not-found-presets.js';
 import { packageKey } from '../../catalogue/names.js';
 import type { OrgContext } from '../../db/port.js';
-import type { BlobStore } from '../../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../../platform/blob.js';
 import type { Codecs } from '../../platform/codec.js';
 import {
   UpstreamError,

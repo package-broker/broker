@@ -9,41 +9,44 @@ import {
   rolePermissionProblems,
 } from './permissions.js';
 
-// Columns: name, scope, then session only, admin, organization auditor, owner, developer, auditor.
+// Columns: name, scope, then session only, admin, organization auditor, owner, developer, auditor, publisher.
 const matrix = [
-  ['org:read', 'organization', '011000'],
-  ['org:settings:write', 'organization', '110000'],
-  ['org:users:read', 'organization', '011000'],
-  ['org:users:write', 'organization', '110000'],
-  ['org:roles:read', 'organization', '011000'],
-  ['org:roles:write', 'organization', '110000'],
-  ['org:grants:read', 'organization', '011000'],
-  ['org:grants:write', 'organization', '110000'],
-  ['org:projects:create', 'organization', '110000'],
-  ['org:projects:archive', 'organization', '110000'],
-  ['org:sources:read', 'organization', '011000'],
-  ['org:sources:write', 'organization', '110000'],
-  ['org:tokens:read', 'organization', '111000'],
-  ['org:tokens:revoke', 'organization', '110000'],
-  ['org:service-principals:write', 'organization', '110000'],
-  ['org:packages:manage', 'organization', '110000'],
-  ['org:import:write', 'organization', '010000'],
-  ['org:import:approve', 'organization', '110000'],
-  ['org:audit:read', 'organization', '011000'],
-  ['project:read', 'project', '011111'],
-  ['project:settings:write', 'project', '110100'],
-  ['project:grants:read', 'project', '011101'],
-  ['project:grants:write', 'project', '110100'],
-  ['project:packages:read', 'project', '011111'],
-  ['project:packages:write', 'project', '010110'],
-  ['project:packages:manage', 'project', '110100'],
-  ['project:sources:read', 'project', '011111'],
-  ['project:sources:write', 'project', '110100'],
-  ['project:service-principals:write', 'project', '110100'],
-  ['project:tokens:create', 'project', '110110'],
-  ['project:tokens:read', 'project', '111101'],
-  ['project:tokens:revoke', 'project', '110100'],
-  ['project:audit:read', 'project', '011101'],
+  ['org:read', 'organization', '0110001'],
+  ['org:settings:write', 'organization', '1100000'],
+  ['org:users:read', 'organization', '0110000'],
+  ['org:users:write', 'organization', '1100000'],
+  ['org:roles:read', 'organization', '0110000'],
+  ['org:roles:write', 'organization', '1100000'],
+  ['org:grants:read', 'organization', '0110000'],
+  ['org:grants:write', 'organization', '1100000'],
+  ['org:projects:create', 'organization', '1100000'],
+  ['org:projects:archive', 'organization', '1100000'],
+  ['org:sources:read', 'organization', '0110000'],
+  ['org:sources:write', 'organization', '1100000'],
+  ['org:tokens:read', 'organization', '1110000'],
+  ['org:tokens:revoke', 'organization', '1100000'],
+  ['org:service-principals:write', 'organization', '1100000'],
+  ['org:packages:read', 'organization', '1110000'],
+  ['org:packages:publish', 'organization', '0100001'],
+  ['org:packages:approve', 'organization', '1100000'],
+  ['org:packages:manage', 'organization', '1100000'],
+  ['org:import:write', 'organization', '0100000'],
+  ['org:import:approve', 'organization', '1100000'],
+  ['org:audit:read', 'organization', '0110000'],
+  ['project:read', 'project', '0111110'],
+  ['project:settings:write', 'project', '1101000'],
+  ['project:grants:read', 'project', '0111010'],
+  ['project:grants:write', 'project', '1101000'],
+  ['project:packages:read', 'project', '0111110'],
+  ['project:packages:write', 'project', '0101100'],
+  ['project:packages:manage', 'project', '1101000'],
+  ['project:sources:read', 'project', '0111110'],
+  ['project:sources:write', 'project', '1101000'],
+  ['project:service-principals:write', 'project', '1101000'],
+  ['project:tokens:create', 'project', '1101100'],
+  ['project:tokens:read', 'project', '1111010'],
+  ['project:tokens:revoke', 'project', '1101000'],
+  ['project:audit:read', 'project', '0111010'],
 ] as const;
 
 const roles = [
@@ -52,15 +55,16 @@ const roles = [
   ['project_owner', 'Project Owner', 'project'],
   ['project_developer', 'Project Developer', 'project'],
   ['project_auditor', 'Project Auditor', 'project'],
+  ['organization_publisher', 'Organization Publisher', 'organization'],
 ] as const;
 
 describe('permission catalogue', () => {
   it('matches every catalogue and default-role matrix cell', () => {
     expect(PERMISSIONS.map(({ name }) => name)).toEqual(matrix.map(([name]) => name));
-    expect(PERMISSIONS).toHaveLength(33);
-    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(19);
+    expect(PERMISSIONS).toHaveLength(36);
+    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(22);
     expect(PERMISSIONS.filter(({ scope }) => scope === 'project')).toHaveLength(14);
-    expect(DEFAULT_ROLES).toHaveLength(5);
+    expect(DEFAULT_ROLES).toHaveLength(6);
     for (const [index, [key, name, scope]] of roles.entries()) {
       const role = DEFAULT_ROLES[index]!;
       expect(role).toMatchObject({ key, name, scope, protectsLastHolder: index === 0 });
@@ -80,8 +84,8 @@ describe('permission catalogue', () => {
       expect(name).toMatch(PERMISSION_PATTERN);
       expect(isPermission(name)).toBe(true);
     }
-    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(33);
-    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(33);
+    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(36);
+    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(36);
   });
 
   it('validates unknown names, project scope violations and duplicates', () => {
@@ -220,8 +224,8 @@ describe('permission catalogue', () => {
     expect(problems).toHaveLength(2);
     const missing = missingCatalogue([]);
     expect(() => missing.push('extra')).not.toThrow();
-    expect(missing).toHaveLength(34);
-    expect(missingCatalogue([])).toHaveLength(33);
+    expect(missing).toHaveLength(37);
+    expect(missingCatalogue([])).toHaveLength(36);
     expect(rolePermissionProblems('project', ['bogus'])).toHaveLength(1);
   });
 

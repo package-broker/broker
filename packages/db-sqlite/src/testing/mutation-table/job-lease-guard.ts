@@ -1,8 +1,8 @@
 import type { MutationEntry } from './harness.js';
 import { leaseCase } from './lease-cases.js';
-export const entries: readonly MutationEntry[] = [
-  {
-    builder: 'jobLeaseGuard',
+export const entries: readonly MutationEntry[] = ['jobLeaseGuard', 'jobLeasePredicate'].map(
+  (builder) => ({
+    builder,
     file: 'repositories/job-lease-guard.ts',
     cases: [leaseCase('job', false)],
     predicates: [
@@ -14,5 +14,5 @@ export const entries: readonly MutationEntry[] = [
         caseName: leaseCase('job', false).name,
       },
     ],
-  },
-];
+  }),
+);

@@ -162,3 +162,10 @@ export async function auditLedgerRepositorySuite(
   const { auditLedgerRepositorySuite: run } = await import('./audit-ledger-suite.js');
   run(open);
 }
+
+export async function auditExportRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditExportRepositorySuite: run } = await import('./audit-export-suite.js');
+  run(open);
+}

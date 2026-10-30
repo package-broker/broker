@@ -32,20 +32,26 @@ export interface AuditExportPort {
   /** Return only this organization’s sealed rows (seq <= audit_chain.head_seq), in seq order. */
   page(org: OrgContext, afterSeq: number, limit: number): Promise<readonly AuditRow[]>;
   /** In one transaction, require the org-scoped job lease identified by fence.job to
-   * match id/owner/fence and remain unexpired at database time. CAS every field of
+   * match id/owner/fence and resource_key = audit-export:<sink_id>, and remain unexpired at database time. CAS every field of
    * expected: chain id, epoch, incarnation, mode generation, boundary seq/hash,
    * policy, restore flag, highest build generation and every sink field (including
-   * nullable body/repr and retry state). Require next.generation >= the org's
-   * highest build generation. Write every next sink field atomically or nothing.
+   * nullable body/repr and retry state). Require the acting buildGeneration >=
+   * the organization’s highest stored sink generation in the same atomic batch.
+   * Require next pluginId, kind, generation, receiverFingerprint, durableAck and
+   * activationSource to equal expected; only the G13 registry may change them.
+   * Write all other next sink fields atomically or nothing. G15b must add
+   * retry_count_for_seq to this CAS when it introduces that retry state.
    * Return false on any mismatch or lease expiry. No HTTP precedes a true save.
    * Custody is computed in core, including ledger-backed G15b dispositions; the
    * adapter must not infer custody from progress or independently reconcile it.
+   * Receivers must be idempotent per throughSeq when frozen batches are replayed.
    */
   save(
     org: OrgContext,
     fence: SystemMutationFence,
     expected: AuditExportSnapshot,
     next: AuditExportState,
+    buildGeneration: number,
   ): Promise<boolean>;
 }
 
@@ -54,6 +60,7 @@ interface Representation {
   readonly purpose?: string;
   readonly registryMarkerBody?: string;
   readonly registryMarkerOriginalAttempt?: number;
+  readonly registryMarkerOriginalErrorCode?: string | null;
   readonly registryMarkers?: readonly AuditMarkerV1[];
   readonly [key: string]: unknown;
 }
@@ -88,7 +95,7 @@ export function auditInflightEventRange(sink: AuditSinkState): { from: number; t
   try {
     const batch = JSON.parse(sink.inflightBody) as AuditBatchV1;
     if (!batch.records.some((record) => record.kind === 'event' || record.kind === 'withheld'))
-      return null;
+      throw new Error();
   } catch {
     throw new Error('Audit sink in-flight batch malformed');
   }
@@ -120,7 +127,8 @@ export interface AuditExportOptions {
   readonly generation: number;
   /** Version of the registered plugin that supplies this sink. */
   readonly pluginVersion: string;
-  /** Must match the runner lease; defaults to JOB_LEASE_SECONDS. */
+  /** Must match the runner lease; defaults to JOB_LEASE_SECONDS.
+   * JobContext exposes no expiry; the budget assumes a fresh lease at handler entry. */
   readonly leaseSeconds?: number;
   readonly sourceIp: 'include' | 'omit';
   readonly maxBatchEvents?: number;
@@ -203,7 +211,10 @@ function frozenBatch(body: string, org: OrgContext, snapshot: AuditExportSnapsho
     if (last === undefined) {
       if (
         batch.throughSeq !== snapshot.sink.progressSeq ||
-        batch.throughHash !== snapshot.sink.progressHash
+        batch.throughHash !== snapshot.sink.progressHash ||
+        !['marker', 'registry_markers'].includes(
+          representation(snapshot.sink.inflightRepr).purpose ?? '',
+        )
       )
         throw new Error();
     } else if (
@@ -261,6 +272,10 @@ export async function exportAuditBatch(
       ...repr,
       registryMarkerBody: body,
       registryMarkerOriginalAttempt: repr.registryMarkerOriginalAttempt ?? sink.attempt,
+      registryMarkerOriginalErrorCode:
+        repr.registryMarkerBody === undefined
+          ? sink.lastErrorCode
+          : (repr.registryMarkerOriginalErrorCode ?? null),
     };
     sink = { ...sink, inflightRepr: JSON.stringify(repr) };
   } else if (body === null) {
@@ -323,12 +338,15 @@ export async function exportAuditBatch(
   const markersOnly = queued !== undefined && queued.length > 0;
   const batch = frozenBatch(body!, org, {
     ...snapshot,
-    sink: markersOnly ? { ...sink, inflightFrom: null, inflightTo: null } : sink,
+    sink: markersOnly
+      ? { ...sink, inflightRepr: JSON.stringify({ ...repr, purpose: 'registry_markers' }) }
+      : sink,
   });
   const sending = { ...sink, attempt: sink.attempt + 1 };
-  if (!(await port.save(org, fence, snapshot, sending))) return 'contended';
+  if (signal.aborted || Date.now() >= deadline) return 'idle';
+  if (!(await port.save(org, fence, snapshot, sending, options.generation))) return 'contended';
   snapshot = { ...snapshot, sink: sending };
-  if (signal.aborted) return 'idle';
+  if (signal.aborted || Date.now() >= deadline) return 'idle';
   let result: AuditDelivery;
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -336,11 +354,7 @@ export async function exportAuditBatch(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     result = await Promise.race([
-      Promise.resolve().then(() =>
-        Date.now() >= deadline
-          ? { outcome: 'retry' as const, code: 'timeout' as const }
-          : options.sink.deliver(batch, controller.signal),
-      ),
+      Promise.resolve().then(() => options.sink.deliver(batch, controller.signal)),
       new Promise<AuditDelivery>((resolve) => {
         controller.signal.addEventListener(
           'abort',
@@ -373,6 +387,7 @@ export async function exportAuditBatch(
     delete rest.registryMarkers;
     delete rest.registryMarkerBody;
     delete rest.registryMarkerOriginalAttempt;
+    delete rest.registryMarkerOriginalErrorCode;
     if (markersOnly) {
       const delivered = new Set(
         batch.records.filter((record) => 'markerId' in record).map((record) => record.markerId),
@@ -384,7 +399,11 @@ export async function exportAuditBatch(
       ...sending,
       attempt: markersOnly ? repr.registryMarkerOriginalAttempt! : 0,
       nextAttemptAt: null,
-      lastErrorCode: result.outcome === 'accepted_with_warning' ? result.code : null,
+      lastErrorCode: markersOnly
+        ? (repr.registryMarkerOriginalErrorCode ?? null)
+        : result.outcome === 'accepted_with_warning'
+          ? result.code
+          : null,
       progressSeq: markersOnly ? sending.progressSeq : batch.throughSeq,
       progressHash: markersOnly ? sending.progressHash : batch.throughHash,
       custodySeq:
@@ -400,7 +419,7 @@ export async function exportAuditBatch(
       inflightBody: markersOnly ? sending.inflightBody : null,
       inflightRepr: JSON.stringify(markersOnly ? rest : { ...rest, purpose: 'idle' }),
     };
-    const saved = await port.save(org, fence, snapshot, next);
+    const saved = await port.save(org, fence, snapshot, next, options.generation);
     if (saved && result.outcome === 'accepted_with_warning') options.warning?.(result.code);
     return saved ? 'accepted' : 'contended';
   }
@@ -420,7 +439,7 @@ export async function exportAuditBatch(
     lastErrorCode: retry?.code ?? 'bad_response',
     nextAttemptAt: new Date(now + Math.min(delay, 8.64e15 - now)).toISOString(),
   };
-  return (await port.save(org, fence, snapshot, next)) ? 'retry' : 'contended';
+  return (await port.save(org, fence, snapshot, next, options.generation)) ? 'retry' : 'contended';
 }
 
 export function auditExportJob(
@@ -430,7 +449,9 @@ export function auditExportJob(
   if (
     !/^[a-z0-9-]{1,32}$/.test(options.id) ||
     !Number.isSafeInteger(options.generation) ||
-    options.generation < 0
+    options.generation < 0 ||
+    typeof options.pluginVersion !== 'string' ||
+    !/^[\x21-\x7e]{1,128}$/.test(options.pluginVersion)
   )
     throw new TypeError('Invalid audit export configuration');
   options = { ...options, maxBatchEvents: batchLimit(options) };
@@ -468,8 +489,8 @@ export function auditExportJob(
               ctx.observability.log({
                 level: 'warn',
                 event: 'audit.delivery_partial_success',
-                code,
-                sinkId: options.id,
+                reason_code: 'audit.partial_success',
+                sink_id: options.id,
               });
               options.warning?.(code);
             },

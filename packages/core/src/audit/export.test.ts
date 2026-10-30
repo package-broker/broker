@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { systemMutationFence } from '../authz/fence.js';
 import { orgContext } from '../db/port.js';
 import { jobFences } from '../platform/job-fences.js';
-import { safeRecord } from '../platform/observability.js';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-codes.js';
+import { createObservability, safeRecord } from '../platform/observability.js';
 import type { JobContext } from '../platform/jobs.js';
 import { auditEvent } from './actions.js';
 import { hashRow, type AuditRow } from './chain.js';
@@ -110,10 +111,15 @@ async function setup(durableAck = true) {
       expect(limit).toBeLessThanOrEqual(100);
       return after === 0 ? [row] : [];
     }),
-    save: vi.fn(async (ctx, guard, expected, next) => {
+    save: vi.fn(async (ctx, guard, expected, next, buildGeneration) => {
       expect(ctx).toEqual(org);
       expect(guard).toEqual(fence);
-      if (!active || JSON.stringify(expected) !== JSON.stringify(stored)) return false;
+      if (
+        buildGeneration < stored.highestGeneration ||
+        !active ||
+        JSON.stringify(expected) !== JSON.stringify(stored)
+      )
+        return false;
       stored = structuredClone({ ...expected, sink: next });
       saves.push(structuredClone(stored));
       return true;
@@ -284,6 +290,57 @@ describe('audit delivery', () => {
     }
   });
 
+  it.each(['read', 'page', 'save'] as const)(
+    'returns idle if the deadline expires during %s',
+    async (phase) => {
+      const f = await setup();
+      const before = structuredClone(f.get());
+      vi.useFakeTimers();
+      try {
+        if (phase === 'read') {
+          const read = f.port.read;
+          f.port.read = async (...args) => {
+            const result = await read(...args);
+            vi.setSystemTime(Date.now() + 45_000);
+            return result;
+          };
+        } else if (phase === 'page') {
+          f.port.page = async () => {
+            vi.setSystemTime(Date.now() + 45_000);
+            return [f.row];
+          };
+        } else {
+          const save = f.port.save;
+          f.port.save = async (...args) => {
+            const result = await save(...args);
+            vi.setSystemTime(Date.now() + 45_000);
+            return result;
+          };
+        }
+        expect(await f.run()).toBe('idle');
+        expect(f.deliver).not.toHaveBeenCalled();
+        expect(f.saves).toHaveLength(phase === 'save' ? 1 : 0);
+        if (phase !== 'save') expect(f.get()).toEqual(before);
+        expect(f.get().sink.lastErrorCode).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['', ' ', 'a b', 'a\t', 'a\n', '\x7f', 'é', 'a'.repeat(129)])(
+    'rejects invalid plugin version %j at job construction',
+    async (pluginVersion) => {
+      const f = await setup();
+      expect(() => auditExportJob(f.port, { ...f.options, pluginVersion })).toThrow(
+        'Invalid audit export configuration',
+      );
+      expect(() =>
+        auditExportJob(f.port, { ...f.options, pluginVersion: 'a'.repeat(128) }),
+      ).not.toThrow();
+    },
+  );
+
   it('caps Retry-After at 24 hours', async () => {
     const f = await setup();
     f.deliver.mockResolvedValue({
@@ -437,6 +494,20 @@ describe('audit delivery', () => {
     },
   );
 
+  it.each([4, 5])(
+    'passes acting build %s to both saves while retaining the sink generation',
+    async (generation) => {
+      const f = await setup();
+      f.change({ highestGeneration: 4 });
+      expect(await exportAuditBatch(f.port, org, fence, { ...f.options, generation }, signal)).toBe(
+        'accepted',
+      );
+      expect(f.get().sink.generation).toBe(1);
+      expect(f.port.save).toHaveBeenCalledTimes(2);
+      for (const call of vi.mocked(f.port.save).mock.calls) expect(call[4]).toBe(generation);
+    },
+  );
+
   it('fails closed without custody metadata', async () => {
     const f = await setup();
     f.change({ sink: { ...f.get().sink, inflightRepr: '{}' } });
@@ -465,8 +536,9 @@ describe('audit delivery', () => {
       },
     });
     f.advance();
-    f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+    f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'refused' });
     expect(await f.run()).toBe('retry');
+    expect(f.get().sink.lastErrorCode).toBe('refused');
     const markerRepr = JSON.parse(f.get().sink.inflightRepr!);
     const markerBody = markerRepr.registryMarkerBody;
     const laterMarker = { ...marker, markerId: '01J00000000000000000000007' };
@@ -479,50 +551,62 @@ describe('audit delivery', () => {
     f.advance();
     expect(await f.run()).toBe('accepted');
     expect(JSON.stringify(f.deliver.mock.calls[2]![0])).toBe(markerBody);
-    expect(f.get().sink.attempt).toBe(1);
+    expect(f.get().sink).toMatchObject({ attempt: 1, lastErrorCode: 'network' });
     expect(f.deliver.mock.calls[1]![0].records).toEqual([marker]);
     expect(f.get().sink).toMatchObject({ progressSeq: 0, custodySeq: 0, inflightBody: body });
     expect(await f.run()).toBe('accepted');
     expect(f.deliver.mock.calls[3]![0].records).toEqual([laterMarker]);
-    expect(f.get().sink.attempt).toBe(1);
+    expect(f.get().sink).toMatchObject({ attempt: 1, lastErrorCode: 'network' });
     expect(await f.run()).toBe('accepted');
     expect(JSON.stringify(f.deliver.mock.calls[4]![0])).toBe(body);
   });
 
-  it('marker-only batches never advance custody or count as event ranges', async () => {
-    const f = await setup();
-    const batch = {
-      v: 1,
-      chainId,
-      epoch: 0,
-      orgId: org.orgId,
-      records: [
-        {
-          kind: 'head',
-          chainId,
-          epoch: 0,
-          markerId: '01J00000000000000000000006',
-          seq: 0,
-          hash,
-          boundarySeq: 1,
+  it.each(['marker', 'registry_markers', 'events'] as const)(
+    'marker-only %s batches never advance custody or count as event ranges',
+    async (purpose) => {
+      const f = await setup();
+      const batch = {
+        v: 1,
+        chainId,
+        epoch: 0,
+        orgId: org.orgId,
+        records: [
+          {
+            kind: 'head',
+            chainId,
+            epoch: 0,
+            markerId: '01J00000000000000000000006',
+            seq: 0,
+            hash,
+            boundarySeq: 1,
+          },
+        ],
+        throughSeq: 0,
+        throughHash: hash,
+      };
+      f.change({
+        sink: {
+          ...f.get().sink,
+          inflightFrom: 1,
+          inflightTo: 1,
+          inflightBody: JSON.stringify(batch),
+          inflightRepr: JSON.stringify({ custodyFromSeq: 1, purpose }),
         },
-      ],
-      throughSeq: 0,
-      throughHash: hash,
-    };
-    f.change({
-      sink: {
-        ...f.get().sink,
-        inflightFrom: 1,
-        inflightTo: 1,
-        inflightBody: JSON.stringify(batch),
-        inflightRepr: JSON.stringify({ custodyFromSeq: 1, purpose: 'registry_markers' }),
-      },
-    });
-    expect(auditInflightEventRange(f.get().sink)).toBeNull();
-    expect(await f.run()).toBe('accepted');
-    expect(f.get().sink).toMatchObject({ progressSeq: 0, custodySeq: 0, inflightBody: null });
-  });
+      });
+      if (purpose === 'events') {
+        expect(() => auditInflightEventRange(f.get().sink)).toThrow(
+          'Audit sink in-flight batch malformed',
+        );
+        await expect(f.run()).rejects.toThrow('Audit sink in-flight batch malformed');
+        expect(f.port.save).not.toHaveBeenCalled();
+        expect(f.deliver).not.toHaveBeenCalled();
+        return;
+      }
+      expect(auditInflightEventRange(f.get().sink)).toBeNull();
+      expect(await f.run()).toBe('accepted');
+      expect(f.get().sink).toMatchObject({ progressSeq: 0, custodySeq: 0, inflightBody: null });
+    },
+  );
 
   it.each([
     { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 },
@@ -589,17 +673,35 @@ describe('audit delivery', () => {
     expect(log).toHaveBeenCalledExactlyOnceWith({
       level: 'warn',
       event: 'audit.delivery_partial_success',
-      code: 'partial_success',
-      sinkId: 'test',
+      reason_code: 'audit.partial_success',
+      sink_id: 'test',
     });
     expect(safeRecord(log.mock.calls[0]![0])).toMatchObject({
-      code: 'partial_success',
-      sinkId: 'test',
+      reason_code: 'audit.partial_success',
+      sink_id: 'test',
     });
     expect(f.get().sink).toMatchObject({
       progressSeq: 1,
       custodySeq: 1,
       lastErrorCode: 'partial_success',
+    });
+    const emit = vi.fn();
+    const observability = createObservability(
+      { emit },
+      {
+        deploymentId: 'test',
+        runtime: 'node',
+        requestId: '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11',
+      },
+      { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+    );
+    observability.log(log.mock.calls[0]![0]);
+    expect(emit).toHaveBeenCalledExactlyOnceWith({
+      kind: 'log',
+      record: expect.objectContaining({
+        reason_code: 'audit.partial_success',
+        sink_id: 'test',
+      }),
     });
   });
 

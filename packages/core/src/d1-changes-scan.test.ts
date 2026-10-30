@@ -668,6 +668,25 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Destructures chain fields from a single SELECT snapshot; the remaining sink fields are SELECT data, never executor change metadata.',
+      sites: ['db-sqlite/src/repositories/audit-export.ts:object rest access: ...sink #1'],
+    },
+    {
+      reason:
+        'Sets each named nullable export snapshot field to null to exercise CAS rejection; the computed key never accesses executor metadata.',
+      sites: [
+        'db-sqlite/src/testing/audit-export-suite.ts:unresolved computed key: expect(\n          await port().save(\n            org(),\n            fence(),\n            { ...current, sink: { ...current.sink, [key]: null } },\n            before.sink,\n            1,\n          ),\n          key,\n        ).toBe(false); #1',
+      ],
+    },
+    {
+      reason:
+        'Loads the shared export persistence contract suite for Node and D1 tests; the module has no executor count reads.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-export-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'Compares named chain snapshot fields from readHead SELECT results for contention; neither snapshot contains executor change metadata.',
       sites: [
         'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: a[key as keyof Head] #1',
@@ -2136,9 +2155,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
-        'SQL in job-lease-guard; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+        'Shared live job lease predicate optionally binds the sink resource key; all interpolations are checked lease inputs or bound SQL values, never executor metadata.',
       sites: [
-        "db-sqlite/src/repositories/job-lease-guard.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM job\n      WHERE job.id = ${id} AND job.org_id = ${ctx.orgId}\n        AND job.lease_owner = ${owner} AND job.fence = ${fence}\n        AND job.state = 'running'\n        AND job.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now'))` #1",
+        "db-sqlite/src/repositories/job-lease-guard.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM job\n      WHERE job.id = ${id} AND job.org_id = ${ctx.orgId}\n        AND job.lease_owner = ${owner} AND job.fence = ${fence}\n        AND job.state = 'running'\n        AND job.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now')\n        ${resourceKey === undefined ? sql`` : sql`AND job.resource_key = ${resourceKey}`})` #1",
       ],
     },
     {

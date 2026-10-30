@@ -696,18 +696,20 @@ describe('HTTP_REQUEST_EVENT', () => {
 });
 
 describe('LOG_FIELDS', () => {
-  it('retains only the fixed delivery warning code and a bounded sink id', () => {
+  it('retains a reason code and bounded snake_case sink id', () => {
     const record = {
       level: 'warn',
       event: 'audit.delivery_partial_success',
-      code: 'partial_success',
-      sinkId: 'archive-1',
+      reason_code: 'audit.partial_success',
+      sink_id: 'archive-1',
     };
     expect(safeRecord(record)).toEqual(record);
     for (const patch of [
-      { code: 'arbitrary' },
-      { sinkId: 'a'.repeat(33) },
-      { sinkId: 'person@example.test' },
+      { code: 'partial_success' },
+      { sinkId: 'archive-1' },
+      { reason_code: 'invalid reason' },
+      { sink_id: 'a'.repeat(33) },
+      { sink_id: 'person@example.test' },
     ])
       for (const key of Object.keys(patch))
         expect(safeRecord({ ...record, ...patch })).not.toHaveProperty(key);
@@ -716,7 +718,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(47);
+    expect(missing).toHaveLength(46);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 

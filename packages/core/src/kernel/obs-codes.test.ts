@@ -44,7 +44,7 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 24 reason codes', () => {
+  it('has exactly the 25 reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
         'authz.unauthenticated',
@@ -71,9 +71,10 @@ describe('vocabularies', () => {
         'health.not_ready',
         'request.aborted',
         'http.handler_status',
+        'audit.partial_success',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(24);
+    expect(KERNEL_REASON_CODES.size).toBe(25);
   });
 
   it('matches the port CODE pattern for every value', () => {

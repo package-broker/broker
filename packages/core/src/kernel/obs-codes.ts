@@ -59,6 +59,7 @@ const REASON_CODES = [
   'health.not_ready',
   'request.aborted',
   'http.handler_status',
+  'audit.partial_success',
 ] as const;
 
 export type KernelReasonCode = (typeof REASON_CODES)[number];

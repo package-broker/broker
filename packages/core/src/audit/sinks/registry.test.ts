@@ -334,6 +334,15 @@ describe('audit sink registry', () => {
     },
   );
 
+  it('starts durable custody after existing progress when durableAck flips on', async () => {
+    const old = { ...(await existing()), durableAck: false };
+    const f = fixture({ ...snapshot(), sinks: [old] });
+    await reconcileAuditSinks(f.port, ctx, 2, [registration], now);
+    expect(JSON.parse(f.next().inflightRepr!).custodyFromSeq).toBe(13);
+    expect(f.save.mock.calls[0]![2].rebinds).toHaveLength(1);
+    expect(f.next()).toMatchObject({ custodySeq: 10, progressSeq: 12, durableAck: true });
+  });
+
   it('records a configuration change while a previously registered receiver is inactive', async () => {
     const old = { ...(await existing()), state: 'inactive' as const };
     const f = fixture({ ...snapshot(), sinks: [old] });

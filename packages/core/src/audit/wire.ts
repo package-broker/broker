@@ -5,6 +5,8 @@ import type { AuditRow } from './chain.js';
 import type { AuditJournalItemV1, AuditMarkerV1, AuditRecordV1 } from './plugin-api.js';
 import { redactValue } from './redact.js';
 
+export const AUDIT_SANITIZER_VERSION = 1;
+
 export interface AuditWireIdentity {
   readonly chainId: string;
   readonly epoch: number;
@@ -44,7 +46,11 @@ function text(value: unknown): boolean {
 }
 
 function identity(input: AuditWireIdentity): void {
-  assert(id(input.chainId) && id(input.orgId) && seq(input.epoch));
+  assert(
+    (id(input.chainId) || /^[0-9a-f]{32}$/.test(input.chainId)) &&
+      id(input.orgId) &&
+      seq(input.epoch),
+  );
 }
 
 function chainFields(row: Record<string, unknown>): void {

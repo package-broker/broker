@@ -24,6 +24,7 @@ export const KERNEL_EVENTS = frozenSet([
 
 export const AUDIT_EVENTS = frozenSet([
   'audit.sealed',
+  'audit.delivery_partial_success',
   'audit.chain_integrity',
   'audit.seal_repaired',
   'audit.seal.contended',

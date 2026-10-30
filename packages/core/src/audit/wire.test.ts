@@ -7,7 +7,7 @@ import { auditWireMarker, auditWireRecord, type AuditMarkerFields } from './wire
 
 const ID = '01JZZZZZZZZZZZZZZZZZZZZZZY';
 const ORG = '01JZZZZZZZZZZZZZZZZZZZZZZX';
-const scope = { chainId: '01JZZZZZZZZZZZZZZZZZZZZZZZ', epoch: 1, orgId: ORG };
+const scope = { chainId: 'a'.repeat(32), epoch: 1, orgId: ORG };
 const now = '2026-10-28T00:00:00.000Z';
 
 function row(

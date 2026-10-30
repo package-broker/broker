@@ -219,7 +219,8 @@ export async function reconcileAuditSinks(
         ...sink,
         inflightRepr: JSON.stringify({
           ...representationOf(sink.inflightRepr),
-          custodyFromSeq: old.custodySeq + 1,
+          custodyFromSeq:
+            !old.durableAck && registration.durableAck ? old.progressSeq + 1 : old.custodySeq + 1,
         }),
       };
       const event = auditEvent({

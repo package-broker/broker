@@ -437,7 +437,22 @@ describe('public audit plugin contract', () => {
       | 'receiver_changed'
       | 'head'
     >();
-    expectTypeOf<keyof AuditWithheldMarkerV1>().toEqualTypeOf<keyof typeof withheld>();
+    expectTypeOf<keyof Extract<AuditWithheldMarkerV1, { id: string }>>().toEqualTypeOf<
+      keyof typeof withheld
+    >();
+    expectTypeOf<
+      keyof Extract<AuditWithheldMarkerV1, { reasonCode: 'unreadable' }>
+    >().toEqualTypeOf<
+      | 'kind'
+      | 'reasonCode'
+      | 'markerId'
+      | 'chainId'
+      | 'epoch'
+      | 'orgId'
+      | 'seq'
+      | 'prevHash'
+      | 'hash'
+    >();
     expectTypeOf<AuditRecordV1['sourceIp']>().toEqualTypeOf<string | null | undefined>();
   });
 

@@ -79,7 +79,7 @@ export type AuditMarkerV1 = AuditMarkerIdentityV1 &
   );
 
 /** Withheld bodies cannot be recomputed; these fields assert only the chain link. */
-export type AuditWithheldMarkerV1 = AuditMarkerIdentityV1 & {
+type AuditContentWithheldMarkerV1 = AuditMarkerIdentityV1 & {
   readonly kind: 'withheld';
   readonly reasonCode: string;
 } & Pick<
@@ -97,6 +97,14 @@ export type AuditWithheldMarkerV1 = AuditMarkerIdentityV1 & {
     | 'targetId'
     | 'projectId'
   >;
+
+/** Unreadable envelopes expose only validated chain fields, without event metadata. */
+export type AuditWithheldMarkerV1 =
+  | AuditContentWithheldMarkerV1
+  | (AuditMarkerIdentityV1 & {
+      readonly kind: 'withheld';
+      readonly reasonCode: 'unreadable';
+    } & Pick<AuditRecordV1, 'orgId' | 'seq' | 'prevHash' | 'hash'>);
 
 export type AuditJournalItemV1 = AuditRecordV1 | AuditWithheldMarkerV1;
 
@@ -122,6 +130,7 @@ export interface AuditHeadV1 {
 /** Bound by core to the current organization; stored payloads pass the sanitizer comparison. */
 export interface AuditJournalReader {
   list(q: {
+    /** null includes events from every project and events without a project. */
     readonly projectId: string | null;
     readonly actor?: string;
     readonly action?: string;

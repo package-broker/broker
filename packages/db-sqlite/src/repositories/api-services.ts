@@ -1,3 +1,9 @@
+import { noopObservability, type Observability } from '@package-broker/core/platform/observability';
+import type { AuditTrailContext } from '@package-broker/core/audit/plugin-api';
+import { requestVerification } from '@package-broker/core/audit/verify';
+import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { Clock } from '@package-broker/core/ids';
+import { orgContext } from '@package-broker/core/db/port';
 import { createSourcePackageStore } from './source-package-request.js';
 import type { SourcePackageProbe } from '@package-broker/core/ingest/source-package';
 import { createProjectGrantReader } from './project-grant-read.js';
@@ -9,7 +15,7 @@ import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
-import { createAuditQueryRepository } from './audit-query.js';
+import { createAuditJournalReader, createAuditQueryRepository } from './audit-query.js';
 import { createPackageAdminReader } from './package-admin-read.js';
 import { createProjectSourceReader } from './project-source-read.js';
 import { createRegisteredNameRepository } from './registered-name.js';
@@ -250,4 +256,18 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     }
     throw error;
   }
+}
+
+export function createAuditTrailServices(
+  executor: SqlExecutor,
+  org: OrgContext,
+  jobs: Jobs,
+  clock: Clock,
+  observability: Pick<Observability, 'counter'> = noopObservability,
+): Pick<AuditTrailContext, 'journal' | 'requestVerification'> {
+  const boundOrg = orgContext(org.orgId);
+  return Object.freeze({
+    journal: createAuditJournalReader(executor, boundOrg, observability),
+    requestVerification: () => requestVerification(jobs, boundOrg, clock.now()),
+  });
 }

@@ -72,6 +72,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/audit/status': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read audit status */
+    get: operations['getAuditStatus'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/auth/local/login': {
     parameters: {
       query?: never;
@@ -1851,6 +1868,123 @@ export interface operations {
       };
     };
   };
+  getAuditStatus: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            boundaryPrevHash: string;
+            boundarySeq: number;
+            capacity: {
+              journalBytes: number;
+              journalRows: number;
+              maxJournalBytes: number | null;
+              /** @enum {string} */
+              state: 'ok' | 'warning' | 'refusing';
+            };
+            chainId: string;
+            epoch: number;
+            headHash: string;
+            headSeq: number;
+            health: {
+              codes: (
+                | 'audit.skipped'
+                | 'audit.uncertain'
+                | 'audit.gap'
+                | 'audit.withheld'
+                | 'audit.marker_rejected'
+                | 'audit.blocked'
+                | 'audit.fork'
+                | 'audit.pending_old'
+                | 'audit.capacity'
+                | 'audit.mode_change'
+                | 'audit.policy_change'
+                | 'audit.sink_inactive'
+                | 'audit.config_invalid'
+                | 'audit.mode_none'
+                | 'audit.chain_integrity'
+                | 'audit.hold_failed'
+                | 'audit.prune_anchor'
+              )[];
+              /** @enum {string} */
+              status: 'ok' | 'degraded' | 'failing';
+            };
+            ledger: {
+              count: number;
+              kind: string;
+            }[];
+            /** @enum {string} */
+            mode: 'trail' | 'export' | 'none';
+            /** @enum {string} */
+            modeSource: 'build' | 'env' | 'stored';
+            pendingCount: number;
+            /** @enum {string} */
+            pendingMode?: 'trail' | 'export' | 'none';
+            /** @enum {string} */
+            policy: 'availability' | 'required';
+            /** @enum {string} */
+            policySource: 'build' | 'env' | 'stored';
+            restorePending: boolean;
+            sinks: {
+              activationSource: string;
+              custodySeq: number;
+              durableAck: boolean;
+              id: string;
+              progressSeq: number;
+              /** @enum {string} */
+              state: 'active' | 'inactive' | 'blocked' | 'disabled' | 'retired';
+            }[];
+            trailActive: boolean;
+            verification: {
+              bodies: number;
+              fromSeq: number;
+              throughSeq: number;
+              verifiedAt: string;
+              withheld: number;
+            } | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   localLogin: {
     parameters: {
       query?: never;
@@ -3421,6 +3555,9 @@ export interface operations {
         };
         content: {
           'application/json': {
+            features: {
+              auditTrail: boolean;
+            };
             organization: {
               name: string;
               slug: string;

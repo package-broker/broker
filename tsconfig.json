@@ -11,6 +11,9 @@
     { "path": "packages/ui/test-support" },
     { "path": "packages/ui-assets" },
     { "path": "packages/plugin-sso-oidc" },
-    { "path": "packages/plugin-github" }
+    { "path": "packages/plugin-github" },
+    { "path": "packages/plugin-audit-trail" },
+    { "path": "packages/plugin-audit-otlp" },
+    { "path": "packages/plugin-audit-webhook" }
   ]
 }

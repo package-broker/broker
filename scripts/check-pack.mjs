@@ -11,6 +11,9 @@ const REQUIRED_PACKAGES = [
   'core',
   'cli',
   'db-sqlite',
+  'plugin-audit-trail',
+  'plugin-audit-otlp',
+  'plugin-audit-webhook',
   'runtime-cloudflare',
   'runtime-node',
   'ui',
@@ -24,7 +27,14 @@ const DEPENDENCY_FIELDS = [
 ];
 const UNRESOLVED_RANGE = /^(?:workspace|catalog|link|file):/;
 const CORE_PACKAGE = '@package-broker/core';
-const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc', 'ui-assets']);
+const CORE_PEER_PACKAGES = new Set([
+  'plugin-github',
+  'plugin-sso-oidc',
+  'plugin-audit-trail',
+  'plugin-audit-otlp',
+  'plugin-audit-webhook',
+  'ui-assets',
+]);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const STATIC_REQUIRED_FILES = {

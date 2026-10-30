@@ -23,6 +23,7 @@ export const KERNEL_EVENTS = frozenSet([
 ]);
 
 export const AUDIT_EVENTS = frozenSet([
+  'audit.alert',
   'audit.failure_event_invalid',
   'audit.failure_event_failed',
   'audit.failure_events_cap',
@@ -75,6 +76,15 @@ const REASON_CODES = [
   'audit.capacity',
   'audit.hold_failed',
   'audit.prune_anchor',
+  'audit.gap',
+  'audit.fork',
+  'audit.pending_old',
+  'audit.mode_change',
+  'audit.policy_change',
+  'audit.sink_inactive',
+  'audit.config_invalid',
+  'audit.mode_none',
+  'audit.chain_integrity',
 ] as const;
 
 export type KernelReasonCode = (typeof REASON_CODES)[number];

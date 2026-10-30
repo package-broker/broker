@@ -668,6 +668,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Maps ledger kinds to fixed alert code strings; this lookup contains no executor result or change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-health.ts:unresolved computed access: LEDGER_ALERT_CODES[kind] #1',
+      ],
+    },
+    {
+      reason:
         'Named constant batch indices select UPDATE RETURNING rows; success uses rows.length and never executor change metadata.',
       sites: [
         'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[chainUpdateIndex] #1',
@@ -4021,6 +4028,17 @@ function inboundForeignKeys(sql: readonly string[], parents: readonly string[]) 
 
 describe('D1 changes read-site scan', () => {
   const sources = sourcesUnder(ROOT);
+
+  it('inventories health persistence as RETURNING-counted writes without changes metadata', () => {
+    const source = sources['db-sqlite/src/repositories/audit-health.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(mutationTargets(source)).toEqual([
+      'INSERT INTO audit_health',
+      'INSERT INTO audit_health',
+      'UPDATE audit_health',
+      'UPDATE audit_health',
+    ]);
+  });
 
   it('lists every changes read across both source trees with no stale reviewed sites', () => {
     assertReviewed(sources);

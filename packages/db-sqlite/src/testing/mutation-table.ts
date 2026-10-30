@@ -1,3 +1,4 @@
+import { entries as auditHealthEntries } from './mutation-table/audit-health.js';
 import { entries as auditForkEntries } from './mutation-table/audit-fork.js';
 import { entries as auditNoneEntries } from './mutation-table/audit-none.js';
 import { entries as auditPruneEntries } from './mutation-table/audit-prune.js';
@@ -220,6 +221,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...auditSinkEntries,
   ...auditForkEntries,
   ...auditLedgerEntries,
+  ...auditHealthEntries,
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,

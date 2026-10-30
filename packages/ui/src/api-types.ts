@@ -38,6 +38,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/audit/health': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read audit health */
+    get: operations['getAuditHealth'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/auth/local/login': {
     parameters: {
       query?: never;
@@ -1572,6 +1589,75 @@ export interface operations {
             lastVerifiedAt: string | null;
             pendingCount: number;
             seq: number;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getAuditHealth: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            codes: (
+              | 'audit.skipped'
+              | 'audit.uncertain'
+              | 'audit.gap'
+              | 'audit.withheld'
+              | 'audit.marker_rejected'
+              | 'audit.blocked'
+              | 'audit.fork'
+              | 'audit.pending_old'
+              | 'audit.capacity'
+              | 'audit.mode_change'
+              | 'audit.policy_change'
+              | 'audit.sink_inactive'
+              | 'audit.config_invalid'
+              | 'audit.mode_none'
+              | 'audit.chain_integrity'
+              | 'audit.hold_failed'
+              | 'audit.prune_anchor'
+            )[];
+            /** @enum {string} */
+            status: 'ok' | 'degraded' | 'failing';
           };
         };
       };
@@ -8001,7 +8087,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Package not found; Not found */
+      /** @description Package not found; Not found; Audit trail unavailable */
       404: {
         headers: {
           [name: string]: unknown;
@@ -8117,7 +8203,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Package not found; Not found */
+      /** @description Package not found; Not found; Audit trail unavailable */
       404: {
         headers: {
           [name: string]: unknown;

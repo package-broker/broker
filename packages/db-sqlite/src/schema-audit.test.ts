@@ -3,11 +3,21 @@ import type { Insertable, Selectable } from 'kysely';
 import type { AuditChainTable, AuditLedgerTable, AuditSinkTable, Database } from './schema.js';
 import { openMigratedDatabase, type MigratedDatabase } from './testing/migrated-database.js';
 
-type AuditTable = 'audit_chain' | 'audit_sink' | 'audit_ledger';
+type AuditTable = 'audit_chain' | 'audit_sink' | 'audit_ledger' | 'audit_health';
 type Nullability<T extends AuditTable> = {
   [K in keyof Selectable<Database[T]>]: null extends Selectable<Database[T]>[K] ? 0 : 1;
 };
 const declared: { [T in AuditTable]: Nullability<T> } = {
+  audit_health: {
+    origin: 1,
+    org_id: 1,
+    code: 1,
+    fingerprint: 1,
+    revision: 1,
+    acknowledged_revision: 1,
+    active: 1,
+    failing: 1,
+  },
   audit_chain: {
     org_id: 1,
     chain_id: 1,

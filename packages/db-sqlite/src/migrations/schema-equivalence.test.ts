@@ -32,7 +32,7 @@ it('the audit migration back-fill fits D1 statement, parameter and atomic batch 
   expect(audit.id).toBe('core:0002_audit');
   expect(audit.phase).toBe('expand');
   const statements = splitStatements(audit.sql);
-  expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(3);
+  expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(4);
   expect(statements.filter((sql) => sql.startsWith('INSERT INTO audit_chain '))).toHaveLength(1);
   expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
   expect(

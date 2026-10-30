@@ -140,7 +140,7 @@ export async function resolveAuditRejection(
       options.generation,
       capacity ? { capacity } : undefined,
     );
-    if (saved) options.alert?.(required ? 'blocked' : 'marker_rejected');
+    if (saved) await options.alert?.(required ? 'blocked' : 'marker_rejected');
     return saved;
   }
   if (result.outcome === 'rejected' && records.length > 1) {
@@ -190,7 +190,7 @@ export async function resolveAuditRejection(
       },
       options.generation,
     );
-    if (saved) options.alert?.('blocked');
+    if (saved) await options.alert?.('blocked');
     return saved;
   }
   if (
@@ -277,8 +277,8 @@ export async function resolveAuditRejection(
     },
   );
   if (saved) {
-    options.alert?.(kind);
-    if (snapshot.policy === 'required') options.alert?.('blocked');
+    await options.alert?.(kind);
+    if (snapshot.policy === 'required') await options.alert?.('blocked');
   }
   return saved;
 }

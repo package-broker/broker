@@ -9,6 +9,7 @@ export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   audit_chain: 'include',
   audit_sink: 'include',
   audit_ledger: 'include',
+  audit_health: 'include',
   blob: 'include-rows-only',
   bundle: 'include',
   bundle_item: 'include',

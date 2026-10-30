@@ -1,3 +1,4 @@
+import { createAuditHealthRepository } from './audit-health.js';
 import { AUDIT_VERIFIED_EXPORT, type AuditLedgerEntry } from '@package-broker/core/audit/ledger';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
@@ -578,9 +579,10 @@ it.each([1, 2, 3])('logs and counts integrity anchor refusal at row %s', async (
   expect(await repository.prune(org, options)).toEqual({ outcome: 'retained' });
   expect(await rows()).toHaveLength(3);
   expect(logs).toEqual([
+    { level: 'error', event: 'audit.alert', reason_code: 'audit.prune_anchor' },
     { level: 'error', event: 'audit.chain_integrity', reason_code: 'audit.prune_anchor' },
   ]);
-  expect(counters).toEqual(['pb.audit.chain_integrity']);
+  expect(counters).toEqual(['pb.audit.alerts_total', 'pb.audit.chain_integrity']);
 });
 
 it('commits a pending none cutover only when the successful prune passes its sequence', async () => {
@@ -869,8 +871,17 @@ it('alerts using fixed codes only after a committed capacity loss', async () => 
     outcome: 'evicted',
     evicted: 3,
   });
-  expect(logs).toEqual([{ level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' }]);
-  expect(counters).toEqual([['pb.audit.loss_events_total', { kind: 'gap' }, 3]]);
+  expect(logs).toEqual([
+    { level: 'error', event: 'audit.alert', reason_code: 'audit.capacity' },
+    { level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' },
+  ]);
+  expect(counters).toEqual([
+    ['pb.audit.alerts_total', { code: 'audit.capacity' }],
+    ['pb.audit.loss_events_total', { kind: 'gap' }, 3],
+  ]);
+  expect((await createAuditHealthRepository(executor).observe(org, [])).alerts).toMatchObject([
+    { code: 'audit.capacity', revision: 1 },
+  ]);
 });
 
 it('permits concurrent sink progress, custody and state changes during eviction', async () => {
@@ -990,9 +1001,16 @@ it('keeps the capacity loss log through production observability', async () => {
     }),
   ).toMatchObject({ outcome: 'evicted', evicted: 3 });
   expect(records.filter((record) => record.kind === 'log')).toMatchObject([
+    { record: { level: 'error', event: 'audit.alert', reason_code: 'audit.capacity' } },
     { record: { level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' } },
   ]);
   expect(records.filter((record) => record.kind === 'counter')).toEqual([
+    {
+      kind: 'counter',
+      name: 'pb.audit.alerts_total',
+      labels: { code: 'audit.capacity' },
+      value: 1,
+    },
     { kind: 'counter', name: 'pb.audit.loss_events_total', labels: { kind: 'gap' }, value: 3 },
   ]);
 });
@@ -1087,9 +1105,13 @@ it('keeps the prune anchor integrity log through production observability', asyn
     outcome: 'retained',
   });
   expect(records.filter((record) => record.kind === 'log')).toMatchObject([
+    { record: { level: 'error', event: 'audit.alert', reason_code: 'audit.prune_anchor' } },
     {
       record: { level: 'error', event: 'audit.chain_integrity', reason_code: 'audit.prune_anchor' },
     },
+  ]);
+  expect((await createAuditHealthRepository(executor).observe(org, [])).alerts).toMatchObject([
+    { code: 'audit.prune_anchor', revision: 1 },
   ]);
 });
 
@@ -1143,4 +1165,34 @@ it('evicts nothing when the budget is raised during an unfinished cycle', async 
     journal_bytes: before.journal_bytes,
     capacity_evict_to: null,
   });
+});
+
+it('keeps committed capacity loss successful and alerts when health persistence fails', async () => {
+  await seed();
+  const records: ObsRecord[] = [];
+  const observability = createObservability(
+    { emit: (record) => records.push(record) },
+    { deploymentId: 'deployment', runtime: 'node', requestId: null },
+    { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+  );
+  const wrapped: SqlExecutor = {
+    ...executor,
+    all: (statement) => {
+      if (statement.sql.includes('INSERT INTO audit_health')) throw new Error('health unavailable');
+      return executor.all(statement);
+    },
+  };
+  expect(
+    await createAuditPruneRepository(wrapped, observability).evict(org, {
+      generation: 1,
+      maxJournalBytes: 1,
+    }),
+  ).toMatchObject({ outcome: 'evicted', evicted: 3 });
+  expect(records).toContainEqual({
+    kind: 'counter',
+    name: 'pb.audit.alerts_total',
+    labels: { code: 'audit.capacity' },
+    value: 1,
+  });
+  expect((await createAuditHealthRepository(executor).observe(org, [])).alerts).toEqual([]);
 });

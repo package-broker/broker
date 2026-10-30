@@ -94,6 +94,8 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/catalogue-writer.ts#bindPackage':
+    'NOT_A_MUTATION: adds no organization column or scope predicate; substitutes the caller-provided scoped package lookup into prepared parameters. The writer and publish contracts test the winning package identity.',
   'repositories/import-run.ts#getImportRunStatement':
     'NOT_A_MUTATION: read-only organization-scoped import run summary; organization isolation is covered by repository, D1 twin and cp-restore mutation tests.',
   'repositories/import-run.ts#listImportRunsStatement':

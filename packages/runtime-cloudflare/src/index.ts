@@ -1505,7 +1505,14 @@ export function createWorker(
     const platformServices: PlatformServices = Object.freeze({
       blob: createBlobStore(
         byteStore,
-        createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+        createBlobRepository(executor, {
+          purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS,
+          supersededObjects: {
+            remove: (key) => byteStore.remove(key),
+            counter: (outcome) =>
+              observability.counter('pb.blob.operations', { kind: 'superseded_remove', outcome }),
+          },
+        }),
         {
           observability,
           admission: uploadAdmission,

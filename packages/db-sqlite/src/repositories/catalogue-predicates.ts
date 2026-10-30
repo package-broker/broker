@@ -158,6 +158,7 @@ export function readTimeCondition(
   const a = aliasesFor(['p'], [projectRef], [pkg.package, pkg.source]);
   const status = at(pkg.package, 'status');
   return sql<SqlBool>`(
+    ${at(pkg.package, 'held_until_active')} = 0 and
     exists (
       select 1 from project as ${sql.id(a.p)}
       where ${at(a.p, 'id')} = ${projectRef} and ${at(a.p, 'org_id')} = ${ctx.orgId} and ${at(a.p, 'status')} = 'active'

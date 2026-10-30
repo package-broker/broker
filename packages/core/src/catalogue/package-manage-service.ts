@@ -21,7 +21,13 @@ export interface PackageManageInput {
 }
 
 export type PackageManageError =
-  'invalid_input' | 'reauth_required' | 'forbidden' | 'not_found' | 'conflict' | 'indeterminate';
+  | 'invalid_input'
+  | 'reauth_required'
+  | 'forbidden'
+  | 'not_found'
+  | 'conflict'
+  | 'indeterminate'
+  | 'publish_gate';
 
 export type PackageManageResult =
   | {
@@ -99,6 +105,7 @@ export function createPackageManageService(deps: {
         projectId: input.scope.kind === 'project' ? input.scope.projectId : null,
       });
       if (version === null) return fail('not_found');
+      if (version.publishGate) return fail('publish_gate');
       const transition = {
         quarantine: { status: 'quarantined', reason: 'admin_quarantine' },
         tombstone: { status: 'tombstoned', reason: 'admin_tombstone' },
@@ -145,6 +152,8 @@ export function createPackageManageService(deps: {
           return fail('forbidden');
         case 'conflict':
           return fail('conflict');
+        case 'publish_gate':
+          return fail('publish_gate');
         case 'indeterminate':
           return fail('indeterminate');
         default:

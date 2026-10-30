@@ -98,11 +98,13 @@ function owner(ctx: OrgContext, projectId: string): RawBuilder<unknown> {
 function derivedStatus(ctx: OrgContext): RawBuilder<unknown> {
   return sql`case when c.status = 'removed_upstream' then 'removed_upstream'
     when exists (select 1 from version as vs where vs.org_id = ${ctx.orgId}
-      and vs.package_id = c.id and vs.status = 'quarantined') then 'quarantined'
+      and vs.package_id = c.id and vs.status = 'quarantined'
+      and not exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = vs.id)) then 'quarantined'
     when exists (select 1 from version as vs where vs.org_id = ${ctx.orgId}
       and vs.package_id = c.id and vs.status = 'tombstoned')
       and not exists (select 1 from version as vs indexed by version_package_status where vs.org_id = ${ctx.orgId}
-        and vs.package_id = c.id and vs.status <> 'tombstoned') then 'tombstoned'
+        and vs.package_id = c.id and vs.status <> 'tombstoned'
+        and not (vs.status = 'quarantined' and exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = vs.id))) then 'tombstoned'
     else 'active' end`;
 }
 
@@ -134,6 +136,7 @@ async function list(
   const after = cursor(query.after, organization);
   const filters = [
     sql`pkg.org_id = ${ctx.orgId}`,
+    sql`pkg.held_until_active = 0`,
     sql`src.org_id = ${ctx.orgId}`,
     after?.condition ?? sql`1 = 1`,
   ];
@@ -196,7 +199,8 @@ async function list(
     (select count(*) from scan) as scanned,
     (select v.version from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id
       and v.status in ('active', 'removed_upstream') order by v.published_at desc, v.id desc limit 1) as latest_version,
-    (select count(*) from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id) as version_count,
+    (select count(*) from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id
+      and not (v.status = 'quarantined' and exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id))) as version_count,
     (${sql.join(qualifies, sql` and `)}) as qualifies
   from d order by d.ecosystem, d.name, d.id`),
   );
@@ -263,12 +267,13 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
         statement(sql`with target as (
         select pkg.id from package as pkg join source as src on src.id = pkg.source_id
         where pkg.org_id = ${ctx.orgId} and src.org_id = ${ctx.orgId}
-          and pkg.id = ${query.packageId} and ${access}
+          and pkg.held_until_active = 0 and pkg.id = ${query.packageId} and ${access}
       ), versions as (
         select v.id, v.version, v.stability, v.status, v.published_at,
           v.removed_upstream_at, v.tombstoned_at, v.revision
         from version as v join target as t on t.id = v.package_id
-        where v.org_id = ${ctx.orgId} and ${after} order by v.id limit ${limit + 1}
+        where v.org_id = ${ctx.orgId}
+          and not (v.status = 'quarantined' and exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id)) and ${after} order by v.id limit ${limit + 1}
       ) select t.id as package_id, versions.* from target as t left join versions on 1 = 1 order by versions.id`),
       );
       if (rows.length === 0) return null;
@@ -287,16 +292,22 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
     },
     async findManagedVersion(ctx, query) {
       const access = query.projectId === null ? sql`1 = 1` : owner(ctx, query.projectId);
-      const rows = await executor.all<ManagedVersion>(
+      const rows = await executor.all<
+        Omit<ManagedVersion, 'publishGate'> & { publishGate: number }
+      >(
         statement(sql`select pkg.id as "packageId", v.id as "versionId",
         pkg.ecosystem, pkg.name as "packageName", v.version, v.status,
-        src.id as "sourceId", src.project_id as "sourceProjectId"
+        src.id as "sourceId", src.project_id as "sourceProjectId",
+        exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id) as "publishGate"
         from package as pkg join source as src on src.id = pkg.source_id
         join version as v on v.package_id = pkg.id
         where pkg.org_id = ${ctx.orgId} and src.org_id = ${ctx.orgId} and v.org_id = ${ctx.orgId}
-          and pkg.id = ${query.packageId} and v.id = ${query.versionId} and ${access}`),
+          and pkg.held_until_active = 0 and pkg.id = ${query.packageId} and v.id = ${query.versionId} and ${access}`),
       );
-      return rows[0] ?? null;
+      const row = rows[0];
+      if (!row) return null;
+      const { publishGate, ...version } = row;
+      return { ...version, ...(publishGate === 1 ? { publishGate: true } : {}) };
     },
   };
 }

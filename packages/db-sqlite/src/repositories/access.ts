@@ -722,6 +722,18 @@ function requireSelector(value: string): string {
 
 /** The single read behind `lookupToken`. */
 export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): Statement {
+  return compile(tokenLookupQuery(ctx, input));
+}
+
+export function tokenAccessCondition(
+  ctx: OrgContext,
+  input: TokenLookupInput,
+  condition: Expression<SqlBool>,
+): Expression<SqlBool> {
+  return sql<SqlBool>`exists ${loose.selectFrom(tokenLookupQuery(ctx, input).as('pa')).select(sql.lit(1).as('one')).where(condition)}`;
+}
+
+function tokenLookupQuery(ctx: OrgContext, input: TokenLookupInput) {
   requireSelector(input.selector);
   if (input.boundary !== 'organization' && input.boundary !== 'project') {
     throw new TypeError('boundary must be organization or project');
@@ -895,7 +907,7 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
     .where('t.org_id', '=', ctx.orgId)
     .where('t.kind', 'in', ['pat', 'svc']);
 
-  return compile(select);
+  return select;
 }
 
 function parsedScope(row: TokenRow): TokenAccess['token']['scope'] {

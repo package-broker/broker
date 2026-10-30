@@ -428,10 +428,10 @@ describe('version-state fenced batch', () => {
 });
 
 describe('catalogue adapter', () => {
-  it('budgets publishing at 40 statements and rejects until publishing is implemented', async () => {
+  it('budgets publishing at 40 statements and rejects an unissued publish guard', async () => {
     expect(writer.statementBudget.publishVersion).toBe(40);
     await expect(writer.publishVersion(org, {} as never, {} as never)).rejects.toThrow(
-      'not_implemented',
+      'invalid publish write guard',
     );
   });
 

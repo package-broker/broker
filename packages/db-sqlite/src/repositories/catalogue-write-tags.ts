@@ -10,13 +10,14 @@ export const MAX_TAGS_PER_CALL = 100;
 const TAG_GRAMMAR = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NOW = sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
 
-export type DistTagActorType = 'user' | 'sync' | 'import';
+export type DistTagActorType = 'user' | 'service' | 'sync' | 'import';
 
 export interface DistTagRequest {
   readonly packageId: string;
   readonly ecosystem: 'composer' | 'npm';
-  /** Tag to version_normalized; the package's tags become exactly this map. */
+  /** Tag to version_normalized; patch mode preserves omitted tags. */
   readonly tags: Readonly<Record<string, string>>;
+  readonly mode?: 'replace' | 'patch';
   /** Full snapshot names when this call applies only a slice. */
   readonly tagNames?: readonly string[];
   readonly actorType: DistTagActorType;
@@ -83,7 +84,7 @@ export function distTagStatementGroups(
   if (entries.length > MAX_TAGS_PER_CALL) {
     throw new RangeError(`a call carries at most ${String(MAX_TAGS_PER_CALL)} tags`);
   }
-  const user = actorType === 'user';
+  const user = actorType === 'user' || actorType === 'service';
   const badGrammar = entries.filter(([tag]) => !grammarOk(tag)).map(([tag]) => tag);
   if (user && badGrammar.length > 0) throw new DistTagRefusedError(badGrammar);
   const valid = entries.filter(([tag]) => grammarOk(tag));
@@ -95,7 +96,7 @@ export function distTagStatementGroups(
   );
   const targetOf = (target: string) => sql<string>`(SELECT version.id FROM version
     WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}
-      AND version.version_normalized = ${target} AND version.status != 'tombstoned')`;
+      AND version.version_normalized = ${target} AND ${request.mode === 'patch' ? sql<boolean>`version.status = 'active'` : sql<boolean>`version.status != 'tombstoned'`})`;
 
   const checks: Statement[] = [];
   const probes: Statement[] = [];
@@ -243,7 +244,7 @@ export function distTagStatementGroups(
     head,
     ...probes.map((probe) => [probe]),
     ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),
-    [removeHistory, remove],
+    ...(request.mode === 'patch' ? [] : [[removeHistory, remove]]),
     [advance],
   ];
   const statementCount = groups.reduce((sum, group) => sum + group.length, 0);
@@ -261,7 +262,8 @@ export function distTagStatementGroups(
       const setChanges = results
         .slice(setOffset, setOffset + sets.length)
         .reduce((sum, result, index) => sum + (index % 2 === 0 ? result.changes : 0), 0);
-      const removed = results[setOffset + sets.length]?.changes ?? 0;
+      const removed =
+        request.mode === 'patch' ? 0 : (results[setOffset + sets.length]?.changes ?? 0);
       return {
         packageId,
         inserted: 0,

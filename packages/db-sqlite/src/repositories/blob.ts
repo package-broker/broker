@@ -51,6 +51,10 @@ const MAX_RETENTION_DAYS = 36_500;
 
 export interface BlobRepositoryOptions {
   readonly purgeLeaseSeconds?: number;
+  readonly supersededObjects?: {
+    remove(storageKey: string): Promise<void>;
+    counter(outcome: 'removed' | 'error'): void;
+  };
 }
 
 const DEFAULT_PURGE_LEASE_SECONDS = 900;
@@ -235,9 +239,40 @@ export function createBlobRepository(
         .select(['size_bytes', 'media_type', 'deleted_at'])
         .where('org_id', '=', ctx.orgId)
         .where('sha256', '=', sha256);
-      const [written, current] = await executor.batch([statement(upsert), statement(existing)]);
+      const previous = db
+        .selectFrom('blob')
+        .select(['storage_key', 'deleted_at'])
+        .where('org_id', '=', ctx.orgId)
+        .where('sha256', '=', sha256);
+      const [before, written, current] = await executor.batch([
+        statement(previous),
+        statement(upsert),
+        statement(existing),
+      ]);
       const row = written?.rows[0] as InfoRow | undefined;
-      if (row !== undefined) return info(row);
+      if (row !== undefined) {
+        const old = before?.rows[0] as
+          { storage_key: string; deleted_at: string | null } | undefined;
+        if (
+          options.supersededObjects &&
+          old?.deleted_at === null &&
+          old.storage_key.startsWith('npm-publish/') &&
+          old.storage_key !== blobStorageKey(ctx.orgId, sha256)
+        ) {
+          let outcome: 'removed' | 'error' = 'removed';
+          try {
+            await options.supersededObjects.remove(old.storage_key);
+          } catch {
+            outcome = 'error';
+          }
+          try {
+            options.supersededObjects.counter(outcome);
+          } catch {
+            // Telemetry failure cannot undo a committed publication.
+          }
+        }
+        return info(row);
+      }
       const stored = current?.rows[0] as
         { size_bytes: number; media_type: string; deleted_at: string | null } | undefined;
       if (

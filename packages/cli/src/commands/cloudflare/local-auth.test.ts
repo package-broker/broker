@@ -79,7 +79,8 @@ it('requires agreement across live versions unless explicitly overridden', () =>
     expect(() => resolveLocalAuth({ sources })).toThrow(
       expect.objectContaining({ code: 'configuration_conflict', exitCode: 8 }),
     );
-    expect(resolveLocalAuth({ sources, flag: 'disabled' })).toBe('disabled');
+    for (const flag of ['enabled', 'disabled'] as const)
+      expect(resolveLocalAuth({ sources, flag })).toBe(flag);
   }
   expect(resolveLocalAuth({ sources: [source('disabled'), source('disabled')] })).toBe('disabled');
 });

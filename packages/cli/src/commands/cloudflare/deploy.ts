@@ -50,6 +50,7 @@ import {
   type CommandResult,
 } from './api.js';
 import { inputMessages } from './input-messages.js';
+import { resolveLocalAuth, type LocalAuthMode } from './local-auth.js';
 import { resolveZone } from './zone.js';
 import { routeConflict } from './routes.js';
 import {
@@ -156,16 +157,30 @@ function desiredProviders(
     );
   }
 }
-type PlannedCompiled = { readonly id: string } & (
+type PlannedCompiled = {
+  readonly id: string;
+  readonly policy?: IdentityDescriptor['compiled'][number]['policy'];
+} & (
   | { readonly kind: 'oidc'; readonly issuer: string }
   | { readonly kind: 'cloudflare-access'; readonly teamDomain: string; readonly audience: string }
 );
-function planned({ id, kind, anchor }: IdentityDescriptor['compiled'][number]): PlannedCompiled {
+function planned({
+  id,
+  kind,
+  anchor,
+  policy,
+}: IdentityDescriptor['compiled'][number]): PlannedCompiled {
   const value = anchor.slice(anchor.indexOf(':') + 1);
   const slash = value.indexOf('/');
   return kind === 'oidc'
-    ? { id, kind, issuer: value }
-    : { id, kind, teamDomain: value.slice(0, slash), audience: value.slice(slash + 1) };
+    ? { id, kind, issuer: value, ...(policy === undefined ? {} : { policy }) }
+    : {
+        id,
+        kind,
+        teamDomain: value.slice(0, slash),
+        audience: value.slice(slash + 1),
+        ...(policy === undefined ? {} : { policy }),
+      };
 }
 function identityDigest(descriptor: IdentityDescriptor | null, providers: string | null) {
   return descriptor === null && providers === null
@@ -571,6 +586,7 @@ export const cloudflareDeployContract: DeployProviderContract = {
 };
 
 export interface DeployOptions {
+  localAuth?: LocalAuthMode;
   providers?: ProvidersOption;
   workerName: string;
   prebuilt?: boolean;
@@ -660,11 +676,14 @@ function routeInput(raw: string | undefined, script: string): ManagedRoute[] {
 }
 function secretNames(o: DeployOptions): string[] {
   const names = [...(o.secret ?? []), ...(o.secrets === undefined ? [] : o.secrets.split('\n'))];
+  if (names.includes('PB_AUTH_LOCAL'))
+    return invalid('Remove the secret first: wrangler secret delete PB_AUTH_LOCAL');
   if (
     new Set(names).size !== names.length ||
     names.some(
       (n) =>
-        !/^[A-Z][A-Z0-9_]{0,127}$/.test(n) || ['PB_TOKEN_PEPPER', 'PB_IDP_PROVIDERS'].includes(n),
+        !/^[A-Z][A-Z0-9_]{0,127}$/.test(n) ||
+        ['PB_TOKEN_PEPPER', 'PB_IDP_PROVIDERS', 'PB_AUTH_LOCAL'].includes(n),
     )
   )
     return invalid();
@@ -1586,6 +1605,7 @@ export async function deploy(
       'DEPLOYMENT_ID',
       'PB_PUBLIC_URL',
       'PB_IDP_PROVIDERS',
+      'PB_AUTH_LOCAL',
       'ASSETS',
       ...(artifact.ports
         ? [
@@ -1692,6 +1712,30 @@ export async function deploy(
     if (matches.length > 1) return conflict('worker:identity');
     const exists = matches.length === 1;
     creatingWorker = !exists;
+    if (!exists) {
+      try {
+        await api.request(`${base}/settings`);
+        if (
+          journal.deployment?.attempt.script_creation !== undefined ||
+          journal.resources.worker?.name === identity.script_name
+        ) {
+          const error = new CloudflareError('outcome_unknown', 6, false, 'deploy');
+          inputMessages.set(
+            error,
+            'The journal owns this Worker creation, but the Worker list is stale; retry deploy after the Worker becomes visible.',
+          );
+          throw error;
+        }
+        return conflict('worker:identity');
+      } catch (error) {
+        if (
+          !(error instanceof CloudflareError) ||
+          error.status !== 404 ||
+          error.providerCode !== 10007
+        )
+          throw error;
+      }
+    }
     if (exists) {
       const tags = matches[0]!.tags;
       if (
@@ -1723,6 +1767,25 @@ export async function deploy(
       return conflict('preview_cleanup'); // Re-read the complete configuration on a fresh run after interrupted cleanup.
     }
     const workerSettings = exists ? await ownedWorkerSettings(api, base, journal) : null;
+    const interrupted = journal.deployment?.attempt;
+    if (
+      exists &&
+      !o.dryRun &&
+      interrupted &&
+      [
+        'preparing_upload',
+        'upload_pending',
+        'uploaded',
+        'configuring',
+        'activation_pending',
+      ].includes(interrupted.phase)
+    ) {
+      const liveEndpoints = await endpoints(api, base);
+      await enforceEndpoints(api, store, journal, {
+        enabled: liveEndpoints.enabled && restrictivePolicy(interrupted).enabled,
+        previews_enabled: false,
+      });
+    }
     if (workerSettings) {
       for (const raw of (workerSettings.bindings as unknown[]).map(object)) {
         const b = normalizedBinding(raw);
@@ -1829,6 +1892,10 @@ export async function deploy(
         'activation_pending',
       ].includes(priorAttempt.phase);
     if (resuming) {
+      if (priorAttempt.local_auth === undefined)
+        return invalid(
+          "This frozen deployment attempt predates local-auth support and cannot be resumed; finish it with the previous release's CLI, then deploy again",
+        );
       if (priorAttempt.artifact_sha256 !== artifact.artifactHash)
         return conflict('artifact_sha256');
       if (priorAttempt.requested_rollout !== rollout) return conflict('requested_rollout');
@@ -1852,6 +1919,42 @@ export async function deploy(
         return removeSecret();
       sources.push(resources);
     }
+    if (exists && sources.length === 0) {
+      if (!workerSettings || !Array.isArray(workerSettings.bindings)) return conflict('local_auth');
+      sources.push(workerSettings);
+    }
+    const localAuth = resolveLocalAuth({
+      flag: o.localAuth,
+      env: o.env.PB_AUTH_LOCAL,
+      sources: exists ? (sources as { bindings: readonly unknown[] }[]) : null,
+      secretNames: [...selectedSecrets, ...installedNames],
+      ...(resuming ? { frozen: priorAttempt } : {}),
+    });
+    const liveModes = sources.map((source) => {
+      const binding = (source.bindings as unknown[])
+        .map(object)
+        .find((binding) => binding.name === 'PB_AUTH_LOCAL');
+      return binding?.text ?? 'enabled';
+    });
+    if (new Set(liveModes).size > 1) return conflict('local_auth');
+    if (
+      localAuth === 'enabled' &&
+      o.localAuth === undefined &&
+      o.env.PB_AUTH_LOCAL === 'enabled' &&
+      (liveModes.includes('disabled') || recordedVerified?.local_auth === 'disabled')
+    )
+      return invalid('Re-enabling local sign-in requires --local-auth enabled');
+    if (
+      liveModes.some((mode) => mode !== localAuth) ||
+      (recordedVerified && localAuth !== (recordedVerified.local_auth ?? 'enabled'))
+    )
+      output.checks.push({
+        name: 'local_auth_change',
+        status: 'notice',
+        source: `Local sign-in configuration changes to ${localAuth}.`,
+      });
+    assertLocalAuthAccepted(localAuth, artifact.localAuth);
+    output.checks.push({ name: 'local_auth', status: localAuth });
     const frozen = resuming ? frozenProviders(priorAttempt) : null;
     let providersText = frozen;
     if (o.providers?.kind === 'set' || o.providers?.kind === 'remove') {
@@ -1880,9 +1983,27 @@ export async function deploy(
       providersText = values[0] ?? null;
     }
     const identityHash = identityDigest(artifact.identity, providersText);
+    if (
+      recordedVerified &&
+      !resuming &&
+      identityHash !== (recordedVerified.identity_sha256 ?? null)
+    )
+      output.checks.push({
+        name: 'sso_artifact_upgrade',
+        status: 'notice',
+        source:
+          'The first deploy of a rebuilt artifact after upgrading counts as an SSO configuration change; one partial rollout will be refused. Deploy with --rollout 100 first.',
+      });
     const anchors = effectiveAnchors(artifact.identity, providersText);
     if (o.dryRun) output.identity = dryRunIdentity(artifact.identity, providersText, identityHash);
+    const effectiveProviders =
+      artifact.identity === null
+        ? []
+        : providerPlan(artifact.identity, providersText).plan.effective;
+    if (localAuth === 'disabled' && effectiveProviders.length === 0)
+      return invalid('Cannot disable local sign-in without a usable SSO provider');
     const plainBindings = bindings(journal, artifact.ports, url);
+    plainBindings.push({ type: 'plain_text', name: 'PB_AUTH_LOCAL', text: localAuth });
     if (providersText !== null)
       plainBindings.push({ type: 'plain_text', name: 'PB_IDP_PROVIDERS', text: providersText });
     if (endpointEnv) {
@@ -1901,8 +2022,11 @@ export async function deploy(
         : [];
     const missingSecrets = [
       ...new Set(
-        parseRuntimeProviders(providersText ?? undefined)
-          .accepted.filter((p) => p.kind === 'oidc')
+        [
+          ...parseRuntimeProviders(providersText ?? undefined).accepted,
+          ...(localAuth === 'disabled' ? effectiveProviders : []),
+        ]
+          .filter((p) => p.kind === 'oidc')
           .map((p) => providerSecretName(p.id, 'CLIENT_SECRET')),
       ),
     ].filter(
@@ -2012,6 +2136,19 @@ export async function deploy(
     )
       output.identity?.skipped_checks.push('anchor_preflight');
     if (
+      rollout < 100 &&
+      !resuming &&
+      (localAuth !== (verified?.local_auth ?? 'enabled') ||
+        sources.some(
+          (source) =>
+            resolveLocalAuth({ sources: [source as { bindings: readonly unknown[] }] }) !==
+            localAuth,
+        ))
+    )
+      return invalid(
+        'partial rollout is not allowed when local sign-in configuration changes; deploy with --rollout 100 first',
+      );
+    if (
       verified &&
       plainMatch &&
       verified.artifact_sha256 === artifact.artifactHash &&
@@ -2022,6 +2159,7 @@ export async function deploy(
       equal(withoutIds(live), withoutIds(intended)) &&
       !updates.some((b) => b.name !== 'PB_MASTER_KEY' && b.name !== 'PB_MASTER_KEY_PREVIOUS')
     ) {
+      await version(api, base, verified.version_id!, verified, allNames, plainBindings);
       outputAttempt(output, verified);
       output.plan.push({ stage: 'deploy', action: 'unchanged' });
       output.checks.push({ name: 'endpoint_policy', status: 'verified', ...policy });
@@ -2048,6 +2186,24 @@ export async function deploy(
       return conflict('bindings:secret_text');
     if (resuming) {
       if (priorAttempt.settings_sha256 !== settingsHash) return conflict('settings_sha256');
+    }
+    if (
+      resuming &&
+      (priorAttempt.version_id ||
+        priorAttempt.phase === 'upload_pending' ||
+        priorAttempt.script_creation)
+    ) {
+      let id = priorAttempt.version_id;
+      const creation = priorAttempt.script_creation !== undefined;
+      if (!id) {
+        const versions = await api.list(`${base}/versions`, 'items');
+        const matches = versions.filter((v) =>
+          versionAnnotationsMatch(object(v.annotations), priorAttempt, creation),
+        );
+        if (matches.length !== 1 || !uuid(matches[0]!.id)) return unknown();
+        id = matches[0]!.id;
+      }
+      await version(api, base, id, priorAttempt, allNames, plainBindings, creation);
     }
     if (!resuming && current.versions.length > 1) return conflict('deployment');
     checkManaged();
@@ -2081,6 +2237,9 @@ export async function deploy(
         plainBinding: { name: 'PB_PUBLIC_URL', text: url },
       });
       recordDeploymentHistory(pendingHistory, {
+        plainBinding: { name: 'PB_AUTH_LOCAL', text: localAuth },
+      });
+      recordDeploymentHistory(pendingHistory, {
         reserveVersion: !resuming || !priorAttempt.version_id,
         ...(endpointEnv ? { plainBinding: { name: endpointEnv, text: telemetryEndpoint! } } : {}),
       });
@@ -2102,6 +2261,7 @@ export async function deploy(
     if (resuming) {
       a = priorAttempt;
       a.identity_sha256 = identityHash;
+      a.local_auth = localAuth;
     } else {
       a = {
         operation_id: randomUUID(),
@@ -2110,6 +2270,7 @@ export async function deploy(
         settings_sha256: settingsHash,
         providers_sha256: providersText === null ? null : digest(providersText),
         identity_sha256: identityHash,
+        local_auth: localAuth,
         ...(providersText === null ? {} : { providers_text: providersText }),
         secret_names: allNames,
         build_info: artifact.info,
@@ -2139,16 +2300,25 @@ export async function deploy(
         ...(priorJournal?.history ? { history: structuredClone(priorJournal.history) } : {}),
       };
       recordDeploymentHistory(journal.deployment, {
+        plainBinding: { name: 'PB_AUTH_LOCAL', text: localAuth },
+      });
+      recordDeploymentHistory(journal.deployment, {
         ...(priorAttempt?.version_id ? { versionId: priorAttempt.version_id } : {}),
         ...(endpointEnv ? { plainBinding: { name: endpointEnv, text: telemetryEndpoint! } } : {}),
       });
       await save(store, journal, now);
     }
     attemptStarted = true;
-    if (endpointEnv && journal.deployment)
+    if (journal.deployment) {
       recordDeploymentHistory(journal.deployment, {
-        plainBinding: { name: endpointEnv, text: telemetryEndpoint! },
+        plainBinding: { name: 'PB_AUTH_LOCAL', text: localAuth },
       });
+      if (endpointEnv)
+        recordDeploymentHistory(journal.deployment, {
+          plainBinding: { name: endpointEnv, text: telemetryEndpoint! },
+        });
+      await save(store, journal, now);
+    }
     outputAttempt(output, a);
     if (
       a.script_creation?.state === 'pending' ||
@@ -2249,6 +2419,10 @@ export async function deploy(
     }
     if (!a.version_id) return unknown();
     await version(api, base, a.version_id, a, allNames, plainBindings);
+    recordDeploymentHistory(journal.deployment!, {
+      plainBinding: { name: 'PB_AUTH_LOCAL', text: localAuth },
+    });
+    await save(store, journal, now);
     if (providersText !== null) {
       recordDeploymentHistory(journal.deployment!, {
         plainBinding: { name: 'PB_IDP_PROVIDERS', text: providersText },

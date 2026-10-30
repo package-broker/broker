@@ -1102,11 +1102,17 @@ async function exerciseDeploymentCheckpoint(checkpoint: string) {
     if (path === '/workers/scripts') return ok(created ? [{ id: identity.script_name, tags }] : []);
     if (path === `/d1/database/${DB}`)
       return ok({ uuid: DB, name: 'broker-production-db', jurisdiction: 'eu' });
-    if (path === `${base}/settings`)
+    if (path === `${base}/settings`) {
+      if (!created)
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 10007 }] }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        });
       return ok({
         tags,
         bindings: active ? candidateBindings : [{ type: 'd1', name: 'DB', id: DB }],
       });
+    }
     if (path === `${base}/secrets`)
       return ok(
         ['PB_MASTER_KEY', ...(active ? ['IDP_SECRET'] : [])].map((name) => ({

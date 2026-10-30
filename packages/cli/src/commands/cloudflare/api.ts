@@ -498,10 +498,13 @@ export class CloudflareApi {
             response.status,
           );
         if (responseFailure) {
-          // Only Queues plan rejection needs a numeric code; other HTTP failures need no body.
+          // Read only the numeric codes needed for plan rejection and confirmed Worker absence.
           if (
             method !== 'GET' ||
-            !/^\/queues(?:\?|$)/.test(path) ||
+            !(
+              /^\/queues(?:\?|$)/.test(path) ||
+              (response.status === 404 && /^\/workers\/scripts\/[^/]+\/settings$/.test(path))
+            ) ||
             !response.headers.get('content-type')?.includes('application/json')
           ) {
             controller.abort();
@@ -552,6 +555,20 @@ export class CloudflareApi {
               null,
               10253,
             );
+          if (
+            method === 'GET' &&
+            response.status === 404 &&
+            /^\/workers\/scripts\/[^/]+\/settings$/.test(path) &&
+            Array.isArray(parsed.errors) &&
+            parsed.errors.some(
+              (entry: unknown) =>
+                entry !== null &&
+                typeof entry === 'object' &&
+                !Array.isArray(entry) &&
+                (entry as Record<string, unknown>).code === 10007,
+            )
+          )
+            throw new CloudflareError('provider_failure', 1, false, 'provision', 404, null, 10007);
           if (responseFailure) throw responseFailure;
           throw new Error();
         }
@@ -566,7 +583,8 @@ export class CloudflareApi {
         };
       } catch (error) {
         const safe =
-          responseFailure && !(error instanceof CloudflareError && error.providerCode === 10253)
+          responseFailure &&
+          !(error instanceof CloudflareError && [10253, 10007].includes(error.providerCode ?? 0))
             ? responseFailure
             : error instanceof CloudflareError
               ? error

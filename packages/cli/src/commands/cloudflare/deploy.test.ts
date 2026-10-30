@@ -327,6 +327,14 @@ function harness() {
       return ok(h.active);
     }
     if (path === base + '/settings') {
+      if (!h.exists)
+        return new Response(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 10007, message: 'Worker not found' }],
+          }),
+          { status: 404, headers: { 'content-type': 'application/json' } },
+        );
       const current = h.versions.get(h.settingsVersion ?? h.active.versions[0]?.version_id ?? '');
       const currentBindings = (current?.resources as { bindings: unknown[] } | undefined)?.bindings;
       return ok({
@@ -975,6 +983,7 @@ function providerReadback(
       });
     }
     const response = await inner(input, init);
+    if (!response.ok) return response;
     if (path.endsWith(base + '/settings') || path.includes(base + '/versions/')) {
       const envelope = object(await response.json());
       const result = object(envelope.result);
@@ -1005,7 +1014,7 @@ function realSettingsReadback(h: ReturnType<typeof harness>, o: DeployOptions) {
   const send = o.fetch!;
   o.fetch = (async (input, init) => {
     const response = await send(input, init);
-    if (!String(input).endsWith(base + '/settings')) return response;
+    if (!response.ok || !String(input).endsWith(base + '/settings')) return response;
     const result = object(object(await response.json()).result);
     const bindings = (result.bindings as Record<string, unknown>[]).map((b) =>
       b.type === 'd1' ? { ...b, id: b.database_id } : b,
@@ -1183,6 +1192,7 @@ it.each(['eu', 'default', 'missing'] as const)(
     let fullReads = 0;
     o.fetch = (async (input, init) => {
       const response = await inner(input, init);
+      if (!response.ok) return response;
       const path = new URL(String(input)).pathname;
       const full = path.includes('/workers/workers/');
       if (!full && !path.endsWith(base + '/settings') && !path.includes(base + '/versions/'))
@@ -2011,6 +2021,7 @@ it('journals every uploaded version across successive deployments', async () => 
   const history = (await store.read())!.deployment!.history!;
   expect(history.version_ids).toEqual([CANDIDATE, NEWEST]);
   expect(history.plain_bindings).toEqual([
+    { name: 'PB_AUTH_LOCAL', texts: ['enabled'] },
     { name: 'PB_PUBLIC_URL', texts: ['https://broker.example.test'] },
   ]);
 });
@@ -2026,6 +2037,7 @@ it('journals the telemetry endpoint binding it uploads', async () => {
   expect((await store.read())!.deployment!.history).toEqual({
     version_ids: [CANDIDATE],
     plain_bindings: [
+      { name: 'PB_AUTH_LOCAL', texts: ['enabled'] },
       { name: 'OTEL_ENDPOINT', texts: ['https://telemetry.example.test'] },
       { name: 'PB_PUBLIC_URL', texts: ['https://broker.example.test'] },
     ],
@@ -3350,7 +3362,7 @@ it.each([true, false])(
   },
 );
 
-it.each(['PB_PUBLIC_URL', 'DB', 'JOBS', 'ASSETS'])(
+it.each(['PB_PUBLIC_URL', 'DB', 'JOBS', 'ASSETS', 'PB_AUTH_LOCAL'])(
   'R3 telemetry endpoint name colliding with generated binding %s refuses before requests',
   async (name) => {
     const file = join(out, 'generated/manifest.json'),
@@ -3725,6 +3737,7 @@ it.each([false, true])(
       ).toBe(0);
     }
     expect((await store.read())!.deployment!.history!.plain_bindings).toEqual([
+      { name: 'PB_AUTH_LOCAL', texts: ['enabled'] },
       {
         name: 'OTEL_ENDPOINT',
         texts: ['https://telemetry.example.test/v1', 'https://telemetry.example.test/v2'],
@@ -4925,7 +4938,7 @@ it.each([
   'checks %i variable names with workersPaid=%s',
   async (count, workersPaid, exitCode) => {
     const h = harness();
-    h.installed.push(...Array.from({ length: count - 4 }, (_, i) => `ORPHAN_${i}`));
+    h.installed.push(...Array.from({ length: count - 5 }, (_, i) => `ORPHAN_${i}`));
     const result = await deploy(options(h, { workersPaid }));
     expect(result.exitCode).toBe(exitCode);
     if (exitCode) {
@@ -4962,7 +4975,7 @@ it.each([64, 65])(
     const h = harness();
     h.installed.push(
       'PB_IDP_CORP_CLIENT_SECRET',
-      ...Array.from({ length: count - 8 }, (_, i) => `ORPHAN_${i}`),
+      ...Array.from({ length: count - 9 }, (_, i) => `ORPHAN_${i}`),
     );
     const o = options(h, {
       dryRun: true,
@@ -4995,7 +5008,7 @@ it('counts orphaned installed provider secrets after providers are removed', asy
   liveProviders(h, corpProviders);
   h.installed.push(
     'PB_IDP_CORP_CLIENT_SECRET',
-    ...Array.from({ length: 60 }, (_, i) => `ORPHAN_${i}`),
+    ...Array.from({ length: 59 }, (_, i) => `ORPHAN_${i}`),
   );
   const result = await deploy(options(h, { providers: { kind: 'remove' } }));
   expect(result.exitCode).toBe(2);
@@ -5013,7 +5026,7 @@ it('includes pending secret names in the variable budget before reconciling a lo
   o.env = { ...o.env, PENDING_SECRET: 'PENDING_SENTINEL' };
   expect((await deploy(o)).exitCode).toBe(6);
   const uploads = providerUploads(h).length;
-  h.installed.push(...Array.from({ length: 60 }, (_, i) => `ORPHAN_${i}`));
+  h.installed.push(...Array.from({ length: 59 }, (_, i) => `ORPHAN_${i}`));
   const result = await deploy(options(h, { dryRun: true }));
   expect(result.exitCode).toBe(2);
   expect(result.output.error).toMatchObject({
@@ -5850,3 +5863,701 @@ it.each([undefined, null, '', 'ENABLED', 'private-input', false, 0, {}, []])(
     }
   },
 );
+
+async function localAuthArtifact(compiled: unknown[] = [accessIdentity]) {
+  await writeIdentity({ runtimeProviders: true, compiled });
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.localAuth = { version: 1 };
+  await writeFile(file, JSON.stringify(manifest));
+}
+function liveLocalAuth(
+  h: ReturnType<typeof harness>,
+  text: unknown,
+  id = OLD,
+  type = 'plain_text',
+) {
+  const resources = h.versions.get(id)!.resources as { bindings: unknown[] };
+  resources.bindings = [
+    ...resources.bindings.filter((b) => object(b).name !== 'PB_AUTH_LOCAL'),
+    { type, name: 'PB_AUTH_LOCAL', text },
+  ];
+}
+const localBinding = (text: string) => ({ type: 'plain_text', name: 'PB_AUTH_LOCAL', text });
+
+it.each(['enabled', 'disabled'] as const)(
+  'first deploy freezes and receipts local auth %s',
+  async (mode) => {
+    await localAuthArtifact();
+    const { h, o } = firstInstall();
+    o.localAuth = mode;
+    const result = await deploy(o);
+    expect(result.output.error).toBeNull();
+    const version = h.versions.get(CREATED)!;
+    expect((version.resources as { bindings: unknown[] }).bindings).toContainEqual(
+      localBinding(mode),
+    );
+    const journal = (await store.read())!;
+    expect(journal.deployment!.attempt.local_auth).toBe(mode);
+    expect(journal.deployment!.history!.plain_bindings).toContainEqual({
+      name: 'PB_AUTH_LOCAL',
+      texts: [mode],
+    });
+    expect(result.output.checks.some((c) => c.name === 'sso_artifact_upgrade')).toBe(false);
+  },
+);
+
+it.each([false, true])(
+  'preserves disabled and explicitly re-enables (dry-run %s)',
+  async (dryRun) => {
+    await localAuthArtifact();
+    const h = harness();
+    liveLocalAuth(h, 'disabled');
+    const first = await deploy(options(h, { dryRun }));
+    expect(first.output.error).toBeNull();
+    expect(first.output.checks).toContainEqual({ name: 'local_auth', status: 'disabled' });
+    if (!dryRun) {
+      expect(h.metadata!.bindings).toContainEqual(localBinding('disabled'));
+      const j = (await store.read())!;
+      j.deployment!.attempt.phase = 'verified';
+      j.deployment!.attempt.smoke = 'passed';
+      await store.write(j);
+    }
+    const reenabled = await deploy(options(h, { dryRun, localAuth: 'enabled' }));
+    expect(reenabled.output.error).toBeNull();
+    expect(reenabled.output.checks).toContainEqual({ name: 'local_auth', status: 'enabled' });
+    expect(reenabled.output.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'local_auth_change',
+        status: 'notice',
+      }),
+    );
+    if (dryRun) expect(mutations(h)).toEqual([]);
+    else expect(h.metadata!.bindings).toContainEqual(localBinding('enabled'));
+  },
+);
+
+it.each([false, true])(
+  'removes runtime providers with compiled fallback before disabling (dry-run %s)',
+  async (dryRun) => {
+    await localAuthArtifact();
+    const h = providerHarness();
+    liveProviders(h, providersValue);
+    const result = await deploy(
+      options(h, { dryRun, localAuth: 'disabled', providers: { kind: 'remove' } }),
+    );
+    expect(result.output.error).toBeNull();
+    if (dryRun) {
+      expect(identityOf(result)).toMatchObject({
+        providers: [{ id: 'access', type: 'cloudflare-access', source: 'compiled' }],
+      });
+      expect(mutations(h)).toEqual([]);
+    } else {
+      expect(h.metadata!.bindings).toContainEqual(localBinding('disabled'));
+      expect(uploadedProviders(h)).toEqual([]);
+    }
+  },
+);
+
+it.each([false, true])(
+  'rejects unsafe local configurations with zero mutations (dry-run %s)',
+  async (dryRun) => {
+    for (const scenario of [
+      'empty',
+      'legacy',
+      'compiled-secret',
+      'runtime-secret',
+      'secret-collision',
+      'duplicate',
+      'invalid',
+      'env-conflict',
+      'selected-secret',
+    ] as const) {
+      await artifact();
+      await localAuthArtifact(
+        scenario === 'compiled-secret'
+          ? [compiledIdentity]
+          : scenario === 'empty' || scenario === 'runtime-secret'
+            ? []
+            : [accessIdentity],
+      );
+      if (scenario === 'legacy') {
+        const file = join(out, 'generated/manifest.json');
+        const manifest = JSON.parse(await readFile(file, 'utf8'));
+        delete manifest.localAuth;
+        await writeFile(file, JSON.stringify(manifest));
+      }
+      const h = harness();
+      const o = options(h, { dryRun, localAuth: 'disabled' });
+      if (scenario === 'runtime-secret')
+        o.providers = { kind: 'set', value: providersValue, ids: ['test'] };
+      if (scenario === 'secret-collision') h.installed.push('PB_AUTH_LOCAL');
+      if (scenario === 'selected-secret') o.secret = ['PB_AUTH_LOCAL'];
+      if (scenario === 'env-conflict') o.env = { ...o.env, PB_AUTH_LOCAL: 'enabled' };
+      if (scenario === 'invalid') {
+        delete o.localAuth;
+        liveLocalAuth(h, 'INVALID_SENTINEL');
+      }
+      if (scenario === 'duplicate') {
+        liveLocalAuth(h, 'disabled');
+        (h.versions.get(OLD)!.resources as { bindings: unknown[] }).bindings.push(
+          localBinding('disabled'),
+        );
+      }
+      const result = await deploy(o);
+      expect(result.exitCode, scenario).toBe(2);
+      expect(mutations(h), scenario).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain('INVALID_SENTINEL');
+      expect(JSON.stringify(result)).not.toContain('IDP_SENTINEL');
+    }
+  },
+);
+
+it('freezes disabled over a lost upload and refuses conflicting resume before mutations', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  h.uploadLost = true;
+  expect((await deploy(options(h, { localAuth: 'disabled' }))).exitCode).not.toBe(0);
+  expect((await store.read())!.deployment!.attempt.local_auth).toBe('disabled');
+  h.calls.length = 0;
+  const conflict = await deploy(options(h, { localAuth: 'enabled' }));
+  expect(conflict.output.error?.code).toBe('configuration_conflict');
+  expect(mutations(h)).toEqual([]);
+  h.uploadLost = false;
+  const resumed = await deploy(options(h));
+  expect(resumed.output.error).toBeNull();
+  expect(providerUploads(h)).toHaveLength(0);
+  expect((h.versions.get(CANDIDATE)!.resources as { bindings: unknown[] }).bindings).toContainEqual(
+    localBinding('disabled'),
+  );
+});
+
+it.each(['missing', 'wrong', 'secret'] as const)(
+  'refuses resumed version with %s local binding before mutations',
+  async (mode) => {
+    await localAuthArtifact();
+    const h = harness();
+    h.uploadLost = true;
+    expect((await deploy(options(h, { localAuth: 'disabled' }))).exitCode).not.toBe(0);
+    const resources = h.versions.get(CANDIDATE)!.resources as { bindings: unknown[] };
+    if (mode === 'missing')
+      resources.bindings = resources.bindings.filter((b) => object(b).name !== 'PB_AUTH_LOCAL');
+    else
+      liveLocalAuth(
+        h,
+        mode === 'wrong' ? 'enabled' : undefined,
+        CANDIDATE,
+        mode === 'secret' ? 'secret_text' : 'plain_text',
+      );
+    h.calls.length = 0;
+    const result = await deploy(options(h));
+    expect(result.output.error?.code).toBe('configuration_conflict');
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it('legacy frozen attempt without room for the binding refuses before mutation', async () => {
+  const h = providerHarness();
+  await pendingProviders(h);
+  const j = (await store.read())!;
+  delete j.deployment!.attempt.local_auth;
+  j.deployment!.attempt.settings_sha256 = digest('legacy settings without PB_AUTH_LOCAL');
+  await store.write(j);
+  h.calls.length = 0;
+  const result = await deploy(options(h));
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message:
+      "This frozen deployment attempt predates local-auth support and cannot be resumed; finish it with the previous release's CLI, then deploy again",
+  });
+  expect(mutations(h)).toEqual([]);
+});
+
+it.each(['failed', 'partial', 'unknown-404', 'unexpected-success'] as const)(
+  'never treats %s Worker read as a fresh installation',
+  async (mode) => {
+    await localAuthArtifact();
+    const { h, o } = firstInstall();
+    const original = h.fetch;
+    o.fetch = vi.fn(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/settings')) {
+        if (mode === 'failed') throw new Error('LIVE_READ_SENTINEL');
+        if (mode === 'partial') return snap({});
+        if (mode === 'unknown-404') return new Response('LIVE_READ_SENTINEL', { status: 404 });
+        return snap({ bindings: [localBinding('disabled')] });
+      }
+      return original(input, init);
+    });
+    const result = await deploy(o);
+    expect(result.exitCode).not.toBe(0);
+    expect(mutations(h)).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('LIVE_READ_SENTINEL');
+  },
+);
+
+it('refuses disagreement across active local modes before mutations', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  await verifiedIdentityDeploy(h);
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  const j = (await store.read())!;
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  await store.write(j);
+  liveLocalAuth(h, 'disabled', NEWEST);
+  h.calls.length = 0;
+  const result = await deploy(options(h, { rollout: 25 }));
+  expect(result.output.error).toMatchObject({ code: 'configuration_conflict' });
+  expect(mutations(h)).toEqual([]);
+});
+
+it.each(['redeploy', 'resume'] as const)(
+  'checks legacy artifact capability on a preserved disabled %s',
+  async (path) => {
+    const h = providerHarness();
+    if (path === 'resume') {
+      await pendingProviders(h);
+      const j = (await store.read())!;
+      j.deployment!.attempt.local_auth = 'disabled';
+      await store.write(j);
+    }
+    liveLocalAuth(h, 'disabled');
+    h.calls.length = 0;
+    const result = await deploy(options(h));
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: 'Cannot disable local sign-in on an artifact without local-auth support',
+    });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it('checks the verified Worker version before reporting unchanged', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  await verifiedIdentityDeploy(h);
+  const saved = structuredClone(h.versions.get(CANDIDATE)!);
+  h.versions.set(THIRD, { ...saved, id: THIRD });
+  h.settingsVersion = THIRD;
+  liveLocalAuth(h, 'disabled', CANDIDATE);
+  h.calls.length = 0;
+  const result = await deploy(options(h, { localAuth: 'enabled' }));
+  expect(result.output.error?.code).toBe('configuration_conflict');
+  expect(mutations(h)).toEqual([]);
+});
+
+it('refuses a partial active-version read before any mutation', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  const original = h.fetch;
+  const result = await deploy(
+    options(h, {
+      fetch: async (input, init) =>
+        String(input).endsWith(`/versions/${OLD}`)
+          ? snap({ id: OLD, annotations: {}, resources: {} })
+          : original(input, init),
+    }),
+  );
+  expect(result.exitCode).not.toBe(0);
+  expect(mutations(h)).toEqual([]);
+});
+
+it('retries a frozen preparing upload and writes its local binding', async () => {
+  await localAuthArtifact();
+  const h = providerHarness();
+  const original = h.fetch;
+  h.fetch = vi.fn(async (input, init) =>
+    String(input).endsWith('/assets-upload-session')
+      ? new Response('', { status: 403 })
+      : original(input, init),
+  );
+  expect((await deploy(options(h, { localAuth: 'disabled' }))).exitCode).not.toBe(0);
+  h.fetch = original;
+  const resumed = await deploy(options(h));
+  expect(resumed.output.error).toBeNull();
+  expect(h.metadata!.bindings).toContainEqual(localBinding('disabled'));
+});
+
+it('restricts interrupted previews before refusing the next configuration', async () => {
+  const h = harness();
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  const j = (await store.read())!;
+  j.deployment!.attempt.preview = 'cleanup_pending';
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  await store.write(j);
+  h.endpoints = { enabled: true, previews_enabled: true };
+  h.calls.length = 0;
+  const result = await deploy(options(h, { localAuth: 'disabled' }));
+  expect(result.output.error).toMatchObject({
+    code: 'configuration_conflict',
+  });
+  expect(result.output.checks).toContainEqual({
+    name: 'preview_cleanup',
+    status: 'configuration_conflict',
+  });
+  expect(mutations(h)).toEqual([
+    expect.objectContaining({
+      path: expect.stringContaining('/subdomain'),
+      method: 'POST',
+      body: { enabled: false, previews_enabled: false },
+    }),
+  ]);
+  h.calls.length = 0;
+  const rejected = await deploy(options(h, { rollout: 25, localAuth: 'disabled' }));
+  expect(rejected.output.error).toMatchObject({
+    code: 'invalid_input',
+    message: 'Cannot disable local sign-in on an artifact without local-auth support',
+  });
+  expect(mutations(h)).toEqual([]);
+});
+
+it('preserves compiled policy for effective planning and selects runtime override policy', async () => {
+  const definitions = await import('@package-broker/plugin-sso-oidc/definitions');
+  const planner = vi.spyOn(definitions, 'planProviders');
+  const policy = { verifiedDomains: ['example.com'], emailAuthoritativeDomains: ['example.com'] };
+  await localAuthArtifact([{ ...compiledIdentity, policy }]);
+  const h = harness();
+  h.installed.push('PB_IDP_CORP_CLIENT_SECRET');
+  const result = await deploy(
+    options(h, {
+      dryRun: true,
+      localAuth: 'disabled',
+      providers: { kind: 'set', value: corpProviders, ids: ['corp'] },
+    }),
+  );
+  expect(result.output.error).toBeNull();
+  expect(planner).toHaveBeenCalledWith(
+    [expect.objectContaining({ id: 'corp', policy })],
+    expect.anything(),
+  );
+  const effective = planner.mock.results.at(-1)!.value.effective;
+  expect(effective).toHaveLength(1);
+  expect(effective[0].policy).toEqual(JSON.parse(corpProviders)[0].policy);
+  expect(effective[0].policy).not.toEqual(policy);
+  expect(mutations(h)).toEqual([]);
+});
+
+it('explicit environment mode is managed and frozen on deploy', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  const o = options(h);
+  o.env = { ...o.env, PB_AUTH_LOCAL: 'disabled' };
+  const result = await deploy(o);
+  expect(result.output.error).toBeNull();
+  expect(h.metadata!.bindings).toContainEqual(localBinding('disabled'));
+  expect(result.output.checks).toContainEqual(
+    expect.objectContaining({
+      name: 'local_auth_change',
+      status: 'notice',
+    }),
+  );
+  expect((await store.read())!.deployment!.attempt.local_auth).toBe('disabled');
+});
+
+it.each([false, true])(
+  'first deploy refuses disabled without a provider (dry-run %s)',
+  async (dryRun) => {
+    await localAuthArtifact([]);
+    const { h, o } = firstInstall();
+    o.localAuth = 'disabled';
+    o.dryRun = dryRun;
+    const result = await deploy(o);
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: 'Cannot disable local sign-in without a usable SSO provider',
+    });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each([false, true])(
+  'fresh install refuses disabled on a legacy artifact (dry-run %s)',
+  async (dryRun) => {
+    const { h, o } = firstInstall();
+    const result = await deploy({ ...o, dryRun, localAuth: 'disabled' });
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: 'Cannot disable local sign-in on an artifact without local-auth support',
+    });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each(['enabled', 'disabled'] as const)(
+  'refuses a partial rollout changing local auth from %s, then permits a full deploy',
+  async (initial) => {
+    await localAuthArtifact();
+    const h = harness();
+    const target = initial === 'enabled' ? 'disabled' : 'enabled';
+    expect((await deploy(options(h, { localAuth: initial }))).exitCode).toBe(0);
+    const j = (await store.read())!;
+    j.deployment!.attempt.phase = 'verified';
+    j.deployment!.attempt.smoke = 'passed';
+    await store.write(j);
+    h.calls.length = 0;
+    const refused = await deploy(options(h, { localAuth: target, rollout: 25 }));
+    expect(refused.output.error).toMatchObject({
+      code: 'invalid_input',
+      message:
+        'partial rollout is not allowed when local sign-in configuration changes; deploy with --rollout 100 first',
+    });
+    expect(mutations(h)).toEqual([]);
+    const full = await deploy(options(h, { localAuth: target }));
+    expect(full.output.error).toBeNull();
+    expect(full.output.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'local_auth_change',
+        status: 'notice',
+      }),
+    );
+    expect(h.metadata!.bindings).toContainEqual(localBinding(target));
+    const later = (await store.read())!;
+    later.deployment!.attempt.phase = 'verified';
+    later.deployment!.attempt.smoke = 'passed';
+    await store.write(later);
+    expect((await deploy(options(h, { rollout: 25 }))).output.error).toBeNull();
+  },
+);
+
+it.each(['enabled', 'disabled'] as const)(
+  'explicit %s cannot deploy split live modes',
+  async (mode) => {
+    await localAuthArtifact();
+    const h = harness();
+    await verifiedIdentityDeploy(h);
+    expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+    const j = (await store.read())!;
+    j.deployment!.attempt.phase = 'verified';
+    j.deployment!.attempt.smoke = 'passed';
+    await store.write(j);
+    liveLocalAuth(h, 'disabled', mode === 'enabled' ? CANDIDATE : NEWEST);
+    h.calls.length = 0;
+    for (const rollout of [25, 100]) {
+      const result = await deploy(options(h, { rollout, localAuth: mode }));
+      expect(result.output.error?.code).toBe('configuration_conflict');
+      expect(result.output.checks).toContainEqual({
+        name: rollout === 25 ? 'local_auth' : 'deployment',
+        status: 'configuration_conflict',
+      });
+      expect(mutations(h)).toEqual([]);
+    }
+  },
+);
+
+it('only reports the SSO artifact notice when the identity differs from verified', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  const first = await deploy(options(h));
+  expect(first.output.checks.some((c) => c.name === 'sso_artifact_upgrade')).toBe(false);
+  const j = (await store.read())!;
+  j.deployment!.attempt.phase = 'verified';
+  j.deployment!.attempt.smoke = 'passed';
+  await store.write(j);
+  for (const rollout of [100, 25]) {
+    const result = await deploy(options(h, { rollout, dryRun: true }));
+    expect(result.output.error).toBeNull();
+    expect(result.output.checks.some((c) => c.name === 'sso_artifact_upgrade')).toBe(false);
+  }
+});
+
+it('reports SSO artifact upgrade only for a changed verified receipt outside resume', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  await verifiedIdentityDeploy(h);
+  const j = (await store.read())!;
+  j.deployment!.attempt.identity_sha256 = digest('previous identity');
+  await store.write(j);
+  const planned = await deploy(options(h, { dryRun: true }));
+  expect(planned.output.error).toBeNull();
+  expect(planned.output.checks).toContainEqual(
+    expect.objectContaining({
+      name: 'sso_artifact_upgrade',
+      status: 'notice',
+    }),
+  );
+  await writeFile(
+    join(out, 'worker.js'),
+    'export default { fetch() { return new Response("rebuilt") } };',
+  );
+  h.uploadLost = true;
+  expect((await deploy(options(h))).output.error?.code).toBe('outcome_unknown');
+  h.uploadLost = false;
+  const resumed = await deploy(options(h));
+  expect(resumed.output.error).toBeNull();
+  expect(resumed.output.checks.some((c) => c.name === 'sso_artifact_upgrade')).toBe(false);
+});
+
+it.each(['live', 'verified'] as const)(
+  'refuses ambient re-enable from %s disabled mode',
+  async (state) => {
+    await localAuthArtifact();
+    const h = harness();
+    if (state === 'live') liveLocalAuth(h, 'disabled');
+    else {
+      await verifiedIdentityDeploy(h);
+      const j = (await store.read())!;
+      j.deployment!.attempt.local_auth = 'disabled';
+      await store.write(j);
+    }
+    h.calls.length = 0;
+    const o = options(h);
+    o.env = { ...o.env, PB_AUTH_LOCAL: 'enabled' };
+    const result = await deploy(o);
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: 'Re-enabling local sign-in requires --local-auth enabled',
+    });
+    expect(mutations(h)).toEqual([]);
+    const explicit = await deploy({ ...o, localAuth: 'enabled' });
+    expect(explicit.output.error).toBeNull();
+    expect(explicit.output.checks).toContainEqual(
+      expect.objectContaining({
+        name: 'local_auth_change',
+        status: 'notice',
+      }),
+    );
+  },
+);
+
+it('receipts local auth and telemetry before an interrupted version upload', async () => {
+  await localAuthArtifact();
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.platformPorts.observability.endpointEnv = 'OTEL_ENDPOINT';
+  await writeFile(file, JSON.stringify(manifest));
+  const h = harness();
+  h.uploadLost = true;
+  const original = h.fetch;
+  let observed = false;
+  const o = options(h, {
+    localAuth: 'disabled',
+    fetch: async (input, init) => {
+      if (String(input).endsWith('/versions') && init?.method === 'POST') {
+        const history = (await store.read())!.deployment!.history!;
+        expect(history.plain_bindings).toContainEqual({
+          name: 'PB_AUTH_LOCAL',
+          texts: ['disabled'],
+        });
+        expect(history.plain_bindings).toContainEqual({
+          name: 'OTEL_ENDPOINT',
+          texts: ['https://telemetry.example.test'],
+        });
+        observed = true;
+      }
+      return original(input, init);
+    },
+  });
+  o.env = { ...o.env, OTEL_ENDPOINT: 'https://telemetry.example.test' };
+  expect((await deploy(o)).output.error?.code).toBe('outcome_unknown');
+  expect(observed).toBe(true);
+  expect((await store.read())!.deployment!.history!.plain_bindings).toContainEqual({
+    name: 'PB_AUTH_LOCAL',
+    texts: ['disabled'],
+  });
+});
+
+it.each(['pending', 'complete', 'worker'] as const)(
+  'stale Worker list during journal-owned creation: %s',
+  async (state) => {
+    const { h, o } = firstInstall();
+    expect((await deploy(o)).exitCode).toBe(0);
+    const j = (await store.read())!;
+    if (state !== 'worker') {
+      delete j.resources.worker;
+      if (state === 'pending') j.deployment!.attempt.phase = 'preparing_upload';
+      j.deployment!.attempt.script_creation = {
+        state,
+        deployment_id: state === 'complete' ? 'created' : null,
+        version_id: state === 'complete' ? CREATED : null,
+      };
+    }
+    await store.write(j);
+    h.calls.length = 0;
+    const original = h.fetch;
+    const result = await deploy({
+      ...o,
+      fetch: async (input, init) =>
+        String(input).endsWith('/workers/scripts') ? snap([]) : original(input, init),
+    });
+    expect(result.output.error).toMatchObject({
+      code: 'outcome_unknown',
+      message: expect.stringContaining('retry deploy'),
+    });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each([{ secret: ['PB_AUTH_LOCAL'] }, { secrets: 'PB_AUTH_LOCAL' }])(
+  'selected local-auth secret gives a recovery hint: %j',
+  async (selection) => {
+    const h = harness();
+    const result = await deploy(options(h, selection));
+    expect(result.output.error).toMatchObject({
+      code: 'invalid_input',
+      message: 'Remove the secret first: wrangler secret delete PB_AUTH_LOCAL',
+    });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it('refuses a stale absent Worker list when the settings probe finds a Worker', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  liveLocalAuth(h, 'disabled');
+  const original = h.fetch;
+  const result = await deploy(
+    options(h, {
+      fetch: async (input, init) =>
+        String(input).endsWith('/workers/scripts') ? snap([]) : original(input, init),
+    }),
+  );
+  expect(result.output.error).toMatchObject({
+    code: 'configuration_conflict',
+  });
+  expect(result.output.checks).toContainEqual({
+    name: 'worker:identity',
+    status: 'configuration_conflict',
+  });
+  expect(mutations(h)).toEqual([]);
+});
+
+it('restricts interrupted endpoints before a configuration refusal without widening', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  h.uploadLost = true;
+  expect((await deploy(options(h, { localAuth: 'disabled' }))).exitCode).not.toBe(0);
+  h.endpoints = { enabled: true, previews_enabled: true };
+  h.calls.length = 0;
+  const result = await deploy(options(h, { localAuth: 'enabled' }));
+  expect(result.output.error).toMatchObject({
+    code: 'configuration_conflict',
+  });
+  expect(result.output.checks).toContainEqual({
+    name: 'local_auth',
+    status: 'configuration_conflict',
+  });
+  expect(mutations(h)).toEqual([
+    expect.objectContaining({
+      path: expect.stringContaining('/subdomain'),
+      method: 'POST',
+      body: { enabled: false, previews_enabled: false },
+    }),
+  ]);
+});
+
+it('refuses a partial rollout back to a verified mode when the live mode changed', async () => {
+  await localAuthArtifact();
+  const h = harness();
+  await verifiedIdentityDeploy(h);
+  expect((await deploy(options(h, { localAuth: 'disabled' }))).output.error).toBeNull();
+  h.calls.length = 0;
+  const result = await deploy(options(h, { rollout: 25, localAuth: 'enabled' }));
+  expect(result.output.error).toMatchObject({
+    code: 'invalid_input',
+    message:
+      'partial rollout is not allowed when local sign-in configuration changes; deploy with --rollout 100 first',
+  });
+  expect(mutations(h)).toEqual([]);
+});

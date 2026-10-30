@@ -142,12 +142,19 @@ const sinkSnapshot = `SELECT json_group_array(json(snapshot)) AS snapshot FROM (
   SELECT json_object('id', s.sink_id, 'state', s.state, 'progress', s.progress_seq) AS snapshot
   FROM audit_sink s WHERE s.org_id = ? ORDER BY s.sink_id)`;
 
+function capacityLowWater(options: AuditCapacityOptions): number {
+  return options.maxJournalBytes - Math.ceil(options.maxJournalBytes / 20);
+}
+
+/** A cycle starts at the reserve and continues across bounded batches until low water. */
 function capacityEligible(ctx: OrgContext, options: AuditCapacityOptions): Statement {
   return {
-    sql: `c.restore_pending = 0 AND c.policy = 'availability' AND c.journal_bytes >= ?
+    sql: `c.restore_pending = 0 AND c.policy = 'availability'
+      AND (c.journal_bytes >= ? OR (c.capacity_evicting = 1 AND c.journal_bytes > ?))
       AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ? AND s.generation > ?)`,
     params: [
       options.maxJournalBytes - auditCapacityReserveBytes(options.maxJournalBytes),
+      capacityLowWater(options),
       ctx.orgId,
       options.generation,
     ],
@@ -208,9 +215,18 @@ export function createAuditPruneRepository(
         sql: `SELECT 1 FROM audit_chain c WHERE c.org_id = ? AND ${capacityGuard!.sql}`,
         params: [ctx.orgId, ...capacityGuard!.params],
       });
-      if (allowed.length === 0) return { outcome: 'retained' };
+      const lowWater = capacityLowWater(capacity);
+      if (allowed.length === 0) {
+        await executor.batch([
+          {
+            sql: `UPDATE audit_chain SET capacity_evicting = 0
+              WHERE org_id = ? AND capacity_evicting = 1 AND journal_bytes <= ?`,
+            params: [ctx.orgId, lowWater],
+          },
+        ]);
+        return { outcome: 'retained' };
+      }
       let removed = 0;
-      const lowWater = capacity.maxJournalBytes - Math.ceil(capacity.maxJournalBytes / 20);
       const prefix: Candidate[] = [];
       for (const row of candidates) {
         if (row.seq !== chain.boundary_seq + prefix.length) break;
@@ -271,7 +287,9 @@ export function createAuditPruneRepository(
         sql: `UPDATE audit_chain AS c SET boundary_seq = ?, boundary_prev_hash = ?, boundary_reason = ?,
           journal_rows = journal_rows - ?, journal_bytes = max(0, journal_bytes - ?),
           mode = CASE WHEN ? >= c.cutover_seq THEN coalesce(c.pending_mode, c.mode) ELSE c.mode END,
-          pending_mode = CASE WHEN ? >= c.cutover_seq THEN NULL ELSE c.pending_mode END
+          pending_mode = CASE WHEN ? >= c.cutover_seq THEN NULL ELSE c.pending_mode END,
+          capacity_evicting = CASE WHEN ? IS NULL THEN c.capacity_evicting
+            WHEN max(0, c.journal_bytes - ?) > ? THEN 1 ELSE 0 END
           WHERE c.org_id = ? AND ${chainFields.map((key) => `c.${key} IS ?`).join(' AND ')}
           AND ${guard.sql} AND ${sinkGuard.sql}
           AND c.journal_rows >= ? AND ${integrity.sql}
@@ -285,6 +303,9 @@ export function createAuditPruneRepository(
           bytes,
           capacityCutover,
           capacityCutover,
+          capacity === undefined ? null : 1,
+          bytes,
+          capacity === undefined ? 0 : capacityLowWater(capacity),
           ctx.orgId,
           chain.chain_id,
           chain.epoch,
@@ -357,7 +378,7 @@ export function createAuditPruneRepository(
       const results = await executor.batch(statements);
       const deleted = results.at(deleteIndex)!.rows.length;
       if (capacity !== undefined) {
-        observability.log({ level: 'warn', event: 'audit.loss', reason_code: 'capacity' });
+        observability.log({ level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' });
         observability.counter('pb.audit.loss_events_total', { kind: 'gap' }, deleted);
       }
       return { outcome: 'pruned', pruned: deleted, boundarySeq: last.seq + 1 };

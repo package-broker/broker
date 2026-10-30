@@ -92,6 +92,35 @@ export interface AuditExportPort {
       readonly capacity?: { readonly fromSeq: number; readonly toSeq: number } | undefined;
     },
   ): Promise<boolean>;
+  /** Persist a partly accepted delivery on its frozen events batch so it is never sent again.
+   * Same lease, build generation, chain identity (without the boundary) and sink CAS as save;
+   * next may differ from expected.sink only by adding `uncertainOutcome` to inflightRepr. */
+  hold(
+    org: OrgContext,
+    fence: SystemMutationFence,
+    expected: AuditExportSnapshot,
+    next: AuditExportState,
+    buildGeneration: number,
+  ): Promise<boolean>;
+}
+
+/** The partly accepted outcome held on a frozen events batch; null marks an invalid count. */
+export interface AuditHeldOutcome {
+  readonly rejectedCount: number | null;
+}
+
+function heldOutcome(
+  repr: Representation,
+): Extract<AuditDelivery, { outcome: 'uncertain' }> | undefined {
+  const held = repr.uncertainOutcome as AuditHeldOutcome | undefined;
+  if (held === undefined) return undefined;
+  if (
+    held === null ||
+    typeof held !== 'object' ||
+    (held.rejectedCount !== null && !Number.isSafeInteger(held.rejectedCount))
+  )
+    throw new Error('Audit sink representation malformed');
+  return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: held.rejectedCount ?? 0 };
 }
 
 interface Representation {
@@ -260,40 +289,41 @@ function frozenBatch(body: string, org: OrgContext, snapshot: AuditExportSnapsho
   }
 }
 
-/** Retries a post-delivery save when only capacity eviction moved the boundary since `expected`. */
+/** Retries a post-delivery save while only capacity eviction moves the boundary since `expected`. */
 async function reconcileEviction(
   port: AuditExportPort,
   org: OrgContext,
   expected: AuditExportSnapshot,
   signal: AbortSignal,
-  deadline: number,
+  leaseDeadline: number,
   save: (current: AuditExportSnapshot) => Promise<boolean>,
 ): Promise<boolean> {
-  const current = await port.read(org, expected.sink.id);
   const fields = (snapshot: AuditExportSnapshot) =>
     JSON.stringify({ ...snapshot, boundarySeq: 0, boundaryPrevHash: '', replayPending: undefined });
-  const { boundarySeq: oldBoundary, boundaryPrevHash: oldHash } = expected;
-  const { boundarySeq: newBoundary, boundaryPrevHash: newHash } = current;
-  if (newBoundary <= oldBoundary || fields(expected) !== fields(current)) return false;
-  let cursor = oldBoundary - 1;
-  let hash = oldHash;
-  for (
-    let lookups = 0;
-    cursor < newBoundary - 1 && lookups < 100 && !signal.aborted && Date.now() < deadline;
-    lookups++
-  ) {
-    const gap = await port.capacityGap(org, current, cursor);
-    if (
-      gap === null ||
-      gap.fromSeq > cursor + 1 ||
-      (gap.fromSeq === cursor + 1 && gap.prevHash !== hash) ||
-      gap.toSeq >= newBoundary
-    )
-      break;
-    cursor = gap.toSeq;
-    hash = gap.hash;
+  const live = () => !signal.aborted && Date.now() < leaseDeadline;
+  for (let attempt = 0; attempt < 10 && live(); attempt++) {
+    const current = await port.read(org, expected.sink.id);
+    const { boundarySeq: oldBoundary, boundaryPrevHash: oldHash } = expected;
+    const { boundarySeq: newBoundary, boundaryPrevHash: newHash } = current;
+    if (newBoundary <= oldBoundary || fields(expected) !== fields(current)) return false;
+    let cursor = oldBoundary - 1;
+    let hash = oldHash;
+    for (let lookups = 0; cursor < newBoundary - 1 && lookups < 100 && live(); lookups++) {
+      const gap = await port.capacityGap(org, current, cursor);
+      if (
+        gap === null ||
+        gap.fromSeq > cursor + 1 ||
+        (gap.fromSeq === cursor + 1 && gap.prevHash !== hash) ||
+        gap.toSeq >= newBoundary
+      )
+        break;
+      cursor = gap.toSeq;
+      hash = gap.hash;
+    }
+    if (cursor !== newBoundary - 1 || hash !== newHash) return false;
+    if (await save(current)) return true;
   }
-  return cursor === newBoundary - 1 && hash === newHash && save(current);
+  return false;
 }
 
 export async function exportAuditBatch(
@@ -483,22 +513,29 @@ export async function exportAuditBatch(
     inflightRepr: JSON.stringify({ ...repr, ...auditDurableCoverage(sink, undefined, ledger) }),
   };
   repr = representation(sending.inflightRepr);
-  if (signal.aborted || Date.now() >= deadline) return 'idle';
-  if (!(await port.save(org, fence, snapshot, sending, options.generation, { ledger })))
-    return 'contended';
-  if (ledger.length > 0) options.alert?.('withheld');
-  snapshot = { ...snapshot, sink: sending };
   // Outcomes of a completed delivery survive a concurrent capacity eviction; a retry schedule
   // does not need to, because contention re-sends the same frozen batch.
+  // deliveryBudgetMs leaves 15 s of the lease after the delivery deadline.
+  const leaseDeadline = deadline + 10_000;
   const sendingPort = port;
   const reconciling: AuditExportPort = {
     ...port,
     save: async (org, fence, expected, next, generation, effects) =>
       (await sendingPort.save(org, fence, expected, next, generation, effects)) ||
-      (await reconcileEviction(sendingPort, org, expected, signal, deadline, (current) =>
+      (await reconcileEviction(sendingPort, org, expected, signal, leaseDeadline, (current) =>
         sendingPort.save(org, fence, current, next, generation, effects),
       )),
   };
+  const held = !markersOnly && repr.purpose === 'events' ? heldOutcome(repr) : undefined;
+  if (held !== undefined)
+    return (await resolveAuditRejection(reconciling, org, fence, snapshot, batch, held, options))
+      ? 'resolved'
+      : 'contended';
+  if (signal.aborted || Date.now() >= deadline) return 'idle';
+  if (!(await port.save(org, fence, snapshot, sending, options.generation, { ledger })))
+    return 'contended';
+  if (ledger.length > 0) options.alert?.('withheld');
+  snapshot = { ...snapshot, sink: sending };
   if (signal.aborted || Date.now() >= deadline) return 'idle';
   let result: AuditDelivery;
   const controller = new AbortController();
@@ -523,14 +560,27 @@ export async function exportAuditBatch(
     clearTimeout(timer);
     signal.removeEventListener('abort', abort);
   }
-  if (signal.aborted) return 'idle';
+  // A partly accepted batch must never be sent again, so its outcome is kept even when aborting.
+  if (signal.aborted && result?.outcome !== 'uncertain') return 'idle';
   const codes = ['network', 'timeout', 'refused', 'too_large', 'http_status', 'bad_response'];
   if (result?.outcome === 'rejected' && !codes.includes(result.code))
     result = { outcome: 'retry', code: 'bad_response' };
   if (result?.outcome === 'rejected' || result?.outcome === 'uncertain') {
-    return (await resolveAuditRejection(reconciling, org, fence, snapshot, batch, result, options))
-      ? 'resolved'
-      : 'contended';
+    if (await resolveAuditRejection(reconciling, org, fence, snapshot, batch, result, options))
+      return 'resolved';
+    if (result.outcome === 'uncertain' && !markersOnly && repr.purpose === 'events') {
+      const held: AuditHeldOutcome = {
+        rejectedCount: Number.isSafeInteger(result.rejectedCount) ? result.rejectedCount : null,
+      };
+      await port.hold(
+        org,
+        fence,
+        snapshot,
+        { ...snapshot.sink, inflightRepr: JSON.stringify({ ...repr, uncertainOutcome: held }) },
+        options.generation,
+      );
+    }
+    return 'contended';
   }
   if (
     (result?.outcome === 'accepted' || result?.outcome === 'accepted_with_warning') &&

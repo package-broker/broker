@@ -2,12 +2,13 @@ import { jobFences } from '@package-broker/core/platform/job-fences';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import type { AuditLedgerEntry } from '@package-broker/core/audit/ledger';
 import { createAuditLedgerRepository } from '../repositories/audit-ledger.js';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   exportAuditBatch,
   auditExportJob,
   auditDurableCoverage,
   auditInflightEventRange,
+  type AuditExportPort,
   type AuditExportSnapshot,
   type AuditExportState,
 } from '@package-broker/core/audit/export';
@@ -282,9 +283,10 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
     const runWith = (
       deliver: import('@package-broker/core/audit/plugin-api').AuditSink['deliver'],
       alert: (reason: string) => void = () => {},
+      exportPort: AuditExportPort = port(),
     ) =>
       exportAuditBatch(
-        port(),
+        exportPort,
         org(),
         fence(),
         {
@@ -389,6 +391,153 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
         inflightBody: null,
       });
       expect(await runWith(async () => Promise.reject(new Error('unexpected')))).toBe('idle');
+    });
+    const partial = { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 } as const;
+    const kinds = (batch: import('@package-broker/core/audit/plugin-api').AuditBatchV1) =>
+      batch.records.map((record) => record.kind).join();
+    const ledgerKinds = async () =>
+      database.executor.all<{ kind: string; count: number }>({
+        sql: "SELECT kind, count FROM audit_ledger WHERE org_id = ? AND kind IN ('uncertain', 'gap') AND superseded_by IS NULL ORDER BY kind",
+        params: [org().orgId],
+      });
+    it('retries reconciliation when another eviction lands between its read and save', async () => {
+      await journal();
+      const real = port();
+      let saves = 0;
+      const racing: AuditExportPort = {
+        ...real,
+        save: async (...args) => {
+          saves += 1;
+          if (saves === 3) expect(await evict(1)).toMatchObject({ outcome: 'evicted' });
+          return real.save(...args);
+        },
+      };
+      const delivered: string[] = [];
+      expect(
+        await runWith(
+          async (batch) => {
+            delivered.push(kinds(batch));
+            expect(await evict(1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+            return partial;
+          },
+          undefined,
+          racing,
+        ),
+      ).toBe('resolved');
+      expect(saves).toBe(4);
+      expect(await ledgerKinds()).toEqual([
+        { kind: 'gap', count: 2 },
+        { kind: 'uncertain', count: 1 },
+      ]);
+      expect(
+        await runWith(async (batch) => {
+          delivered.push(kinds(batch));
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect(delivered).toEqual(['event,event,event', 'delivery_uncertain']);
+    });
+    it('reconciles a partial success after the delivery deadline while the lease is valid', async () => {
+      await journal();
+      const start = Date.now();
+      const clock = vi.spyOn(Date, 'now');
+      try {
+        expect(
+          await exportAuditBatch(
+            port(),
+            org(),
+            fence(),
+            {
+              id: 'archive',
+              generation: 1,
+              pluginVersion: '1.0',
+              sourceIp: 'omit',
+              now: () => new Date(),
+              random: () => 0,
+              sink: {
+                deliver: async () => {
+                  await evict();
+                  clock.mockReturnValue(start + 6_000);
+                  return partial;
+                },
+              },
+              rejectionRetries: 'terminal',
+            },
+            new AbortController().signal,
+            5_000,
+          ),
+        ).toBe('resolved');
+      } finally {
+        clock.mockRestore();
+      }
+      expect(await ledgerKinds()).toEqual([
+        { kind: 'gap', count: 3 },
+        { kind: 'uncertain', count: 1 },
+      ]);
+    });
+    it('holds a partial success past the lease so the frozen batch is never sent again', async () => {
+      await journal();
+      const start = Date.now();
+      const clock = vi.spyOn(Date, 'now');
+      const delivered: string[] = [];
+      try {
+        expect(
+          await runWith(async (batch) => {
+            delivered.push(kinds(batch));
+            await evict();
+            clock.mockReturnValue(start + 3_600_000);
+            return partial;
+          }),
+        ).toBe('contended');
+      } finally {
+        clock.mockRestore();
+      }
+      const frozen = (await port().read(org(), 'archive')).sink;
+      expect(JSON.parse(frozen.inflightRepr!)).toMatchObject({
+        purpose: 'events',
+        uncertainOutcome: { rejectedCount: 1 },
+      });
+      expect(await ledgerKinds()).toEqual([{ kind: 'gap', count: 3 }]);
+      expect(
+        await runWith(async (batch) => {
+          delivered.push(kinds(batch));
+          return ack(batch);
+        }),
+      ).toBe('resolved');
+      expect(await ledgerKinds()).toEqual([
+        { kind: 'gap', count: 3 },
+        { kind: 'uncertain', count: 1 },
+      ]);
+      expect(
+        await runWith(async (batch) => {
+          delivered.push(kinds(batch));
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect(delivered).toEqual(['event,event,event', 'delivery_uncertain']);
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        inflightBody: null,
+      });
+    });
+    it('refuses a hold that changes anything but the held outcome', async () => {
+      await journal();
+      await runWith(async () => ({ outcome: 'retry', code: 'network' }));
+      const expected = await port().read(org(), 'archive');
+      const repr = JSON.parse(expected.sink.inflightRepr!) as Record<string, unknown>;
+      const next = (patch: Partial<AuditExportState>, extra: Record<string, unknown> = {}) => ({
+        ...expected.sink,
+        inflightRepr: JSON.stringify({ ...repr, uncertainOutcome: { rejectedCount: 1 }, ...extra }),
+        ...patch,
+      });
+      await expect(
+        port().hold(org(), fence(), expected, next({ progressSeq: 3 }), 1),
+      ).rejects.toThrow('Invalid audit export hold');
+      await expect(
+        port().hold(org(), fence(), expected, next({}, { purpose: 'idle' }), 1),
+      ).rejects.toThrow('Invalid audit export hold');
+      await expect(port().hold(org(), fence(), expected, next({}), 1)).resolves.toBe(true);
+      await expect(port().hold(org(), fence(), expected, next({}), 1)).resolves.toBe(false);
     });
     it('accepts a capacity disposition only for the frozen marker inside a recorded gap', async () => {
       const capacityRepr = '{"custodyFromSeq":1,"purpose":"capacity"}';

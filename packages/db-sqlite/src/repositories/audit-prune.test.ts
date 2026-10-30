@@ -2,6 +2,8 @@ import { AUDIT_VERIFIED_EXPORT, type AuditLedgerEntry } from '@package-broker/co
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import { createObservability, type ObsRecord } from '@package-broker/core/platform/observability';
 import { createAuditLedgerRepository } from './audit-ledger.js';
 import { createAuditSealRepository } from './audit-seal.js';
 import { createAuditPruneRepository } from './audit-prune.js';
@@ -867,7 +869,7 @@ it('alerts using fixed codes only after a committed capacity loss', async () => 
     outcome: 'evicted',
     evicted: 3,
   });
-  expect(logs).toEqual([{ level: 'warn', event: 'audit.loss', reason_code: 'capacity' }]);
+  expect(logs).toEqual([{ level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' }]);
   expect(counters).toEqual([['pb.audit.loss_events_total', { kind: 'gap' }, 3]]);
 });
 
@@ -971,4 +973,94 @@ it('does not complete a pending none cutover through capacity eviction', async (
     pending_mode: 'none',
     cutover_seq: 2,
   });
+});
+
+it('keeps the capacity loss log through production observability', async () => {
+  await seed();
+  const records: ObsRecord[] = [];
+  const observability = createObservability(
+    { emit: (record) => records.push(record) },
+    { deploymentId: 'deployment', runtime: 'node', requestId: null },
+    { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+  );
+  expect(
+    await createAuditPruneRepository(executor, observability).evict(org, {
+      generation: 1,
+      maxJournalBytes: 1,
+    }),
+  ).toMatchObject({ outcome: 'evicted', evicted: 3 });
+  expect(records.filter((record) => record.kind === 'log')).toMatchObject([
+    { record: { level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' } },
+  ]);
+  expect(records.filter((record) => record.kind === 'counter')).toEqual([
+    { kind: 'counter', name: 'pb.audit.loss_events_total', labels: { kind: 'gap' }, value: 3 },
+  ]);
+});
+
+it('never reallocates evicted seqs after the head is rolled back', async () => {
+  await seed();
+  const evicted = await rows();
+  expect(await evict()).toEqual({ outcome: 'evicted', evicted: 3, boundarySeq: 4 });
+  await run(
+    `UPDATE audit_chain SET head_seq = 0, head_hash = ? WHERE org_id = ?`,
+    '0'.repeat(64),
+    org.orgId,
+  );
+  await run(
+    `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+    VALUES (?, ?, '2026-10-29T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+    `${org.orgId}-after`,
+    org.orgId,
+  );
+  expect(await createAuditSealRepository(executor).seal(org)).toMatchObject({
+    outcome: 'sealed',
+    sealed: 1,
+    headSeq: 4,
+    integrity: ['head_mismatch'],
+  });
+  expect(await rows()).toMatchObject([{ seq: 4, prev_hash: evicted.at(-1)!.hash }]);
+  expect(await chain()).toMatchObject({ boundary_seq: 4, head_seq: 4 });
+});
+
+it('continues an eviction cycle across bounded batches until the low-water mark', async () => {
+  await seed(100);
+  const budget = (await chain()).journal_bytes as number;
+  const lowWater = budget - Math.ceil(budget / 20);
+  let batches = 0;
+  for (;;) {
+    const loss = await evict(budget, 1);
+    if (loss.outcome !== 'evicted') break;
+    expect(loss.evicted).toBe(1);
+    batches += 1;
+    if (batches === 1) expect((await chain()).capacity_evicting).toBe(1);
+  }
+  expect(batches).toBeGreaterThanOrEqual(5);
+  expect((await chain()).journal_bytes).toBeLessThanOrEqual(lowWater);
+  expect((await chain()).capacity_evicting).toBe(0);
+  await executor.batch(
+    ['refill-1', 'refill-2'].map((id) => ({
+      sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+        VALUES (?, ?, '2026-10-29T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+      params: [id, org.orgId],
+    })),
+  );
+  await createAuditSealRepository(executor).seal(org);
+  expect((await chain()).journal_bytes).toBeGreaterThan(lowWater);
+  expect((await chain()).journal_bytes).toBeLessThan(budget - Math.ceil(budget / 100));
+  expect(await evict(budget, 1)).toEqual({ outcome: 'retained' });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(org)).toMatchObject([
+    { fromSeq: 1, toSeq: batches, count: batches },
+  ]);
+});
+
+it('closes only its own finished eviction cycle', async () => {
+  const other = database.orgs!.b;
+  await seed(3);
+  await seed(3, other);
+  for (const ctx of [org, other])
+    await run('UPDATE audit_chain SET capacity_evicting = 1 WHERE org_id = ?', ctx.orgId);
+  const budget = 10 * ((await chain()).journal_bytes as number);
+  expect(await evict(budget)).toEqual({ outcome: 'retained' });
+  expect((await chain()).capacity_evicting).toBe(0);
+  expect((await chain(other)).capacity_evicting).toBe(1);
 });

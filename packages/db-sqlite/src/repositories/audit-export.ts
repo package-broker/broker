@@ -169,6 +169,84 @@ export function createAuditExportRepository(executor: SqlExecutor): AuditExportP
         params: [org.orgId, afterSeq, org.orgId, limit],
       });
     },
+    async hold(org, fence, expected, next, buildGeneration) {
+      if (fenceKind(fence) !== 'system' || fence.writer !== 'audit-export')
+        throw new TypeError('Invalid audit export fence');
+      const parse = (raw: string | null) => {
+        try {
+          const value = JSON.parse(raw ?? 'null') as Record<string, unknown> | null;
+          return value !== null && typeof value === 'object' && !Array.isArray(value)
+            ? value
+            : null;
+        } catch {
+          return null;
+        }
+      };
+      const before = parse(expected.sink.inflightRepr);
+      const after = parse(next.inflightRepr);
+      const held = after?.uncertainOutcome as { rejectedCount?: unknown } | undefined;
+      const rest = after === null ? null : { ...after };
+      if (rest !== null) delete rest.uncertainOutcome;
+      if (
+        before === null ||
+        before.purpose !== 'events' ||
+        'uncertainOutcome' in before ||
+        expected.sink.inflightBody === null ||
+        held === null ||
+        typeof held !== 'object' ||
+        Object.keys(held).join() !== 'rejectedCount' ||
+        (held.rejectedCount !== null && !Number.isSafeInteger(held.rejectedCount)) ||
+        JSON.stringify(rest) !== JSON.stringify(before) ||
+        columns.some(
+          ({ column, value }) => column !== 'inflight_repr' && value(next) !== value(expected.sink),
+        ) ||
+        !Number.isSafeInteger(buildGeneration) ||
+        buildGeneration < 0
+      )
+        throw new TypeError('Invalid audit export hold');
+      const lease = compile({
+        compile: () =>
+          jobLeasePredicate(org, fence.job, `audit-export:${expected.sink.id}`).compile(db),
+      });
+      try {
+        const rows = await executor.all<{ sink_id: string }>({
+          sql: `UPDATE audit_sink SET inflight_repr = ?,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE org_id = ? AND ${columns.map(({ column }) => `${column} IS ?`).join(' AND ')}
+            AND (${highest}) = ? AND ? >= ?
+            AND EXISTS (SELECT 1 FROM audit_chain c WHERE c.org_id = ?
+              AND c.chain_id = ? AND c.epoch = ? AND c.incarnation = ? AND c.mode_generation = ?
+              AND c.policy = ? AND c.restore_pending = 0)
+            AND ${lease.sql}
+            RETURNING sink_id`,
+          params: [
+            next.inflightRepr,
+            org.orgId,
+            ...values(expected.sink),
+            org.orgId,
+            expected.highestGeneration,
+            buildGeneration,
+            expected.highestGeneration,
+            org.orgId,
+            expected.chainId,
+            expected.epoch,
+            expected.incarnation,
+            expected.modeGeneration,
+            expected.policy,
+            ...lease.params,
+          ],
+        });
+        return rows.length === 1;
+      } catch (error) {
+        if (
+          error instanceof DbError &&
+          error.kind === 'unique' &&
+          error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+        )
+          return false;
+        throw error;
+      }
+    },
     async save(org, fence, expected, next, buildGeneration, effects) {
       if (fenceKind(fence) !== 'system' || fence.writer !== 'audit-export')
         throw new TypeError('Invalid audit export fence');

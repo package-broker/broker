@@ -36,6 +36,7 @@ export const AUDIT_EVENTS = frozenSet([
   'audit.chain_broken',
   'audit.verify_partial',
   'audit.verify_continued',
+  'audit.loss',
 ]);
 
 const REASON_CODES = [
@@ -71,6 +72,7 @@ const REASON_CODES = [
   'audit.uncertain',
   'audit.blocked',
   'audit.withheld',
+  'audit.capacity',
 ] as const;
 
 export type KernelReasonCode = (typeof REASON_CODES)[number];

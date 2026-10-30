@@ -126,6 +126,20 @@ async function setup(durableAck = true) {
       saves.push(structuredClone(stored));
       return true;
     }),
+    hold: vi.fn(async (ctx, guard, expected, next, buildGeneration) => {
+      expect(ctx).toEqual(org);
+      expect(guard).toEqual(fence);
+      const fields = (snapshot: AuditExportSnapshot) =>
+        JSON.stringify({ ...snapshot, boundarySeq: 0, boundaryPrevHash: '' });
+      if (
+        buildGeneration < stored.highestGeneration ||
+        !active ||
+        fields(expected) !== fields(stored)
+      )
+        return false;
+      stored = { ...stored, sink: structuredClone(next) };
+      return true;
+    }),
   };
   const deliver = vi.fn<(batch: AuditBatchV1) => Promise<AuditDelivery>>(async (batch) =>
     ack(batch),

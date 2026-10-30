@@ -67,6 +67,7 @@ export async function resolveAuditRejection(
   } catch {
     throw new Error('Audit sink representation malformed');
   }
+  delete repr.uncertainOutcome;
   const now = options.now();
   const records = batch.records;
   if (

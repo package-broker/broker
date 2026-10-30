@@ -1,4 +1,4 @@
-import { auditDurableCoverage } from '@package-broker/core/audit/export';
+import { auditDurableCoverage, type AuditExportState } from '@package-broker/core/audit/export';
 import { expect } from 'vitest';
 import { systemMutationFence } from '@package-broker/core/authz/fence';
 import type { SqlExecutor } from '@package-broker/core/db/port';
@@ -279,11 +279,90 @@ const replay: ContractCase = {
     expect(rows).toEqual([{ resolves_id: '01J00000000000000000000007', from_seq: 2, to_seq: 2 }]);
   },
 };
+async function holdFixture(context: CaseContext) {
+  const fixed = await fixture(context);
+  for (const ctx of [fixed.own, fixed.foreign])
+    await fixed.seed(
+      `UPDATE audit_sink SET inflight_from = 1, inflight_to = 2, inflight_body = '{}',
+      inflight_repr = '{"custodyFromSeq":1,"purpose":"events"}' WHERE org_id = ?`,
+      ctx.orgId,
+    );
+  const held = (sink: AuditExportState): AuditExportState => ({
+    ...sink,
+    inflightRepr: JSON.stringify({
+      custodyFromSeq: 1,
+      purpose: 'events',
+      uncertainOutcome: { rejectedCount: 1 },
+    }),
+  });
+  return { ...fixed, held };
+}
+const holdSink: ContractCase = {
+  name: 'export holds update only the requested organization sink',
+  async run(context) {
+    const { own, foreign, plain, repository, fence, held } = await holdFixture(context);
+    const expected = await plain.read(own, 'archive');
+    const other = await plain.read(foreign, 'archive');
+    expect(await repository.hold(own, fence, expected, held(expected.sink), 1)).toBe(true);
+    expect(await plain.read(foreign, 'archive')).toEqual(other);
+  },
+};
+const holdHighest: ContractCase = {
+  name: 'export hold generation excludes foreign builds',
+  async run(context) {
+    const { own, foreign, seed, plain, repository, fence, held } = await holdFixture(context);
+    await seed('UPDATE audit_sink SET generation = 99 WHERE org_id = ?', foreign.orgId);
+    const expected = await plain.read(own, 'archive');
+    expect(await repository.hold(own, fence, expected, held(expected.sink), 1)).toBe(true);
+  },
+};
+const holdChain: ContractCase = {
+  name: 'a foreign chain snapshot cannot authorize an export hold',
+  async run(context) {
+    const { own, foreign, plain, repository, fence, held } = await holdFixture(context);
+    const expected = await plain.read(own, 'archive');
+    const other = await plain.read(foreign, 'archive');
+    expect(
+      await repository.hold(
+        own,
+        fence,
+        { ...expected, chainId: other.chainId, incarnation: other.incarnation },
+        held(expected.sink),
+        1,
+      ),
+    ).toBe(false);
+    expect(await plain.read(own, 'archive')).toEqual(expected);
+  },
+};
+const holdLease: ContractCase = {
+  name: 'a foreign job lease cannot authorize an export hold',
+  async run(context) {
+    const { own, foreign, seed, plain, repository, fence, held } = await holdFixture(context);
+    await seed('UPDATE job SET org_id = ? WHERE id = ?', foreign.orgId, 'export-job');
+    const expected = await plain.read(own, 'archive');
+    expect(await repository.hold(own, fence, expected, held(expected.sink), 1)).toBe(false);
+    expect(await plain.read(own, 'archive')).toEqual(expected);
+  },
+};
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditExportRepository',
     file: 'repositories/audit-export.ts',
-    cases: [read, highestRead, page, head, save, highestSave, chain, lease, replay],
+    cases: [
+      read,
+      highestRead,
+      page,
+      head,
+      save,
+      highestSave,
+      chain,
+      lease,
+      replay,
+      holdSink,
+      holdHighest,
+      holdChain,
+      holdLease,
+    ],
     predicates: [
       {
         name: 'replay incident kind',
@@ -388,6 +467,34 @@ export const entries: readonly MutationEntry[] = [
         locate: /job.org_id = \?/,
         neutral: '(? IS NOT NULL)',
         caseName: lease.name,
+        copies: 1,
+      },
+      {
+        name: 'held sink organization',
+        locate: /org_id = \?(?= AND sink_id IS)/,
+        neutral: '(? IS NOT NULL)',
+        caseName: holdSink.name,
+        copies: 1,
+      },
+      {
+        name: 'hold highest generation organization',
+        locate: /(?<=MAX\(generation\), 0\) FROM audit_sink WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: holdHighest.name,
+        copies: 1,
+      },
+      {
+        name: 'hold chain organization',
+        locate: /c.org_id = \?(?=\s+AND c.chain_id)/,
+        neutral: '(? IS NOT NULL)',
+        caseName: holdChain.name,
+        copies: 1,
+      },
+      {
+        name: 'hold lease organization',
+        locate: /job.org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: holdLease.name,
         copies: 1,
       },
     ],

@@ -235,7 +235,7 @@ describe('d1 local login constraints on the fresh 0001 baseline', () => {
   it('rejects malformed hashes, unpaired setup, negative failures and duplicate setup or TOTP credentials', async () => {
     const db = await database();
     const executor = createD1Executor(db);
-    const sources = await loadSources();
+    const sources = (await loadSources()).filter(({ id }) => id === 'core:0001_init');
     expect(sources.map(({ id }) => id)).toEqual(['core:0001_init']);
 
     const result = await migrate(executor, sources, { holder: 'auth-contract' });

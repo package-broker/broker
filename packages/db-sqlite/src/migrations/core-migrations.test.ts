@@ -161,20 +161,20 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 56 tables, one expand baseline', async () => {
+  it('1: a fresh database gets every core migration: 59 tables, two expand migrations', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
-    expect(ids).toEqual(['core:0001_init']);
+    expect(ids).toEqual(['core:0001_init', 'core:0002_npm_publish']);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))
       .sort();
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    expect(await countTables()).toBe(56);
+    expect(await countTables()).toBe(59);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );

@@ -30,6 +30,7 @@ type ExpectedNotNull<T extends CatalogueTable> = {
 
 const declared: { [T in CatalogueTable]: ExpectedNotNull<T> } = {
   source: {
+    require_publish_approval: 1,
     sync_generation: 0,
     sync_counts: 1,
     id: 1,
@@ -70,6 +71,8 @@ const declared: { [T in CatalogueTable]: ExpectedNotNull<T> } = {
   },
   registered_name: { id: 1, org_id: 1, source_id: 1, ecosystem: 1, pattern: 1, created_at: 1 },
   package: {
+    new_project_access_mode: 1,
+    held_until_active: 1,
     id: 1,
     org_id: 1,
     source_id: 1,

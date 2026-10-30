@@ -105,6 +105,8 @@ export const ROLLBACK_ENTITIES: Readonly<Record<string, RollbackEntity>> = {
       ['token', 'project_id'],
       ['token_project', 'project_id'],
       ['job', 'project_id'],
+      ['publish_approval', 'route_project_id'],
+      ['package_access_request', 'project_id'],
     ],
   },
   role: {
@@ -131,6 +133,7 @@ export const ROLLBACK_ENTITIES: Readonly<Record<string, RollbackEntity>> = {
       ['project_package_pattern', 'source_id'],
       ['webhook_delivery', 'source_id'],
       ['ingest_session', 'source_id'],
+      ['publish_approval', 'source_id'],
     ],
   },
   registered_name: {

@@ -2,19 +2,19 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { describe, expect, it } from 'vitest';
 import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createD1Executor, type D1DatabaseLike } from '../db/d1-executor.js';
-import { bindSnapshot, exportDatabase } from './sql-snapshot.test.support.js';
+import { exportDatabase, restoreDatabase } from './sql-snapshot.test.support.js';
 
 const nodeSnapshot = (await import(
   new URL(
     '../../../runtime-node/src/restore-rehearsal/sql-snapshot.test.support.ts',
     import.meta.url,
   ).href
-)) as { bindSnapshot: typeof bindSnapshot; exportDatabase: typeof exportDatabase };
+)) as { exportDatabase: typeof exportDatabase };
 
 describe.each([
-  { runtime: 'cloudflare', exporter: exportDatabase, bind: bindSnapshot },
-  { runtime: 'node', exporter: nodeSnapshot.exportDatabase, bind: nodeSnapshot.bindSnapshot },
-])('$runtime large-TEXT export into Miniflare D1', ({ runtime, exporter, bind }) => {
+  { runtime: 'cloudflare', exporter: exportDatabase },
+  { runtime: 'node', exporter: nodeSnapshot.exportDatabase },
+])('$runtime large-TEXT export into Miniflare D1', ({ runtime, exporter }) => {
   it.each([60_000, 262_000])(
     'restores %i-byte descriptions byte-identically',
     async (size) => {
@@ -66,7 +66,7 @@ describe.each([
           expect(Buffer.byteLength(sql)).toBeLessThan(100_000);
           expect(params.length).toBeLessThanOrEqual(100);
         }
-        await restored.batch(bind(JSON.parse(JSON.stringify(snapshot))));
+        await restoreDatabase(restored, JSON.parse(JSON.stringify(snapshot)));
         for (const org of ['org-a', 'org-b']) {
           const query = {
             sql: 'SELECT typeof(description) AS type, hex(description) AS description, hex(metadata_json) AS metadata FROM publisher_content WHERE org_id = ? ORDER BY rowid',

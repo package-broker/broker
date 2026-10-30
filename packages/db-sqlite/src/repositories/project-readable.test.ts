@@ -315,7 +315,9 @@ async function expectIndexedPlan(statement: Statement, smallTablesByKey: boolean
   if (!smallTablesByKey) return;
   expect(details).toContain('SEARCH gm USING PRIMARY KEY (user_id=?)');
   for (const alias of ['eu', 'gu']) {
-    expect(details).toContain(`SEARCH ${alias} USING INDEX sqlite_autoindex_user_account_1 (id=?)`);
+    expect(details).toContain(
+      `SEARCH ${alias} USING INDEX user_account_org_id (id=? AND org_id=?)`,
+    );
   }
   for (const alias of ['er', 'gr']) {
     expect(details).toContain(`SEARCH ${alias} USING INDEX sqlite_autoindex_role_1 (id=?)`);

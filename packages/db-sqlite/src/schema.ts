@@ -341,8 +341,9 @@ export type PatternEffect = 'include' | 'exclude';
 export type DistType = 'zip' | 'tar' | 'tgz';
 export type DistTagAction = 'set' | 'remove';
 
-/** Mirrors `source` in `migrations/0001_init.sql`. */
+/** Mirrors `source` in the core migrations. */
 export interface SourceTable {
+  require_publish_approval: Generated<number>;
   sync_generation: string | null;
   sync_counts: Generated<string>;
   id: string;
@@ -392,8 +393,10 @@ export interface RegisteredNameTable {
   created_at: Generated<string>;
 }
 
-/** Mirrors `package` in `migrations/0001_init.sql`. */
+/** Mirrors `package` in the core migrations. */
 export interface PackageTable {
+  new_project_access_mode: Generated<'none' | 'request'>;
+  held_until_active: Generated<number>;
   id: string;
   org_id: string;
   source_id: string;
@@ -661,6 +664,9 @@ export interface ApiIdempotencyTable {
 }
 
 export interface Database {
+  publish_approval: PublishApprovalTable;
+  package_access_request: PackageAccessRequestTable;
+  version_readme: VersionReadmeTable;
   vulnerability_result: VulnerabilityResultTable;
   vulnerability_match: VulnerabilityMatchTable;
   vulnerability_advisory: VulnerabilityAdvisoryTable;
@@ -776,4 +782,57 @@ export interface VulnerabilitySyncStateTable {
   next_request_at: string;
   consecutive_failures: Generated<number>;
   blocked_until: string | null;
+}
+
+export interface PublishApprovalTable {
+  id: string;
+  org_id: string;
+  package_id: string;
+  version_id: string;
+  source_id: string;
+  hold_approval: number;
+  hold_scan: number;
+  approval_state: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+  scan_state: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+  required_scanners_json: Generated<string>;
+  scan_attempts: Generated<number>;
+  requested_by_type: 'user' | 'service';
+  requested_by_id: string;
+  token_id: string;
+  route_project_id: string | null;
+  dist_tags_json: Generated<string>;
+  readme_pending: Generated<number>;
+  decided_by_user_id: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+  scan_verdict_json: Generated<string>;
+  expires_at: string;
+  revision: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface PackageAccessRequestTable {
+  id: string;
+  org_id: string;
+  package_id: string;
+  project_id: string;
+  state: Generated<'pending' | 'approved' | 'rejected' | 'expired'>;
+  requested_by_user_id: string;
+  reason: string | null;
+  decided_by_user_id: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+  expires_at: string;
+  revision: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface VersionReadmeTable {
+  version_id: string;
+  org_id: string;
+  filename: string;
+  body: string;
+  created_at: Generated<string>;
 }

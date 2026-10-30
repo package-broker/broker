@@ -8,6 +8,11 @@ import {
 import { systemMutationFence } from '@package-broker/core/authz/fence';
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import { createAuditExportRepository } from '../repositories/audit-export.js';
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { ulid } from '@package-broker/core/ids';
+import { createAuditPruneRepository } from '../repositories/audit-prune.js';
+import { createAuditSealRepository } from '../repositories/audit-seal.js';
+import { createAuditLedgerRepository } from '../repositories/audit-ledger.js';
 import type { MigratedDatabase } from './migrated-database.js';
 
 export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>): void {
@@ -52,6 +57,219 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
       lastErrorCode: 'timeout',
     };
   }
+  async function journal(count = 3) {
+    for (let i = 0; i < count; i++) {
+      const event = auditEvent({
+        id: ulid(),
+        now: '2026-10-30T00:00:00.000Z',
+        actor: { type: 'system', id: null },
+        action: 'source.update',
+        target: { type: 'source', id: 'source' },
+        changes: { url: { new: 'https://host.test/repo' } },
+        context: {
+          opId: '01JZZZZZZZZZZZZZZZZZZZZZZY',
+          requestId: '01JZZZZZZZZZZZZZZZZZZZZZZX',
+          sourceIp: null,
+          tokenSelector: null,
+        },
+      });
+      if (!event.ok) throw new Error('Invalid journal fixture');
+      await seed(
+        `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type, target_id, payload_json)
+        VALUES (?, ?, '2026-10-30T00:00:00.000Z', 'system', 'source.update', 'source', 'source', ?)`,
+        event.event.id,
+        org().orgId,
+        event.event.payloadJson,
+      );
+    }
+    await createAuditSealRepository(database.executor).seal(org());
+  }
+  const evict = (limit = 500) =>
+    createAuditPruneRepository(database.executor).evict(org(), {
+      generation: 1,
+      maxJournalBytes: 1,
+      limit,
+    });
+  const runExport = (
+    deliver: import('@package-broker/core/audit/plugin-api').AuditSink['deliver'],
+    maxBatchEvents = 100,
+  ) =>
+    exportAuditBatch(
+      port(),
+      org(),
+      fence(),
+      {
+        id: 'archive',
+        generation: 1,
+        pluginVersion: '1.0',
+        sourceIp: 'omit',
+        now: () => new Date(),
+        random: () => 0,
+        sink: { deliver },
+        maxBatchEvents,
+        resolve: async () => {
+          throw new Error('Unexpected disposition');
+        },
+      },
+      new AbortController().signal,
+    );
+  const ack = (batch: import('@package-broker/core/audit/plugin-api').AuditBatchV1) => ({
+    outcome: 'accepted' as const,
+    chainId: batch.chainId,
+    epoch: batch.epoch,
+    throughSeq: batch.throughSeq,
+    throughHash: batch.throughHash,
+  });
+  describe('audit export capacity reconciliation', () => {
+    it('delivers each durable gap before the surviving page and advances disposition custody', async () => {
+      await journal();
+      const foreignBefore = await port().read(foreign(), 'archive');
+      const original = await port().page(org(), 0, 100);
+      expect(await evict(1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+      expect(await evict(1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+      const gaps = await createAuditLedgerRepository(database.executor).effectiveGaps(org());
+      expect(gaps).toMatchObject([
+        {
+          fromSeq: 1,
+          toSeq: 2,
+          count: 2,
+          capacity: {
+            prevHash: original[0]!.prev_hash,
+            hash: original[1]!.hash,
+            affectedSinkIds: ['archive'],
+          },
+        },
+      ]);
+      for (const seq of [2, 3]) {
+        expect(
+          await runExport(async (batch) => {
+            expect(batch.throughSeq).toBe(seq);
+            expect(batch.records[0]!.kind).toBe(seq < 3 ? 'gap' : 'event');
+            return ack(batch);
+          }),
+        ).toBe('accepted');
+        expect((await port().read(org(), 'archive')).sink).toMatchObject({
+          progressSeq: seq,
+          custodySeq: seq,
+        });
+      }
+      expect(await port().read(foreign(), 'archive')).toEqual(foreignBefore);
+    });
+    it('delivers a capacity gap even when no events remain', async () => {
+      await journal();
+      await evict();
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records).toMatchObject([{ kind: 'gap', fromSeq: 1, toSeq: 3 }]);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+      });
+    });
+    it.each([1, 3])('reconciles a late exact ACK racing eviction of %s events', async (limit) => {
+      await journal();
+      expect(
+        await runExport(async (batch) => {
+          const sending = (await port().read(org(), 'archive')).sink;
+          expect(await evict(limit)).toMatchObject({ outcome: 'evicted', evicted: limit });
+          expect((await port().read(org(), 'archive')).sink).toEqual(sending);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+        inflightBody: null,
+      });
+    });
+    it('retries the original frozen bytes after eviction and a lost ACK', async () => {
+      await journal();
+      let original = '';
+      expect(
+        await runExport(async (batch) => {
+          original = JSON.stringify(batch);
+          await evict();
+          return { outcome: 'retry', code: 'network' };
+        }),
+      ).toBe('contended');
+      expect(
+        await runExport(async (batch) => {
+          expect(JSON.stringify(batch)).toBe(original);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+    });
+    it('consumes the remaining gap after a late ACK stops inside the evicted range', async () => {
+      await journal();
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.throughSeq).toBe(1);
+          await evict();
+          return ack(batch);
+        }, 1),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink.progressSeq).toBe(1);
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records).toMatchObject([
+            {
+              kind: 'gap',
+              fromSeq: 2,
+              toSeq: 3,
+              count: 2,
+              prevHash: (await port().read(org(), 'archive')).sink.progressHash,
+            },
+          ]);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 3,
+        custodySeq: 3,
+      });
+    });
+    it('keeps a frozen gap marker while another eviction moves the boundary', async () => {
+      await journal();
+      await evict(1);
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records[0]!.kind).toBe('gap');
+          const before = (await port().read(org(), 'archive')).sink;
+          expect(auditInflightEventRange(before)).toBeNull();
+          expect(await evict()).toMatchObject({ outcome: 'evicted', evicted: 2 });
+          expect((await port().read(org(), 'archive')).sink).toEqual(before);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+      expect(
+        await runExport(async (batch) => {
+          expect(batch.records).toMatchObject([{ kind: 'gap', fromSeq: 2, toSeq: 3 }]);
+          return ack(batch);
+        }),
+      ).toBe('accepted');
+    });
+    it('does not reconcile an ACK across an intervening sink change', async () => {
+      await journal();
+      expect(
+        await runExport(async (batch) => {
+          await evict();
+          await seed(
+            "UPDATE audit_sink SET state = 'blocked', blocked_reason = 'rejected' WHERE org_id = ?",
+            org().orgId,
+          );
+          return ack(batch);
+        }),
+      ).toBe('contended');
+      expect((await port().read(org(), 'archive')).sink).toMatchObject({
+        progressSeq: 0,
+        custodySeq: 0,
+        state: 'blocked',
+      });
+    });
+  });
   describe('audit export persistence', () => {
     it('reads a complete snapshot and writes exporter-owned sink fields, preserving foreign rows', async () => {
       const before = await port().read(org(), 'archive');

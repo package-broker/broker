@@ -77,6 +77,171 @@ export function auditLedgerRepositorySuite(open: () => Promise<MigratedDatabase>
     };
   }
 
+  const capacity = { prevHash: '0'.repeat(64), hash: '1'.repeat(64), affectedSinkIds: ['archive'] };
+  it('merges chained capacity metadata while preserving retry identity', async () => {
+    const { a } = orgs();
+    const repository = createAuditLedgerRepository(database.executor);
+    const first = { ...entry, capacity };
+    const second = {
+      ...entry,
+      id: '01K7R5V0000000000000000002',
+      fromSeq: 3,
+      toSeq: 4,
+      capacity: { prevHash: capacity.hash, hash: '2'.repeat(64), affectedSinkIds: [] },
+    };
+    await repository.append(a, [first, second]);
+    const [merged] = await repository.effectiveGaps(a);
+    expect(merged).toMatchObject({
+      fromSeq: 1,
+      toSeq: 4,
+      count: 4,
+      capacity: {
+        prevHash: capacity.prevHash,
+        hash: second.capacity.hash,
+        affectedSinkIds: ['archive'],
+      },
+    });
+    await repository.append(a, [first, second]);
+    expect(await repository.capacityGap(a, entry.chainId, 0, 2)).toEqual(merged);
+    await expect(
+      repository.append(a, [{ ...first, capacity: { ...capacity, hash: '3'.repeat(64) } }]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+    await expect(
+      repository.append(a, [
+        { ...first, id: '01K7R5V0000000000000000003', capacity: second.capacity },
+      ]),
+    ).rejects.toBeInstanceOf(AuditLedgerOverlapError);
+  });
+  it('bridges capacity neighbors using endpoint hashes and a sorted union', async () => {
+    const repository = createAuditLedgerRepository(database.executor);
+    const { a } = orgs();
+    const earlier = { ...entry, capacity: { ...capacity, affectedSinkIds: ['z'] } };
+    const later = {
+      ...entry,
+      id: '01K7R5V0000000000000000002',
+      fromSeq: 5,
+      toSeq: 6,
+      capacity: { prevHash: '2'.repeat(64), hash: '3'.repeat(64), affectedSinkIds: ['a', 'z'] },
+    };
+    const middle = {
+      ...entry,
+      id: '01K7R5V0000000000000000003',
+      fromSeq: 3,
+      toSeq: 4,
+      capacity: { prevHash: capacity.hash, hash: later.capacity.prevHash, affectedSinkIds: ['m'] },
+    };
+    await repository.append(a, [earlier, later, middle]);
+    expect(await repository.effectiveGaps(a)).toMatchObject([
+      {
+        fromSeq: 1,
+        toSeq: 6,
+        count: 6,
+        capacity: {
+          prevHash: capacity.prevHash,
+          hash: later.capacity.hash,
+          affectedSinkIds: ['a', 'm', 'z'],
+        },
+      },
+    ]);
+    await repository.append(a, [earlier, later, middle]);
+    expect(await repository.effectiveGaps(a)).toHaveLength(1);
+  });
+  it('keeps adjacent unchained capacity gaps separate', async () => {
+    const repository = createAuditLedgerRepository(database.executor);
+    const { a } = orgs();
+    const first = { ...entry, capacity };
+    const second = { ...entry, id: '01K7R5V0000000000000000002', fromSeq: 3, toSeq: 4, capacity };
+    await repository.append(a, [first, second]);
+    expect(await repository.effectiveGaps(a)).toEqual([first, second]);
+  });
+  it('writes capacity keys canonically and caps merged attribution with sticky overflow', async () => {
+    const repository = createAuditLedgerRepository(database.executor);
+    const { a } = orgs();
+    const ids = Array.from({ length: 1000 }, (_, i) => `sink-${String(i).padStart(4, '0')}`);
+    const first = {
+      ...entry,
+      capacity: { affectedSinkIds: ids, hash: capacity.hash, prevHash: capacity.prevHash },
+    };
+    await repository.append(a, [first]);
+    const [raw] = await database.executor.all<{ capacity_json: string }>({
+      sql: 'SELECT capacity_json FROM audit_ledger WHERE org_id = ? AND id = ?',
+      params: [a.orgId, entry.id],
+    });
+    expect(Object.keys(JSON.parse(raw!.capacity_json))).toEqual([
+      'prevHash',
+      'hash',
+      'affectedSinkIds',
+    ]);
+    await repository.append(a, [
+      {
+        ...entry,
+        id: '01K7R5V0000000000000000002',
+        fromSeq: 3,
+        toSeq: 4,
+        capacity: { prevHash: capacity.hash, hash: '2'.repeat(64), affectedSinkIds: ['z'] },
+      },
+    ]);
+    const [merged] = await repository.effectiveGaps(a);
+    expect(merged!.capacity).toEqual({
+      prevHash: capacity.prevHash,
+      hash: '2'.repeat(64),
+      affectedSinkIds: ids,
+      affectedSinkIdsOverflow: true,
+    });
+    await repository.append(a, [
+      {
+        ...entry,
+        id: '01K7R5V0000000000000000003',
+        fromSeq: 5,
+        toSeq: 6,
+        capacity: { prevHash: '2'.repeat(64), hash: '3'.repeat(64), affectedSinkIds: [] },
+      },
+    ]);
+    expect((await repository.effectiveGaps(a))[0]!.capacity!.affectedSinkIdsOverflow).toBe(true);
+  });
+  it.each([
+    'null',
+    '{}',
+    '{',
+    JSON.stringify({ ...capacity, hash: 'bad' }),
+    JSON.stringify({ ...capacity, prevHash: null }),
+    JSON.stringify({ ...capacity, affectedSinkIds: ['bad_id'] }),
+    JSON.stringify({ ...capacity, affectedSinkIds: ['archive', 'archive'] }),
+    JSON.stringify({ ...capacity, affectedSinkIds: ['z', 'a'] }),
+    JSON.stringify({ ...capacity, affectedSinkIds: [1] }),
+    JSON.stringify({ ...capacity, extra: 'a'.repeat(65536) }),
+    JSON.stringify({ ...capacity, extra: true }),
+    JSON.stringify({ ...capacity, affectedSinkIdsOverflow: false }),
+    JSON.stringify({
+      ...capacity,
+      affectedSinkIds: Array.from({ length: 1001 }, (_, i) => `sink-${String(i).padStart(4, '0')}`),
+    }),
+  ])('database rejects malformed or unbounded capacity metadata', async (capacityJson) => {
+    const { a } = orgs();
+    const raw = rawRow(a.orgId, entry);
+    await expect(
+      database.executor.batch([
+        {
+          sql: raw.sql
+            .replace('superseded_by)', 'superseded_by, capacity_json)')
+            .replace('?, ?)', '?, ?, ?)'),
+          params: [...raw.params, capacityJson],
+        },
+      ]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+  });
+  it('database forbids altering durable capacity metadata', async () => {
+    const { a } = orgs();
+    await createAuditLedgerRepository(database.executor).append(a, [{ ...entry, capacity }]);
+    await expect(
+      database.executor.batch([
+        {
+          sql: 'UPDATE audit_ledger SET capacity_json = NULL WHERE org_id = ? AND id = ?',
+          params: [a.orgId, entry.id],
+        },
+      ]),
+    ).rejects.toMatchObject({ name: 'DbError' });
+  });
   it.each([
     { resolvesId: '01K7R5V0000000000000000099' },
     { kind: 'withheld' as const },

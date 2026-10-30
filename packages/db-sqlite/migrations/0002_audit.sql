@@ -73,6 +73,7 @@ CREATE TABLE audit_ledger (
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   superseded_by    TEXT,
   resolves_id      TEXT,
+  capacity_json    TEXT CHECK (capacity_json IS NULL OR (json_valid(capacity_json) AND length(CAST(capacity_json AS BLOB)) <= 65536)),
   PRIMARY KEY (org_id, id),
   FOREIGN KEY (org_id) REFERENCES organization (id),
   FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id),
@@ -88,7 +89,7 @@ WHEN NOT (
   AND NEW.from_seq = OLD.from_seq AND NEW.to_seq = OLD.to_seq AND NEW.count = OLD.count
   AND NEW.sink_id IS OLD.sink_id AND NEW.reason_code = OLD.reason_code AND NEW.policy = OLD.policy
   AND NEW.mode_generation = OLD.mode_generation AND NEW.actor_type = OLD.actor_type
-  AND NEW.resolves_id IS OLD.resolves_id
+  AND NEW.resolves_id IS OLD.resolves_id AND NEW.capacity_json IS OLD.capacity_json
   AND NEW.actor_id IS OLD.actor_id AND NEW.created_at = OLD.created_at
   AND EXISTS (
     SELECT 1 FROM audit_ledger AS covering
@@ -96,6 +97,14 @@ WHEN NOT (
       AND covering.kind = 'gap' AND covering.superseded_by IS NULL
       AND covering.chain_id = OLD.chain_id AND covering.epoch = OLD.epoch
       AND covering.reason_code = OLD.reason_code AND covering.sink_id IS OLD.sink_id
+      AND (covering.capacity_json IS OLD.capacity_json OR (
+        covering.capacity_json IS NOT NULL AND OLD.capacity_json IS NOT NULL
+        AND (covering.from_seq < OLD.from_seq OR json_extract(covering.capacity_json, '$.prevHash') = json_extract(OLD.capacity_json, '$.prevHash'))
+        AND (covering.to_seq > OLD.to_seq OR json_extract(covering.capacity_json, '$.hash') = json_extract(OLD.capacity_json, '$.hash'))
+        AND (json_extract(covering.capacity_json, '$.affectedSinkIdsOverflow') = 1 OR NOT EXISTS (
+          SELECT 1 FROM json_each(OLD.capacity_json, '$.affectedSinkIds') old_sink
+          WHERE old_sink.value NOT IN (SELECT value FROM json_each(covering.capacity_json, '$.affectedSinkIds'))))
+      ))
       AND covering.from_seq <= OLD.from_seq AND covering.to_seq >= OLD.to_seq
       AND covering.to_seq - covering.from_seq > OLD.to_seq - OLD.from_seq
       AND covering.count >= OLD.count + COALESCE((
@@ -123,6 +132,34 @@ WHEN NEW.superseded_by IS NOT NULL OR (
 )
 BEGIN
   SELECT RAISE(ABORT, 'audit ledger rows are inserted visible');
+END;
+
+CREATE TRIGGER audit_ledger_capacity_insert
+BEFORE INSERT ON audit_ledger
+WHEN NEW.capacity_json IS NOT NULL
+BEGIN
+  SELECT CASE WHEN NEW.kind <> 'gap' OR NEW.reason_code <> 'capacity' OR NEW.sink_id IS NOT NULL
+    OR json_type(NEW.capacity_json) IS NOT 'object'
+    OR json_type(NEW.capacity_json, '$.prevHash') IS NOT 'text'
+    OR length(json_extract(NEW.capacity_json, '$.prevHash')) <> 64
+    OR json_extract(NEW.capacity_json, '$.prevHash') GLOB '*[^0-9a-f]*'
+    OR json_type(NEW.capacity_json, '$.hash') IS NOT 'text'
+    OR length(json_extract(NEW.capacity_json, '$.hash')) <> 64
+    OR json_extract(NEW.capacity_json, '$.hash') GLOB '*[^0-9a-f]*'
+    OR EXISTS (SELECT 1 FROM json_each(NEW.capacity_json)
+      WHERE key NOT IN ('prevHash', 'hash', 'affectedSinkIds', 'affectedSinkIdsOverflow'))
+    OR (SELECT count(*) FROM json_each(NEW.capacity_json)) <> CASE
+      WHEN json_type(NEW.capacity_json, '$.affectedSinkIdsOverflow') IS NULL THEN 3 ELSE 4 END
+    OR (json_type(NEW.capacity_json, '$.affectedSinkIdsOverflow') IS NOT NULL
+      AND json_type(NEW.capacity_json, '$.affectedSinkIdsOverflow') IS NOT 'true')
+    OR json_type(NEW.capacity_json, '$.affectedSinkIds') IS NOT 'array'
+    OR json_array_length(NEW.capacity_json, '$.affectedSinkIds') > 1000
+    OR EXISTS (SELECT 1 FROM json_each(NEW.capacity_json, '$.affectedSinkIds') s
+      WHERE s.type <> 'text' OR length(s.value) NOT BETWEEN 1 AND 32
+        OR s.value GLOB '*[^a-z0-9-]*'
+        OR (CAST(s.key AS INTEGER) > 0 AND s.value <= json_extract(NEW.capacity_json,
+          '$.affectedSinkIds[' || (CAST(s.key AS INTEGER) - 1) || ']')))
+    THEN RAISE(ABORT, 'invalid audit capacity metadata') END;
 END;
 
 CREATE TRIGGER audit_ledger_append_only_delete

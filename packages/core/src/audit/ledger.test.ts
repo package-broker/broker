@@ -117,3 +117,53 @@ describe('audit ledger gaps', () => {
     }
   });
 });
+
+it.each([
+  { extra: true },
+  { affectedSinkIdsOverflow: false },
+  { affectedSinkIds: Array.from({ length: 1001 }, (_, i) => `sink-${String(i).padStart(4, '0')}`) },
+])('rejects unknown or unbounded capacity metadata: %j', (change) => {
+  const capacity = {
+    prevHash: '0'.repeat(64),
+    hash: '1'.repeat(64),
+    affectedSinkIds: [],
+    ...change,
+  };
+  expect(() => assertAuditLedgerEntry({ ...gap, capacity } as AuditLedgerEntry)).toThrow(
+    new TypeError('invalid audit ledger entry'),
+  );
+});
+
+it.each([false, true])('compares capacity metadata canonically with overflow %s', (overflow) => {
+  const capacity = {
+    prevHash: '0'.repeat(64),
+    hash: 'a'.repeat(64),
+    affectedSinkIds: ['archive'],
+    ...(overflow ? { affectedSinkIdsOverflow: true as const } : {}),
+  };
+  const entry = { ...gap, capacity };
+  const reordered = {
+    ...gap,
+    capacity: {
+      affectedSinkIdsOverflow: capacity.affectedSinkIdsOverflow,
+      affectedSinkIds: capacity.affectedSinkIds,
+      hash: capacity.hash,
+      prevHash: capacity.prevHash,
+    },
+  } as AuditLedgerEntry;
+  expect(normalizeAuditLedgerEntries([entry, reordered])).toEqual([entry]);
+  expect(normalizeAuditLedgerEntries([reordered, entry])).toEqual([reordered]);
+  for (const change of [
+    { hash: 'b'.repeat(64) },
+    { prevHash: 'b'.repeat(64) },
+    { affectedSinkIds: ['other'] },
+    { affectedSinkIdsOverflow: overflow ? undefined : true },
+  ]) {
+    expect(() =>
+      normalizeAuditLedgerEntries([
+        entry,
+        { ...entry, capacity: { ...capacity, ...change } } as AuditLedgerEntry,
+      ]),
+    ).toThrow('audit ledger duplicate id');
+  }
+});

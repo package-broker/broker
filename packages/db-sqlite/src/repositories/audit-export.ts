@@ -1,3 +1,4 @@
+import { createAuditLedgerRepository } from './audit-ledger.js';
 import { compile, db } from '../kysely.js';
 import { jobLeasePredicate } from './job-lease-guard.js';
 import type { AuditRow } from '@package-broker/core/audit/chain';
@@ -53,6 +54,24 @@ const highest = 'SELECT COALESCE(MAX(generation), 0) FROM audit_sink WHERE org_i
 
 export function createAuditExportRepository(executor: SqlExecutor): AuditExportPort {
   return {
+    async capacityGap(org, snapshot, afterSeq) {
+      const gap = await createAuditLedgerRepository(executor).capacityGap(
+        org,
+        snapshot.chainId,
+        snapshot.epoch,
+        afterSeq,
+      );
+      if (gap === null || gap.capacity === undefined) return null;
+      return {
+        id: gap.id,
+        fromSeq: gap.fromSeq,
+        toSeq: gap.toSeq,
+        count: gap.count,
+        modeGeneration: gap.modeGeneration,
+        prevHash: gap.capacity.prevHash,
+        hash: gap.capacity.hash,
+      };
+    },
     async read(org, sinkId) {
       const [row] = await executor.all<Omit<AuditExportSnapshot, 'sink'> & AuditExportState>({
         sql: `SELECT c.chain_id AS chainId, c.epoch, c.incarnation, c.mode_generation AS modeGeneration,

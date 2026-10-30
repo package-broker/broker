@@ -27,7 +27,22 @@ export interface AuditExportSnapshot {
   readonly sink: AuditExportState;
 }
 
+export interface AuditCapacityGap {
+  readonly id: string;
+  readonly fromSeq: number;
+  readonly toSeq: number;
+  readonly count: number;
+  readonly modeGeneration: number;
+  readonly prevHash: string;
+  readonly hash: string;
+}
+
 export interface AuditExportPort {
+  capacityGap(
+    org: OrgContext,
+    snapshot: AuditExportSnapshot,
+    afterSeq: number,
+  ): Promise<AuditCapacityGap | null>;
   read(org: OrgContext, sinkId: string): Promise<AuditExportSnapshot>;
   /** Return only this organization’s sealed rows (seq <= audit_chain.head_seq), in seq order. */
   page(org: OrgContext, afterSeq: number, limit: number): Promise<readonly AuditRow[]>;
@@ -91,7 +106,7 @@ function representation(raw: string | null): Representation {
 export function auditInflightEventRange(sink: AuditSinkState): { from: number; to: number } | null {
   if (sink.inflightBody === null) return null;
   const repr = representation(sink.inflightRepr);
-  if (repr.purpose === 'registry_markers' || repr.purpose === 'marker') return null;
+  if (['registry_markers', 'marker', 'capacity'].includes(repr.purpose ?? '')) return null;
   try {
     const batch = JSON.parse(sink.inflightBody) as AuditBatchV1;
     if (!batch.records.some((record) => record.kind === 'event' || record.kind === 'withheld'))
@@ -208,7 +223,20 @@ function frozenBatch(body: string, org: OrgContext, snapshot: AuditExportSnapsho
     if (advancing.some((record, index) => record.seq !== snapshot.sink.progressSeq + index + 1))
       throw new Error();
     const last = advancing.at(-1);
-    if (last === undefined) {
+    if (representation(snapshot.sink.inflightRepr).purpose === 'capacity') {
+      const gap = batch.records[0];
+      if (
+        batch.records.length !== 1 ||
+        gap?.kind !== 'gap' ||
+        gap.fromSeq > snapshot.sink.progressSeq + 1 ||
+        gap.toSeq <= snapshot.sink.progressSeq ||
+        batch.throughSeq !== gap.toSeq ||
+        batch.throughHash !== gap.hash ||
+        (gap.fromSeq === snapshot.sink.progressSeq + 1 &&
+          gap.prevHash !== snapshot.sink.progressHash)
+      )
+        throw new Error();
+    } else if (last === undefined) {
       if (
         batch.throughSeq !== snapshot.sink.progressSeq ||
         batch.throughHash !== snapshot.sink.progressHash ||
@@ -280,60 +308,103 @@ export async function exportAuditBatch(
     sink = { ...sink, inflightRepr: JSON.stringify(repr) };
   } else if (body === null) {
     const limit = batchLimit(options);
-    const rows = await port.page(org, sink.progressSeq, limit);
-    const records: AuditBatchV1['records'][number][] = [];
-    let throughSeq = sink.progressSeq;
-    let throughHash = sink.progressHash;
-    for (const row of rows.slice(0, limit)) {
-      if (row.org_id !== org.orgId || row.seq !== throughSeq + 1 || row.prev_hash !== throughHash)
+    const gap = await port.capacityGap(org, snapshot, sink.progressSeq);
+    if (gap != null) {
+      const count = gap.count - (sink.progressSeq + 1 - gap.fromSeq);
+      if (
+        count < 1 ||
+        gap.fromSeq > sink.progressSeq + 1 ||
+        gap.toSeq <= sink.progressSeq ||
+        (gap.fromSeq === sink.progressSeq + 1 && gap.prevHash !== sink.progressHash)
+      )
         throw new Error('Audit delivery range unavailable');
-      const record = await auditWireRecord(
-        { chainId: snapshot.chainId, epoch: snapshot.epoch, orgId: org.orgId },
-        row,
-        options.sourceIp,
-      );
-      const candidate: AuditBatchV1 = {
+      body = JSON.stringify({
         v: 1,
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: org.orgId,
-        records: [...records, record],
-        throughSeq: row.seq,
-        throughHash: row.hash,
+        records: [
+          {
+            kind: 'gap',
+            markerId: gap.id,
+            chainId: snapshot.chainId,
+            epoch: snapshot.epoch,
+            fromSeq: sink.progressSeq + 1,
+            toSeq: gap.toSeq,
+            count,
+            prevHash: sink.progressHash,
+            hash: gap.hash,
+            reason: 'capacity',
+            policyGeneration: gap.modeGeneration,
+          },
+        ],
+        throughSeq: gap.toSeq,
+        throughHash: gap.hash,
+      });
+      repr = { ...repr, purpose: 'capacity' };
+      sink = {
+        ...sink,
+        inflightFrom: sink.progressSeq + 1,
+        inflightTo: gap.toSeq,
+        inflightBody: body,
+        inflightRepr: JSON.stringify(repr),
       };
-      if (new TextEncoder().encode(JSON.stringify(candidate)).length > 512 * 1024) break;
-      records.push(record);
-      throughSeq = row.seq;
-      throughHash = row.hash;
+    } else {
+      const rows = await port.page(org, sink.progressSeq, limit);
+      const records: AuditBatchV1['records'][number][] = [];
+      let throughSeq = sink.progressSeq;
+      let throughHash = sink.progressHash;
+      for (const row of rows.slice(0, limit)) {
+        if (row.org_id !== org.orgId || row.seq !== throughSeq + 1 || row.prev_hash !== throughHash)
+          throw new Error('Audit delivery range unavailable');
+        const record = await auditWireRecord(
+          { chainId: snapshot.chainId, epoch: snapshot.epoch, orgId: org.orgId },
+          row,
+          options.sourceIp,
+        );
+        const candidate: AuditBatchV1 = {
+          v: 1,
+          chainId: snapshot.chainId,
+          epoch: snapshot.epoch,
+          orgId: org.orgId,
+          records: [...records, record],
+          throughSeq: row.seq,
+          throughHash: row.hash,
+        };
+        if (new TextEncoder().encode(JSON.stringify(candidate)).length > 512 * 1024) break;
+        records.push(record);
+        throughSeq = row.seq;
+        throughHash = row.hash;
+      }
+      if (records.length === 0) {
+        if (rows.length > 0) throw new Error('Audit delivery record too large');
+        return 'idle';
+      }
+      body = JSON.stringify({
+        v: 1,
+        chainId: snapshot.chainId,
+        epoch: snapshot.epoch,
+        orgId: org.orgId,
+        records,
+        throughSeq,
+        throughHash,
+      });
+      repr = {
+        ...repr,
+        v: 1,
+        sanitizerVersion: AUDIT_SANITIZER_VERSION,
+        pluginVersion: options.pluginVersion,
+        sourceIp: options.sourceIp,
+        purpose: 'events',
+      };
+      sink = {
+        ...sink,
+        inflightFrom: sink.progressSeq + 1,
+        inflightTo: throughSeq,
+        inflightBody: body,
+        inflightRepr: JSON.stringify(repr),
+      };
     }
-    if (records.length === 0) {
-      if (rows.length > 0) throw new Error('Audit delivery record too large');
-      return 'idle';
-    }
-    body = JSON.stringify({
-      v: 1,
-      chainId: snapshot.chainId,
-      epoch: snapshot.epoch,
-      orgId: org.orgId,
-      records,
-      throughSeq,
-      throughHash,
-    });
-    repr = {
-      ...repr,
-      v: 1,
-      sanitizerVersion: AUDIT_SANITIZER_VERSION,
-      pluginVersion: options.pluginVersion,
-      sourceIp: options.sourceIp,
-      purpose: 'events',
-    };
-    sink = {
-      ...sink,
-      inflightFrom: sink.progressSeq + 1,
-      inflightTo: throughSeq,
-      inflightBody: body,
-      inflightRepr: JSON.stringify(repr),
-    };
   }
   const markersOnly = queued !== undefined && queued.length > 0;
   const batch = frozenBatch(body!, org, {
@@ -407,11 +478,11 @@ export async function exportAuditBatch(
       progressSeq: markersOnly ? sending.progressSeq : batch.throughSeq,
       progressHash: markersOnly ? sending.progressHash : batch.throughHash,
       custodySeq:
-        !markersOnly && auditInflightEventRange(sending) !== null
+        !markersOnly && (repr.purpose === 'capacity' || auditInflightEventRange(sending) !== null)
           ? auditCustodySeq(sending, {
-              from: sending.inflightFrom!,
+              from: repr.purpose === 'capacity' ? sending.progressSeq + 1 : sending.inflightFrom!,
               to: batch.throughSeq,
-              kind: 'durable_ack',
+              kind: repr.purpose === 'capacity' ? 'disposed' : 'durable_ack',
             })
           : sending.custodySeq,
       inflightFrom: markersOnly ? sending.inflightFrom : null,
@@ -419,7 +490,34 @@ export async function exportAuditBatch(
       inflightBody: markersOnly ? sending.inflightBody : null,
       inflightRepr: JSON.stringify(markersOnly ? rest : { ...rest, purpose: 'idle' }),
     };
-    const saved = await port.save(org, fence, snapshot, next, options.generation);
+    let saved = await port.save(org, fence, snapshot, next, options.generation);
+    if (!saved) {
+      const current = await port.read(org, options.id);
+      const { boundarySeq: oldBoundary, boundaryPrevHash: oldHash, ...oldFields } = snapshot;
+      const { boundarySeq: newBoundary, boundaryPrevHash: newHash, ...newFields } = current;
+      if (newBoundary > oldBoundary && JSON.stringify(oldFields) === JSON.stringify(newFields)) {
+        let cursor = oldBoundary - 1;
+        let hash = oldHash;
+        for (
+          let lookups = 0;
+          cursor < newBoundary - 1 && lookups < 100 && !signal.aborted && Date.now() < deadline;
+          lookups++
+        ) {
+          const gap = await port.capacityGap(org, current, cursor);
+          if (
+            gap === null ||
+            gap.fromSeq > cursor + 1 ||
+            (gap.fromSeq === cursor + 1 && gap.prevHash !== hash) ||
+            gap.toSeq >= newBoundary
+          )
+            break;
+          cursor = gap.toSeq;
+          hash = gap.hash;
+        }
+        if (cursor === newBoundary - 1 && hash === newHash)
+          saved = await port.save(org, fence, current, next, options.generation);
+      }
+    }
     if (saved && result.outcome === 'accepted_with_warning') options.warning?.(result.code);
     return saved ? 'accepted' : 'contended';
   }

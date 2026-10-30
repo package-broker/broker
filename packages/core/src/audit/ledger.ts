@@ -51,6 +51,13 @@ export interface AuditLedgerEntry {
   readonly count: number;
   readonly sinkId: string | null;
   readonly resolvesId?: string | null;
+  readonly capacity?: {
+    readonly prevHash: string;
+    readonly hash: string;
+    /** Possibly affected sinks, including disabled sinks; attribution can race progress and state changes. */
+    readonly affectedSinkIds: readonly string[];
+    readonly affectedSinkIdsOverflow?: true;
+  };
   readonly reasonCode: string;
   readonly policy: 'availability' | 'required';
   readonly modeGeneration: number;
@@ -78,6 +85,24 @@ export function assertAuditLedgerEntry(entry: AuditLedgerEntry): void {
   const integer = (value: number, minimum: number) =>
     Number.isSafeInteger(value) && value >= minimum;
   if (
+    (entry.capacity !== undefined &&
+      (entry.kind !== 'gap' ||
+        entry.reasonCode !== 'capacity' ||
+        entry.sinkId !== null ||
+        !/^[a-f0-9]{64}$/.test(entry.capacity.prevHash) ||
+        !/^[a-f0-9]{64}$/.test(entry.capacity.hash) ||
+        Object.keys(entry.capacity).some(
+          (key) =>
+            !['prevHash', 'hash', 'affectedSinkIds', 'affectedSinkIdsOverflow'].includes(key),
+        ) ||
+        (entry.capacity.affectedSinkIdsOverflow !== undefined &&
+          entry.capacity.affectedSinkIdsOverflow !== true) ||
+        !Array.isArray(entry.capacity.affectedSinkIds) ||
+        entry.capacity.affectedSinkIds.length > 1000 ||
+        JSON.stringify(entry.capacity).length > 65536 ||
+        entry.capacity.affectedSinkIds.some(
+          (id, i, ids) => !/^[a-z0-9-]{1,32}$/.test(id) || (i > 0 && ids[i - 1]! >= id),
+        ))) ||
     !isUlid(entry.id) ||
     (entry.resolvesId != null && (entry.kind !== 'replay' || !isUlid(entry.resolvesId))) ||
     !AUDIT_LEDGER_KINDS.includes(entry.kind) ||
@@ -104,10 +129,21 @@ export function assertAuditLedgerEntry(entry: AuditLedgerEntry): void {
   }
 }
 
+const capacityJson = (capacity: AuditLedgerEntry['capacity']) =>
+  capacity === undefined
+    ? null
+    : JSON.stringify({
+        prevHash: capacity.prevHash,
+        hash: capacity.hash,
+        affectedSinkIds: capacity.affectedSinkIds,
+        ...(capacity.affectedSinkIdsOverflow ? { affectedSinkIdsOverflow: true } : {}),
+      });
+
 const sameEntry = (a: AuditLedgerEntry, b: AuditLedgerEntry) =>
   (a.resolvesId ?? null) === (b.resolvesId ?? null) &&
+  capacityJson(a.capacity) === capacityJson(b.capacity) &&
   (Object.keys(a) as (keyof AuditLedgerEntry)[]).every(
-    (key) => key === 'resolvesId' || a[key] === b[key],
+    (key) => key === 'resolvesId' || key === 'capacity' || a[key] === b[key],
   );
 
 /**

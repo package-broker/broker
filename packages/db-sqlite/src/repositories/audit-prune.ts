@@ -147,14 +147,20 @@ function capacityLowWater(options: AuditCapacityOptions): number {
   return options.maxJournalBytes - Math.ceil(options.maxJournalBytes / 20);
 }
 
+/** A budget raised during a cycle lifts its target to the new low-water mark. */
+function effectiveTarget(chain: Chain, options: AuditCapacityOptions): number {
+  return Math.max(chain.capacity_evict_to ?? 0, capacityLowWater(options));
+}
+
 /** A cycle starts at the reserve and continues across bounded batches until its stored target. */
 function capacityEligible(ctx: OrgContext, options: AuditCapacityOptions): Statement {
   return {
     sql: `c.restore_pending = 0 AND c.policy = 'availability'
-      AND (c.journal_bytes >= ? OR c.journal_bytes > c.capacity_evict_to)
+      AND (c.journal_bytes >= ? OR c.journal_bytes > max(c.capacity_evict_to, ?))
       AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ? AND s.generation > ?)`,
     params: [
       options.maxJournalBytes - auditCapacityReserveBytes(options.maxJournalBytes),
+      capacityLowWater(options),
       ctx.orgId,
       options.generation,
     ],
@@ -183,13 +189,13 @@ export function createAuditPruneRepository(
     if (
       capacity !== undefined &&
       chain.capacity_evict_to !== null &&
-      chain.journal_bytes <= chain.capacity_evict_to
+      chain.journal_bytes <= Math.max(chain.capacity_evict_to, capacityLowWater(capacity))
     ) {
       await executor.batch([
         {
           sql: `UPDATE audit_chain SET capacity_evict_to = NULL
-            WHERE org_id = ? AND journal_bytes <= capacity_evict_to`,
-          params: [ctx.orgId],
+            WHERE org_id = ? AND journal_bytes <= max(capacity_evict_to, ?)`,
+          params: [ctx.orgId, capacityLowWater(capacity)],
         },
       ]);
       chain = await readChain();
@@ -234,7 +240,7 @@ export function createAuditPruneRepository(
         params: [ctx.orgId, ...capacityGuard!.params],
       });
       if (allowed.length === 0) return { outcome: 'retained' };
-      const lowWater = chain.capacity_evict_to ?? capacityLowWater(capacity);
+      const lowWater = effectiveTarget(chain, capacity);
       let removed = 0;
       const prefix: Candidate[] = [];
       for (const row of candidates) {
@@ -261,8 +267,7 @@ export function createAuditPruneRepository(
     // Capacity loss is not an export: only a retention prune completes a pending cutover.
     const capacityCutover = capacity === undefined ? last.seq : null;
     // Any journal reduction that reaches the stored target ends the eviction cycle in the same CAS.
-    const cycleTarget =
-      capacity === undefined ? null : (chain.capacity_evict_to ?? capacityLowWater(capacity));
+    const cycleTarget = capacity === undefined ? null : effectiveTarget(chain, capacity);
     const integrity: Statement = {
       sql: `NOT EXISTS (SELECT 1 FROM audit_event anchor WHERE anchor.org_id = ?
             AND anchor.seq = c.boundary_seq AND anchor.prev_hash != c.boundary_prev_hash)

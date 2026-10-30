@@ -1128,3 +1128,19 @@ it('clears a reached cycle target even when the journal is empty', async () => {
   expect(await evict()).toEqual({ outcome: 'retained' });
   expect((await chain()).capacity_evict_to).toBeNull();
 });
+
+it('evicts nothing when the budget is raised during an unfinished cycle', async () => {
+  await seed(100);
+  const budget = (await chain()).journal_bytes as number;
+  expect(await evict(budget, 1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+  const before = await chain();
+  expect(before.capacity_evict_to).toBe(budget - Math.ceil(budget / 20));
+  const raised = budget * 2;
+  expect(before.journal_bytes as number).toBeLessThanOrEqual(raised - Math.ceil(raised / 20));
+  expect(await evict(raised, 1)).toEqual({ outcome: 'retained' });
+  expect(await chain()).toMatchObject({
+    boundary_seq: before.boundary_seq,
+    journal_bytes: before.journal_bytes,
+    capacity_evict_to: null,
+  });
+});

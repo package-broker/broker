@@ -18,6 +18,7 @@ import { createCredentialStore } from '@package-broker/core/secrets/credential-s
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { createBlobRepository } from '@package-broker/db-sqlite/repositories/blob';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import * as vulnerabilityModule from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import {
@@ -258,6 +259,7 @@ describe('node registry wiring', () => {
   async function boot(
     transport: FetchLike,
     extra: {
+      auditEnabled?: boolean;
       jobs?: Jobs;
       level?: 'info' | 'debug';
       executor?: SqlExecutor;
@@ -286,7 +288,13 @@ describe('node registry wiring', () => {
           cache: createLruCache({}),
           jobStore: createJobRepository(db.executor),
         },
-        registry: { config: resolveRegistryConfig(undefined, 'node', ORIGIN) },
+        registry: {
+          config: resolveRegistryConfig(
+            { npmAudit: { enabled: extra.auditEnabled ?? true } },
+            'node',
+            ORIGIN,
+          ),
+        },
         log: (record) => void logged.push(JSON.stringify(record)),
         ...(extra.level === undefined
           ? {}
@@ -346,6 +354,146 @@ describe('node registry wiring', () => {
   }
 
   const brokerPath = (url: string): string => new URL(url).pathname;
+
+  describe('npm audit matrix', () => {
+    afterEach(() => vi.restoreAllMocks());
+    const endpoint = '/alpha/npm/-/npm/v1/security/advisories/bulk';
+    async function audit(body: unknown) {
+      const kernel = await broker!.ready();
+      return kernel.fetch(
+        new Request(`${ORIGIN}${endpoint}`, {
+          method: 'POST',
+          headers: {
+            cookie,
+            origin: ORIGIN,
+            'x-csrf-token': cookie.split('__Host-pb_csrf=')[1]!,
+            'content-type': 'application/json',
+            traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+          },
+          body: JSON.stringify(body),
+        }),
+      );
+    }
+
+    it('forwards verified public pairs and refuses disclosure after a private claim or cap', async () => {
+      const repositorySpy = vi.spyOn(vulnerabilityModule, 'createVulnerabilityRepository');
+      let failEvidence = false;
+      const executor: SqlExecutor = {
+        driver: db.executor.driver,
+        all: (statement) => db.executor.all(statement),
+        batch: (statements) => {
+          if (
+            failEvidence &&
+            statements.some((statement) => statement.sql.includes('evidence_bytes'))
+          )
+            throw new Error('evidence unavailable');
+          return db.executor.batch(statements);
+        },
+      };
+      const remote = upstream();
+      const sent: { body: unknown; headers: Headers }[] = [];
+      await boot(
+        async (input, init) => {
+          const request = new Request(input, init);
+          if (request.method !== 'POST') return remote.transport(input, init);
+          sent.push({ body: await request.json(), headers: request.headers });
+          return Response.json({ 'left-pad': [{ id: 42 }], sentinel: [{ id: 43 }] });
+        },
+        { executor },
+      );
+      expect(repositorySpy.mock.calls.length).toBeGreaterThan(0);
+      for (const call of repositorySpy.mock.calls) expect(call[1]).toBe(systemClock);
+      repositorySpy.mockRestore();
+      expect((await get('/alpha/npm/left-pad')).status).toBe(200);
+      const response = await audit({ 'left-pad': ['1.0.0'], '@private/hidden': ['1.0.0'] });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ 'left-pad': [{ id: 42 }] });
+      expect(response.headers.get('cache-control')).toBe('private, no-store');
+      expect(sent.map(({ body }) => body)).toEqual([{ 'left-pad': ['1.0.0'] }]);
+      for (const { headers } of sent) {
+        expect(headers.has('cookie')).toBe(false);
+        expect(headers.has('authorization')).toBe(false);
+        expect(headers.has('x-csrf-token')).toBe(false);
+        expect(headers.get('user-agent')).toBe('PackageBroker/2');
+        expect(headers.has('traceparent')).toBe(false);
+      }
+      failEvidence = true;
+      sent.length = 0;
+      const unavailable = await audit({ 'left-pad': ['1.0.0'] });
+      expect(unavailable.status).toBe(502);
+      expect(await unavailable.json()).toMatchObject({ code: 'upstream_error' });
+      expect(sent).toEqual([]);
+      failEvidence = false;
+      await sql(
+        "INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json) VALUES ('PRIVATE', ?, 'Private', 'npm', 'npm_registry', 'https://private.test', '{\"scopes\":[\"@private\"]}')",
+        [orgId],
+      );
+      await sql(
+        "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('HIDDEN', ?, 'PRIVATE', 'npm', 'left-pad')",
+        [orgId],
+      );
+      sent.length = 0;
+      const hiddenHolder = await audit({ 'left-pad': ['1.0.0'] });
+      expect(hiddenHolder.status).toBe(200);
+      expect(await hiddenHolder.json()).toEqual({});
+      expect(sent).toEqual([]);
+      await sql("UPDATE source SET status = 'paused' WHERE org_id = ? AND id = 'PRIVATE'", [orgId]);
+      const pausedHolder = await audit({ 'left-pad': ['1.0.0'] });
+      expect(pausedHolder.status).toBe(200);
+      expect(await pausedHolder.json()).toEqual({});
+      expect(sent).toEqual([]);
+      await sql("DELETE FROM package WHERE org_id = ? AND id = 'HIDDEN'", [orgId]);
+      await sql(
+        "INSERT INTO source (id, org_id, name, ecosystem, type, url) VALUES ('CLAIM', ?, 'Claim', 'npm', 'vcs', 'https://private.test/repo.git')",
+        [orgId],
+      );
+      await sql(
+        'INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, ?, ?)',
+        [ulid(), orgId, 'CLAIM', 'npm', 'left-pad'],
+      );
+      sent.length = 0;
+      const filtered = await audit({ 'left-pad': ['1.0.0'], '@private/hidden': ['1.0.0'] });
+      expect(filtered.status).toBe(200);
+      expect(await filtered.json()).toEqual({});
+      expect(sent).toEqual([]);
+      sent.length = 0;
+      const privateOnly = await audit({ '@private/hidden': ['1.0.0'] });
+      expect(privateOnly.status).toBe(200);
+      expect(await privateOnly.json()).toEqual({});
+      for (const body of [
+        Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`pkg-${i}`, ['1.0.0']])),
+        { 'left-pad': Array.from({ length: 2001 }, (_, i) => `1.0.${i}`) },
+      ]) {
+        const capped = await audit(body);
+        expect(capped.status).toBe(413);
+        expect(await capped.json()).toMatchObject({ code: 'payload_too_large' });
+      }
+      expect(sent).toEqual([]);
+      expect(logged.join('')).not.toMatch(/@private|reader@example|__Host-pb_session/);
+    });
+
+    it('distinguishes no attached proxy from the disabled off switch without outbound traffic', async () => {
+      const transport = vi.fn(async () => Response.json({}));
+      await boot(transport);
+      await sql(
+        'DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?',
+        [orgId, projectId, sources.npm],
+      );
+      const absent = await audit({ 'left-pad': ['1.0.0'] });
+      expect(absent.status).toBe(501);
+      expect(await absent.json()).toMatchObject({
+        code: 'unsupported',
+        error: 'npm audit requires an npmjs.org proxy source in this project',
+      });
+      await broker!.close();
+      broker = undefined;
+      await boot(transport, { auditEnabled: false });
+      const disabled = await audit({ 'left-pad': ['1.0.0'] });
+      expect(disabled.status).toBe(501);
+      expect(await disabled.json()).toMatchObject({ code: 'npm_audit_disabled' });
+      expect(transport).not.toHaveBeenCalled();
+    });
+  });
 
   describe.each([undefined, 'info', 'debug'] as const)('refusals at level %s', (level) => {
     it.each([

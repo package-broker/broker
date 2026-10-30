@@ -86,6 +86,12 @@
     },
     {
       "type": "index",
+      "name": "audit_ledger_kind_chain",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_kind_chain ON audit_ledger (org_id, kind, chain_id, epoch, created_at, id) WHERE superseded_by IS NULL"
+    },
+    {
+      "type": "index",
       "name": "audit_ledger_open_gap",
       "tbl_name": "audit_ledger",
       "sql": "CREATE INDEX audit_ledger_open_gap ON audit_ledger (org_id, chain_id, epoch, reason_code, sink_id, from_seq, id) WHERE kind = 'gap' AND superseded_by IS NULL"
@@ -1351,7 +1357,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 0,
-      "name": "audit_ledger_superseded",
+      "name": "audit_ledger_kind_chain",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1359,7 +1365,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 1,
-      "name": "audit_ledger_visible",
+      "name": "audit_ledger_superseded",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1367,7 +1373,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 2,
-      "name": "audit_ledger_open_gap",
+      "name": "audit_ledger_visible",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1375,6 +1381,14 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 3,
+      "name": "audit_ledger_open_gap",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 4,
       "name": "audit_ledger_sink",
       "unique": 0,
       "origin": "c",
@@ -1382,7 +1396,7 @@
     },
     {
       "tbl_name": "audit_ledger",
-      "seq": 4,
+      "seq": 5,
       "name": "audit_ledger_range",
       "unique": 0,
       "origin": "c",
@@ -1390,7 +1404,7 @@
     },
     {
       "tbl_name": "audit_ledger",
-      "seq": 5,
+      "seq": 6,
       "name": "sqlite_autoindex_audit_ledger_1",
       "unique": 1,
       "origin": "pk",

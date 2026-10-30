@@ -10,6 +10,7 @@ import { sql } from 'kysely';
 import { assertCheck } from '../kysely.js';
 import { createAuditLedgerRepository } from './audit-ledger.js';
 import { auditPendingStatement } from './audit-pending.js';
+import { auditEpochCarryStatements, AuditEpochCarryLimitError } from './audit-epoch-carry.js';
 import { clearAuditVerificationStatements } from './audit-verify.js';
 
 const chain = {
@@ -54,19 +55,34 @@ const projection = (fields: Readonly<Record<string, string>>) =>
     .join(', ');
 
 const HISTORY_LIMIT = 1024;
-const relevantHistory = `audit_ledger.superseded_by IS NULL AND (
-  (audit_ledger.kind = 'gap' AND audit_ledger.reason_code = 'seq_gap' AND audit_ledger.sink_id IS NULL
-    AND audit_ledger.chain_id = c.chain_id AND audit_ledger.epoch = c.epoch
-    AND audit_ledger.to_seq >= c.boundary_seq - 1 AND audit_ledger.from_seq <= c.head_seq)
-  OR audit_ledger.id = (SELECT reset.id FROM audit_ledger reset WHERE reset.org_id = c.org_id
-    AND reset.kind = 'chain_reset' AND reset.chain_id = audit_ledger.chain_id
-    AND reset.chain_id <> c.chain_id AND reset.superseded_by IS NULL
-    ORDER BY reset.created_at DESC, reset.id DESC LIMIT 1)
-  OR audit_ledger.id = (SELECT latest.id FROM audit_ledger latest WHERE latest.org_id = c.org_id
-    AND latest.chain_id = c.chain_id AND latest.epoch = c.epoch
-    AND latest.kind = 'restore_confirmed' AND latest.superseded_by IS NULL
-    ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1))`;
-const historyOrder = `ORDER BY created_at DESC, id DESC LIMIT ${HISTORY_LIMIT}`;
+const historyColumns = (alias: string) =>
+  ['id', 'kind', 'chain_id', 'epoch', 'from_seq', 'to_seq', 'reason_code', 'created_at']
+    .map((column) => `${alias}.${column}`)
+    .join(', ');
+/** Current-window seq gaps, the latest reset of each other chain and the latest confirmation. */
+const HISTORY_SQL = `WITH history_chain AS (SELECT * FROM audit_chain history_source WHERE history_source.org_id = ?)
+  SELECT * FROM (
+    SELECT ${historyColumns('gap')} FROM history_chain JOIN audit_ledger gap
+      ON gap.org_id = history_chain.org_id AND gap.kind = 'gap' AND gap.superseded_by IS NULL
+        AND gap.chain_id = history_chain.chain_id AND gap.epoch = history_chain.epoch
+        AND gap.reason_code = 'seq_gap' AND gap.sink_id IS NULL
+        AND gap.from_seq <= history_chain.head_seq AND gap.to_seq >= history_chain.boundary_seq - 1
+    UNION ALL
+    SELECT ${historyColumns('reset')} FROM history_chain JOIN audit_ledger reset
+      ON reset.org_id = history_chain.org_id AND reset.kind = 'chain_reset'
+        AND reset.superseded_by IS NULL AND reset.chain_id <> history_chain.chain_id
+      WHERE NOT EXISTS (SELECT 1 FROM audit_ledger newer WHERE newer.org_id = reset.org_id
+        AND newer.kind = 'chain_reset' AND newer.superseded_by IS NULL AND newer.chain_id = reset.chain_id
+        AND (newer.created_at > reset.created_at OR (newer.created_at = reset.created_at AND newer.id > reset.id)))
+    UNION ALL
+    SELECT * FROM (SELECT ${historyColumns('latest')} FROM history_chain JOIN audit_ledger latest
+      ON latest.org_id = history_chain.org_id AND latest.kind = 'restore_confirmed'
+        AND latest.superseded_by IS NULL AND latest.chain_id = history_chain.chain_id
+        AND latest.epoch = history_chain.epoch
+      ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+  ) ORDER BY created_at DESC, id DESC LIMIT ${HISTORY_LIMIT}`;
+
+const [historyHead, historyTail] = HISTORY_SQL.split('?') as [string, string];
 
 export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort {
   return {
@@ -82,9 +98,7 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
         },
         {
           sql: `SELECT id, kind, chain_id AS chainId, epoch, from_seq AS fromSeq, to_seq AS toSeq, reason_code AS reasonCode
-          FROM audit_ledger WHERE org_id = ? AND superseded_by IS NULL
-          AND EXISTS (SELECT 1 FROM audit_chain c WHERE c.org_id = audit_ledger.org_id AND ${relevantHistory})
-          ${historyOrder}`,
+          FROM (${HISTORY_SQL})`,
           params: [org.orgId],
         },
       ]);
@@ -133,20 +147,16 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
       });
       const chainSnapshot = { ...expected, sinks: undefined, history: undefined };
       const snapshot = JSON.stringify(chainSnapshot);
-      const carried = change.carriedGaps ?? [];
-      const carriedHistory = (Array.isArray(expected.history) ? expected.history : []).filter(
-        (row) =>
-          row.kind === 'gap' &&
-          row.reasonCode === 'seq_gap' &&
-          row.chainId === expected.chainId &&
-          row.epoch === expected.epoch,
-      );
-      if (
-        (carried.length > 0 && change.epoch === expected.epoch) ||
-        new Set(carried.map((row) => row.sourceId)).size !== carried.length ||
-        carried.some((row) => !carriedHistory.some((gap) => gap.id === row.sourceId))
-      )
-        throw new TypeError('Invalid audit fork carried gaps');
+      let carry: Statement[] = [];
+      if (change.epoch !== expected.epoch) {
+        try {
+          carry = await auditEpochCarryStatements(executor, org.orgId, change.epoch, change.now);
+        } catch (error) {
+          if (error instanceof AuditEpochCarryLimitError)
+            throw new AuditForkLimitError('batch_limit');
+          throw error;
+        }
+      }
       const statements: Statement[] = [
         ...assertCheck(sql`EXISTS (SELECT 1 FROM audit_chain c, json_each(${`[${snapshot}]`}) e
           WHERE c.org_id = ${org.orgId} AND ${sql.raw(
@@ -154,8 +164,7 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
               .map(([column, key]) => `c.${column} IS json_extract(e.value, '$.${key}')`)
               .join(' AND '),
           )} AND (SELECT json_group_array(json_object('id', id, 'kind', kind, 'chainId', chain_id, 'epoch', epoch, 'fromSeq', from_seq, 'toSeq', to_seq, 'reasonCode', reason_code))
-            FROM (SELECT * FROM audit_ledger WHERE org_id = c.org_id AND superseded_by IS NULL
-              AND ${sql.raw(relevantHistory)} ${sql.raw(historyOrder)})) IS ${JSON.stringify(expected.history ?? [])})`),
+            FROM (${sql.raw(historyHead)}${org.orgId}${sql.raw(historyTail)})) IS ${JSON.stringify(expected.history ?? [])})`),
         ...assertCheck(sql`((SELECT count(*) FROM audit_sink WHERE org_id = ${org.orgId}) = ${expected.sinks.length}
           AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ${org.orgId} AND (
             s.generation > ${generation} OR NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(expected.sinks.map(compact))}) e
@@ -170,6 +179,7 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
           WHERE (SELECT hash FROM audit_event WHERE org_id = ${org.orgId}
             AND seq = json_extract(e.value, '$.seq')) IS NOT json_extract(e.value, '$.hash'))`),
       ];
+      statements.push(...carry);
       const chainUpdateIndex = statements.length;
       statements.push(
         {
@@ -204,28 +214,6 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
             org.orgId,
           ],
         },
-        ...(carried.length === 0
-          ? []
-          : [
-              {
-                sql: `INSERT INTO audit_ledger (org_id, id, kind, chain_id, epoch, from_seq, to_seq, count,
-                  sink_id, reason_code, policy, mode_generation, actor_type, actor_id, created_at)
-                SELECT g.org_id, json_extract(m.value, '$.id'), 'gap', g.chain_id, ?, g.from_seq, g.to_seq,
-                  g.count, NULL, 'seq_gap', g.policy, g.mode_generation, 'system', NULL, ?
-                FROM json_each(?) m JOIN audit_ledger g ON g.org_id = ?
-                  AND g.id = json_extract(m.value, '$.sourceId')
-                WHERE g.kind = 'gap' AND g.reason_code = 'seq_gap' AND g.sink_id IS NULL
-                  AND g.superseded_by IS NULL AND g.chain_id = ? AND g.epoch = ?`,
-                params: [
-                  change.epoch,
-                  change.now,
-                  JSON.stringify(carried),
-                  org.orgId,
-                  expected.chainId,
-                  expected.epoch,
-                ],
-              },
-            ]),
         ...clearAuditVerificationStatements(org),
         ...createAuditLedgerRepository(executor).statements(org, change.ledger),
         ...(change.event === null ? [] : [auditPendingStatement(org, change.event)]),

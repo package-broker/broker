@@ -8,6 +8,14 @@ import { reconcileAuditSinks } from '@package-broker/core/audit/sinks/registry';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { createAuditForkRepository } from '../repositories/audit-fork.js';
 import { createAuditSinkRepository } from '../repositories/audit-sink.js';
+import { createAuditSealRepository } from '../repositories/audit-seal.js';
+import { createAuditPruneRepository } from '../repositories/audit-prune.js';
+import { createAuditLedgerRepository } from '../repositories/audit-ledger.js';
+import { createAuditExportRepository } from '../repositories/audit-export.js';
+import { exportAuditBatch } from '@package-broker/core/audit/export';
+import type { AuditBatchV1, AuditSink } from '@package-broker/core/audit/plugin-api';
+import { systemMutationFence } from '@package-broker/core/authz/fence';
+import { ulid } from '@package-broker/core/ids';
 import type { MigratedDatabase } from './migrated-database.js';
 
 const now = new Date('2026-10-30T00:00:00.000Z');
@@ -863,6 +871,226 @@ export async function auditForkRepositorySuite(
         ]),
       ).rejects.toThrow(/monotonic/);
       expect(await bodyVersions()).toEqual([1]);
+    });
+    async function sealEvents(count: number) {
+      await database.executor.batch(
+        Array.from({ length: count }, () => ({
+          sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+          VALUES (?, ?, '2026-10-30T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+          params: [ulid(), org.orgId],
+        })),
+      );
+      return createAuditSealRepository(database.executor).seal(org);
+    }
+    async function hashOf(seq: number) {
+      return (await port.hashAt(org, seq))!;
+    }
+    const receiverAhead = (): { id: string; sink: AuditSink } => ({
+      id: 'archive',
+      sink: {
+        deliver: async () => {
+          throw new Error('unused');
+        },
+        frontier: async () => ({
+          chainId: (await port.read(org)).chainId,
+          epoch: 99,
+          seq: 1,
+          hash: zero,
+        }),
+      },
+    });
+    const confirm = (fromSeq: number) =>
+      confirmAuditRestore(port, org, {
+        alert: () => {},
+        generation: 2,
+        now,
+        fromSeq,
+        actor: { type: 'user', id: org.orgId },
+      });
+    it('never re-allocates a gap above a rolled-back head after a fork bump and confirmation', async () => {
+      await sealEvents(3);
+      const two = await hashOf(2);
+      await database.executor.batch([
+        { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq = 3', params: [org.orgId] },
+      ]);
+      await createAuditSealRepository(database.executor).seal(org);
+      await database.executor.batch([
+        {
+          sql: 'UPDATE audit_chain SET head_seq = 2, head_hash = ? WHERE org_id = ?',
+          params: [two, org.orgId],
+        },
+      ]);
+      expect(await detectAuditFork(port, org, options())).toBe('blocked');
+      expect(await confirm(3)).toBe('confirmed');
+      expect(await sealEvents(1)).toMatchObject({ outcome: 'sealed' });
+      const seqs = (
+        await database.executor.all<{ seq: number }>({
+          sql: 'SELECT seq FROM audit_event WHERE org_id = ? ORDER BY seq',
+          params: [org.orgId],
+        })
+      ).map((row) => row.seq);
+      expect(seqs.slice(0, 3)).toEqual([1, 2, 4]);
+      expect(seqs).not.toContain(3);
+    });
+    it('records a held partial outcome as an uncertain disposition when confirmation discards it', async () => {
+      await sealEvents(3);
+      const current = await port.read(org);
+      await database.executor.batch([
+        {
+          sql: `UPDATE audit_sink SET progress_seq = 1, progress_hash = ?, custody_seq = 1,
+            inflight_from = 2, inflight_to = 3, inflight_body = ?, inflight_repr = ? WHERE org_id = ?`,
+          params: [
+            await hashOf(1),
+            JSON.stringify({
+              v: 1,
+              chainId: current.chainId,
+              epoch: current.epoch,
+              orgId: org.orgId,
+              records: [{ seq: 2 }, { seq: 3 }],
+              throughSeq: 3,
+              throughHash: await hashOf(3),
+            }),
+            JSON.stringify({
+              custodyFromSeq: 1,
+              purpose: 'events',
+              uncertainOutcome: { rejectedCount: 1 },
+            }),
+            org.orgId,
+          ],
+        },
+      ]);
+      expect(await detectAuditFork(port, org, { ...options(), probes: [receiverAhead()] })).toBe(
+        'blocked',
+      );
+      expect(await confirm(4)).toBe('confirmed');
+      expect(
+        await database.executor.all({
+          sql: "SELECT kind, epoch, from_seq, to_seq, count, sink_id, reason_code FROM audit_ledger WHERE org_id = ? AND kind = 'uncertain'",
+          params: [org.orgId],
+        }),
+      ).toEqual([
+        {
+          kind: 'uncertain',
+          epoch: 0,
+          from_seq: 2,
+          to_seq: 3,
+          count: 1,
+          sink_id: 'archive',
+          reason_code: 'partial_rejected',
+        },
+      ]);
+      expect(JSON.parse((await port.read(org)).sinks[0]!.inflightRepr!)).not.toHaveProperty(
+        'uncertainOutcome',
+      );
+    });
+    it('keeps a required withheld hold on pruning across a bump and confirmation', async () => {
+      await sealEvents(3);
+      const current = await port.read(org);
+      await database.executor.batch([
+        {
+          sql: `UPDATE audit_sink SET progress_seq = 3, progress_hash = ?, custody_seq = 3 WHERE org_id = ?`,
+          params: [await hashOf(3), org.orgId],
+        },
+        { sql: "UPDATE audit_chain SET mode = 'export' WHERE org_id = ?", params: [org.orgId] },
+      ]);
+      await createAuditLedgerRepository(database.executor).append(org, [
+        {
+          id: ulid(),
+          kind: 'withheld',
+          chainId: current.chainId,
+          epoch: current.epoch,
+          fromSeq: 1,
+          toSeq: 1,
+          count: 1,
+          sinkId: 'archive',
+          reasonCode: 'unreadable',
+          policy: 'required',
+          modeGeneration: current.modeGeneration,
+          actorType: 'system',
+          actorId: null,
+          createdAt: now.toISOString(),
+        },
+      ]);
+      const prune = () =>
+        createAuditPruneRepository(database.executor).prune(org, {
+          generation: 2,
+          configuredSinkIds: ['archive'],
+          trailActive: false,
+        });
+      expect(await prune()).toEqual({ outcome: 'retained' });
+      expect(await detectAuditFork(port, org, { ...options(), probes: [receiverAhead()] })).toBe(
+        'blocked',
+      );
+      expect(await confirm(4)).toBe('confirmed');
+      expect((await port.read(org)).sinks[0]).toMatchObject({ state: 'active', custodySeq: 3 });
+      expect(await prune()).toEqual({ outcome: 'retained' });
+    });
+    it('lets a lagging exporter deliver capacity gaps recorded before a bump and confirmation', async () => {
+      await sealEvents(12);
+      await database.executor.batch([
+        {
+          sql: `UPDATE audit_sink SET progress_seq = 0, progress_hash = ?, custody_seq = 0 WHERE org_id = ?`,
+          params: [zero, org.orgId],
+        },
+        {
+          sql: "UPDATE audit_chain SET mode = 'export', policy = 'availability' WHERE org_id = ?",
+          params: [org.orgId],
+        },
+        {
+          sql: `INSERT INTO job (id, org_id, type, resource_key, state, lease_owner, fence, lease_until)
+          VALUES ('export-job', ?, 'audit-export-archive', 'audit-export:archive', 'running', 'worker', 3, '2099-01-01T00:00:00.000Z')`,
+          params: [org.orgId],
+        },
+      ]);
+      expect(
+        await createAuditPruneRepository(database.executor).evict(org, {
+          generation: 2,
+          maxJournalBytes: 1,
+          limit: 10,
+        }),
+      ).toMatchObject({ outcome: 'evicted', boundarySeq: 11 });
+      expect(await detectAuditFork(port, org, { ...options(), probes: [receiverAhead()] })).toBe(
+        'blocked',
+      );
+      expect(await confirm(11)).toBe('confirmed');
+      const delivered: AuditBatchV1[] = [];
+      const run = () =>
+        exportAuditBatch(
+          createAuditExportRepository(database.executor),
+          org,
+          systemMutationFence('audit-export', { id: 'export-job', owner: 'worker', fence: 3 }, {}),
+          {
+            id: 'archive',
+            generation: 2,
+            pluginVersion: '1.0',
+            sourceIp: 'omit',
+            now: () => new Date(),
+            random: () => 0,
+            sink: {
+              deliver: async (batch) => {
+                delivered.push(batch);
+                return {
+                  outcome: 'accepted',
+                  chainId: batch.chainId,
+                  epoch: batch.epoch,
+                  throughSeq: batch.throughSeq,
+                  throughHash: batch.throughHash,
+                };
+              },
+            },
+            rejectionRetries: 'terminal',
+          },
+          new AbortController().signal,
+        );
+      for (let attempt = 0; attempt < 10 && (await run()) !== 'idle'; attempt++);
+      const records = delivered.flatMap((batch) => batch.records);
+      expect(records.find((record) => record.kind === 'gap')).toMatchObject({
+        reason: 'capacity',
+        fromSeq: 1,
+        toSeq: 10,
+      });
+      expect(records.flatMap((record) => ('seq' in record ? [record.seq] : []))).toEqual([11, 12]);
+      expect((await port.read(org)).sinks[0]).toMatchObject({ progressSeq: 12 });
     });
     it('isolates foreign generation, chain, sinks, ledger, pending and verification', async () => {
       const foreign = database.orgs!.b;

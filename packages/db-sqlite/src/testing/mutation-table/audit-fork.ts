@@ -30,8 +30,13 @@ async function readHistory(context: CaseContext, target: 'own' | 'foreign') {
   ]);
   await context.executor.batch([
     {
-      sql: 'UPDATE audit_chain SET chain_id = ?, head_seq = CASE WHEN org_id = ? THEN 0 ELSE 10 END WHERE org_id IN (?, ?)',
+      sql: 'UPDATE audit_chain SET chain_id = ?, head_seq = CASE WHEN org_id = ? THEN 8 ELSE 10 END WHERE org_id IN (?, ?)',
       params: ['c'.repeat(32), own.orgId, own.orgId, foreign.orgId],
+    },
+    {
+      sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+        SELECT 'foreign-gap', org_id, 'gap', chain_id, epoch, 6, 6, 1, 'seq_gap', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id = ?`,
+      params: [foreign.orgId],
     },
     {
       sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
@@ -195,21 +200,43 @@ const hashes: ContractCase = {
   },
 };
 const carry: ContractCase = {
-  name: 'fork carry copies only the organization gaps into the new epoch',
+  name: 'fork carry copies only the organization obligations into the new epoch',
   async run(context) {
     const { own, foreign } = orgOf(context);
     await seedAuditFork(context.executor, own);
     await seedAuditFork(context.executor, foreign);
+    const row = (
+      orgId: string,
+      id: string,
+      kind: string,
+      from: number,
+      reason: string,
+      resolves: string | null = null,
+    ) => ({
+      sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, sink_id, reason_code, policy, mode_generation, actor_type, created_at, resolves_id)
+        SELECT ?, org_id, ?, chain_id, epoch, ?, ?, 1, CASE WHEN ? = 'gap' THEN NULL ELSE 'archive' END, ?, policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z', ? FROM audit_chain WHERE org_id = ?`,
+      params: [id, kind, from, from, kind, reason, resolves, orgId],
+    });
     await context.executor.batch([
       {
         sql: 'UPDATE audit_chain SET chain_id = ?, head_seq = 10 WHERE org_id IN (?, ?)',
         params: ['c'.repeat(32), own.orgId, foreign.orgId],
       },
-      {
-        sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
-        SELECT '01JZZZZZZZZZZZZZZZZZZZZZZV', org_id, 'gap', chain_id, epoch, 5, 5, 1, 'seq_gap', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id IN (?, ?)`,
-        params: [own.orgId, foreign.orgId],
-      },
+      row(own.orgId, '01JZZZZZZZZZZZZZZZZZZZZZZV', 'gap', 5, 'seq_gap'),
+      row(own.orgId, '01JZZZZZZZZZZZZZZZZZZZZZZT', 'uncertain', 6, 'timeout'),
+      row(foreign.orgId, '01JZZZZZZZZZZZZZZZZZZZZZZV', 'gap', 5, 'seq_gap'),
+      row(foreign.orgId, '01JZZZZZZZZZZZZZZZZZZZZZZU', 'gap', 7, 'seq_gap'),
+      row(foreign.orgId, '01JZZZZZZZZZZZZZZZZZZZZZZT', 'uncertain', 6, 'timeout'),
+    ]);
+    await context.executor.batch([
+      row(
+        foreign.orgId,
+        '01JZZZZZZZZZZZZZZZZZZZZZZR',
+        'replay',
+        6,
+        'durable_ack',
+        '01JZZZZZZZZZZZZZZZZZZZZZZT',
+      ),
     ]);
     const ledger = (orgId: string) =>
       context.executor.all({
@@ -229,18 +256,20 @@ const carry: ContractCase = {
           boundaryReason: 'epoch_bump',
           sinks: expected.sinks,
           ledger: [],
-          carriedGaps: [
-            { sourceId: '01JZZZZZZZZZZZZZZZZZZZZZZV', id: '01JZZZZZZZZZZZZZZZZZZZZZZT' },
-          ],
           event: null,
           now: '2026-10-30T00:00:00.000Z',
         },
         2,
       ),
     ).toBe(true);
-    expect(await ledger(own.orgId)).toEqual([
-      expect.objectContaining({ id: '01JZZZZZZZZZZZZZZZZZZZZZZT', epoch: 1, from_seq: 5 }),
-      expect.objectContaining({ id: '01JZZZZZZZZZZZZZZZZZZZZZZV', epoch: 0, from_seq: 5 }),
+    expect(
+      (await ledger(own.orgId))
+        .filter((value) => value.epoch === 1)
+        .map((value) => [value.kind, value.from_seq])
+        .sort(),
+    ).toEqual([
+      ['gap', 5],
+      ['uncertain', 6],
     ]);
     expect(await ledger(foreign.orgId)).toEqual(foreignBefore);
   },
@@ -252,60 +281,119 @@ export const entries: readonly MutationEntry[] = [
     cases: [read, historyRead, save, guard, hashes, carry],
     predicates: [
       {
-        name: 'history read organization',
-        locate: /(?<=FROM audit_ledger WHERE )org_id = \?(?= AND superseded_by)/,
+        name: 'chain read organization',
+        locate: /(?<=FROM audit_chain WHERE )org_id = \?/,
         neutral: '(? IS NOT NULL)',
         copies: 1,
         caseName: read.name,
       },
       {
-        name: 'history chain correlation',
-        locate: /c\.org_id = audit_ledger\.org_id/,
-        neutral: '1',
-        copies: 1,
-        caseName: historyRead.name,
-      },
-      {
-        name: 'latest confirmation read organization',
-        locate: /latest\.org_id = c\.org_id/,
-        neutral: '1',
-        copies: 1,
-        caseName: historyRead.name,
-      },
-      {
-        name: 'latest confirmation CAS organization',
-        locate: /latest\.org_id = c\.org_id/,
-        neutral: '1',
-        copies: 1,
-        caseName: save.name,
-      },
-      {
-        name: 'chain reset read organization',
-        locate: /reset\.org_id = c\.org_id/,
-        neutral: '1',
-        copies: 1,
-        caseName: historyRead.name,
-      },
-      {
-        name: 'chain reset CAS organization',
-        locate: /reset\.org_id = c\.org_id/,
-        neutral: '1',
-        copies: 1,
-        caseName: save.name,
-      },
-      {
-        name: 'carried gap organization',
-        locate: /g\.org_id = \?/,
+        name: 'sink read organization',
+        locate: /(?<=FROM audit_sink WHERE )org_id = \?(?= ORDER BY)/,
         neutral: '(? IS NOT NULL)',
         copies: 1,
+        caseName: read.name,
+      },
+      {
+        name: 'history chain organization (read)',
+        locate: /history_source\.org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        copies: 1,
+        caseName: historyRead.name,
+      },
+      {
+        name: 'history chain organization (CAS)',
+        locate: /history_source\.org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        copies: 1,
+        caseName: save.name,
+      },
+      {
+        name: 'history gap organization (read)',
+        locate: /gap\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+      },
+      {
+        name: 'history gap organization (CAS)',
+        locate: /gap\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: save.name,
+      },
+      {
+        name: 'history chain reset organization (read)',
+        locate: /reset\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+      },
+      {
+        name: 'history chain reset organization (CAS)',
+        locate: /reset\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: save.name,
+      },
+      {
+        name: 'history newer reset organization (read)',
+        locate: /newer\.org_id = reset\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+      },
+      {
+        name: 'history newer reset organization (CAS)',
+        locate: /newer\.org_id = reset\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: save.name,
+      },
+      {
+        name: 'history latest confirmation organization (read)',
+        locate: /latest\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+      },
+      {
+        name: 'history latest confirmation organization (CAS)',
+        locate: /latest\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: save.name,
+      },
+      {
+        name: 'carry chain organization',
+        locate: /carry_chain\.org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        copies: 3,
         caseName: carry.name,
       },
       {
-        name: 'history CAS organization',
-        locate: /(?<=FROM audit_ledger WHERE )org_id = c\.org_id/,
+        name: 'carry row organization',
+        locate: /carried\.org_id = carry_chain\.org_id/,
         neutral: '1',
+        copies: 3,
+        caseName: carry.name,
+      },
+      {
+        name: 'carry resolution organization',
+        locate: /resolution\.org_id = carried\.org_id/,
+        neutral: '1',
+        copies: 3,
+        caseName: carry.name,
+        waivedCopies: {
+          2: 'Without the predicate the carried set can only shrink; the guard count (copy 1) catches a shrink, while its membership check only looks for carried rows missing from the mapping.',
+        },
+      },
+      {
+        name: 'carry source organization',
+        locate: /(?<![a-z_])source\.org_id = \?/,
+        neutral: '(? IS NOT NULL)',
         copies: 1,
-        caseName: save.name,
+        caseName: carry.name,
       },
       {
         name: 'journal read organization',
@@ -320,20 +408,6 @@ export const entries: readonly MutationEntry[] = [
         neutral: '(? IS NOT NULL)',
         copies: 1,
         caseName: hashes.name,
-      },
-      {
-        name: 'chain read organization',
-        locate: /(?<=FROM audit_chain WHERE )org_id = \?/,
-        neutral: '(? IS NOT NULL)',
-        copies: 1,
-        caseName: read.name,
-      },
-      {
-        name: 'sink read organization',
-        locate: /(?<=FROM audit_sink WHERE )org_id = \?(?= ORDER BY)/,
-        neutral: '(? IS NOT NULL)',
-        copies: 1,
-        caseName: read.name,
       },
       {
         name: 'chain CAS organization',

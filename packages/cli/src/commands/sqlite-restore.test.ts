@@ -5,8 +5,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { createAuditLedgerRepository } from '@package-broker/db-sqlite/repositories/audit-ledger';
+import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { DbError, type DbErrorKind } from '@package-broker/core/db/errors';
-import { orgContext } from '@package-broker/core/db/port';
+import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
 import { openBetterSqliteExecutor } from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import * as sqliteDriver from '@package-broker/runtime-node/db/better-sqlite3-executor';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -187,6 +188,71 @@ it('carries recorded seq gaps of the retained window into the bumped epoch', asy
     ]);
   } finally {
     await reopened.close();
+  }
+});
+
+it('never re-allocates a gap above a rolled-back head after an epoch bump', async () => {
+  expect(await runRestoreSqlite({ file, snapshot })).toBe(0);
+  const ctx = orgContext(orgId);
+  const pending = (executor: SqlExecutor, count: number) =>
+    executor.batch(
+      Array.from({ length: count }, () => ({
+        sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+        VALUES (?, ?, ?, 'system', 'org.update', 'organization')`,
+        params: [ulid(), orgId, now],
+      })),
+    );
+  const seqs = async (executor: SqlExecutor) =>
+    (
+      await executor.all<{ seq: number }>({
+        sql: 'SELECT seq FROM audit_event WHERE org_id = ? ORDER BY seq',
+        params: [orgId],
+      })
+    ).map((row) => row.seq);
+  let opened = openBetterSqliteExecutor(file);
+  try {
+    const { executor } = opened;
+    await executor.batch([
+      { sql: 'UPDATE audit_chain SET restore_pending = 0 WHERE org_id = ?', params: [orgId] },
+    ]);
+    await createAuditSealRepository(executor).seal(ctx);
+    await pending(executor, 2);
+    await createAuditSealRepository(executor).seal(ctx);
+    const sealed = await seqs(executor);
+    expect(sealed).toHaveLength(3);
+    const [two] = await executor.all<{ hash: string }>({
+      sql: 'SELECT hash FROM audit_event WHERE org_id = ? AND seq = 2',
+      params: [orgId],
+    });
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq = 3', params: [orgId] },
+    ]);
+    await createAuditSealRepository(executor).seal(ctx);
+    await executor.batch([
+      {
+        sql: 'UPDATE audit_chain SET head_seq = 2, head_hash = ? WHERE org_id = ?',
+        params: [two!.hash, orgId],
+      },
+    ]);
+  } finally {
+    await opened.close();
+  }
+  expect(await run(['audit', 'epoch', 'bump', '--sqlite', file])).toBe(0);
+  opened = openBetterSqliteExecutor(file);
+  try {
+    const { executor } = opened;
+    await executor.batch([
+      { sql: 'UPDATE audit_chain SET restore_pending = 0 WHERE org_id = ?', params: [orgId] },
+    ]);
+    await pending(executor, 1);
+    expect(await createAuditSealRepository(executor).seal(ctx)).toMatchObject({
+      outcome: 'sealed',
+    });
+    const after = await seqs(executor);
+    expect(after.slice(0, 3)).toEqual([1, 2, 4]);
+    expect(after).not.toContain(3);
+  } finally {
+    await opened.close();
   }
 });
 

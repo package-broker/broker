@@ -57,8 +57,6 @@ export interface AuditForkChange {
   readonly boundaryReason: string | null;
   readonly sinks: readonly AuditExportState[];
   readonly ledger: readonly AuditLedgerEntry[];
-  /** Recorded seq_gap rows copied into the new epoch under fresh ids, with the epoch bump. */
-  readonly carriedGaps?: readonly { readonly sourceId: string; readonly id: string }[];
   readonly event: AuditEvent | null;
   readonly now: string;
 }
@@ -71,8 +69,9 @@ export interface AuditForkPort {
   /** Atomically CAS every snapshot field and the complete sink set, including each sink's
    * bodyVersion, against expected, and require generation >= every stored sink generation.
    * Recheck all observed journal hashes in that batch. Apply change, increment bodyVersion
-   * of every rewritten sink, copy carriedGaps, clear verification, append ledger via the
-   * ledger repository, and stage event together or do nothing.
+   * of every rewritten sink, clear verification, append ledger via the ledger repository,
+   * and stage event together or do nothing. When change.epoch differs from expected.epoch,
+   * carry the governing ledger rows into the new epoch in the same batch (G19b carry rule).
    * Preserve head, boundary position, incarnation, counters and mode generation.
    * Return false on contention. No delivery may start before this succeeds. */
   save(
@@ -149,6 +148,102 @@ function ledger(
     actorId: actor.id,
     createdAt: now,
   };
+}
+
+/**
+ * Ledger dispositions for frozen delivery state that confirmation discards, in the frozen
+ * batch's own chain and epoch: a held partial outcome, and frozen or tail ranges above the
+ * head that can no longer be delivered again.
+ */
+function discardedDispositions(
+  snapshot: AuditForkSnapshot,
+  sink: AuditExportState,
+  repr: Record<string, unknown>,
+  now: string,
+): AuditLedgerEntry[] {
+  const identity = (batch: unknown) => {
+    const value = batch as { chainId?: unknown; epoch?: unknown; records?: unknown } | null;
+    if (
+      typeof value?.chainId !== 'string' ||
+      !Number.isSafeInteger(value.epoch) ||
+      !Array.isArray(value.records)
+    )
+      throw new Error('Audit sink representation malformed');
+    return { chainId: value.chainId, epoch: value.epoch as number, records: value.records };
+  };
+  const entry = (
+    batch: { chainId: string; epoch: number },
+    kind: 'uncertain' | 'skipped',
+    fromSeq: number,
+    toSeq: number,
+    count: number,
+    reasonCode: string,
+  ): AuditLedgerEntry => ({
+    id: ulid(),
+    kind,
+    chainId: batch.chainId,
+    epoch: batch.epoch,
+    fromSeq,
+    toSeq,
+    count,
+    sinkId: sink.id,
+    reasonCode,
+    policy: snapshot.policy,
+    modeGeneration: snapshot.modeGeneration,
+    actorType: 'system',
+    actorId: null,
+    createdAt: now,
+  });
+  const result: AuditLedgerEntry[] = [];
+  const head = snapshot.headSeq;
+  if (
+    repr.purpose === 'events' &&
+    sink.inflightBody !== null &&
+    sink.inflightFrom !== null &&
+    sink.inflightTo !== null
+  ) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(sink.inflightBody);
+    } catch {
+      throw new Error('Audit sink representation malformed');
+    }
+    const batch = identity(parsed);
+    const from = sink.inflightFrom;
+    const to = sink.inflightTo;
+    const held = repr.uncertainOutcome as { rejectedCount?: unknown } | undefined;
+    if (held !== undefined) {
+      const rejected = held?.rejectedCount;
+      const count =
+        Number.isSafeInteger(rejected) &&
+        (rejected as number) >= 1 &&
+        (rejected as number) <= batch.records.length
+          ? (rejected as number)
+          : to - from + 1;
+      result.push(entry(batch, 'uncertain', from, to, count, 'partial_rejected'));
+    } else if (to > head) {
+      const lost = Math.max(from, head + 1);
+      result.push(entry(batch, 'uncertain', lost, to, to - lost + 1, 'fork_discarded'));
+    }
+  }
+  if (repr.rejectionTail !== undefined) {
+    if (!Array.isArray(repr.rejectionTail)) throw new Error('Audit sink representation malformed');
+    for (const tail of repr.rejectionTail) {
+      const batch = identity(tail);
+      const first = batch.records.find(
+        (record): record is { seq: number } =>
+          record !== null && typeof record === 'object' && Number.isSafeInteger(record.seq),
+      );
+      const through = (tail as { throughSeq?: unknown }).throughSeq;
+      if (first === undefined || !Number.isSafeInteger(through))
+        throw new Error('Audit sink representation malformed');
+      const to = through as number;
+      if (to <= head) continue;
+      const lost = Math.max(first.seq, head + 1);
+      result.push(entry(batch, 'skipped', lost, to, to - lost + 1, 'fork_discarded'));
+    }
+  }
+  return result;
 }
 
 function hashReader(port: AuditForkPort, org: OrgContext, snapshot: AuditForkSnapshot) {
@@ -344,17 +439,6 @@ async function detectOnce(
           : sink,
       ),
       ledger: snapshot.restorePending ? [] : [ledger(snapshot, epoch, 'epoch_bump', reason, now)],
-      carriedGaps: snapshot.restorePending
-        ? []
-        : (snapshot.history ?? [])
-            .filter(
-              (row) =>
-                row.kind === 'gap' &&
-                row.reasonCode === 'seq_gap' &&
-                row.chainId === snapshot.chainId &&
-                row.epoch === snapshot.epoch,
-            )
-            .map((row) => ({ sourceId: row.id, id: ulid() })),
       event: snapshot.restorePending ? null : control(org, epoch, 'epoch_bump', now),
       now,
     },
@@ -426,6 +510,8 @@ export async function confirmAuditRestore(
       lastCommonSeq: from - 1,
       lastCommonHash: hash,
     });
+    const now = options.now.toISOString();
+    const dispositions: AuditLedgerEntry[] = [];
     const sinks = await Promise.all(
       snapshot.sinks.map(async (sink) => {
         if (sink.state === 'retired') return sink;
@@ -451,6 +537,7 @@ export async function confirmAuditRestore(
         delete repr.registryMarkerBody;
         delete repr.registryMarkerOriginalAttempt;
         delete repr.registryMarkerOriginalErrorCode;
+        dispositions.push(...discardedDispositions(snapshot, sink, repr, now));
         delete repr.rejectionTail;
         delete repr.uncertainOutcome;
         const coverage = auditDurableCoverage(sink);
@@ -489,7 +576,6 @@ export async function confirmAuditRestore(
         };
       }),
     );
-    const now = options.now.toISOString();
     return (await port.save(
       org,
       snapshot,
@@ -500,6 +586,7 @@ export async function confirmAuditRestore(
         boundaryReason: snapshot.boundaryReason,
         sinks,
         ledger: [
+          ...dispositions,
           ledger(
             snapshot,
             snapshot.epoch,
@@ -510,7 +597,6 @@ export async function confirmAuditRestore(
             options.actor,
           ),
         ],
-        carriedGaps: [],
         event: control(org, snapshot.epoch, 'confirm_restore', now, from, options.actor),
         now,
       },

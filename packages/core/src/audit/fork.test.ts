@@ -689,56 +689,82 @@ describe('restore replay invariants', () => {
     expect(await detectAuditFork(f.port, org, f.options)).toBe(epoch === 2 ? 'clear' : 'blocked');
   });
 
-  it('carries current-epoch seq gaps with the epoch bump only', async () => {
-    const f = fixture(
-      snapshot({
-        sinks: [sink({ progressSeq: 6 })],
-        history: [
+  it.each([
+    [
+      'held outcome',
+      { uncertainOutcome: { rejectedCount: 2 } },
+      5,
+      [['uncertain', 4, 6, 2, 'partial_rejected']],
+    ],
+    [
+      'held invalid count',
+      { uncertainOutcome: { rejectedCount: null } },
+      5,
+      [['uncertain', 4, 6, 3, 'partial_rejected']],
+    ],
+    ['frozen batch above the head', {}, 4, [['uncertain', 5, 6, 2, 'fork_discarded']]],
+    ['frozen batch at or below the head', {}, 6, []],
+    [
+      'rejection tail above the head',
+      {
+        rejectionTail: [
           {
-            id: gapId,
-            kind: 'gap',
-            chainId,
-            epoch: 2,
-            fromSeq: 3,
-            toSeq: 3,
-            reasonCode: 'seq_gap',
-          },
-          {
-            id: '01JZZZZZZZZZZZZZZZZZZZZZZH',
-            kind: 'gap',
             chainId,
             epoch: 1,
-            fromSeq: 4,
-            toSeq: 4,
-            reasonCode: 'seq_gap',
+            records: [
+              { kind: 'event', seq: 7 },
+              { kind: 'event', seq: 8 },
+            ],
+            throughSeq: 8,
           },
         ],
-      }),
-    );
-    expect(await detectAuditFork(f.port, org, f.options)).toBe('blocked');
-    expect(f.change()).toMatchObject({
-      epoch: 3,
-      carriedGaps: [{ sourceId: gapId, id: expect.stringMatching(/^[0-9A-Z]{26}$/) }],
-    });
-    const pending = fixture(
-      snapshot({
-        restorePending: true,
-        history: [
-          {
-            id: gapId,
-            kind: 'gap',
-            chainId,
-            epoch: 2,
-            fromSeq: 3,
-            toSeq: 3,
-            reasonCode: 'seq_gap',
-          },
-        ],
-      }),
-    );
-    expect(await detectAuditFork(pending.port, org, pending.options)).toBe('blocked');
-    expect(pending.change().carriedGaps).toEqual([]);
-  });
+      },
+      7,
+      [['skipped', 8, 8, 1, 'fork_discarded']],
+    ],
+  ] as const)(
+    'records discarded frozen state on confirmation: %s',
+    async (_name, extra, headSeq, expected) => {
+      const f = fixture(
+        snapshot({
+          restorePending: true,
+          headSeq,
+          sinks: [
+            sink({
+              progressSeq: 3,
+              custodySeq: 3,
+              inflightFrom: 4,
+              inflightTo: 6,
+              inflightBody: JSON.stringify({
+                chainId,
+                epoch: 1,
+                records: [{ seq: 4 }, { seq: 5 }, { seq: 6 }],
+                throughSeq: 6,
+              }),
+              inflightRepr: JSON.stringify({ custodyFromSeq: 1, purpose: 'events', ...extra }),
+            }),
+          ],
+        }),
+      );
+      expect(
+        await confirmAuditRestore(f.port, org, {
+          alert: () => {},
+          generation: 3,
+          now,
+          fromSeq: 4,
+          actor: { type: 'user', id: org.orgId },
+        }),
+      ).toBe('confirmed');
+      expect(
+        f
+          .change()
+          .ledger.filter((row) => row.kind !== 'restore_confirmed')
+          .map((row) => [row.kind, row.fromSeq, row.toSeq, row.count, row.reasonCode]),
+      ).toEqual(expected);
+      for (const row of f.change().ledger.filter((value) => value.kind !== 'restore_confirmed'))
+        expect(row).toMatchObject({ chainId, epoch: 1, sinkId: 'archive' });
+    },
+  );
 
   it('alerts the observed fork when the save is refused with an error', async () => {
     const f = fixture(snapshot({ sinks: [sink({ progressSeq: 6 })] }));
@@ -759,7 +785,7 @@ describe('restore replay invariants', () => {
               custodyFromSeq: 1,
               purpose: 'events',
               uncertainOutcome: { rejectedCount: 1 },
-              rejectionTail: [{ chainId, epoch: 1 }],
+              rejectionTail: [{ chainId, epoch: 1, records: [{ seq: 5 }], throughSeq: 5 }],
               durableCustodySeq: 5,
               durableAckRanges: [
                 { from: 1, to: 2 },

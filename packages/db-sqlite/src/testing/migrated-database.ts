@@ -169,3 +169,10 @@ export async function auditExportRepositorySuite(
   const { auditExportRepositorySuite: run } = await import('./audit-export-suite.js');
   run(open);
 }
+
+export async function auditNoneRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditNoneRepositorySuite: run } = await import('./audit-none-suite.js');
+  run(open);
+}

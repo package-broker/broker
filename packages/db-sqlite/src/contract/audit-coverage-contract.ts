@@ -38,6 +38,16 @@ interface CoverageEntry {
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
+    actions: ['audit.mode_change'],
+    callers: ['core/src/audit/none.ts'],
+    repository: 'audit-none',
+    batchGuard:
+      'executor.batch; complete snapshot CAS, restore and required-policy refusal, highest sink generation fence',
+    cardinality:
+      '1 per accepted transition to none; refused, stale and unchanged transitions stage zero',
+    stagingCalls: 1,
+  },
+  {
     actions: ['session.login_failed', 'access.denied'],
     callers: ['core/src/audit/failure-events.ts'],
     repository: 'audit-failure',
@@ -377,7 +387,7 @@ export const AUDIT_INJECTED_STATEMENTS = [
   },
 ] as const;
 
-const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set(['audit.export', 'audit.mode_change']);
+const LATER_PACKET_ACTIONS: ReadonlySet<string> = new Set(['audit.export']);
 
 export const AUDIT_UNCAPTURED: readonly {
   readonly action: AuditAction;

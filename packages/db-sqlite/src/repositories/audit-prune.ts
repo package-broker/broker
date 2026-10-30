@@ -192,7 +192,9 @@ export function createAuditPruneRepository(
     const statements: Statement[] = [
       {
         sql: `UPDATE audit_chain AS c SET boundary_seq = ?, boundary_prev_hash = ?, boundary_reason = 'prune',
-          journal_rows = journal_rows - ?, journal_bytes = max(0, journal_bytes - ?)
+          journal_rows = journal_rows - ?, journal_bytes = max(0, journal_bytes - ?),
+          mode = CASE WHEN ? >= c.cutover_seq THEN coalesce(c.pending_mode, c.mode) ELSE c.mode END,
+          pending_mode = CASE WHEN ? >= c.cutover_seq THEN NULL ELSE c.pending_mode END
           WHERE c.org_id = ? AND ${chainFields.map((key) => `c.${key} IS ?`).join(' AND ')}
           AND ${guard.sql}
           AND c.journal_rows >= ? AND ${integrity.sql}
@@ -203,6 +205,8 @@ export function createAuditPruneRepository(
           last.hash,
           selected.length,
           bytes,
+          last.seq,
+          last.seq,
           ctx.orgId,
           chain.chain_id,
           chain.epoch,

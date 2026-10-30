@@ -10,7 +10,10 @@ import type { DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import type { PluginDefinition } from '@package-broker/core/plugin';
-import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
+import {
+  bootstrapAdmin,
+  bootstrapSsoAdmin,
+} from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { rebindProvider } from '@package-broker/db-sqlite/repositories/provider-binding';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
@@ -216,7 +219,7 @@ interface Fixture {
   readonly token: string;
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(localAdmin = true): Promise<Fixture> {
   const binding = bindings[next];
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
@@ -234,16 +237,17 @@ async function fixture(): Promise<Fixture> {
   const token = randomBytes(32).toString('base64url');
   const roleIds = {} as Record<DefaultRoleKey, string>;
   for (const { key } of DEFAULT_ROLES) roleIds[key] = ulid();
-  await bootstrapAdmin(executor, orgContext(orgId), {
-    email: ADMIN_EMAIL,
-    userId: ulid(),
-    setupHash: createHash('sha256').update(token).digest('hex'),
-    setupExpiresAt: new Date(now.getTime() + 24 * 3_600_000).toISOString(),
-    grantId: ulid(),
-    roleIds,
-    opId: ulid(),
-    now: now.toISOString(),
-  });
+  if (localAdmin)
+    await bootstrapAdmin(executor, orgContext(orgId), {
+      email: ADMIN_EMAIL,
+      userId: ulid(),
+      setupHash: createHash('sha256').update(token).digest('hex'),
+      setupExpiresAt: new Date(now.getTime() + 24 * 3_600_000).toISOString(),
+      grantId: ulid(),
+      roleIds,
+      opId: ulid(),
+      now: now.toISOString(),
+    });
   return { db, orgId, token };
 }
 
@@ -341,7 +345,7 @@ async function ssoLogin(
   h: Harness,
   environment: Env,
   mock: MockIssuer,
-  who: { subject: string; email: string; provider?: string },
+  who: { subject: string; email: string; provider?: string; groups?: readonly string[] },
 ): Promise<Attempt> {
   const provider = who.provider ?? 'corp';
   const before = h.log.length;
@@ -354,14 +358,15 @@ async function ssoLogin(
   }
   const { location } = (await start.json()) as { location: string };
   const query = new URL(location).searchParams;
-  mock.idToken = await signIdToken(
-    claims(mock, {
+  mock.idToken = await signIdToken({
+    ...claims(mock, {
       nonce: query.get('nonce') as string,
       audience: query.get('client_id') as string,
       subject: who.subject,
       email: who.email,
     }),
-  );
+    ...(who.groups === undefined ? {} : { groups: who.groups }),
+  });
   const cookie = cookies(start);
   const callback = await h.worker.fetch(
     get(`/_pb/auth/sso/${provider}/callback?code=the-code&state=${query.get('state') as string}`, {
@@ -394,6 +399,200 @@ const ISSUER = 'https://idp-a.example.test/dex';
 const OTHER_ISSUER = 'https://idp-b.example.test/dex';
 
 describe('runtime SSO providers on Miniflare D1', () => {
+  it.each(['email', 'group'] as const)(
+    'fresh disabled SSO %s bootstrap admits the invited administrator and a protected write',
+    async (subjectType) => {
+      const { db, orgId } = await fixture(false);
+      const executor = createD1Executor(db);
+      const roleIds = Object.fromEntries(DEFAULT_ROLES.map((role) => [role.key, ulid()])) as Record<
+        DefaultRoleKey,
+        string
+      >;
+      const email = 'admin@corp.example';
+      const common = { grantId: ulid(), roleIds, now: new Date().toISOString() };
+      await bootstrapSsoAdmin(
+        executor,
+        orgContext(orgId),
+        subjectType === 'email'
+          ? { ...common, subject: { type: 'email', value: email }, userId: ulid() }
+          : { ...common, subject: { type: 'group', provider: 'corp', value: 'broker-admins' } },
+      );
+      expect(
+        await executor.all({
+          sql: 'SELECT user_id FROM local_login WHERE org_id = ?',
+          params: [orgId],
+        }),
+      ).toEqual([]);
+      const mock = mockIssuer(ISSUER, 'broker-client', SECRET);
+      installIssuers(mock);
+      const h = harness();
+      const environment = {
+        ...env(db, [
+          oidc(
+            ISSUER,
+            {},
+            {
+              verifiedDomains: ['corp.example'],
+              emailAuthoritativeDomains: ['corp.example'],
+              autoJoin: false,
+            },
+          ),
+        ]),
+        PB_AUTH_LOCAL: 'disabled',
+      };
+      const listed = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({ local: false });
+      expect((await h.worker.fetch(get('/_pb/projects'), environment)).status).toBe(401);
+      const uninvited = await ssoLogin(h, environment, mock, {
+        email: 'uninvited@corp.example',
+        subject: 'uninvited',
+      });
+      expect(uninvited.callback?.status).toBe(401);
+      const signedIn = await ssoLogin(h, environment, mock, {
+        email,
+        subject: 'admin',
+        groups: subjectType === 'group' ? ['broker-admins'] : [],
+      });
+      expect(signedIn.callback?.status).toBe(303);
+      expect((await session(h, environment, signedIn.cookie)).status).toBe(200);
+      const csrf = /__Host-pb_csrf=([^;]+)/.exec(signedIn.cookie)?.[1];
+      expect(csrf).toBeTruthy();
+      const created = await h.worker.fetch(
+        post(
+          '/_pb/projects',
+          { name: 'SSO project', slug: 'sso-project' },
+          {
+            cookie: signedIn.cookie,
+            'x-csrf-token': csrf!,
+            'idempotency-key': ulid(),
+          },
+        ),
+        environment,
+      );
+      expect(created.status).toBe(201);
+      const projects = await h.worker.fetch(
+        get('/_pb/projects', { cookie: signedIn.cookie }),
+        environment,
+      );
+      expect(projects.status).toBe(200);
+      expect(await projects.json()).toMatchObject({
+        items: [expect.objectContaining({ slug: 'sso-project' })],
+      });
+    },
+  );
+
+  it('disabling local sign-in retains both session origins, local PATs and service tokens', async () => {
+    const { db, token } = await fixture();
+    const mock = mockIssuer(ISSUER, 'broker-client', SECRET);
+    installIssuers(mock);
+    const h = harness();
+    const enabled = env(db, [oidc(ISSUER, {}, { verifiedDomains: ['corp.example'] })]);
+    const call = (
+      environment: Env,
+      route: string,
+      body: unknown,
+      headers: Record<string, string> = {},
+    ) => h.worker.fetch(post(route, body, headers), environment);
+    const started = await call(enabled, '/_pb/auth/local/setup/start', { token });
+    expect(started.status).toBe(200);
+    const { secret } = (await started.json()) as { secret: string };
+    const totpSecret = base32Decode(secret);
+    const step = Math.floor(Date.now() / 30_000);
+    expect(
+      (
+        await call(enabled, '/_pb/auth/local/setup/finish', {
+          token,
+          password: PASSWORD,
+          code: await totpCode(totpSecret, step - 1),
+        })
+      ).status,
+    ).toBe(204);
+    const local = await call(enabled, '/_pb/auth/local/login', {
+      email: ADMIN_EMAIL,
+      password: PASSWORD,
+      code: await totpCode(totpSecret, step),
+    });
+    expect(local.status).toBe(204);
+    const cookie = cookies(local);
+    const csrf = /__Host-pb_csrf=([^;]+)/.exec(cookie)?.[1];
+    expect(csrf).toBeTruthy();
+    const headers = { cookie, 'x-csrf-token': csrf! };
+    expect(
+      (
+        await call(
+          enabled,
+          '/_pb/auth/local/reauth',
+          {
+            password: PASSWORD,
+            code: await totpCode(totpSecret, step + 1),
+          },
+          headers,
+        )
+      ).status,
+    ).toBe(204);
+    const issue = (route: string, body: unknown) =>
+      call(enabled, route, body, { ...headers, 'idempotency-key': ulid() });
+    const pat = await issue('/_pb/me/tokens', {
+      name: 'local-admin',
+      scope: 'full',
+      projectMode: 'all',
+      projectIds: [],
+    });
+    expect(pat.status).toBe(201);
+    const patBody = (await pat.json()) as { token: string };
+    const principal = await issue('/_pb/service-principals', {
+      name: 'automation',
+      permissions: ['org:read'],
+    });
+    expect(principal.status).toBe(201);
+    const { id } = (await principal.json()) as { id: string };
+    const service = await issue('/_pb/tokens', {
+      servicePrincipalId: id,
+      name: 'automation',
+      scope: 'full',
+    });
+    expect(service.status).toBe(201);
+    const serviceBody = (await service.json()) as { token: string };
+    const signedIn = await ssoLogin(h, enabled, mock, {
+      email: 'member@corp.example',
+      subject: 'member',
+    });
+    expect(signedIn.callback?.status).toBe(303);
+    const tokens = [patBody.token, serviceBody.token];
+    const disabled = { ...enabled, PB_AUTH_LOCAL: 'disabled' };
+    for (const environment of [enabled, disabled]) {
+      const providers = await h.worker.fetch(get('/_pb/auth/providers'), environment);
+      expect(providers.status).toBe(200);
+      expect(await providers.json()).toMatchObject({ local: environment === enabled });
+      for (const retained of [cookie, signedIn.cookie]) {
+        expect((await session(h, environment, retained)).status).toBe(200);
+        expect(
+          (await h.worker.fetch(get('/_pb/projects', { cookie: retained }), environment)).status,
+        ).toBe(200);
+      }
+      for (const bearer of tokens) {
+        const response = await h.worker.fetch(
+          get('/_pb/organization', { authorization: `Bearer ${bearer}` }),
+          environment,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ slug: 'acme' });
+      }
+    }
+    const refused = await call(
+      disabled,
+      '/_pb/auth/local/reauth',
+      { password: PASSWORD, code: await totpCode(totpSecret, step + 2) },
+      headers,
+    );
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+    const loginRefused = await call(disabled, '/_pb/auth/local/login', {}, headers);
+    expect(loginRefused.status).toBe(403);
+    expect(await loginRefused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+  });
+
   it('keeps local policy immutable per env object and reuses the application for an equal binding set', async () => {
     const { db } = await fixture();
     installIssuers(mockIssuer(ISSUER));

@@ -15,7 +15,10 @@ import {
   loadMigrationSource,
   type MigrationSource,
 } from '@package-broker/db-sqlite/migrations/source';
-import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
+import {
+  bootstrapAdmin,
+  bootstrapSsoAdmin,
+} from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { rebindProvider } from '@package-broker/db-sqlite/repositories/provider-binding';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
@@ -121,6 +124,7 @@ class MockIdp {
     readonly nonce: string;
     readonly subject: string;
     readonly email: string;
+    readonly groups?: readonly string[];
   }): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     this.idToken = await signToken({
@@ -133,6 +137,7 @@ class MockIdp {
       nonce: claims.nonce,
       email: claims.email,
       email_verified: true,
+      ...(claims.groups === undefined ? {} : { groups: claims.groups }),
       name: 'Ada Lovelace',
     });
   }
@@ -191,7 +196,11 @@ interface RuntimeDefinition {
   readonly displayName?: string;
   readonly issuer: string;
   readonly clientId: string;
-  readonly policy: { readonly verifiedDomains: readonly string[]; readonly autoJoin: boolean };
+  readonly policy: {
+    readonly verifiedDomains: readonly string[];
+    readonly autoJoin: boolean;
+    readonly emailAuthoritativeDomains?: readonly string[];
+  };
 }
 
 function definition(issuer: string, overrides: Partial<RuntimeDefinition> = {}): RuntimeDefinition {
@@ -364,7 +373,13 @@ describe('runtime SSO providers on the node runtime', () => {
   async function login(
     kernel: Kernel,
     mock: MockIdp,
-    options: { id?: string; email: string; subject: string; clientId?: string },
+    options: {
+      id?: string;
+      email: string;
+      subject: string;
+      clientId?: string;
+      groups?: readonly string[];
+    },
   ): Promise<Response> {
     const id = options.id ?? 'corp';
     const started = await startLogin(kernel, id);
@@ -374,6 +389,7 @@ describe('runtime SSO providers on the node runtime', () => {
       nonce: started.nonce,
       subject: options.subject,
       email: options.email,
+      ...(options.groups === undefined ? {} : { groups: options.groups }),
     });
     return callback(kernel, id, started);
   }
@@ -435,6 +451,178 @@ describe('runtime SSO providers on the node runtime', () => {
       return token;
     });
   }
+
+  it.each(['email', 'group'] as const)(
+    'a fresh disabled deployment bootstraps an SSO %s administrator and permits an admin action',
+    async (subjectType) => {
+      const email = 'admin@corp.example';
+      const { kernel } = await boot(
+        environment(
+          [
+            definition(issuerA, {
+              policy: {
+                verifiedDomains: ['corp.example'],
+                emailAuthoritativeDomains: ['corp.example'],
+                autoJoin: false,
+              },
+            }),
+          ],
+          { PB_AUTH_LOCAL: 'disabled' },
+        ),
+      );
+      await database(async (executor) => {
+        const org = await createOrganizationBootstrap(executor).findSingleton();
+        if (org === null) throw new Error('organization missing');
+        const roleIds = Object.fromEntries(
+          DEFAULT_ROLES.map((role) => [role.key, ulid()]),
+        ) as Record<DefaultRoleKey, string>;
+        const common = { grantId: ulid(), roleIds, now: new Date().toISOString() };
+        await bootstrapSsoAdmin(
+          executor,
+          orgContext(org.id),
+          subjectType === 'email'
+            ? { ...common, subject: { type: 'email', value: email }, userId: ulid() }
+            : { ...common, subject: { type: 'group', provider: 'corp', value: 'broker-admins' } },
+        );
+        expect(
+          await executor.all({
+            sql: 'SELECT user_id FROM local_login WHERE org_id = ?',
+            params: [org.id],
+          }),
+        ).toEqual([]);
+      });
+      expect((await providerList(kernel)).local).toBe(false);
+      expect((await call(kernel, 'GET', '/_pb/projects')).status).toBe(401);
+      const uninvited = await login(kernel, idpA, {
+        email: 'uninvited@corp.example',
+        subject: 'uninvited',
+        groups: [],
+      });
+      expect(uninvited.status).toBe(401);
+      const response = await login(kernel, idpA, {
+        email,
+        subject: 'admin',
+        groups: subjectType === 'group' ? ['broker-admins'] : [],
+      });
+      await expectSession(kernel, response, email);
+      const cookie = cookieHeader([response]);
+      const csrf = /__Host-pb_csrf=([^;]+)/.exec(cookie)?.[1];
+      expect(csrf).toBeTruthy();
+      const created = await call(kernel, 'POST', '/_pb/projects', {
+        cookie,
+        headers: { 'x-csrf-token': csrf!, 'idempotency-key': ulid() },
+        body: { name: 'SSO project', slug: 'sso-project' },
+      });
+      expect(created.status).toBe(201);
+      const listed = await call(kernel, 'GET', '/_pb/projects', { cookie });
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({
+        items: [expect.objectContaining({ slug: 'sso-project' })],
+      });
+    },
+  );
+
+  it('disabling local sign-in retains local and SSO sessions, local PATs and service tokens', async () => {
+    const values = environment([
+      definition(issuerA, { policy: { verifiedDomains: ['corp.example'], autoJoin: true } }),
+    ]);
+    const first = await boot(values);
+    const token = await seedAdmin();
+    const started = await call(first.kernel, 'POST', '/_pb/auth/local/setup/start', {
+      body: { token },
+    });
+    expect(started.status).toBe(200);
+    const { secret } = (await started.json()) as { secret: string };
+    const totpSecret = base32Decode(secret);
+    const step = Math.floor(Date.now() / 30_000);
+    const finished = await call(first.kernel, 'POST', '/_pb/auth/local/setup/finish', {
+      body: { token, password: PASSWORD, code: await totpCode(totpSecret, step - 1) },
+    });
+    expect(finished.status).toBe(204);
+    const local = await call(first.kernel, 'POST', '/_pb/auth/local/login', {
+      body: { email: ADMIN_EMAIL, password: PASSWORD, code: await totpCode(totpSecret, step) },
+    });
+    expect(local.status).toBe(204);
+    const cookie = cookieHeader([local]);
+    const csrf = /__Host-pb_csrf=([^;]+)/.exec(cookie)?.[1];
+    expect(csrf).toBeTruthy();
+    const reauth = await call(first.kernel, 'POST', '/_pb/auth/local/reauth', {
+      cookie,
+      headers: { 'x-csrf-token': csrf! },
+      body: { password: PASSWORD, code: await totpCode(totpSecret, step + 1) },
+    });
+    expect(reauth.status).toBe(204);
+    const issue = (route: string, body: unknown) =>
+      call(first.kernel, 'POST', route, {
+        cookie,
+        headers: { 'x-csrf-token': csrf!, 'idempotency-key': ulid() },
+        body,
+      });
+    const pat = await issue('/_pb/me/tokens', {
+      name: 'local-admin',
+      scope: 'full',
+      projectMode: 'all',
+      projectIds: [],
+    });
+    expect(pat.status).toBe(201);
+    const patBody = (await pat.json()) as { token: string };
+    const principal = await issue('/_pb/service-principals', {
+      name: 'automation',
+      permissions: ['org:read'],
+    });
+    expect(principal.status).toBe(201);
+    const { id } = (await principal.json()) as { id: string };
+    const service = await issue('/_pb/tokens', {
+      servicePrincipalId: id,
+      name: 'automation',
+      scope: 'full',
+    });
+    expect(service.status).toBe(201);
+    const serviceBody = (await service.json()) as { token: string };
+    const sso = await login(first.kernel, idpA, {
+      email: 'member@corp.example',
+      subject: 'member',
+    });
+    await expectSession(first.kernel, sso, 'member@corp.example');
+    const ssoCookie = cookieHeader([sso]);
+    const tokens = [patBody.token, serviceBody.token];
+    for (const bearer of tokens) {
+      const response = await call(first.kernel, 'GET', '/_pb/organization', {
+        headers: { authorization: `Bearer ${bearer}` },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ slug: 'acme' });
+    }
+    await stop(first.broker);
+    const second = await boot({ ...values, PB_AUTH_LOCAL: 'disabled' });
+    expect((await providerList(second.kernel)).local).toBe(false);
+    for (const retained of [cookie, ssoCookie]) {
+      expect((await call(second.kernel, 'GET', '/_pb/session', { cookie: retained })).status).toBe(
+        200,
+      );
+      expect((await call(second.kernel, 'GET', '/_pb/projects', { cookie: retained })).status).toBe(
+        200,
+      );
+    }
+    for (const bearer of tokens) {
+      const response = await call(second.kernel, 'GET', '/_pb/organization', {
+        headers: { authorization: `Bearer ${bearer}` },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ slug: 'acme' });
+    }
+    expect((await call(second.kernel, 'GET', '/_pb/organization')).status).toBe(401);
+    const refused = await call(second.kernel, 'POST', '/_pb/auth/local/reauth', {
+      cookie,
+      headers: { 'x-csrf-token': csrf! },
+      body: { password: PASSWORD, code: await totpCode(totpSecret, step + 2) },
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+    const loginRefused = await call(second.kernel, 'POST', '/_pb/auth/local/login', { body: {} });
+    expect(loginRefused.status).toBe(403);
+    expect(await loginRefused.json()).toMatchObject({ error: { code: 'local_auth_disabled' } });
+  });
 
   it.each(['runtime', 'compiled'] as const)(
     'disabled local auth accepts a constructed %s provider and keeps SSO login working',

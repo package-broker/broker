@@ -1081,3 +1081,50 @@ describe('reauthenticateWithIdentity', () => {
     });
   });
 });
+
+describe('identity reauthentication failure capture', () => {
+  it.each([
+    ['session_inactive', 'expired'],
+    ['not_sso_session', 'blocked'],
+    ['not_supported', 'provider_error'],
+    ['state_mismatch', 'state_mismatch'],
+    ['identity_mismatch', 'state_mismatch'],
+    ['anchor_mismatch', 'state_mismatch'],
+    ['no_auth_time', 'provider_error'],
+    ['stale_auth_time', 'expired'],
+    ['policy', 'blocked'],
+    ['hook_denied', 'blocked'],
+    ['not_updated', 'state_mismatch'],
+  ] as const)('records %s for the resolved session account', async (refusal, reason) => {
+    const h = setup(
+      refusal === 'hook_denied' ? { hooks: [resolving('test', () => ({ deny: true }))] } : {},
+    );
+    if (refusal === 'session_inactive') h.findActiveById.mockResolvedValue(null);
+    if (refusal === 'not_updated') h.mark.mockResolvedValue(false);
+    const recordFailure = vi.fn();
+    const result = await reauthenticate(
+      { ...h.deps, recordFailure },
+      CTX,
+      sessionOf(refusal === 'not_sso_session' ? null : IDENTITY_ID),
+      providerOf({
+        ...(refusal === 'not_supported' ? { supportsReauth: false } : {}),
+        ...(refusal === 'anchor_mismatch' ? { trustAnchor: 'oidc:https://other.test' } : {}),
+      }),
+      verified({
+        ...(refusal === 'no_auth_time' ? { authTime: null } : {}),
+        ...(refusal === 'stale_auth_time' ? { authTime: iso(-900_000) } : {}),
+        ...(refusal === 'identity_mismatch' ? { subject: 'other' } : {}),
+        ...(refusal === 'policy' ? { emailVerified: false } : {}),
+      }),
+      loginStateOf(refusal === 'state_mismatch' ? { purpose: 'login' } : {}),
+      { requestId: '01JA0000000000000000000001', ip: '203.0.113.7' },
+    );
+    expect(result).toEqual({ ok: false, reason: refusal });
+    expect(recordFailure).toHaveBeenCalledExactlyOnceWith(
+      CTX,
+      expect.objectContaining({ method: 'reauth', reason, userId: USER_ID }),
+    );
+    expect(JSON.stringify(recordFailure.mock.calls)).not.toContain(EMAIL);
+    expect(JSON.stringify(recordFailure.mock.calls)).not.toContain('subject-1');
+  });
+});

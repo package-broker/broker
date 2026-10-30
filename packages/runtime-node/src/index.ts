@@ -1,3 +1,5 @@
+import { createFailureEvents } from '@package-broker/core/audit/failure-events';
+import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
@@ -43,7 +45,7 @@ import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
 import { JobError } from '@package-broker/core/platform/jobs';
 import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
 import { jobLeaseGuard } from '@package-broker/db-sqlite/repositories/job-lease-guard';
-import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
 import { createObservability, filterLogLevel } from '@package-broker/core/platform/observability';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
@@ -401,6 +403,7 @@ async function assembleAccess(
   log: KernelLog,
   tokens: TokenWiring,
   clientIp: (request: Request) => string | null,
+  failureEvents: NonNullable<Parameters<typeof createAccessServices>[0]['failureEvents']>,
 ): Promise<AccessAssembly> {
   await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
   const providers = buildIdentityProviders(registration, plugins, {
@@ -417,6 +420,7 @@ async function assembleAccess(
     ids: { ulid },
     log,
     dispatch: deferredDispatch,
+    failureEvents,
     clientIp,
     registration,
     tokens,
@@ -977,7 +981,17 @@ export function createNodeServer(
   const { auth } = options;
   const importJobs = createImportJobHolder();
   const patJobs = createPatJobHolder();
+  const failureWork = new Set<Promise<void>>();
+  const dispatchFailures = (run: () => Promise<void>): void => {
+    const work = Promise.resolve()
+      .then(run)
+      .catch(() => undefined);
+    failureWork.add(work);
+    void work.finally(() => failureWork.delete(work));
+  };
   let drainRegistry: (() => Promise<void>) | undefined;
+  const failureRecorder = createFailureEvents();
+  const failureRouteTemplates = new Set<string>();
   const ingestScope = new AsyncLocalStorage<Observability>();
   let keyringVerification: Promise<void> | undefined;
   const verify = async (): Promise<void> => {
@@ -1178,6 +1192,25 @@ export function createNodeServer(
             log,
             tokenWiring(lifetime, patJobs, options.platformServices !== undefined),
             clientIp,
+            {
+              recorder: failureRecorder,
+              dispatch: dispatchFailures,
+              binding: {
+                deploymentId,
+                staging: createAuditFailureRepository(executor),
+                now: () => systemClock.now(),
+                routeTemplates: failureRouteTemplates,
+                observability: createObservability(
+                  obsSink,
+                  { deploymentId, runtime: 'node', requestId: null, plugin: 'core' },
+                  {
+                    events: AUDIT_EVENTS,
+                    reasonCodes: KERNEL_REASON_CODES,
+                    routeTemplates: failureRouteTemplates,
+                  },
+                ),
+              },
+            },
           );
     if (access !== undefined && options.platformServices !== undefined) {
       importJobs.set({
@@ -1294,6 +1327,7 @@ export function createNodeServer(
       coreRoutes,
       ...(authorization === undefined ? {} : { authorization }),
     });
+    for (const template of kernel.routeTemplates) failureRouteTemplates.add(template);
     const services: NodeServices = Object.freeze({
       providerAnchors: access?.providerAnchors ?? NO_ANCHORS,
       dispatch: deferredDispatch,
@@ -1359,6 +1393,12 @@ export function createNodeServer(
           (ready) => ready.idle(shutdownMs),
           () => undefined,
         );
+        const failuresDrained = await settlesWithin(
+          Promise.all([...failureWork]),
+          Math.max(0, deadline - Date.now()),
+        );
+        if (!failuresDrained)
+          log({ level: 'warn', event: 'shutdown.failure_events_drain_timeout' });
         if (drainRegistry !== undefined) {
           const drained = await settlesWithin(drainRegistry(), Math.max(0, deadline - Date.now()));
           if (!drained) log({ level: 'warn', event: 'shutdown.registry_drain_timeout' });

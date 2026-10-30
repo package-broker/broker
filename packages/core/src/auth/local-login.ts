@@ -1,3 +1,8 @@
+import {
+  recordLoginFailure,
+  type LoginFailureRecorder,
+  type LoginFailureReason,
+} from './login-failure.js';
 import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import { isReauthSessionActive } from './identity-reauth.js';
 import { hashPassword, verifyDummy, verifyPassword } from './password.js';
@@ -43,6 +48,7 @@ export interface LocalLoginService {
 }
 
 export interface LocalLoginDeps {
+  readonly recordFailure?: LoginFailureRecorder;
   readonly reader: LocalLoginReader;
   readonly writer: LocalLoginSuccessWriter;
   readonly credentials: CredentialStore;
@@ -158,15 +164,23 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
     password: string,
     code: string,
     expectedUserId: string | null,
+    failure: { userId: string | null; reason: LoginFailureReason },
   ): Promise<Verified | null> {
     const nowMs = clock.now().getTime();
     const refuse = async (): Promise<null> => {
       await check(ctx, null, password, code, nowMs);
       return null;
     };
+    failure.reason = 'unknown_account';
     const normalized = normalizeEmail(email);
     if (normalized === null) return refuse();
     const found = await reader.findByEmail(ctx, normalized);
+    failure.userId = expectedUserId ?? found?.userId ?? null;
+    failure.reason =
+      found === null ? 'unknown_account' : !found.userActive ? 'suspended' : 'blocked';
+    if (expectedUserId !== null && found !== null && found.userId !== expectedUserId) {
+      failure.reason = 'state_mismatch';
+    }
     if (
       found === null ||
       !usable(found) ||
@@ -180,6 +194,15 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
       isoTimestamp(new Date(nowMs)),
       isoTimestamp(new Date(nowMs + LOCK_DURATION_MS)),
     );
+    failure.reason = !reservation.reserved
+      ? reservation.reason === 'locked'
+        ? 'blocked'
+        : 'state_mismatch'
+      : reservation.snapshot.userId !== found.userId
+        ? 'state_mismatch'
+        : !reservation.snapshot.userActive
+          ? 'suspended'
+          : 'blocked';
     if (
       !reservation.reserved ||
       reservation.snapshot.userId !== found.userId ||
@@ -189,7 +212,10 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
     }
     const { snapshot } = reservation;
     const verdict = await check(ctx, snapshot, password, code, nowMs);
-    if (!verdict.ok) return null;
+    if (!verdict.ok) {
+      failure.reason = 'bad_credentials';
+      return null;
+    }
     return { snapshot, step: verdict.step, needsRehash: verdict.needsRehash, nowMs };
   }
 
@@ -232,86 +258,127 @@ export function createLocalLoginService(deps: LocalLoginDeps): LocalLoginService
     return result.event;
   }
 
-  return {
-    async login(ctx, input, meta) {
-      if (input === null || typeof input !== 'object') return REFUSED;
-      if (!strings(input.email, input.password, input.code)) return REFUSED;
-      const verified = await attempt(ctx, input.email, input.password, input.code, null);
-      if (verified === null) return REFUSED;
-      const { snapshot, step, nowMs } = verified;
-      const secrets = await newSessionSecrets();
-      const expiresAt = isoTimestamp(new Date(nowMs + SESSION_ABSOLUTE_MS));
-      const sessionId = ids.ulid();
-      const succeeded = await writer.succeed(ctx, {
-        audit: sessionAudit('session.login', snapshot.userId, sessionId, nowMs, meta),
-        snapshot,
-        step,
-        rehash: null,
-        session: {
-          id: sessionId,
-          userId: snapshot.userId,
-          identityId: null,
-          secretHash: secrets.secretHash,
-          csrfHash: secrets.csrfHash,
-          expiresAt,
-          ip: meta.ip,
-          userAgent: meta.userAgent,
+  function service(failure: {
+    userId: string | null;
+    reason: LoginFailureReason;
+  }): LocalLoginService {
+    return {
+      async login(ctx, input, meta) {
+        if (input === null || typeof input !== 'object') return REFUSED;
+        if (!strings(input.email, input.password, input.code)) return REFUSED;
+        const verified = await attempt(ctx, input.email, input.password, input.code, null, failure);
+        if (verified === null) return REFUSED;
+        const { snapshot, step, nowMs } = verified;
+        const secrets = await newSessionSecrets();
+        const expiresAt = isoTimestamp(new Date(nowMs + SESSION_ABSOLUTE_MS));
+        const sessionId = ids.ulid();
+        const succeeded = await writer.succeed(ctx, {
+          audit: sessionAudit('session.login', snapshot.userId, sessionId, nowMs, meta),
+          snapshot,
+          step,
+          rehash: null,
+          session: {
+            id: sessionId,
+            userId: snapshot.userId,
+            identityId: null,
+            secretHash: secrets.secretHash,
+            csrfHash: secrets.csrfHash,
+            expiresAt,
+            ip: meta.ip,
+            userAgent: meta.userAgent,
+            now: isoTimestamp(new Date(nowMs)),
+          },
+          previousSecretHash: meta.previousSecretHash,
+          reauthSessionId: null,
           now: isoTimestamp(new Date(nowMs)),
-        },
-        previousSecretHash: meta.previousSecretHash,
-        reauthSessionId: null,
-        now: isoTimestamp(new Date(nowMs)),
-      });
-      if (!succeeded) return REFUSED;
-      await rehashAfterSuccess(ctx, verified, input.password);
-      return {
-        ok: true,
-        cookies: sessionCookies.setCookies(secrets, expiresAt),
-        userId: snapshot.userId,
-      };
-    },
+        });
+        if (!succeeded) {
+          failure.reason = 'state_mismatch';
+          return REFUSED;
+        }
+        await rehashAfterSuccess(ctx, verified, input.password);
+        return {
+          ok: true,
+          cookies: sessionCookies.setCookies(secrets, expiresAt),
+          userId: snapshot.userId,
+        };
+      },
 
-    async reauth(ctx, authenticated, input, meta) {
-      if (!(await isReauthSessionActive(deps, ctx, authenticated.session.id))) {
-        return { ok: false, reason: 'session_inactive' };
-      }
-      if (input === null || typeof input !== 'object') return REFUSED;
-      if (!strings(input.password, input.code)) return REFUSED;
-      const { session } = authenticated;
-      if (session.identityId !== null) {
-        await check(ctx, null, input.password, input.code, clock.now().getTime());
-        return REFUSED;
-      }
-      const verified = await attempt(
-        ctx,
-        session.user.email,
-        input.password,
-        input.code,
-        session.userId,
-      );
-      if (verified === null) return REFUSED;
-      if (!(await isReauthSessionActive(deps, ctx, session.id))) {
-        return { ok: false, reason: 'session_inactive' };
-      }
-      const succeeded = await writer.succeed(ctx, {
-        audit: sessionAudit(
-          'session.reauth',
-          verified.snapshot.userId,
-          session.id,
-          verified.nowMs,
-          meta,
-        ),
-        snapshot: verified.snapshot,
-        step: verified.step,
-        rehash: null,
-        session: null,
-        previousSecretHash: null,
-        reauthSessionId: session.id,
-        now: isoTimestamp(new Date(verified.nowMs)),
-      });
-      if (!succeeded) return REFUSED;
-      await rehashAfterSuccess(ctx, verified, input.password);
-      return { ok: true };
-    },
+      async reauth(ctx, authenticated, input, meta) {
+        if (!(await isReauthSessionActive(deps, ctx, authenticated.session.id))) {
+          failure.reason = 'expired';
+          return { ok: false, reason: 'session_inactive' };
+        }
+        if (input === null || typeof input !== 'object') return REFUSED;
+        if (!strings(input.password, input.code)) return REFUSED;
+        const { session } = authenticated;
+        if (session.identityId !== null) {
+          failure.reason = 'blocked';
+          await check(ctx, null, input.password, input.code, clock.now().getTime());
+          return REFUSED;
+        }
+        const verified = await attempt(
+          ctx,
+          session.user.email,
+          input.password,
+          input.code,
+          session.userId,
+          failure,
+        );
+        if (verified === null) return REFUSED;
+        if (!(await isReauthSessionActive(deps, ctx, session.id))) {
+          failure.reason = 'expired';
+          return { ok: false, reason: 'session_inactive' };
+        }
+        const succeeded = await writer.succeed(ctx, {
+          audit: sessionAudit(
+            'session.reauth',
+            verified.snapshot.userId,
+            session.id,
+            verified.nowMs,
+            meta,
+          ),
+          snapshot: verified.snapshot,
+          step: verified.step,
+          rehash: null,
+          session: null,
+          previousSecretHash: null,
+          reauthSessionId: session.id,
+          now: isoTimestamp(new Date(verified.nowMs)),
+        });
+        if (!succeeded) {
+          failure.reason = 'state_mismatch';
+          return REFUSED;
+        }
+        await rehashAfterSuccess(ctx, verified, input.password);
+        return { ok: true };
+      },
+    };
+  }
+  async function capture<T extends { readonly ok: boolean }>(
+    ctx: OrgContext,
+    meta: AuthCallMeta,
+    method: 'local' | 'reauth',
+    userId: string | null,
+    run: (login: LocalLoginService) => Promise<T>,
+  ): Promise<T> {
+    const failure = { userId, reason: 'bad_credentials' as LoginFailureReason };
+    try {
+      const result = await run(service(failure));
+      if (!result.ok)
+        recordLoginFailure(deps.recordFailure, ctx, meta, method, failure.reason, failure.userId);
+      return result;
+    } catch (error) {
+      recordLoginFailure(deps.recordFailure, ctx, meta, method, 'provider_error', failure.userId);
+      throw error;
+    }
+  }
+  return {
+    login: (ctx, input, meta) =>
+      capture(ctx, meta, 'local', null, (login) => login.login(ctx, input, meta)),
+    reauth: (ctx, session, input, meta) =>
+      capture(ctx, meta, 'reauth', session.session.userId, (login) =>
+        login.reauth(ctx, session, input, meta),
+      ),
   };
 }

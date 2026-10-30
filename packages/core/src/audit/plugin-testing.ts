@@ -604,7 +604,8 @@ export interface AuditSinkConformanceAdapter {
    * Extract actual snake_case record objects from the body, removing only envelopes and prefixes.
    * Never reconstruct fields from decode() or coerce their types. JSON preserves numbers/nulls;
    * OTLP omits null attributes and unwraps stringValue attributes; all other fields are strings.
-   * decode() may omit those null fields or restore them as null.
+   * OTLP includes source_ip.hashed='false' when source_ip is present.
+   * decode() removes that qualifier and may omit null fields or restore them as null.
    */
   readonly wireRecords: (body: string) => readonly Readonly<Record<string, unknown>>[];
   readonly wireFormat: 'json' | 'otlp';
@@ -728,11 +729,12 @@ export async function runAuditSinkConformance(
         if (expectedWire !== undefined) {
           const expected = expectedWire.map((record) =>
             adapter.wireFormat === 'otlp'
-              ? Object.fromEntries(
-                  Object.entries(record)
+              ? Object.fromEntries([
+                  ...Object.entries(record)
                     .filter(([, value]) => value !== null)
                     .map(([key, value]) => [key, String(value)]),
-                )
+                  ...(record['source_ip'] != null ? [['source_ip.hashed', 'false']] : []),
+                ])
               : record,
           );
           assertConformance(stable(adapter.wireRecords(request.body)) === stable(expected));

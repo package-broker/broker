@@ -104,6 +104,18 @@
     },
     {
       "type": "index",
+      "name": "audit_ledger_reset",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_reset ON audit_ledger (org_id, chain_id, created_at, id) WHERE kind = 'chain_reset' AND superseded_by IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "audit_ledger_resolves",
+      "tbl_name": "audit_ledger",
+      "sql": "CREATE INDEX audit_ledger_resolves ON audit_ledger (org_id, resolves_id) WHERE resolves_id IS NOT NULL"
+    },
+    {
+      "type": "index",
       "name": "audit_ledger_sink",
       "tbl_name": "audit_ledger",
       "sql": "CREATE INDEX audit_ledger_sink ON audit_ledger (org_id, sink_id, from_seq)"
@@ -1357,7 +1369,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 0,
-      "name": "audit_ledger_kind_chain",
+      "name": "audit_ledger_resolves",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1365,7 +1377,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 1,
-      "name": "audit_ledger_superseded",
+      "name": "audit_ledger_reset",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1373,7 +1385,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 2,
-      "name": "audit_ledger_visible",
+      "name": "audit_ledger_kind_chain",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1381,7 +1393,7 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 3,
-      "name": "audit_ledger_open_gap",
+      "name": "audit_ledger_superseded",
       "unique": 0,
       "origin": "c",
       "partial": 1
@@ -1389,6 +1401,22 @@
     {
       "tbl_name": "audit_ledger",
       "seq": 4,
+      "name": "audit_ledger_visible",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 5,
+      "name": "audit_ledger_open_gap",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "audit_ledger",
+      "seq": 6,
       "name": "audit_ledger_sink",
       "unique": 0,
       "origin": "c",
@@ -1396,7 +1424,7 @@
     },
     {
       "tbl_name": "audit_ledger",
-      "seq": 5,
+      "seq": 7,
       "name": "audit_ledger_range",
       "unique": 0,
       "origin": "c",
@@ -1404,7 +1432,7 @@
     },
     {
       "tbl_name": "audit_ledger",
-      "seq": 6,
+      "seq": 8,
       "name": "sqlite_autoindex_audit_ledger_1",
       "unique": 1,
       "origin": "pk",

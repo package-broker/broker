@@ -221,7 +221,23 @@ function discardedDispositions(
           ? (rejected as number)
           : to - from + 1;
       result.push(entry(batch, 'uncertain', from, to, count, 'partial_rejected'));
-    } else if (to > head) {
+      // Retained records are delivered again in the current epoch, so the obligation moves
+      // with them under an id a current-epoch durable ACK can resolve.
+      if (from <= head && batch.chainId === snapshot.chainId && batch.epoch !== snapshot.epoch) {
+        const kept = Math.min(to, head);
+        result.push(
+          entry(
+            snapshot,
+            'uncertain',
+            from,
+            kept,
+            Math.min(count, kept - from + 1),
+            'partial_rejected',
+          ),
+        );
+      }
+    }
+    if (to > head) {
       const lost = Math.max(from, head + 1);
       result.push(entry(batch, 'uncertain', lost, to, to - lost + 1, 'fork_discarded'));
     }

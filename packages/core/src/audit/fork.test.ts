@@ -694,16 +694,35 @@ describe('restore replay invariants', () => {
       'held outcome',
       { uncertainOutcome: { rejectedCount: 2 } },
       5,
-      [['uncertain', 4, 6, 2, 'partial_rejected']],
+      [4, 6],
+      [
+        ['uncertain', 4, 6, 2, 'partial_rejected', 1],
+        ['uncertain', 4, 5, 2, 'partial_rejected', 2],
+        ['uncertain', 6, 6, 1, 'fork_discarded', 1],
+      ],
     ],
     [
       'held invalid count',
       { uncertainOutcome: { rejectedCount: null } },
-      5,
-      [['uncertain', 4, 6, 3, 'partial_rejected']],
+      6,
+      [4, 6],
+      [
+        ['uncertain', 4, 6, 3, 'partial_rejected', 1],
+        ['uncertain', 4, 6, 3, 'partial_rejected', 2],
+      ],
     ],
-    ['frozen batch above the head', {}, 4, [['uncertain', 5, 6, 2, 'fork_discarded']]],
-    ['frozen batch at or below the head', {}, 6, []],
+    [
+      'held outcome wholly above a rolled-back head',
+      { uncertainOutcome: { rejectedCount: 1 } },
+      5,
+      [6, 10],
+      [
+        ['uncertain', 6, 10, 1, 'partial_rejected', 1],
+        ['uncertain', 6, 10, 5, 'fork_discarded', 1],
+      ],
+    ],
+    ['frozen batch above the head', {}, 4, [4, 6], [['uncertain', 5, 6, 2, 'fork_discarded', 1]]],
+    ['frozen batch at or below the head', {}, 6, [4, 6], []],
     [
       'rejection tail above the head',
       {
@@ -720,11 +739,12 @@ describe('restore replay invariants', () => {
         ],
       },
       7,
-      [['skipped', 8, 8, 1, 'fork_discarded']],
+      [4, 6],
+      [['skipped', 8, 8, 1, 'fork_discarded', 1]],
     ],
   ] as const)(
     'records discarded frozen state on confirmation: %s',
-    async (_name, extra, headSeq, expected) => {
+    async (_name, extra, headSeq, [inflightFrom, inflightTo], expected) => {
       const f = fixture(
         snapshot({
           restorePending: true,
@@ -733,13 +753,15 @@ describe('restore replay invariants', () => {
             sink({
               progressSeq: 3,
               custodySeq: 3,
-              inflightFrom: 4,
-              inflightTo: 6,
+              inflightFrom,
+              inflightTo,
               inflightBody: JSON.stringify({
                 chainId,
                 epoch: 1,
-                records: [{ seq: 4 }, { seq: 5 }, { seq: 6 }],
-                throughSeq: 6,
+                records: Array.from({ length: inflightTo - inflightFrom + 1 }, (_, n) => ({
+                  seq: inflightFrom + n,
+                })),
+                throughSeq: inflightTo,
               }),
               inflightRepr: JSON.stringify({ custodyFromSeq: 1, purpose: 'events', ...extra }),
             }),
@@ -755,14 +777,11 @@ describe('restore replay invariants', () => {
           actor: { type: 'user', id: org.orgId },
         }),
       ).toBe('confirmed');
+      const rows = f.change().ledger.filter((row) => row.kind !== 'restore_confirmed');
       expect(
-        f
-          .change()
-          .ledger.filter((row) => row.kind !== 'restore_confirmed')
-          .map((row) => [row.kind, row.fromSeq, row.toSeq, row.count, row.reasonCode]),
+        rows.map((row) => [row.kind, row.fromSeq, row.toSeq, row.count, row.reasonCode, row.epoch]),
       ).toEqual(expected);
-      for (const row of f.change().ledger.filter((value) => value.kind !== 'restore_confirmed'))
-        expect(row).toMatchObject({ chainId, epoch: 1, sinkId: 'archive' });
+      for (const row of rows) expect(row).toMatchObject({ chainId, sinkId: 'archive' });
     },
   );
 

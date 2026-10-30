@@ -932,6 +932,47 @@ export async function auditForkRepositorySuite(
       expect(seqs.slice(0, 3)).toEqual([1, 2, 4]);
       expect(seqs).not.toContain(3);
     });
+    async function exportUntilIdle() {
+      await database.executor.batch([
+        {
+          sql: `INSERT OR IGNORE INTO job (id, org_id, type, resource_key, state, lease_owner, fence, lease_until)
+          VALUES ('export-job', ?, 'audit-export-archive', 'audit-export:archive', 'running', 'worker', 3, '2099-01-01T00:00:00.000Z')`,
+          params: [org.orgId],
+        },
+      ]);
+      const delivered: AuditBatchV1[] = [];
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const result = await exportAuditBatch(
+          createAuditExportRepository(database.executor),
+          org,
+          systemMutationFence('audit-export', { id: 'export-job', owner: 'worker', fence: 3 }, {}),
+          {
+            id: 'archive',
+            generation: 2,
+            pluginVersion: '1.0',
+            sourceIp: 'omit',
+            now: () => new Date(),
+            random: () => 0,
+            sink: {
+              deliver: async (batch) => {
+                delivered.push(batch);
+                return {
+                  outcome: 'accepted',
+                  chainId: batch.chainId,
+                  epoch: batch.epoch,
+                  throughSeq: batch.throughSeq,
+                  throughHash: batch.throughHash,
+                };
+              },
+            },
+            rejectionRetries: 'terminal',
+          },
+          new AbortController().signal,
+        );
+        if (result === 'idle') break;
+      }
+      return delivered;
+    }
     it('records a held partial outcome as an uncertain disposition when confirmation discards it', async () => {
       await sealEvents(3);
       const current = await port.read(org);
@@ -968,20 +1009,40 @@ export async function auditForkRepositorySuite(
           sql: "SELECT kind, epoch, from_seq, to_seq, count, sink_id, reason_code FROM audit_ledger WHERE org_id = ? AND kind = 'uncertain'",
           params: [org.orgId],
         }),
-      ).toEqual([
-        {
+      ).toEqual(
+        [0, 1].map((epoch) => ({
           kind: 'uncertain',
-          epoch: 0,
+          epoch,
           from_seq: 2,
           to_seq: 3,
           count: 1,
           sink_id: 'archive',
           reason_code: 'partial_rejected',
-        },
-      ]);
+        })),
+      );
       expect(JSON.parse((await port.read(org)).sinks[0]!.inflightRepr!)).not.toHaveProperty(
         'uncertainOutcome',
       );
+      await database.executor.batch([
+        { sql: "UPDATE audit_chain SET mode = 'export' WHERE org_id = ?", params: [org.orgId] },
+      ]);
+      expect(
+        (await exportUntilIdle()).flatMap((batch) =>
+          batch.records.flatMap((record) => ('seq' in record ? [record.seq] : [])),
+        ),
+      ).toEqual([2, 3]);
+      const [obligation] = await database.executor.all<{ id: string }>({
+        sql: "SELECT id FROM audit_ledger WHERE org_id = ? AND kind = 'uncertain' AND epoch = 1",
+        params: [org.orgId],
+      });
+      expect(
+        await database.executor.all({
+          sql: "SELECT epoch, from_seq, to_seq, sink_id, resolves_id FROM audit_ledger WHERE org_id = ? AND kind = 'replay'",
+          params: [org.orgId],
+        }),
+      ).toEqual([
+        { epoch: 1, from_seq: 2, to_seq: 3, sink_id: 'archive', resolves_id: obligation!.id },
+      ]);
     });
     it('keeps a required withheld hold on pruning across a bump and confirmation', async () => {
       await sealEvents(3);

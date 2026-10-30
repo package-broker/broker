@@ -193,6 +193,8 @@ CREATE INDEX audit_ledger_open_gap ON audit_ledger (org_id, chain_id, epoch, rea
 CREATE INDEX audit_ledger_visible ON audit_ledger (org_id, id) WHERE superseded_by IS NULL;
 CREATE INDEX audit_ledger_superseded ON audit_ledger (org_id, superseded_by) WHERE superseded_by IS NOT NULL;
 CREATE INDEX audit_ledger_kind_chain ON audit_ledger (org_id, kind, chain_id, epoch, created_at, id) WHERE superseded_by IS NULL;
+CREATE INDEX audit_ledger_reset ON audit_ledger (org_id, chain_id, created_at, id) WHERE kind = 'chain_reset' AND superseded_by IS NULL;
+CREATE INDEX audit_ledger_resolves ON audit_ledger (org_id, resolves_id) WHERE resolves_id IS NOT NULL;
 
 INSERT INTO audit_chain (org_id, head_seq, head_hash, boundary_seq, boundary_prev_hash, boundary_reason, journal_rows, journal_bytes)
 SELECT o.id,

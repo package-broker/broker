@@ -59,8 +59,22 @@ const historyColumns = (alias: string) =>
   ['id', 'kind', 'chain_id', 'epoch', 'from_seq', 'to_seq', 'reason_code', 'created_at']
     .map((column) => `${alias}.${column}`)
     .join(', ');
-/** Current-window seq gaps, the latest reset of each other chain and the latest confirmation. */
-const HISTORY_SQL = `WITH history_chain AS (SELECT * FROM audit_chain history_source WHERE history_source.org_id = ?)
+/**
+ * Current-window seq gaps, the latest reset of each other chain and the latest confirmation.
+ * Reset chains are walked one distinct chain id at a time, so the work grows with the number
+ * of reset chains, not with the number of resets.
+ */
+const HISTORY_SQL = `WITH RECURSIVE
+  history_chain AS (SELECT * FROM audit_chain history_source WHERE history_source.org_id = ?),
+  reset_chains(chain_id) AS (
+    SELECT (SELECT min(first_reset.chain_id) FROM audit_ledger first_reset
+      WHERE first_reset.org_id = history_chain.org_id AND first_reset.kind = 'chain_reset'
+        AND first_reset.superseded_by IS NULL) FROM history_chain
+    UNION ALL
+    SELECT (SELECT min(following.chain_id) FROM audit_ledger following
+      WHERE following.org_id = history_chain.org_id AND following.kind = 'chain_reset'
+        AND following.superseded_by IS NULL AND following.chain_id > reset_chains.chain_id)
+    FROM reset_chains JOIN history_chain WHERE reset_chains.chain_id IS NOT NULL)
   SELECT * FROM (
     SELECT ${historyColumns('gap')} FROM history_chain JOIN audit_ledger gap
       ON gap.org_id = history_chain.org_id AND gap.kind = 'gap' AND gap.superseded_by IS NULL
@@ -68,12 +82,13 @@ const HISTORY_SQL = `WITH history_chain AS (SELECT * FROM audit_chain history_so
         AND gap.reason_code = 'seq_gap' AND gap.sink_id IS NULL
         AND gap.from_seq <= history_chain.head_seq AND gap.to_seq >= history_chain.boundary_seq - 1
     UNION ALL
-    SELECT ${historyColumns('reset')} FROM history_chain JOIN audit_ledger reset
-      ON reset.org_id = history_chain.org_id AND reset.kind = 'chain_reset'
-        AND reset.superseded_by IS NULL AND reset.chain_id <> history_chain.chain_id
-      WHERE NOT EXISTS (SELECT 1 FROM audit_ledger newer WHERE newer.org_id = reset.org_id
-        AND newer.kind = 'chain_reset' AND newer.superseded_by IS NULL AND newer.chain_id = reset.chain_id
-        AND (newer.created_at > reset.created_at OR (newer.created_at = reset.created_at AND newer.id > reset.id)))
+    SELECT ${historyColumns('reset')} FROM reset_chains JOIN history_chain
+        ON reset_chains.chain_id <> history_chain.chain_id
+      JOIN audit_ledger reset ON reset.org_id = history_chain.org_id
+        AND reset.id = (SELECT pick.id FROM audit_ledger pick WHERE pick.org_id = history_chain.org_id
+          AND pick.kind = 'chain_reset' AND pick.superseded_by IS NULL
+          AND pick.chain_id = reset_chains.chain_id
+          ORDER BY pick.created_at DESC, pick.id DESC LIMIT 1)
     UNION ALL
     SELECT * FROM (SELECT ${historyColumns('latest')} FROM history_chain JOIN audit_ledger latest
       ON latest.org_id = history_chain.org_id AND latest.kind = 'restore_confirmed'

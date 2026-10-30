@@ -27,6 +27,11 @@ async function readHistory(context: CaseContext, target: 'own' | 'foreign') {
       FROM audit_chain f, audit_chain o WHERE f.org_id = ? AND o.org_id = ?`,
       params: [foreign.orgId, own.orgId],
     },
+    {
+      sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+      SELECT '01JZZZZZZZZZZZZZZZZZZZZZZX', org_id, 'epoch_bump', chain_id, 0, 1, 1, 0, 'restore_detected', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id = ?`,
+      params: [foreign.orgId],
+    },
   ]);
   await context.executor.batch([
     {
@@ -86,6 +91,11 @@ const save: ContractCase = {
       SELECT '01JZZZZZZZZZZZZZZZZZZZZZZW', o.org_id, 'chain_reset', f.chain_id, 0, 1, 1, 0, 'tamper_detected', o.policy, o.mode_generation, 'system', '2026-10-29T00:00:00.000Z'
       FROM audit_chain o, audit_chain f WHERE o.org_id = ? AND f.org_id = ?`,
         params: [own.orgId, foreign.orgId],
+      },
+      {
+        sql: `INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, reason_code, policy, mode_generation, actor_type, created_at)
+      SELECT '01JZZZZZZZZZZZZZZZZZZZZZZW', org_id, 'epoch_bump', chain_id, 0, 1, 1, 0, 'restore_detected', policy, mode_generation, 'system', '2026-10-30T00:00:00.000Z' FROM audit_chain WHERE org_id = ?`,
+        params: [foreign.orgId],
       },
     ]);
     await context.executor.batch([
@@ -324,31 +334,71 @@ export const entries: readonly MutationEntry[] = [
       },
       {
         name: 'history chain reset organization (read)',
-        locate: /reset\.org_id = history_chain\.org_id/,
+        locate: /(?<![a-z_])reset\.org_id = history_chain\.org_id/,
         neutral: '1',
         copies: 1,
         caseName: historyRead.name,
       },
       {
         name: 'history chain reset organization (CAS)',
-        locate: /reset\.org_id = history_chain\.org_id/,
+        locate: /(?<![a-z_])reset\.org_id = history_chain\.org_id/,
         neutral: '1',
         copies: 1,
         caseName: save.name,
       },
       {
-        name: 'history newer reset organization (read)',
-        locate: /newer\.org_id = reset\.org_id/,
+        name: 'history reset pick organization (read)',
+        locate: /pick\.org_id = history_chain\.org_id/,
         neutral: '1',
         copies: 1,
         caseName: historyRead.name,
       },
       {
-        name: 'history newer reset organization (CAS)',
-        locate: /newer\.org_id = reset\.org_id/,
+        name: 'history reset chain walk first organization (read)',
+        locate: /first_reset\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+        waivedCopies: {
+          0: 'Bounds the walk to the organization chain ids; a foreign chain id only adds a step whose pick finds no organization row.',
+        },
+      },
+      {
+        name: 'history reset chain walk following organization (read)',
+        locate: /following\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: historyRead.name,
+        waivedCopies: {
+          0: 'Bounds the walk to the organization chain ids; a foreign chain id only adds a step whose pick finds no organization row.',
+        },
+      },
+      {
+        name: 'history reset pick organization (CAS)',
+        locate: /pick\.org_id = history_chain\.org_id/,
         neutral: '1',
         copies: 1,
         caseName: save.name,
+      },
+      {
+        name: 'history reset chain walk first organization (CAS)',
+        locate: /first_reset\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: save.name,
+        waivedCopies: {
+          0: 'Bounds the walk to the organization chain ids; a foreign chain id only adds a step whose pick finds no organization row.',
+        },
+      },
+      {
+        name: 'history reset chain walk following organization (CAS)',
+        locate: /following\.org_id = history_chain\.org_id/,
+        neutral: '1',
+        copies: 1,
+        caseName: save.name,
+        waivedCopies: {
+          0: 'Bounds the walk to the organization chain ids; a foreign chain id only adds a step whose pick finds no organization row.',
+        },
       },
       {
         name: 'history latest confirmation organization (read)',

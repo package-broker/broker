@@ -106,6 +106,39 @@ export interface SourceCredential {
   readonly probe: CredentialEchoProbe;
 }
 
+const FORBIDDEN_NAME_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
+
+export function createNpmHandleOf(
+  users: {
+    get(ctx: OrgContext, id: string): Promise<{ readonly displayName: string | null } | null>;
+  },
+  services: { get(ctx: OrgContext, id: string): Promise<{ readonly name: string | null } | null> },
+): (ctx: RequestContext) => Promise<string | null> {
+  return async (ctx) => {
+    if (ctx.org === null || ctx.principal === null) return null;
+    const { kind, id } = ctx.principal;
+    let name: string | null;
+    if (kind === 'user') {
+      const user = await users.get(ctx.org, id);
+      if (user === null) return null;
+      name = user.displayName;
+    } else if (kind === 'service') {
+      const service = await services.get(ctx.org, id);
+      if (service === null) return null;
+      name = service.name;
+    } else {
+      return null;
+    }
+    return name !== null &&
+      name !== '' &&
+      name.length <= 214 &&
+      !/[@\s]/u.test(name) &&
+      !FORBIDDEN_NAME_CHARACTERS.test(name)
+      ? name
+      : `${kind}-${id.toLowerCase()}`;
+  };
+}
+
 export interface RegistryModuleDeps {
   readonly runtime: Platform;
   readonly ports: Partial<
@@ -128,7 +161,7 @@ export interface RegistryModuleDeps {
     readonly sources: Pick<SourceRepository, 'hasAttachedProxy'>;
   };
   readonly defer?: (thunk: () => Promise<void>) => void;
-  readonly handleOf?: (ctx: RequestContext) => string | null;
+  readonly handleOf?: (ctx: RequestContext) => Promise<string | null>;
   readonly catalogue: {
     readonly reader: CatalogueReader;
     readonly scopedAdmission: ScopedAdmission;
@@ -565,7 +598,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       dist,
       onDemand,
       reresolve,
-      handleOf: deps.handleOf ?? (() => null),
+      handleOf: deps.handleOf ?? (async () => null),
       ...(deps.defer === undefined ? {} : { defer: deps.defer }),
       publicUrl: deps.publicUrl,
       codecs: deps.codecs,

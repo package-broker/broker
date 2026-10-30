@@ -594,7 +594,7 @@ describe('npm audit gzip bomb contract', () => {
       dist: { serve },
       onDemand: { ensure },
       reresolve,
-      handleOf: () => null,
+      handleOf: async () => null,
       publicUrl: 'https://broker.test',
       codecs: nodeCodecs,
       audit: { enabled: true, forward },

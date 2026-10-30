@@ -132,7 +132,7 @@ async function harness(setup: Setup = {}) {
           defer: () => undefined,
         }),
     reresolve,
-    handleOf: () => (setup.handle === undefined ? 'alice' : setup.handle),
+    handleOf: async () => (setup.handle === undefined ? 'alice' : setup.handle),
     publicUrl: 'https://broker.test',
     codecs: { gunzip: () => new TransformStream() },
     audit: setup.audit ?? { enabled: true },

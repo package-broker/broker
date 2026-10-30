@@ -318,7 +318,7 @@ async function harness(
         if (actor === null || !('key' in parsed)) return { kind: 'absent' };
         return access.resolve(actor, 'npm', displayName(parsed.key));
       },
-      handleOf: () => 'alice',
+      handleOf: async () => 'alice',
       publicUrl: 'https://broker.test',
       codecs: { gunzip: () => new TransformStream() },
       audit: options.audit ?? { enabled: true },

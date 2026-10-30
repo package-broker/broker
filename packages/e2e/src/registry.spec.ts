@@ -444,6 +444,10 @@ async function gitHttpBackend(
     stdio: ['pipe', 'pipe', 'ignore'],
   });
   const exited = once(child, 'close');
+  // git http-backend may exit without draining stdin; its exit code below decides the outcome.
+  child.stdin.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') throw error;
+  });
   child.stdin.end(request.body);
   const chunks: Buffer[] = [];
   for await (const chunk of child.stdout) chunks.push(Buffer.from(chunk));

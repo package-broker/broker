@@ -75,6 +75,9 @@ export interface AuditExportPort {
    * A capacity effect disposes the sink's frozen capacity marker range; it must lie inside
    * a recorded capacity gap and never adds ACK coverage.
    * Receivers must be idempotent per throughSeq when frozen batches are replayed.
+   * Accepted at-least-once window: a crash or lost lease between a partial-success response
+   * and its persisted disposition or hold redelivers that batch; a failed hold is alerted
+   * as `hold_failed` and counted.
    */
   save(
     org: OrgContext,
@@ -189,6 +192,8 @@ export interface AuditExportOptions {
   readonly warning?: (code: 'partial_success') => void;
   /** Protocol policy: terminal for OTLP; webhook skipAfter counts retries. */
   readonly rejectionRetries: 'terminal' | number;
+  /** A partial success could be neither disposed nor held; the next run redelivers it. */
+  readonly holdFailed?: () => void;
   readonly alert?: (
     reason: 'skipped' | 'uncertain' | 'blocked' | 'withheld' | 'marker_rejected',
   ) => void;
@@ -572,13 +577,16 @@ export async function exportAuditBatch(
       const held: AuditHeldOutcome = {
         rejectedCount: Number.isSafeInteger(result.rejectedCount) ? result.rejectedCount : null,
       };
-      await port.hold(
-        org,
-        fence,
-        snapshot,
-        { ...snapshot.sink, inflightRepr: JSON.stringify({ ...repr, uncertainOutcome: held }) },
-        options.generation,
-      );
+      if (
+        !(await port.hold(
+          org,
+          fence,
+          snapshot,
+          { ...snapshot.sink, inflightRepr: JSON.stringify({ ...repr, uncertainOutcome: held }) },
+          options.generation,
+        ))
+      )
+        options.holdFailed?.();
     }
     return 'contended';
   }
@@ -731,6 +739,16 @@ export function auditExportJob(
                 sink_id: options.id,
               });
               options.alert?.(reason);
+            },
+            holdFailed: () => {
+              ctx.observability.log({
+                level: 'error',
+                event: 'audit.delivery_loss',
+                reason_code: 'audit.hold_failed',
+                sink_id: options.id,
+              });
+              ctx.observability.counter('pb.audit.hold_failed_total');
+              options.holdFailed?.();
             },
             warning: (code) => {
               ctx.observability.log({

@@ -73,6 +73,8 @@ const REASON_CODES = [
   'audit.blocked',
   'audit.withheld',
   'audit.capacity',
+  'audit.hold_failed',
+  'audit.prune_anchor',
 ] as const;
 
 export type KernelReasonCode = (typeof REASON_CODES)[number];

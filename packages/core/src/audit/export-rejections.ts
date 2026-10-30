@@ -67,7 +67,8 @@ export async function resolveAuditRejection(
   } catch {
     throw new Error('Audit sink representation malformed');
   }
-  delete repr.uncertainOutcome;
+  // A queued marker batch leaves the frozen events batch, and the outcome held on it, in place.
+  if (repr.registryMarkerBody === undefined) delete repr.uncertainOutcome;
   const now = options.now();
   const records = batch.records;
   if (

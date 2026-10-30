@@ -578,7 +578,7 @@ it.each([1, 2, 3])('logs and counts integrity anchor refusal at row %s', async (
   expect(await repository.prune(org, options)).toEqual({ outcome: 'retained' });
   expect(await rows()).toHaveLength(3);
   expect(logs).toEqual([
-    { level: 'error', event: 'audit.chain_integrity', reason_code: 'prune_anchor' },
+    { level: 'error', event: 'audit.chain_integrity', reason_code: 'audit.prune_anchor' },
   ]);
   expect(counters).toEqual(['pb.audit.chain_integrity']);
 });
@@ -1032,11 +1032,11 @@ it('continues an eviction cycle across bounded batches until the low-water mark'
     if (loss.outcome !== 'evicted') break;
     expect(loss.evicted).toBe(1);
     batches += 1;
-    if (batches === 1) expect((await chain()).capacity_evicting).toBe(1);
+    if (batches === 1) expect((await chain()).capacity_evict_to).toBe(lowWater);
   }
   expect(batches).toBeGreaterThanOrEqual(5);
   expect((await chain()).journal_bytes).toBeLessThanOrEqual(lowWater);
-  expect((await chain()).capacity_evicting).toBe(0);
+  expect((await chain()).capacity_evict_to).toBeNull();
   await executor.batch(
     ['refill-1', 'refill-2'].map((id) => ({
       sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
@@ -1058,9 +1058,73 @@ it('closes only its own finished eviction cycle', async () => {
   await seed(3);
   await seed(3, other);
   for (const ctx of [org, other])
-    await run('UPDATE audit_chain SET capacity_evicting = 1 WHERE org_id = ?', ctx.orgId);
+    await run(
+      'UPDATE audit_chain SET capacity_evict_to = journal_bytes + 1 WHERE org_id = ?',
+      ctx.orgId,
+    );
   const budget = 10 * ((await chain()).journal_bytes as number);
   expect(await evict(budget)).toEqual({ outcome: 'retained' });
-  expect((await chain()).capacity_evicting).toBe(0);
-  expect((await chain(other)).capacity_evicting).toBe(1);
+  expect((await chain()).capacity_evict_to).toBeNull();
+  expect((await chain(other)).capacity_evict_to).toBe(
+    ((await chain(other)).journal_bytes as number) + 1,
+  );
+});
+
+it('keeps the prune anchor integrity log through production observability', async () => {
+  await seed();
+  await run(
+    'UPDATE audit_event SET prev_hash = ? WHERE org_id = ? AND seq = 2',
+    'f'.repeat(64),
+    org.orgId,
+  );
+  const records: ObsRecord[] = [];
+  const observability = createObservability(
+    { emit: (record) => records.push(record) },
+    { deploymentId: 'deployment', runtime: 'node', requestId: null },
+    { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+  );
+  expect(await createAuditPruneRepository(executor, observability).prune(org, options)).toEqual({
+    outcome: 'retained',
+  });
+  expect(records.filter((record) => record.kind === 'log')).toMatchObject([
+    {
+      record: { level: 'error', event: 'audit.chain_integrity', reason_code: 'audit.prune_anchor' },
+    },
+  ]);
+});
+
+it('ends an eviction cycle when retention pruning reaches its target', async () => {
+  await seed(100);
+  const budget = (await chain()).journal_bytes as number;
+  const lowWater = budget - Math.ceil(budget / 20);
+  expect(await evict(budget, 1)).toMatchObject({ outcome: 'evicted', evicted: 1 });
+  expect((await chain()).capacity_evict_to).toBe(lowWater);
+  await run(
+    'UPDATE audit_sink SET progress_seq = (SELECT head_seq FROM audit_chain WHERE org_id = ?) WHERE org_id = ?',
+    org.orgId,
+    org.orgId,
+  );
+  expect(await prune()).toMatchObject({ outcome: 'pruned', pruned: 99 });
+  expect((await chain()).capacity_evict_to).toBeNull();
+  for (let start = 0; start < 97; start += 50)
+    await executor.batch(
+      Array.from({ length: Math.min(50, 97 - start) }, (_, n) => ({
+        sql: `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type)
+        VALUES (?, ?, '2026-10-29T00:00:00.000Z', 'system', 'org.update', 'organization')`,
+        params: [`${org.orgId}-${100 + start + n}`, org.orgId],
+      })),
+    );
+  await createAuditSealRepository(executor).seal(org);
+  const refilled = (await chain()).journal_bytes as number;
+  expect(refilled).toBeGreaterThan(lowWater);
+  expect(refilled).toBeLessThan(budget - Math.ceil(budget / 100));
+  expect(await evict(budget, 1)).toEqual({ outcome: 'retained' });
+});
+
+it('clears a reached cycle target even when the journal is empty', async () => {
+  await seed(3);
+  expect(await evict()).toMatchObject({ outcome: 'evicted', evicted: 3 });
+  await run('UPDATE audit_chain SET capacity_evict_to = 0 WHERE org_id = ?', org.orgId);
+  expect(await evict()).toEqual({ outcome: 'retained' });
+  expect((await chain()).capacity_evict_to).toBeNull();
 });

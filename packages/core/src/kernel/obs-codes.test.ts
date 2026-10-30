@@ -49,7 +49,7 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 33 reason codes', () => {
+  it('has exactly the 35 reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
         'no_ip_key_saturated',
@@ -85,9 +85,11 @@ describe('vocabularies', () => {
         'audit.blocked',
         'audit.withheld',
         'audit.capacity',
+        'audit.hold_failed',
+        'audit.prune_anchor',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(33);
+    expect(KERNEL_REASON_CODES.size).toBe(35);
   });
 
   it('matches the port CODE pattern for every value', () => {

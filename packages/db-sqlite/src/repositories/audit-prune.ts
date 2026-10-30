@@ -60,6 +60,7 @@ type Chain = {
   head_hash: string;
   journal_rows: number;
   journal_bytes: number;
+  capacity_evict_to: number | null;
 };
 type Candidate = { seq: number; hash: string; bytes: number; row_json: string };
 
@@ -146,15 +147,14 @@ function capacityLowWater(options: AuditCapacityOptions): number {
   return options.maxJournalBytes - Math.ceil(options.maxJournalBytes / 20);
 }
 
-/** A cycle starts at the reserve and continues across bounded batches until low water. */
+/** A cycle starts at the reserve and continues across bounded batches until its stored target. */
 function capacityEligible(ctx: OrgContext, options: AuditCapacityOptions): Statement {
   return {
     sql: `c.restore_pending = 0 AND c.policy = 'availability'
-      AND (c.journal_bytes >= ? OR (c.capacity_evicting = 1 AND c.journal_bytes > ?))
+      AND (c.journal_bytes >= ? OR c.journal_bytes > c.capacity_evict_to)
       AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ? AND s.generation > ?)`,
     params: [
       options.maxJournalBytes - auditCapacityReserveBytes(options.maxJournalBytes),
-      capacityLowWater(options),
       ctx.orgId,
       options.generation,
     ],
@@ -171,11 +171,29 @@ export function createAuditPruneRepository(
   ): Promise<AuditPruneOutcome> {
     const capacity = 'maxJournalBytes' in options ? options : undefined;
     const retention = 'configuredSinkIds' in options ? options : undefined;
-    const [chain] = await executor.all<Chain>({
-      sql: 'SELECT * FROM audit_chain WHERE org_id = ?',
-      params: [ctx.orgId],
-    });
-    if (chain === undefined) throw new Error('Audit chain unavailable');
+    const readChain = async () => {
+      const [row] = await executor.all<Chain>({
+        sql: 'SELECT * FROM audit_chain WHERE org_id = ?',
+        params: [ctx.orgId],
+      });
+      if (row === undefined) throw new Error('Audit chain unavailable');
+      return row;
+    };
+    let chain = await readChain();
+    if (
+      capacity !== undefined &&
+      chain.capacity_evict_to !== null &&
+      chain.journal_bytes <= chain.capacity_evict_to
+    ) {
+      await executor.batch([
+        {
+          sql: `UPDATE audit_chain SET capacity_evict_to = NULL
+            WHERE org_id = ? AND journal_bytes <= capacity_evict_to`,
+          params: [ctx.orgId],
+        },
+      ]);
+      chain = await readChain();
+    }
     const capacityGuard = capacity === undefined ? undefined : capacityEligible(ctx, capacity);
     const [fence] =
       capacity === undefined
@@ -215,17 +233,8 @@ export function createAuditPruneRepository(
         sql: `SELECT 1 FROM audit_chain c WHERE c.org_id = ? AND ${capacityGuard!.sql}`,
         params: [ctx.orgId, ...capacityGuard!.params],
       });
-      const lowWater = capacityLowWater(capacity);
-      if (allowed.length === 0) {
-        await executor.batch([
-          {
-            sql: `UPDATE audit_chain SET capacity_evicting = 0
-              WHERE org_id = ? AND capacity_evicting = 1 AND journal_bytes <= ?`,
-            params: [ctx.orgId, lowWater],
-          },
-        ]);
-        return { outcome: 'retained' };
-      }
+      if (allowed.length === 0) return { outcome: 'retained' };
+      const lowWater = chain.capacity_evict_to ?? capacityLowWater(capacity);
       let removed = 0;
       const prefix: Candidate[] = [];
       for (const row of candidates) {
@@ -251,6 +260,9 @@ export function createAuditPruneRepository(
     const bytes = selected.reduce((sum, row) => sum + row.bytes, 0);
     // Capacity loss is not an export: only a retention prune completes a pending cutover.
     const capacityCutover = capacity === undefined ? last.seq : null;
+    // Any journal reduction that reaches the stored target ends the eviction cycle in the same CAS.
+    const cycleTarget =
+      capacity === undefined ? null : (chain.capacity_evict_to ?? capacityLowWater(capacity));
     const integrity: Statement = {
       sql: `NOT EXISTS (SELECT 1 FROM audit_event anchor WHERE anchor.org_id = ?
             AND anchor.seq = c.boundary_seq AND anchor.prev_hash != c.boundary_prev_hash)
@@ -288,8 +300,10 @@ export function createAuditPruneRepository(
           journal_rows = journal_rows - ?, journal_bytes = max(0, journal_bytes - ?),
           mode = CASE WHEN ? >= c.cutover_seq THEN coalesce(c.pending_mode, c.mode) ELSE c.mode END,
           pending_mode = CASE WHEN ? >= c.cutover_seq THEN NULL ELSE c.pending_mode END,
-          capacity_evicting = CASE WHEN ? IS NULL THEN c.capacity_evicting
-            WHEN max(0, c.journal_bytes - ?) > ? THEN 1 ELSE 0 END
+          capacity_evict_to = CASE WHEN ? IS NOT NULL THEN
+              CASE WHEN max(0, c.journal_bytes - ?) > ? THEN ? END
+            WHEN max(0, c.journal_bytes - ?) <= c.capacity_evict_to THEN NULL
+            ELSE c.capacity_evict_to END
           WHERE c.org_id = ? AND ${chainFields.map((key) => `c.${key} IS ?`).join(' AND ')}
           AND ${guard.sql} AND ${sinkGuard.sql}
           AND c.journal_rows >= ? AND ${integrity.sql}
@@ -303,9 +317,11 @@ export function createAuditPruneRepository(
           bytes,
           capacityCutover,
           capacityCutover,
-          capacity === undefined ? null : 1,
+          cycleTarget,
           bytes,
-          capacity === undefined ? 0 : capacityLowWater(capacity),
+          cycleTarget,
+          cycleTarget,
+          bytes,
           ctx.orgId,
           chain.chain_id,
           chain.epoch,
@@ -405,7 +421,7 @@ export function createAuditPruneRepository(
           observability.log({
             level: 'error',
             event: 'audit.chain_integrity',
-            reason_code: 'prune_anchor',
+            reason_code: 'audit.prune_anchor',
           });
           observability.counter('pb.audit.chain_integrity');
         }

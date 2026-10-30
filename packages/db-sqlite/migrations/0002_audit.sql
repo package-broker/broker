@@ -14,7 +14,7 @@ CREATE TABLE audit_chain (
   pending_mode          TEXT CHECK (pending_mode IN ('trail', 'export', 'none')),
   cutover_seq           INTEGER CHECK (cutover_seq BETWEEN 0 AND 9007199254740991),
   capacity_state        TEXT NOT NULL DEFAULT 'ok' CHECK (capacity_state IN ('ok', 'warning', 'refusing')),
-  capacity_evicting     INTEGER NOT NULL DEFAULT 0 CHECK (capacity_evicting IN (0, 1)),
+  capacity_evict_to     INTEGER CHECK (capacity_evict_to BETWEEN 0 AND 9007199254740991),
   journal_rows          INTEGER NOT NULL DEFAULT 0 CHECK (journal_rows >= 0),
   journal_bytes         INTEGER NOT NULL DEFAULT 0 CHECK (journal_bytes >= 0),
   restore_pending       INTEGER NOT NULL DEFAULT 0 CHECK (restore_pending IN (0, 1)),

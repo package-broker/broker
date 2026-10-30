@@ -676,7 +676,7 @@ export interface AuditChainTable {
   pending_mode: 'trail' | 'export' | 'none' | null;
   cutover_seq: number | null;
   capacity_state: Generated<'ok' | 'warning' | 'refusing'>;
-  capacity_evicting: Generated<0 | 1>;
+  capacity_evict_to: number | null;
   journal_rows: Generated<number>;
   journal_bytes: Generated<number>;
   restore_pending: Generated<0 | 1>;

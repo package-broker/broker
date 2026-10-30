@@ -1307,3 +1307,99 @@ it.each([1, 2])(
     expect(f.port.save).not.toHaveBeenCalled();
   },
 );
+
+describe('held partial success behind queued registry markers', () => {
+  it.each([
+    { outcome: 'rejected', code: 'refused' },
+    { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 },
+  ] as const)('keeps the held outcome when a queued marker is $outcome', async (markerResult) => {
+    const f = await setup(false);
+    const alert = vi.fn();
+    const options: AuditExportOptions = { ...f.options, rejectionRetries: 'terminal', alert };
+    const run = () => exportAuditBatch(f.port, org, fence, options, signal);
+    f.deliver.mockImplementationOnce(async () => {
+      f.change({ boundarySeq: 2, boundaryPrevHash: f.row.hash });
+      return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+    });
+    expect(await run()).toBe('contended');
+    const held = f.get().sink;
+    expect(JSON.parse(held.inflightRepr!)).toMatchObject({
+      purpose: 'events',
+      uncertainOutcome: { rejectedCount: 1 },
+    });
+    const marker = { kind: 'cutover', chainId, epoch: 0, markerId: 'marker' };
+    f.change({
+      sink: {
+        ...held,
+        inflightRepr: JSON.stringify({
+          ...JSON.parse(held.inflightRepr!),
+          registryMarkers: [marker],
+        }),
+      },
+    });
+    f.deliver.mockResolvedValueOnce(markerResult);
+    expect(await run()).toBe('resolved');
+    expect(f.deliver.mock.calls[1]![0].records).toEqual([marker]);
+    expect(alert).toHaveBeenCalledWith('marker_rejected');
+    const after = JSON.parse(f.get().sink.inflightRepr!);
+    expect(after.registryMarkers).toBeUndefined();
+    expect(after).toMatchObject({ purpose: 'events', uncertainOutcome: { rejectedCount: 1 } });
+    expect(f.get().sink.inflightBody).toBe(held.inflightBody);
+    expect(await run()).toBe('resolved');
+    expect(f.deliver).toHaveBeenCalledTimes(2);
+    expect(alert).toHaveBeenCalledWith('uncertain');
+    const disposition = JSON.parse(f.get().sink.inflightRepr!);
+    expect(disposition.purpose).toBe('disposition');
+    expect(disposition.uncertainOutcome).toBeUndefined();
+    expect(JSON.parse(f.get().sink.inflightBody!).records).toMatchObject([
+      { kind: 'delivery_uncertain', fromSeq: 1, toSeq: 1 },
+    ]);
+  });
+});
+
+it('logs and counts a partial success that could not be held', async () => {
+  const f = await setup(false);
+  f.deliver.mockImplementationOnce(async () => {
+    f.expire();
+    return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+  });
+  const emit = vi.fn();
+  const observability = createObservability(
+    { emit },
+    {
+      deploymentId: 'test',
+      runtime: 'node',
+      requestId: '0b8f3a3e-8d0c-4a52-9c1c-2f6f1b3a9e11',
+    },
+    { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+  );
+  const alert = vi.fn();
+  const holdFailed = vi.fn();
+  await auditExportJob(f.port, {
+    ...f.options,
+    rejectionRetries: 'terminal',
+    alert,
+    holdFailed,
+  }).handler({}, {
+    org,
+    signal,
+    fences: jobFences(lease),
+    observability,
+  } as unknown as JobContext);
+  expect(f.port.hold).toHaveBeenCalledTimes(1);
+  expect(holdFailed).toHaveBeenCalledTimes(1);
+  expect(alert).not.toHaveBeenCalled();
+  expect(emit.mock.calls.map(([record]) => record)).toEqual([
+    {
+      kind: 'log',
+      record: expect.objectContaining({
+        level: 'error',
+        event: 'audit.delivery_loss',
+        reason_code: 'audit.hold_failed',
+        sink_id: 'test',
+      }),
+    },
+    { kind: 'counter', name: 'pb.audit.hold_failed_total', labels: {}, value: 1 },
+  ]);
+  expect(JSON.parse(f.get().sink.inflightRepr!).uncertainOutcome).toBeUndefined();
+});

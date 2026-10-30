@@ -23,6 +23,9 @@ export const KERNEL_EVENTS = frozenSet([
 ]);
 
 export const AUDIT_EVENTS = frozenSet([
+  'audit.failure_event_invalid',
+  'audit.failure_event_failed',
+  'audit.failure_events_cap',
   'audit.sealed',
   'audit.chain_integrity',
   'audit.seal_repaired',
@@ -34,6 +37,8 @@ export const AUDIT_EVENTS = frozenSet([
 ]);
 
 const REASON_CODES = [
+  'no_ip_key_saturated',
+  'org_cap_reached',
   'authz.unauthenticated',
   'authz.forbidden',
   'authz.not_found',

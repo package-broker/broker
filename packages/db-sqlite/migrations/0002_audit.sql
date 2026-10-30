@@ -142,8 +142,9 @@ WHEN NEW.superseded_by IS NOT NULL OR (
     NEW.kind <> 'replay' OR NOT EXISTS (
       SELECT 1 FROM audit_ledger AS resolved
       WHERE resolved.org_id = NEW.org_id AND resolved.id = NEW.resolves_id
-        AND resolved.kind = 'uncertain' AND resolved.chain_id = NEW.chain_id
-        AND resolved.epoch = NEW.epoch AND resolved.sink_id IS NEW.sink_id
+        AND resolved.kind IN ('uncertain', 'withheld') AND resolved.chain_id = NEW.chain_id
+        AND resolved.epoch = NEW.epoch AND NEW.sink_id IS NOT NULL
+        AND (resolved.sink_id IS NULL OR resolved.sink_id IS NEW.sink_id)
         AND NEW.from_seq <= resolved.from_seq AND NEW.to_seq >= resolved.to_seq
     )
   )

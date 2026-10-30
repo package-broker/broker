@@ -1,3 +1,4 @@
+import { ulid } from '@package-broker/core/ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   AUDIT_LEDGER_KINDS,
@@ -247,18 +248,19 @@ export function auditLedgerRepositorySuite(open: () => Promise<MigratedDatabase>
     { kind: 'withheld' as const },
     { chainId: 'b'.repeat(32) },
     { epoch: 1 },
-    { sinkId: 'archive' },
+    { sinkId: null },
     { fromSeq: 2 },
     { toSeq: 1 },
   ])('rejects invalid resolution references in the database: %j', async (change) => {
     const { a } = orgs();
     await seedSink(a.orgId);
     const repository = createAuditLedgerRepository(database.executor);
-    await repository.append(a, [{ ...entry, kind: 'uncertain' }]);
+    await repository.append(a, [{ ...entry, kind: 'uncertain', sinkId: 'archive' }]);
     const replay = {
       ...entry,
       id: '01K7R5V0000000000000000002',
       kind: 'replay' as const,
+      sinkId: 'archive',
       resolvesId: entry.id,
       ...change,
     };
@@ -273,17 +275,22 @@ export function auditLedgerRepositorySuite(open: () => Promise<MigratedDatabase>
         },
       ]),
     ).rejects.toMatchObject({ name: 'DbError' });
-    expect(await repository.page(a, null, 100)).toEqual([{ ...entry, kind: 'uncertain' }]);
+    expect(await repository.page(a, null, 100)).toEqual([
+      { ...entry, kind: 'uncertain', sinkId: 'archive' },
+    ]);
   });
   it('resolution references cannot name foreign organization evidence', async () => {
     const { a, b } = orgs();
     const repository = createAuditLedgerRepository(database.executor);
-    await repository.append(b, [{ ...entry, kind: 'uncertain' }]);
+    await seedSink(a.orgId);
+    await seedSink(b.orgId);
+    await repository.append(b, [{ ...entry, kind: 'uncertain', sinkId: 'archive' }]);
     await expect(
       repository.append(a, [
         {
           ...entry,
           kind: 'replay',
+          sinkId: 'archive',
           resolvesId: entry.id,
           id: '01K7R5V0000000000000000002',
         },
@@ -291,29 +298,37 @@ export function auditLedgerRepositorySuite(open: () => Promise<MigratedDatabase>
     ).rejects.toMatchObject({ name: 'DbError' });
     expect(await repository.page(a, null, 100)).toEqual([]);
   });
-  it('a resolution must name uncertainty rather than withholding', async () => {
-    const { a } = orgs();
-    const repository = createAuditLedgerRepository(database.executor);
-    await repository.append(a, [{ ...entry, kind: 'withheld' }]);
-    await expect(
-      repository.append(a, [
-        {
+  it.each(['uncertain', 'withheld'] as const)(
+    'resolves sink and global %s evidence with a named sink',
+    async (kind) => {
+      const { a } = orgs();
+      await seedSink(a.orgId);
+      const repository = createAuditLedgerRepository(database.executor);
+      for (const sinkId of [null, 'archive']) {
+        const id = ulid();
+        await repository.append(a, [{ ...entry, id, kind, sinkId }]);
+        const replay: AuditLedgerEntry = {
           ...entry,
+          id: ulid(),
           kind: 'replay',
-          resolvesId: entry.id,
-          id: '01K7R5V0000000000000000002',
-        },
-      ]),
-    ).rejects.toMatchObject({ name: 'DbError' });
-  });
+          sinkId: 'archive',
+          resolvesId: id,
+        };
+        await repository.append(a, [replay]);
+        expect(await repository.page(a, null, 100)).toContainEqual(replay);
+      }
+    },
+  );
 
   it('persists a covering resolution and keeps it immutable and idempotent', async () => {
     const { a } = orgs();
     const repository = createAuditLedgerRepository(database.executor);
-    await repository.append(a, [{ ...entry, kind: 'uncertain' }]);
+    await seedSink(a.orgId);
+    await repository.append(a, [{ ...entry, kind: 'uncertain', sinkId: 'archive' }]);
     const replay: AuditLedgerEntry = {
       ...entry,
       kind: 'replay',
+      sinkId: 'archive',
       resolvesId: entry.id,
       id: '01K7R5V0000000000000000002',
     };

@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  confirmAuditRestore,
-  detectAuditFork,
-  type AuditForkPort,
-} from '@package-broker/core/audit/fork';
+  administerAuditSink,
+  auditRetirementConfirmation,
+  type AuditSinkAdminPort,
+} from '@package-broker/core/audit/sink-admin';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { confirmAuditRestore, detectAuditFork } from '@package-broker/core/audit/fork';
 import { reconcileAuditSinks } from '@package-broker/core/audit/sinks/registry';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { createAuditForkRepository } from '../repositories/audit-fork.js';
@@ -69,13 +70,19 @@ export async function auditForkRepositorySuite(
 ): Promise<void> {
   describe('atomic audit fork repository', () => {
     let database: MigratedDatabase;
-    let port: AuditForkPort;
+    let port: AuditSinkAdminPort;
     let org: OrgContext;
     beforeEach(async () => {
       database = await open();
       org = database.orgs!.a;
       await seedAuditFork(database.executor, org);
       port = createAuditForkRepository(database.executor);
+      await database.executor.batch([
+        {
+          sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+          params: [actor.id, org.orgId, 'operator@example.test'],
+        },
+      ]);
     });
     afterEach(async () => {
       await database?.close();
@@ -94,6 +101,450 @@ export async function auditForkRepositorySuite(
         ['audit_chain', 'audit_sink', 'audit_ledger', 'audit_pending', 'organization'].map(rows),
       );
     }
+    const actor = { type: 'user' as const, id: '01JZZZZZZZZZZZZZZZZZZZZZZX' };
+    const admin = (command: Parameters<typeof administerAuditSink>[2], adminPort = port) =>
+      administerAuditSink(adminPort, org, command, {
+        alert: () => {},
+        generation: 2,
+        now,
+        actor,
+      });
+    it('lists without changing evidence or verification or exposing frozen bodies or destinations', async () => {
+      const before = await contents();
+      const result = await admin({ operation: 'list' });
+      expect(result).toMatchObject({
+        result: 'applied',
+        sinks: [{ id: 'archive', progressSeq: 3 }],
+      });
+      expect(JSON.stringify(result)).not.toContain('receiverFingerprint');
+      expect(await contents()).toEqual(before);
+    });
+    it('requires the exact retirement range and leaves all evidence in place', async () => {
+      await sealEvents(5);
+      await database.executor.batch([
+        {
+          sql: "UPDATE audit_chain SET policy = 'availability' WHERE org_id = ?",
+          params: [org.orgId],
+        },
+        {
+          sql: "UPDATE audit_sink SET state = 'disabled' WHERE org_id = ?",
+          params: [org.orgId],
+        },
+      ]);
+      await expect(
+        admin({ operation: 'retire', sinkId: 'archive', confirm: 'archive' }),
+      ).rejects.toThrow('confirmation mismatch');
+      expect(await rows('audit_ledger')).toEqual([]);
+      const snapshot = await port.read(org);
+      expect(
+        await admin({
+          operation: 'retire',
+          sinkId: 'archive',
+          confirm: auditRetirementConfirmation('archive', 4, snapshot.headSeq),
+        }),
+      ).toEqual({ result: 'applied' });
+      expect((await port.read(org)).sinks[0]).toMatchObject({
+        state: 'retired',
+        progressSeq: 3,
+        custodySeq: 2,
+      });
+      expect(await rows('audit_ledger')).toEqual([
+        expect.objectContaining({ kind: 'retire', sink_id: 'archive' }),
+      ]);
+    });
+    it('leaves verification and evidence unchanged for an unchanged policy', async () => {
+      const before = await contents();
+      expect(await admin({ operation: 'policy_set', policy: 'required' })).toEqual({
+        result: 'applied',
+      });
+      expect(await contents()).toEqual(before);
+    });
+    it('refuses a generation above storage and preserves each stored sink generation', async () => {
+      const before = await contents();
+      await expect(
+        administerAuditSink(
+          port,
+          org,
+          { operation: 'policy_set', policy: 'availability' },
+          { generation: 999, now, actor, alert: () => {} },
+        ),
+      ).rejects.toMatchObject({ reason: 'generation_ahead' });
+      expect(await contents()).toEqual(before);
+      await database.executor.batch([
+        {
+          sql: `INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint,
+          durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq, inflight_repr)
+          SELECT org_id, 'backup', plugin_id, kind, 1, receiver_fingerprint, durable_ack, activation_source,
+          state, progress_seq, progress_hash, custody_seq, inflight_repr FROM audit_sink WHERE org_id = ? AND sink_id = 'archive'`,
+          params: [org.orgId],
+        },
+      ]);
+      await sealEvents(5);
+      expect(await admin({ operation: 'rebind', sinkId: 'backup', fromSeq: 1 })).toEqual({
+        result: 'applied',
+      });
+      expect(
+        (await port.read(org)).sinks.map(({ id, generation }) => ({ id, generation })),
+      ).toEqual([
+        { id: 'archive', generation: 2 },
+        { id: 'backup', generation: 1 },
+      ]);
+    });
+    it('requires a local operator of the specified principal type', async () => {
+      const before = await contents();
+      const foreignId = ulid();
+      await database.executor.batch([
+        {
+          sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+          params: [foreignId, database.orgs!.b.orgId, 'foreign@example.test'],
+        },
+      ]);
+      for (const invalid of [
+        { type: 'user', id: ulid() },
+        { type: 'user', id: foreignId },
+        { type: 'service_principal', id: actor.id },
+      ] as const) {
+        await expect(
+          administerAuditSink(
+            port,
+            org,
+            { operation: 'policy_set', policy: 'availability' },
+            { generation: 2, now, actor: invalid, alert: () => {} },
+          ),
+        ).rejects.toMatchObject({ reason: 'actor_unavailable' });
+      }
+      expect(await contents()).toEqual(before);
+      const principalId = ulid();
+      await database.executor.batch([
+        {
+          sql: 'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+          params: [principalId, org.orgId, 'Operator', actor.id],
+        },
+      ]);
+      expect(
+        await administerAuditSink(
+          port,
+          org,
+          { operation: 'policy_set', policy: 'availability' },
+          {
+            generation: 2,
+            now,
+            actor: { type: 'service_principal', id: principalId },
+            alert: () => {},
+          },
+        ),
+      ).toEqual({ result: 'applied' });
+      expect(await rows('audit_ledger')).toEqual([
+        expect.objectContaining({ actor_type: 'service_principal', actor_id: principalId }),
+      ]);
+    });
+    it.each(['user', 'service_principal'] as const)(
+      'requires an active %s both before and inside the save batch',
+      async (type) => {
+        const table = type === 'user' ? 'user_account' : 'service_principal';
+        const id = type === 'user' ? actor.id : ulid();
+        if (type === 'service_principal')
+          await database.executor.batch([
+            {
+              sql: 'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+              params: [id, org.orgId, 'Operator', actor.id],
+            },
+          ]);
+        const suspend = () =>
+          database.executor.batch([
+            {
+              sql: `UPDATE ${table} SET status = 'suspended' WHERE org_id = ? AND id = ?`,
+              params: [org.orgId, id],
+            },
+          ]);
+        const invoke = (adminPort = port) =>
+          administerAuditSink(
+            adminPort,
+            org,
+            { operation: 'policy_set', policy: 'availability' },
+            { generation: 2, now, actor: { type, id }, alert: () => {} },
+          );
+        await suspend();
+        const before = await contents();
+        await expect(invoke()).rejects.toMatchObject({ reason: 'actor_unavailable' });
+        expect(await contents()).toEqual(before);
+        await database.executor.batch([
+          {
+            sql: `UPDATE ${table} SET status = 'active' WHERE org_id = ? AND id = ?`,
+            params: [org.orgId, id],
+          },
+        ]);
+        expect(
+          await invoke({
+            ...port,
+            save: async (...args) => {
+              await suspend();
+              return port.save(...args);
+            },
+          }),
+        ).toEqual({ result: 'contended' });
+        expect(await contents()).toEqual(before);
+      },
+    );
+    it('refuses retiring without a required durable witness and preserves all evidence', async () => {
+      await sealEvents(5);
+      await database.executor.batch([
+        {
+          sql: "UPDATE audit_sink SET state = 'disabled' WHERE org_id = ?",
+          params: [org.orgId],
+        },
+      ]);
+      const before = await contents();
+      await expect(
+        admin({ operation: 'retire', sinkId: 'archive', confirm: 'archive:4-5' }),
+      ).rejects.toMatchObject({ reason: 'required_witness' });
+      expect(await contents()).toEqual(before);
+    });
+    it.each(['active', 'blocked', 'disabled', 'inactive'] as const)(
+      'refuses retirement without a remaining range in state %s',
+      async (state) => {
+        await database.executor.batch([
+          {
+            sql: "UPDATE audit_sink SET state = ?, blocked_reason = CASE WHEN ? = 'blocked' THEN 'rejected' ELSE NULL END WHERE org_id = ?",
+            params: [state, state, org.orgId],
+          },
+        ]);
+        const before = await contents();
+        await expect(
+          admin({ operation: 'retire', sinkId: 'archive', confirm: 'archive:4-0' }),
+        ).rejects.toMatchObject({
+          reason: ['disabled', 'inactive'].includes(state) ? 'retire_empty' : 'retire_state',
+        });
+        expect(await contents()).toEqual(before);
+      },
+    );
+    it('changes policy with a generation fence and one ledger/event pair', async () => {
+      const before = await port.read(org);
+      expect(await admin({ operation: 'policy_set', policy: 'availability' })).toEqual({
+        result: 'applied',
+      });
+      expect(await port.read(org)).toMatchObject({
+        policy: 'availability',
+        modeGeneration: before.modeGeneration + 1,
+      });
+      expect(await rows('audit_ledger')).toEqual([
+        expect.objectContaining({
+          kind: 'policy_change',
+          mode_generation: before.modeGeneration + 1,
+        }),
+      ]);
+      expect(await rows('audit_pending')).toHaveLength(1);
+      await database.executor.batch([
+        { sql: "UPDATE audit_chain SET mode = 'none' WHERE org_id = ?", params: [org.orgId] },
+      ]);
+      await expect(admin({ operation: 'policy_set', policy: 'required' })).rejects.toMatchObject({
+        reason: 'policy_unavailable',
+      });
+      expect((await port.read(org)).policy).toBe('availability');
+      expect(await rows('audit_ledger')).toHaveLength(1);
+    });
+    it.each(["mode = 'none'", "pending_mode = 'none'", "mode = 'export'"])(
+      'keeps the SQL required-policy guard when %s changes after read',
+      async (assignment) => {
+        await admin({ operation: 'policy_set', policy: 'availability' });
+        const racing: AuditSinkAdminPort = {
+          ...port,
+          save: async (...args) => {
+            await database.executor.batch([
+              { sql: `UPDATE audit_chain SET ${assignment} WHERE org_id = ?`, params: [org.orgId] },
+              {
+                sql: 'UPDATE audit_sink SET durable_ack = 0 WHERE org_id = ?',
+                params: [org.orgId],
+              },
+            ]);
+            return port.save(...args);
+          },
+        };
+        expect(await admin({ operation: 'policy_set', policy: 'required' }, racing)).toEqual({
+          result: 'contended',
+        });
+        expect((await port.read(org)).policy).toBe('availability');
+        expect(await rows('audit_ledger')).toHaveLength(1);
+        expect(await rows('audit_pending')).toHaveLength(1);
+      },
+    );
+    it('refuses stale builds and atomically rolls back admin evidence on a changed sink snapshot', async () => {
+      const before = await contents();
+      expect(
+        await administerAuditSink(
+          port,
+          org,
+          { operation: 'list' },
+          { generation: 1, now, actor, alert: () => {} },
+        ),
+      ).toEqual({ result: 'stale' });
+      expect(await contents()).toEqual(before);
+      const racing: AuditSinkAdminPort = {
+        ...port,
+        save: async (...args) => {
+          await database.executor.batch([
+            {
+              sql: 'UPDATE audit_sink SET body_version = body_version + 1 WHERE org_id = ?',
+              params: [org.orgId],
+            },
+          ]);
+          return port.save(...args);
+        },
+      };
+      expect(await admin({ operation: 'policy_set', policy: 'availability' }, racing)).toEqual({
+        result: 'contended',
+      });
+      expect(await rows('audit_ledger')).toEqual([]);
+      expect(await rows('audit_pending')).toEqual([]);
+    });
+    it.each(['withheld', 'uncertain'] as const)(
+      'resolves sink and global %s only with durable ACK coverage',
+      async (kind) => {
+        await sealEvents(3);
+        const snapshot = await port.read(org);
+        const ledger = createAuditLedgerRepository(database.executor);
+        for (const sinkId of ['archive', null]) {
+          const id = ulid();
+          await ledger.append(org, [
+            {
+              id,
+              kind,
+              chainId: snapshot.chainId,
+              epoch: snapshot.epoch,
+              fromSeq: 1,
+              toSeq: 3,
+              count: 1,
+              sinkId,
+              reasonCode: 'partial_rejected',
+              policy: 'required',
+              modeGeneration: snapshot.modeGeneration,
+              actorType: 'system',
+              actorId: null,
+              createdAt: now.toISOString(),
+            },
+          ]);
+          await expect(
+            admin({ operation: 'resolve', sinkId: 'archive', ledgerId: id }),
+          ).rejects.toThrow('durable resolution unavailable');
+          await database.executor.batch([
+            {
+              sql: `UPDATE audit_sink SET inflight_repr = ?, body_version = body_version + 1 WHERE org_id = ?`,
+              params: [
+                JSON.stringify({ custodyFromSeq: 1, durableAckRanges: [{ from: 1, to: 2 }] }),
+                org.orgId,
+              ],
+            },
+          ]);
+          await expect(
+            admin({ operation: 'resolve', sinkId: 'archive', ledgerId: id }),
+          ).rejects.toThrow('durable resolution unavailable');
+          await database.executor.batch([
+            {
+              sql: `UPDATE audit_sink SET inflight_repr = ?, body_version = body_version + 1 WHERE org_id = ?`,
+              params: [
+                JSON.stringify({ custodyFromSeq: 1, durableAckRanges: [{ from: 1, to: 3 }] }),
+                org.orgId,
+              ],
+            },
+          ]);
+          expect(await admin({ operation: 'resolve', sinkId: 'archive', ledgerId: id })).toEqual({
+            result: 'applied',
+          });
+          expect(await rows('audit_ledger')).toContainEqual(
+            expect.objectContaining({ kind: 'replay', resolves_id: id, sink_id: 'archive' }),
+          );
+          await expect(
+            admin({ operation: 'resolve', sinkId: 'archive', ledgerId: id }),
+          ).rejects.toThrow('durable resolution unavailable');
+          await database.executor.batch([
+            {
+              sql: `UPDATE audit_sink SET inflight_repr = '{"custodyFromSeq":1}', body_version = body_version + 1 WHERE org_id = ?`,
+              params: [org.orgId],
+            },
+          ]);
+        }
+      },
+    );
+    it.each(['withheld', 'uncertain'] as const)(
+      "cannot resolve another seeded sink's %s row",
+      async (kind) => {
+        await database.executor.batch([
+          {
+            sql: `INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint,
+          durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq, inflight_repr)
+          SELECT org_id, 'backup', plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source,
+          state, progress_seq, progress_hash, custody_seq, inflight_repr FROM audit_sink WHERE org_id = ? AND sink_id = 'archive'`,
+            params: [org.orgId],
+          },
+          {
+            sql: 'UPDATE audit_sink SET inflight_repr = ? WHERE org_id = ?',
+            params: [
+              JSON.stringify({ custodyFromSeq: 1, durableAckRanges: [{ from: 1, to: 3 }] }),
+              org.orgId,
+            ],
+          },
+        ]);
+        const snapshot = await port.read(org);
+        const id = ulid();
+        await createAuditLedgerRepository(database.executor).append(org, [
+          {
+            id,
+            kind,
+            chainId: snapshot.chainId,
+            epoch: snapshot.epoch,
+            fromSeq: 1,
+            toSeq: 3,
+            count: 1,
+            sinkId: 'backup',
+            reasonCode: 'unreadable',
+            policy: snapshot.policy,
+            modeGeneration: snapshot.modeGeneration,
+            actorType: 'system',
+            actorId: null,
+            createdAt: now.toISOString(),
+          },
+        ]);
+        const before = await contents();
+        await expect(
+          admin({ operation: 'resolve', sinkId: 'archive', ledgerId: id }),
+        ).rejects.toMatchObject({ reason: 'durable_resolution_unavailable' });
+        expect(await contents()).toEqual(before);
+        expect(await admin({ operation: 'resolve', sinkId: 'backup', ledgerId: id })).toEqual({
+          result: 'applied',
+        });
+      },
+    );
+    it('replays retained history without granting durable resolution and preserves queued markers', async () => {
+      await sealEvents(3);
+      await database.executor.batch([
+        {
+          sql: 'UPDATE audit_sink SET progress_hash = ?, inflight_repr = ? WHERE org_id = ?',
+          params: [
+            await hashOf(3),
+            JSON.stringify({ custodyFromSeq: 1, registryMarkers: [{ kind: 'boundary' }] }),
+            org.orgId,
+          ],
+        },
+      ]);
+      expect(await admin({ operation: 'replay', sinkId: 'archive', fromSeq: 2 })).toEqual({
+        result: 'applied',
+      });
+      expect((await port.read(org)).sinks[0]).toMatchObject({
+        progressSeq: 1,
+        custodySeq: 1,
+        progressHash: await hashOf(1),
+      });
+      expect(JSON.parse((await port.read(org)).sinks[0]!.inflightRepr!)).toMatchObject({
+        registryMarkers: [{ kind: 'boundary' }],
+        durableAckRanges: [],
+      });
+      expect(await rows('audit_ledger')).toEqual([
+        expect.objectContaining({ kind: 'rebind', resolves_id: null }),
+      ]);
+      await expect(admin({ operation: 'replay', sinkId: 'archive', fromSeq: 0 })).rejects.toThrow(
+        'Invalid audit replay range',
+      );
+    });
     it('blocks required sinks and atomically records the epoch, ledger and event; confirms with a fork marker', async () => {
       const before = await port.read(org);
       expect(await detectAuditFork(port, org, options())).toBe('blocked');
@@ -491,7 +942,7 @@ export async function auditForkRepositorySuite(
         generation: 2,
         now,
         fromSeq: 1,
-        actor: { type: 'user', id: org.orgId },
+        actor: { type: 'user', id: actor.id },
       });
       const current = await port.read(org);
       const before = await contents();
@@ -599,7 +1050,7 @@ export async function auditForkRepositorySuite(
           generation: 2,
           now,
           fromSeq: 1,
-          actor: { type: 'user', id: org.orgId },
+          actor: { type: 'user', id: actor.id },
         }),
       ).toBe('confirmed');
       const confirmed = await port.read(org);
@@ -808,7 +1259,7 @@ export async function auditForkRepositorySuite(
           generation: 2,
           now,
           fromSeq: 5,
-          actor: { type: 'user', id: org.orgId },
+          actor: { type: 'user', id: actor.id },
         }),
       ).toBe('confirmed');
       expect((await port.read(org)).sinks[0]).toMatchObject({ progressSeq: 4, state: 'active' });
@@ -829,7 +1280,7 @@ export async function auditForkRepositorySuite(
           generation: 2,
           now,
           fromSeq: 1,
-          actor: { type: 'user', id: org.orgId },
+          actor: { type: 'user', id: actor.id },
         }),
       ).toBe('confirmed');
       expect(await bodyVersions()).toEqual([2]);
@@ -905,7 +1356,7 @@ export async function auditForkRepositorySuite(
         generation: 2,
         now,
         fromSeq,
-        actor: { type: 'user', id: org.orgId },
+        actor: { type: 'user', id: actor.id },
       });
     it('never re-allocates a gap above a rolled-back head after a fork bump and confirmation', async () => {
       await sealEvents(3);

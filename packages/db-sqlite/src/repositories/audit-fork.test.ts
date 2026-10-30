@@ -25,6 +25,12 @@ it('reads fork history with per-chain seeks however many resets other chains hol
     await seedAuditFork(database.executor, org);
     await database.executor.batch([
       {
+        sql: 'UPDATE audit_chain SET chain_id = ? WHERE org_id = ?',
+        params: ['c'.repeat(32), org.orgId],
+      },
+    ]);
+    await database.executor.batch([
+      {
         sql: `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 30000)
         INSERT INTO audit_ledger (id, org_id, kind, chain_id, epoch, from_seq, to_seq, count, sink_id, reason_code, policy, mode_generation, actor_type, created_at)
         SELECT printf('reset-%06d', i), org_id, 'chain_reset',
@@ -115,6 +121,39 @@ it('checks carry resolutions through the resolves index in selection and guard',
       for (const detail of steps.filter((value) => / carried /.test(value)))
         expect(detail).toMatch(/^SEARCH carried USING /);
     }
+  } finally {
+    await database.close();
+  }
+});
+
+it('resolves by primary key and seeks the resolution index with organization isolation', async () => {
+  const database = await openMigratedDatabase({ twoOrganizations: true });
+  try {
+    let lookup: Statement | undefined;
+    const port = createAuditForkRepository({
+      driver: database.executor.driver,
+      all: (statement) => {
+        lookup = statement;
+        return database.executor.all(statement);
+      },
+      batch: (statements) => database.executor.batch(statements),
+    });
+    expect(await port.resolution(database.orgs!.a, '01JZZZZZZZZZZZZZZZZZZZZZZX')).toEqual({
+      target: null,
+      resolved: false,
+    });
+    const details = await plan(database, lookup!);
+    expect(
+      details.some((line) =>
+        /SEARCH l USING INDEX sqlite_autoindex_audit_ledger_1.*org_id=.*id=/.test(line),
+      ),
+    ).toBe(true);
+    expect(
+      details.some((line) =>
+        /SEARCH r USING INDEX audit_ledger_resolves.*org_id=.*resolves_id=/.test(line),
+      ),
+    ).toBe(true);
+    expect(details.some((line) => /SCAN (l|r)\b/.test(line))).toBe(false);
   } finally {
     await database.close();
   }

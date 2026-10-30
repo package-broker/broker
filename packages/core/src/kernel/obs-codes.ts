@@ -23,6 +23,7 @@ export const KERNEL_EVENTS = frozenSet([
 ]);
 
 export const AUDIT_EVENTS = frozenSet([
+  'audit.sink_admin_refused',
   'audit.failure_event_invalid',
   'audit.failure_event_failed',
   'audit.failure_events_cap',
@@ -66,6 +67,11 @@ const REASON_CODES = [
   'health.not_ready',
   'request.aborted',
   'http.handler_status',
+  'audit.restore_detected',
+  'audit.local_fork',
+  'audit.receiver_fork',
+  'audit.history_limit',
+  'audit.batch_limit',
   'audit.partial_success',
   'audit.skipped',
   'audit.marker_rejected',

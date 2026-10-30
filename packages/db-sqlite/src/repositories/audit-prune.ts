@@ -107,9 +107,9 @@ function eligible(ctx: OrgContext, options: AuditPruneOptions, through: number):
                 AND l.epoch = c.epoch AND l.kind IN ('withheld', 'uncertain')
                 AND (l.sink_id IS NULL OR l.sink_id = d.sink_id)
                 AND l.from_seq <= ? AND l.to_seq >= c.boundary_seq
-                AND NOT (l.kind = 'uncertain' AND l.sink_id IS NOT NULL AND l.sink_id = d.sink_id AND EXISTS (
+                AND NOT (EXISTS (
                   SELECT 1 FROM audit_ledger r WHERE r.org_id = ? AND r.chain_id = l.chain_id
-                    AND r.epoch = l.epoch AND r.sink_id = l.sink_id AND r.kind = 'replay'
+                    AND r.epoch = l.epoch AND r.sink_id = d.sink_id AND r.kind = 'replay'
                     AND r.resolves_id = l.id AND r.from_seq <= l.from_seq AND r.to_seq >= l.to_seq)))))))`,
     params: [
       ctx.orgId,

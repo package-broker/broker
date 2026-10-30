@@ -747,6 +747,7 @@ export interface AuditLedgerTable {
   actor_id: string | null;
   created_at: Generated<string>;
   superseded_by: string | null;
+  /** The withheld or uncertain ledger row covered by this sink’s durable ACK. */
   resolves_id: string | null;
   capacity_json: string | null;
 }

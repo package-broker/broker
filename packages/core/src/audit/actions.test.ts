@@ -91,10 +91,20 @@ describe('audit control action registration', () => {
     },
     {
       action: 'audit.sink_admin',
-      fields: ['operation', 'sink_id', 'from_seq', 'to_seq', 'epoch', 'generation', 'reason_code'],
+      fields: [
+        'operation',
+        'policy',
+        'sink_id',
+        'from_seq',
+        'to_seq',
+        'epoch',
+        'generation',
+        'reason_code',
+      ],
       changes: {
         sink_id: { new: 'archive' },
         operation: { new: 'retire' },
+        policy: { new: 'required' },
         from_seq: { new: 1 },
         to_seq: { new: 10 },
         reason_code: { new: 'operator_confirmed' },
@@ -148,10 +158,12 @@ describe('audit control action registration', () => {
     ['audit.mode_change', 'to_mode', ['trail', 'export', 'none']],
     ['audit.mode_change', 'source', ['build', 'env', 'cli']],
     ['audit.mode_change', 'policy', ['availability', 'required']],
+    ['audit.sink_admin', 'policy', ['availability', 'required']],
     [
       'audit.sink_admin',
       'operation',
       [
+        'resolve',
         'rebind',
         'retire',
         'unblock',
@@ -203,6 +215,7 @@ describe('audit control action registration', () => {
   it.each([
     ['audit.mode_change', 'from_mode', 'export-only'],
     ['audit.mode_change', 'to_mode', 'export-only'],
+    ['audit.sink_admin', 'operation', 'unknown'],
     ['audit.sink_admin', 'operation', 'list'],
     ['audit.sink_admin', 'operation', 'confirm-restore'],
     ['audit.sink_admin', 'operation', 'policy set'],
@@ -278,7 +291,6 @@ describe('audit control action registration', () => {
     ['audit.export', 'sink_id'],
     ['audit.mode_change', 'count'],
     ['audit.mode_change', 'mode'],
-    ['audit.sink_admin', 'policy'],
     ['audit.sink_admin', 'mode'],
   ])('%s refuses another action’s field %s', (action, field) => {
     expect(build(action, { [field]: { new: 1 } })).toEqual({

@@ -1,9 +1,10 @@
+import type {
+  AuditSinkAdminPort,
+  AuditSinkAdminSnapshot,
+} from '@package-broker/core/audit/sink-admin';
+import type { AuditLedgerEntry } from '@package-broker/core/audit/ledger';
 import type { AuditExportState } from '@package-broker/core/audit/export';
-import {
-  AuditForkLimitError,
-  type AuditForkPort,
-  type AuditForkSnapshot,
-} from '@package-broker/core/audit/fork';
+import { AuditForkLimitError, type AuditForkSnapshot } from '@package-broker/core/audit/fork';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import type { SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { sql } from 'kysely';
@@ -22,6 +23,8 @@ const chain = {
   boundary_prev_hash: 'boundaryPrevHash',
   boundary_reason: 'boundaryReason',
   policy: 'policy',
+  mode: 'mode',
+  pending_mode: 'pendingMode',
   restore_pending: 'restorePending',
   head_seq: 'headSeq',
   head_hash: 'headHash',
@@ -99,8 +102,30 @@ const HISTORY_SQL = `WITH RECURSIVE
 
 const [historyHead, historyTail] = HISTORY_SQL.split('?') as [string, string];
 
-export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort {
+export function createAuditForkRepository(executor: SqlExecutor): AuditSinkAdminPort {
   return {
+    async actorExists(org, actor) {
+      const table = actor.type === 'user' ? 'user_account' : 'service_principal';
+      const rows = await executor.all({
+        sql: `SELECT 1 FROM ${table} WHERE org_id = ? AND id = ? AND status = 'active'`,
+        params: [org.orgId, actor.id],
+      });
+      return rows.length === 1;
+    },
+    async resolution(org, id) {
+      const [row] = await executor.all<AuditLedgerEntry & { resolved: number }>({
+        sql: `SELECT l.id, l.kind, l.chain_id AS chainId, l.epoch, l.from_seq AS fromSeq,
+          l.to_seq AS toSeq, l.count, l.sink_id AS sinkId, l.reason_code AS reasonCode,
+          l.policy, l.mode_generation AS modeGeneration, l.actor_type AS actorType,
+          l.actor_id AS actorId, l.created_at AS createdAt,
+          EXISTS (SELECT 1 FROM audit_ledger r
+            WHERE r.org_id = ? AND r.resolves_id = l.id AND r.kind = 'replay'
+              AND r.superseded_by IS NULL) AS resolved
+          FROM audit_ledger l WHERE l.org_id = ? AND l.id = ? AND l.superseded_by IS NULL`,
+        params: [org.orgId, org.orgId, id],
+      });
+      return { target: row ?? null, resolved: Boolean(row?.resolved) };
+    },
     async read(org) {
       const [chainResult, sinkResult, historyResult] = await executor.batch([
         {
@@ -117,7 +142,8 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
           params: [org.orgId],
         },
       ]);
-      const row = chainResult!.rows[0] as unknown as Omit<AuditForkSnapshot, 'sinks'> | undefined;
+      const row = chainResult!.rows[0] as unknown as
+        Omit<AuditSinkAdminSnapshot, 'sinks'> | undefined;
       if (row === undefined) throw new Error('Audit chain unavailable');
       const history = historyResult!.rows;
       if (history.length >= HISTORY_LIMIT) throw new AuditForkLimitError('history_limit');
@@ -178,7 +204,10 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
             Object.entries(chain)
               .map(([column, key]) => `c.${column} IS json_extract(e.value, '$.${key}')`)
               .join(' AND '),
-          )} AND (SELECT json_group_array(json_object('id', id, 'kind', kind, 'chainId', chain_id, 'epoch', epoch, 'fromSeq', from_seq, 'toSeq', to_seq, 'reasonCode', reason_code))
+          )} AND (${change.policy ?? 'availability'} <> 'required' OR
+            (c.mode <> 'none' AND c.pending_mode IS NOT 'none'
+              AND (coalesce(c.pending_mode, c.mode) = 'trail' OR ${Number(expected.sinks.some((row) => row.durableAck && ['active', 'blocked'].includes(row.state)))} = 1)))
+            AND (SELECT json_group_array(json_object('id', id, 'kind', kind, 'chainId', chain_id, 'epoch', epoch, 'fromSeq', from_seq, 'toSeq', to_seq, 'reasonCode', reason_code))
             FROM (${sql.raw(historyHead)}${org.orgId}${sql.raw(historyTail)})) IS ${JSON.stringify(expected.history ?? [])})`),
         ...assertCheck(sql`((SELECT count(*) FROM audit_sink WHERE org_id = ${org.orgId}) = ${expected.sinks.length}
           AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ${org.orgId} AND (
@@ -194,12 +223,37 @@ export function createAuditForkRepository(executor: SqlExecutor): AuditForkPort 
           WHERE (SELECT hash FROM audit_event WHERE org_id = ${org.orgId}
             AND seq = json_extract(e.value, '$.seq')) IS NOT json_extract(e.value, '$.hash'))`),
       ];
+      if (change.event?.actor.type === 'user' || change.event?.actor.type === 'service_principal') {
+        const table = change.event.actor.type === 'user' ? 'user_account' : 'service_principal';
+        statements.push(
+          ...assertCheck(sql`EXISTS (SELECT 1 FROM ${sql.table(table)}
+          WHERE org_id = ${org.orgId} AND id = ${change.event.actor.id} AND status = 'active')`),
+        );
+      }
+      for (const row of change.ledger) {
+        if (row.resolvesId != null) {
+          statements.push(
+            ...assertCheck(sql`NOT EXISTS (SELECT 1 FROM audit_ledger
+            WHERE org_id = ${org.orgId}
+            AND resolves_id = ${row.resolvesId} AND kind = 'replay' AND superseded_by IS NULL)`),
+          );
+        }
+      }
       statements.push(...carry);
       const chainUpdateIndex = statements.length;
       statements.push(
         {
-          sql: `UPDATE audit_chain SET epoch = ?, restore_pending = ?, boundary_reason = ? WHERE org_id = ? RETURNING org_id`,
-          params: [change.epoch, Number(change.restorePending), change.boundaryReason, org.orgId],
+          sql: `UPDATE audit_chain SET epoch = ?, restore_pending = ?, boundary_reason = ?,
+            mode_generation = mode_generation + CASE WHEN policy <> ? THEN 1 ELSE 0 END, policy = ?
+            WHERE org_id = ? RETURNING org_id`,
+          params: [
+            change.epoch,
+            Number(change.restorePending),
+            change.boundaryReason,
+            change.policy ?? expected.policy,
+            change.policy ?? expected.policy,
+            org.orgId,
+          ],
         },
         {
           sql: `WITH next AS MATERIALIZED (SELECT value FROM json_each(?))

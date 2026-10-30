@@ -1156,7 +1156,7 @@
       "type": "trigger",
       "name": "audit_ledger_insert_visible",
       "tbl_name": "audit_ledger",
-      "sql": "CREATE TRIGGER audit_ledger_insert_visible\nBEFORE INSERT ON audit_ledger\nWHEN NEW.superseded_by IS NOT NULL OR (\n  NEW.resolves_id IS NOT NULL AND (\n    NEW.kind <> 'replay' OR NOT EXISTS (\n      SELECT 1 FROM audit_ledger AS resolved\n      WHERE resolved.org_id = NEW.org_id AND resolved.id = NEW.resolves_id\n        AND resolved.kind = 'uncertain' AND resolved.chain_id = NEW.chain_id\n        AND resolved.epoch = NEW.epoch AND resolved.sink_id IS NEW.sink_id\n        AND NEW.from_seq <= resolved.from_seq AND NEW.to_seq >= resolved.to_seq\n    )\n  )\n)\nBEGIN\n  SELECT RAISE(ABORT, 'audit ledger rows are inserted visible');\nEND"
+      "sql": "CREATE TRIGGER audit_ledger_insert_visible\nBEFORE INSERT ON audit_ledger\nWHEN NEW.superseded_by IS NOT NULL OR (\n  NEW.resolves_id IS NOT NULL AND (\n    NEW.kind <> 'replay' OR NOT EXISTS (\n      SELECT 1 FROM audit_ledger AS resolved\n      WHERE resolved.org_id = NEW.org_id AND resolved.id = NEW.resolves_id\n        AND resolved.kind IN ('uncertain', 'withheld') AND resolved.chain_id = NEW.chain_id\n        AND resolved.epoch = NEW.epoch AND NEW.sink_id IS NOT NULL\n        AND (resolved.sink_id IS NULL OR resolved.sink_id IS NEW.sink_id)\n        AND NEW.from_seq <= resolved.from_seq AND NEW.to_seq >= resolved.to_seq\n    )\n  )\n)\nBEGIN\n  SELECT RAISE(ABORT, 'audit ledger rows are inserted visible');\nEND"
     },
     {
       "type": "trigger",

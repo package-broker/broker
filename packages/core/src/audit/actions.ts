@@ -165,6 +165,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   // A rebind always includes from_seq; to_seq is omitted when custody is empty.
   'audit.sink_admin': [
     'operation',
+    'policy',
     'sink_id',
     'from_seq',
     'to_seq',
@@ -282,6 +283,7 @@ const AUDIT_CONTROL_ENUMS: Record<string, readonly string[]> = {
   source: ['build', 'env', 'cli'],
   policy: ['availability', 'required'],
   operation: [
+    'resolve',
     'rebind',
     'retire',
     'unblock',

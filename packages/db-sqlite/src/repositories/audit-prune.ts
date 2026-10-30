@@ -1,3 +1,5 @@
+import { createAuditHealthService, raiseAuditAlert } from '@package-broker/core/audit/health';
+import { createAuditHealthRepository } from './audit-health.js';
 import {
   auditCapacityReserveBytes,
   evictAudit,
@@ -171,6 +173,11 @@ export function createAuditPruneRepository(
   executor: SqlExecutor,
   observability: Observability = noopObservability,
 ): AuditPrunePort & AuditCapacityPort {
+  const health = createAuditHealthService({
+    port: createAuditHealthRepository(executor),
+    clock: { now: () => new Date() },
+    observability,
+  });
   async function prune(
     ctx: OrgContext,
     options: AuditPruneOptions | AuditCapacityOptions,
@@ -399,6 +406,7 @@ export function createAuditPruneRepository(
       const results = await executor.batch(statements);
       const deleted = results.at(deleteIndex)!.rows.length;
       if (capacity !== undefined) {
+        await raiseAuditAlert(health, ctx, 'audit.capacity');
         observability.log({ level: 'warn', event: 'audit.loss', reason_code: 'audit.capacity' });
         observability.counter('pb.audit.loss_events_total', { kind: 'gap' }, deleted);
       }
@@ -423,6 +431,7 @@ export function createAuditPruneRepository(
           params: [ctx.orgId, ...integrity.params],
         });
         if (broken.length > 0) {
+          await raiseAuditAlert(health, ctx, 'audit.prune_anchor');
           observability.log({
             level: 'error',
             event: 'audit.chain_integrity',

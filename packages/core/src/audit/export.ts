@@ -1,3 +1,4 @@
+import { raiseAuditAlert, type AuditHealthPort } from './health.js';
 import type { SystemMutationFence } from '../authz/fence.js';
 import type { OrgContext } from '../db/port.js';
 import { JOB_LEASE_SECONDS } from '../platform/job-repository.js';
@@ -176,7 +177,16 @@ export function auditInflightEventRange(sink: AuditSinkState): { from: number; t
   return { from: sink.inflightFrom, to: sink.inflightTo };
 }
 
+const DELIVERY_ALERT_CODES = {
+  skipped: 'audit.skipped',
+  uncertain: 'audit.uncertain',
+  blocked: 'audit.blocked',
+  withheld: 'audit.withheld',
+  marker_rejected: 'audit.marker_rejected',
+} as const;
+
 export interface AuditExportOptions {
+  readonly health?: Pick<AuditHealthPort, 'raise'>;
   readonly id: string;
   readonly generation: number;
   /** Version of the registered plugin that supplies this sink. */
@@ -193,10 +203,10 @@ export interface AuditExportOptions {
   /** Protocol policy: terminal for OTLP; webhook skipAfter counts retries. */
   readonly rejectionRetries: 'terminal' | number;
   /** A partial success could be neither disposed nor held; the next run redelivers it. */
-  readonly holdFailed?: () => void;
+  readonly holdFailed?: () => void | Promise<void>;
   readonly alert?: (
     reason: 'skipped' | 'uncertain' | 'blocked' | 'withheld' | 'marker_rejected',
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 function batchLimit(options: AuditExportOptions): number {
@@ -339,6 +349,18 @@ export async function exportAuditBatch(
   signal: AbortSignal,
   timeoutMs = deliveryBudgetMs(options),
 ): Promise<'idle' | 'contended' | 'accepted' | 'retry' | 'resolved'> {
+  const originalOptions = options;
+  options = {
+    ...options,
+    alert: async (reason) => {
+      await raiseAuditAlert(originalOptions.health, org, DELIVERY_ALERT_CODES[reason]);
+      await originalOptions.alert?.(reason);
+    },
+    holdFailed: async () => {
+      await raiseAuditAlert(originalOptions.health, org, 'audit.hold_failed');
+      await originalOptions.holdFailed?.();
+    },
+  };
   if (options.rejectionRetries !== 'terminal') validateAuditSkipAfter(options.rejectionRetries);
   const originalPort = port;
   port = {
@@ -539,7 +561,7 @@ export async function exportAuditBatch(
   if (signal.aborted || Date.now() >= deadline) return 'idle';
   if (!(await port.save(org, fence, snapshot, sending, options.generation, { ledger })))
     return 'contended';
-  if (ledger.length > 0) options.alert?.('withheld');
+  if (ledger.length > 0) await options.alert?.('withheld');
   snapshot = { ...snapshot, sink: sending };
   if (signal.aborted || Date.now() >= deadline) return 'idle';
   let result: AuditDelivery;
@@ -586,7 +608,7 @@ export async function exportAuditBatch(
           options.generation,
         ))
       )
-        options.holdFailed?.();
+        await options.holdFailed?.();
     }
     return 'contended';
   }
@@ -725,22 +747,16 @@ export function auditExportJob(
           fence,
           {
             ...options,
-            alert: (reason) => {
+            alert: async (reason) => {
               ctx.observability.log({
                 level: 'error',
                 event: 'audit.delivery_loss',
-                reason_code: {
-                  skipped: 'audit.skipped',
-                  uncertain: 'audit.uncertain',
-                  blocked: 'audit.blocked',
-                  withheld: 'audit.withheld',
-                  marker_rejected: 'audit.marker_rejected',
-                }[reason],
+                reason_code: DELIVERY_ALERT_CODES[reason],
                 sink_id: options.id,
               });
-              options.alert?.(reason);
+              await options.alert?.(reason);
             },
-            holdFailed: () => {
+            holdFailed: async () => {
               ctx.observability.log({
                 level: 'error',
                 event: 'audit.delivery_loss',
@@ -748,7 +764,7 @@ export function auditExportJob(
                 sink_id: options.id,
               });
               ctx.observability.counter('pb.audit.hold_failed_total');
-              options.holdFailed?.();
+              await options.holdFailed?.();
             },
             warning: (code) => {
               ctx.observability.log({

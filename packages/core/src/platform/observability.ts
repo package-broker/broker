@@ -323,7 +323,28 @@ export const FINISH_FAILURE_DETAIL_LABELS = Object.freeze({
   invalid_scope: true,
   token_endpoint_error: true,
 } as const);
+export const AUDIT_ALERT_CODES = [
+  'audit.skipped',
+  'audit.uncertain',
+  'audit.gap',
+  'audit.withheld',
+  'audit.marker_rejected',
+  'audit.blocked',
+  'audit.fork',
+  'audit.pending_old',
+  'audit.capacity',
+  'audit.mode_change',
+  'audit.policy_change',
+  'audit.sink_inactive',
+  'audit.config_invalid',
+  'audit.mode_none',
+  'audit.chain_integrity',
+  'audit.hold_failed',
+  'audit.prune_anchor',
+] as const;
+const AUDIT_CODES = new Set<string>(AUDIT_ALERT_CODES);
 const LABEL_KEYS = new Set([
+  'code',
   'method',
   'route',
   'status_class',
@@ -519,6 +540,8 @@ export function metricLabelValueAllowed(
   routeTemplates: ReadonlySet<string>,
 ): boolean {
   switch (key) {
+    case 'code':
+      return AUDIT_CODES.has(value);
     case 'detail':
       return Object.hasOwn(FINISH_FAILURE_DETAIL_LABELS, value);
     case 'method':

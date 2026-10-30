@@ -20,6 +20,7 @@ export const API_ERROR_CODES = {
   forbidden: { status: 403, message: 'Access denied' },
   reauth_required: { status: 403, message: 'Reauthentication required' },
   not_found: { status: 404, message: 'Not found' },
+  audit_trail_unavailable: { status: 404, message: 'Audit trail unavailable' },
   conflict: { status: 409, message: 'Conflict' },
   source_paused: { status: 409, message: 'Source is paused' },
   duplicate: { status: 409, message: 'Already exists' },

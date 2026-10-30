@@ -3,6 +3,7 @@ import type { RouteDefinition } from '../plugin.js';
 import { accessRoutes } from './routes/access.js';
 import { auditExportRoutes } from './routes/audit-export.js';
 import { auditRoutes } from './routes/audit.js';
+import { auditHealthRoutes } from './routes/audit-status.js';
 import { importRoutes } from './routes/import.js';
 import { organizationRoutes } from './routes/organization.js';
 import { packageManageRoutes } from './routes/package-manage.js';
@@ -37,6 +38,7 @@ export interface ApiModuleDeps {
   readonly packages: Parameters<typeof packageRoutes>[0];
   readonly auditExport?: Parameters<typeof auditExportRoutes>[0];
   readonly audit: Parameters<typeof auditRoutes>[0];
+  readonly auditHealth?: Parameters<typeof auditHealthRoutes>[0];
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
   readonly imports?: Parameters<typeof importRoutes>[0];
@@ -50,7 +52,7 @@ export const API_EXEMPT_ROUTES = Object.freeze({
   '/_pb/openapi.json': 'Serves the generated OpenAPI document.',
 });
 
-type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports'> &
+type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports' | 'auditHealth'> &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
   readonly [K in keyof T]?: T[K] extends (...args: never[]) => unknown
@@ -266,6 +268,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...packageRoutes(deps.packages),
     ...auditRoutes(deps.audit),
     ...auditExportRoutes(deps.auditExport),
+    ...auditHealthRoutes(deps.auditHealth),
     ...packageManageRoutes(deps.packageManage),
     ...(deps.imports == null ? [] : importRoutes(deps.imports)),
     myPermissionsRoute(),

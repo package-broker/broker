@@ -105,6 +105,7 @@ const EXPECTED_ROUTES = [
   'GET /_pb/audit',
   'GET /_pb/audit/head',
   'GET /_pb/audit/export',
+  'GET /_pb/audit/health',
   'GET /_pb/projects/:project/audit',
   'GET /_pb/me/permissions',
   'GET /_pb/projects/:project/permissions',

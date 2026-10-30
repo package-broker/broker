@@ -82,6 +82,7 @@ describe('backup scope manifest', () => {
       audit_chain: 'include',
       audit_sink: 'include',
       audit_ledger: 'include',
+      audit_health: 'include',
       api_idempotency: 'exclude',
       import_run: 'include',
       import_ref: 'include',

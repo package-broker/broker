@@ -1403,3 +1403,48 @@ it('logs and counts a partial success that could not be held', async () => {
   ]);
   expect(JSON.parse(f.get().sink.inflightRepr!).uncertainOutcome).toBeUndefined();
 });
+
+it('raises delivery losses without health polling and tolerates failed persistence', async () => {
+  const f = await setup(false);
+  f.deliver.mockResolvedValue({ outcome: 'rejected', code: 'http_status' });
+  const raise = vi.fn(async () => {
+    throw new Error('health unavailable');
+  });
+  expect(
+    await exportAuditBatch(
+      f.port,
+      org,
+      fence,
+      {
+        ...f.options,
+        rejectionRetries: 'terminal',
+        health: { raise },
+      },
+      signal,
+    ),
+  ).toBe('resolved');
+  expect(raise).toHaveBeenCalledWith(org, 'audit.skipped');
+});
+
+it('raises an unheld partial delivery without health polling', async () => {
+  const f = await setup(false);
+  f.deliver.mockImplementationOnce(async () => {
+    f.expire();
+    return { outcome: 'uncertain', code: 'partial_rejected', rejectedCount: 1 };
+  });
+  const raise = vi.fn(async () => {});
+  expect(
+    await exportAuditBatch(
+      f.port,
+      org,
+      fence,
+      {
+        ...f.options,
+        rejectionRetries: 'terminal',
+        health: { raise },
+      },
+      signal,
+    ),
+  ).toBe('contended');
+  expect(raise).toHaveBeenCalledWith(org, 'audit.hold_failed');
+});

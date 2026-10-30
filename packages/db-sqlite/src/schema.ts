@@ -752,7 +752,19 @@ export interface AuditLedgerTable {
   capacity_json: string | null;
 }
 
+export interface AuditHealthTable {
+  org_id: string;
+  code: string;
+  origin: 'ledger' | 'live' | 'source';
+  fingerprint: string;
+  revision: number;
+  acknowledged_revision: number;
+  active: number;
+  failing: number;
+}
+
 export interface Database {
+  audit_health: AuditHealthTable;
   audit_chain: AuditChainTable;
   audit_sink: AuditSinkTable;
   audit_ledger: AuditLedgerTable;

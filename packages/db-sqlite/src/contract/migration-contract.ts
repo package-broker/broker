@@ -497,7 +497,7 @@ export function describeMigrationContract(
         const sources = await discoveredMigrations();
         const result = await migrate(executor, sources, { holder: 'audit-fresh' });
         expect(result.applied).toEqual(['core:0001_init', 'core:0002_audit']);
-        expect(await countTables(executor)).toBe(59);
+        expect(await countTables(executor)).toBe(60);
         expect(await rows(executor, 'SELECT id FROM schema_migration ORDER BY id')).toEqual([
           { id: 'core:0001_init' },
           { id: 'core:0002_audit' },
@@ -1147,7 +1147,7 @@ export function describeMigrationContract(
         );
         const names = await tableNames(executor);
         for (const table of NEW_TABLES) expect(names).toContain(table);
-        expect(names).toHaveLength(59);
+        expect(names).toHaveLength(60);
         expect(await lockHolder(executor)).toBeNull();
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
         for (const table of ['token_project', 'service_principal_permission']) {
@@ -1330,7 +1330,7 @@ export function describeMigrationContract(
           { from: 'project_id', table: 'project', to: 'id' },
         ]);
         expect(await tableNames(executor)).not.toContain('job_attempt_0006');
-        expect(await countTables(executor)).toBe(59);
+        expect(await countTables(executor)).toBe(60);
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
 
         await seedPopulated(executor);

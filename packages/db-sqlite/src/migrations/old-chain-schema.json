@@ -812,6 +812,12 @@
     },
     {
       "type": "table",
+      "name": "audit_health",
+      "tbl_name": "audit_health",
+      "sql": "CREATE TABLE audit_health (\n  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,\n  code TEXT NOT NULL,\n  origin TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('ledger', 'live', 'source')),\n  fingerprint TEXT NOT NULL,\n  revision INTEGER NOT NULL CHECK (revision >= 1),\n  acknowledged_revision INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged_revision >= 0 AND acknowledged_revision <= revision),\n  active INTEGER NOT NULL CHECK (active IN (0, 1)),\n  failing INTEGER NOT NULL CHECK (failing IN (0, 1)),\n  PRIMARY KEY (org_id, code, origin)\n) STRICT"
+    },
+    {
+      "type": "table",
       "name": "audit_ledger",
       "tbl_name": "audit_ledger",
       "sql": "CREATE TABLE audit_ledger (\n  org_id           TEXT NOT NULL,\n  id               TEXT NOT NULL,\n  kind             TEXT NOT NULL CHECK (kind IN ('skipped', 'uncertain', 'gap', 'withheld', 'mode_change', 'policy_change', 'cutover', 'rebind', 'retire', 'unblock', 'restore_confirmed', 'export', 'replay', 'chain_reset', 'epoch_bump')),\n  chain_id         TEXT NOT NULL CHECK (length(chain_id) = 32 AND chain_id NOT GLOB '*[^0-9a-f]*'),\n  epoch            INTEGER NOT NULL CHECK (epoch BETWEEN 0 AND 9007199254740991),\n  from_seq         INTEGER NOT NULL CHECK (from_seq BETWEEN 1 AND 9007199254740991),\n  to_seq           INTEGER NOT NULL CHECK (to_seq BETWEEN from_seq AND 9007199254740991),\n  count            INTEGER NOT NULL CHECK (count >= 0),\n  sink_id          TEXT CHECK (sink_id IS NULL OR (length(sink_id) BETWEEN 1 AND 32 AND sink_id NOT GLOB '*[^a-z0-9-]*')),\n  reason_code      TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 32 AND substr(reason_code, 1, 1) GLOB '[a-z]' AND reason_code NOT GLOB '*[^a-z_]*'),\n  policy           TEXT NOT NULL CHECK (policy IN ('availability', 'required')),\n  mode_generation  INTEGER NOT NULL CHECK (mode_generation BETWEEN 0 AND 9007199254740991),\n  actor_type       TEXT NOT NULL CHECK (actor_type IN ('user', 'service_principal', 'customer', 'system')),\n  actor_id         TEXT,\n  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  superseded_by    TEXT,\n  resolves_id      TEXT,\n  capacity_json    TEXT CHECK (capacity_json IS NULL OR (json_valid(capacity_json) AND length(CAST(capacity_json AS BLOB)) <= 65536)),\n  PRIMARY KEY (org_id, id),\n  FOREIGN KEY (org_id) REFERENCES organization (id),\n  FOREIGN KEY (org_id, sink_id) REFERENCES audit_sink (org_id, sink_id),\n  CHECK (superseded_by IS NULL OR (kind = 'gap' AND superseded_by <> id))\n) STRICT"
@@ -1362,6 +1368,14 @@
       "tbl_name": "audit_event",
       "seq": 6,
       "name": "sqlite_autoindex_audit_event_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "audit_health",
+      "seq": 0,
+      "name": "sqlite_autoindex_audit_health_1",
       "unique": 1,
       "origin": "pk",
       "partial": 0

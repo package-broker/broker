@@ -219,3 +219,15 @@ AFTER INSERT ON organization
 BEGIN
   INSERT INTO audit_chain (org_id) VALUES (NEW.id);
 END;
+
+CREATE TABLE audit_health (
+  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('ledger', 'live', 'source')),
+  fingerprint TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  acknowledged_revision INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged_revision >= 0 AND acknowledged_revision <= revision),
+  active INTEGER NOT NULL CHECK (active IN (0, 1)),
+  failing INTEGER NOT NULL CHECK (failing IN (0, 1)),
+  PRIMARY KEY (org_id, code, origin)
+) STRICT;

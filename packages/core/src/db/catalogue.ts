@@ -14,6 +14,7 @@ import type {
 import type { VersionStability } from '../catalogue/versions.js';
 import type { Sha256 } from '../platform/blob.js';
 import type { CacheKey, EpochReader } from '../platform/cache.js';
+import type { PublishApprovalInsert, PublishReadme } from './publishes.js';
 import type { OrgContext, Statement } from './port.js';
 
 declare const CATALOGUE_WRITE_GUARD: unique symbol;
@@ -360,6 +361,7 @@ export interface FinalizeResult {
 }
 
 export type CatalogueWriteMethod =
+  | 'publishVersion'
   | 'syncPackage'
   | 'attachDist'
   | 'openListing'
@@ -368,7 +370,39 @@ export type CatalogueWriteMethod =
   | 'quarantine'
   | 'markPackageAbsent';
 
+export interface PublishVersionInput {
+  readonly sourceId: string;
+  readonly key: string;
+  readonly description: string | null;
+  readonly versionId: string;
+  readonly version: VersionInput;
+  readonly blob: DistBlob;
+  readonly integrity: string;
+  readonly distTags: Readonly<Record<string, string>>;
+  readonly readme: PublishReadme | null;
+  readonly approval: PublishApprovalInsert | null;
+  readonly scanJobStatements: readonly Statement[];
+  readonly requirePublishApproval: boolean;
+  readonly routeProjectId: string;
+  readonly tokenId: string;
+  readonly now: string;
+  readonly event: AuditEvent;
+}
+
+export interface PublishVersionResult {
+  readonly packageId: string;
+  readonly versionId: string;
+  readonly rev: number;
+  readonly approvalId: string | null;
+  readonly held: { readonly approval: boolean; readonly scan: boolean };
+}
+
 export interface CatalogueWriter {
+  publishVersion(
+    ctx: OrgContext,
+    guard: CatalogueWriteGuard,
+    input: PublishVersionInput,
+  ): Promise<PublishVersionResult>;
   /** Worst-case statements per call; for syncPackage, a call with CATALOGUE_SYNC_VERSIONS_PER_CALL versions. */
   readonly statementBudget: Readonly<Record<CatalogueWriteMethod, number>>;
   /** Worst-case executed statements, including guards repeated after batch splits. */

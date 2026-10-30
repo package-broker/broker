@@ -48,6 +48,9 @@ export const PERMISSIONS: readonly PermissionInfo[] = Object.freeze([
   permission('org:tokens:read', 'Read organization tokens'),
   permission('org:tokens:revoke', 'Revoke organization tokens'),
   permission('org:service-principals:write', 'Manage service principals'),
+  permission('org:packages:read', 'Read organization packages'),
+  permission('org:packages:publish', 'Publish organization packages', false),
+  permission('org:packages:approve', 'Approve organization publishes'),
   permission('org:packages:manage', 'Manage all packages'),
   permission('org:import:write', 'Import runs: create and read', false),
   permission('org:import:approve', 'Approve and apply import runs'),
@@ -69,6 +72,7 @@ export const PERMISSIONS: readonly PermissionInfo[] = Object.freeze([
 ]);
 
 export type DefaultRoleKey =
+  | 'organization_publisher'
   | 'organization_admin'
   | 'organization_auditor'
   | 'project_owner'
@@ -112,6 +116,7 @@ export const DEFAULT_ROLES: readonly DefaultRole[] = Object.freeze([
     'org:grants:read',
     'org:sources:read',
     'org:tokens:read',
+    'org:packages:read',
     'org:audit:read',
     'project:read',
     'project:grants:read',
@@ -150,6 +155,10 @@ export const DEFAULT_ROLES: readonly DefaultRole[] = Object.freeze([
     'project:sources:read',
     'project:tokens:read',
     'project:audit:read',
+  ]),
+  role('organization_publisher', 'Organization Publisher', 'organization', [
+    'org:read',
+    'org:packages:publish',
   ]),
 ]);
 

@@ -45,6 +45,18 @@ describe('shared API assembly', () => {
         ...options,
         runtime,
         blob: {
+          async stage() {
+            throw new Error('not_implemented');
+          },
+          async openStaged() {
+            throw new Error('not_implemented');
+          },
+          async promote() {
+            throw new Error('not_implemented');
+          },
+          async discard() {
+            throw new Error('not_implemented');
+          },
           put: async () => {
             throw new Error('unexpected blob write');
           },

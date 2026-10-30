@@ -230,6 +230,18 @@ describe('import jobs in the Node server assembly', () => {
       platformServices: {
         jobStore: createJobRepository(executor),
         blob: {
+          async stage() {
+            throw new Error('not_implemented');
+          },
+          async openStaged() {
+            throw new Error('not_implemented');
+          },
+          async promote() {
+            throw new Error('not_implemented');
+          },
+          async discard() {
+            throw new Error('not_implemented');
+          },
           head: async () => null,
           get: async () => null,
           put: async () => {

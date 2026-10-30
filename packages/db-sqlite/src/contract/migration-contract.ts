@@ -41,6 +41,7 @@ const NOW = '2026-10-16T09:00:00.000Z';
 const SETUP_EXPIRES = '2026-10-17T09:00:00.000Z';
 
 const ROLE_IDS: Readonly<Record<DefaultRoleKey, string>> = {
+  organization_publisher: '01J0ROLE000000000000000015',
   organization_admin: '01J0ROLE000000000000000010',
   organization_auditor: '01J0ROLE000000000000000011',
   project_owner: '01J0ROLE000000000000000012',

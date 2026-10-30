@@ -497,7 +497,11 @@ describe('token route table', () => {
     const writable = PERMISSIONS.filter(
       (info) => !info.sessionOnly && !info.name.endsWith(':read'),
     ).map((info) => info.name);
-    expect(writable).toEqual(['org:import:write', 'project:packages:write']);
+    expect(writable).toEqual([
+      'org:packages:publish',
+      'org:import:write',
+      'project:packages:write',
+    ]);
   });
 });
 

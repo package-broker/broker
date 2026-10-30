@@ -4,7 +4,7 @@ import type {
   CredentialTarget,
   ImportCredentialStore,
 } from '@package-broker/core/import/credentials';
-import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
+import { parseSha256, type CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import {
   assertCheck,
   assertGuard,

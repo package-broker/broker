@@ -47,7 +47,8 @@ import type { Codecs } from '../platform/codec.js';
 import { createScopedCache, type EpochReader } from '../platform/cache.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
 import type { JobGuard } from '../platform/job-repository.js';
-import type { JobDefinition } from '../platform/jobs.js';
+import type { JobDefinition, CoreJobs } from '../platform/jobs.js';
+import type { CoreBlobStore } from '../platform/blob.js';
 import type { PlatformPorts, Platform, RequestContext, RouteDefinition } from '../plugin.js';
 import { sourceCredentialRequired } from '../sources/credential-origins.js';
 import { parseSourceConfig } from '../sources/config.js';
@@ -107,7 +108,9 @@ export interface SourceCredential {
 
 export interface RegistryModuleDeps {
   readonly runtime: Platform;
-  readonly ports: Partial<PlatformPorts>;
+  readonly ports: Partial<
+    Omit<PlatformPorts, 'blob' | 'jobs'> & { blob: CoreBlobStore; jobs: CoreJobs }
+  >;
   readonly clock: Clock;
   readonly codecs: Codecs;
   readonly publicUrl: string;

@@ -6,7 +6,7 @@ import { fixedClock } from '../ids.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
 import type { SourceSyncDeps } from '../ingest/source-sync-job.js';
 import type { Codecs } from '../platform/codec.js';
-import type { JobContext, Jobs } from '../platform/jobs.js';
+import type { JobContext, CoreJobs as Jobs } from '../platform/jobs.js';
 import type { Observability } from '../platform/observability.js';
 import type { PlatformPorts, PluginPorts, RequestContext } from '../plugin.js';
 import { isRegisteredCoreJob } from '../runtime/core-jobs.js';
@@ -61,6 +61,10 @@ function setup() {
     removalAccepted: false,
   };
   const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     enqueue: vi.fn<Jobs['enqueue']>().mockResolvedValue({ id: 'job', created: true }),
     get: vi.fn<Jobs['get']>(),
   };

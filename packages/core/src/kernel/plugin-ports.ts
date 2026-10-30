@@ -1,5 +1,5 @@
 import type { PluginPorts } from '../plugin.js';
-import type { BlobStore } from '../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../platform/blob.js';
 import type { Cache } from '../platform/cache.js';
 import type { JobInitiator, JobsFactory, JobStore } from '../platform/jobs-port.js';
 import type { Observability } from '../platform/observability.js';
@@ -26,14 +26,23 @@ export function bindPluginPorts(
   if (services === undefined) return base;
   if (jobs === undefined) throw new TypeError('platform services require a jobs factory');
   const { organizations, clock, ids } = base;
+  const boundJobs = jobs(binding.pluginId, binding.initiator);
   return Object.freeze({
     organizations,
     clock,
     ids,
     platform: Object.freeze({
-      blob: services.blob,
+      blob: Object.freeze<NonNullable<PluginPorts['platform']>['blob']>({
+        put: (...args) => services.blob.put(...args),
+        get: (...args) => services.blob.get(...args),
+        head: (...args) => services.blob.head(...args),
+      }),
       cache: services.cache,
-      jobs: jobs(binding.pluginId, binding.initiator),
+      jobs: Object.freeze<NonNullable<PluginPorts['platform']>['jobs']>({
+        enqueue: (...args) => boundJobs.enqueue(...args),
+        get: (...args) => boundJobs.get(...args),
+        ...(boundJobs.notify === undefined ? {} : { notify: boundJobs.notify.bind(boundJobs) }),
+      }),
       observability: binding.observability,
     }),
   });

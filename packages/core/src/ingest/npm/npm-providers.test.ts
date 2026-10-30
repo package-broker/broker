@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { orgContext } from '../../db/port.js';
 import { fixedClock } from '../../ids.js';
-import type { BlobStore } from '../../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../../platform/blob.js';
 import type { Codecs } from '../../platform/codec.js';
 import type { Observability } from '../../platform/observability.js';
 import { bindCredential, parseCredentialMaterial } from '../../sources/credentials.js';

@@ -90,6 +90,22 @@ function memoryStore(chunkSize = 65_536) {
   const objects = new Map<string, Uint8Array>();
   const rows = new Map<string, BlobInfo>();
   const byteStore: ByteStore = {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
+
     async putVerified(key, body, input) {
       const bytes = new Uint8Array(await new Response(body).arrayBuffer());
       if (bytes.length !== input.size || sha256(bytes) !== input.sha256) {

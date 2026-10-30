@@ -3,7 +3,7 @@ import { newSessionSecrets } from '@package-broker/core/auth/session';
 import type { Statement } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import { IMPORT_RUN_JOB } from '@package-broker/core/import/run-service';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { resolveRegistryConfig } from '@package-broker/core/registry/registry-config';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -111,6 +111,18 @@ async function testImport(legacy: boolean) {
   const metadata = createBlobRepository(db.executor);
   const objects = new Map<string, Uint8Array>();
   const blobs: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     async put(org, sha, body, info) {
       objects.set(`${org.orgId}:${sha}`, new Uint8Array(await new Response(body).arrayBuffer()));
       const generation = await metadata.reserve(org, sha);

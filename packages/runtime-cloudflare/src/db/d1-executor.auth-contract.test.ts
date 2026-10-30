@@ -148,6 +148,7 @@ async function loadSources(): Promise<MigrationSource[]> {
 
 function idsWith(prefix: string): Record<DefaultRoleKey, string> {
   return {
+    organization_publisher: `${prefix}PUBLS0000000000000000`.slice(0, 26),
     organization_admin: `${prefix}ADMIN0000000000000000`.slice(0, 26),
     organization_auditor: `${prefix}ORGAUD000000000000000`.slice(0, 26),
     project_owner: `${prefix}OWNER00000000000000000`.slice(0, 26),

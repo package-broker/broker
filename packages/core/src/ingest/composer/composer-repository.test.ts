@@ -11,7 +11,7 @@ import { createPolicyFetch } from '../../sources/policy-fetch.js';
 import type { ProviderContext, ProviderSource } from '../../sources/provider.js';
 import { createOutboundPolicy } from '../../sources/url-policy.js';
 import type { CatalogueWriteGuard } from '../../db/catalogue.js';
-import type { BlobStore } from '../../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../../platform/blob.js';
 import { fetchAndVerifyDist, type DistFetchDeps } from '../dist-fetch.js';
 import { createComposerRepositoryProvider } from './composer-repository.js';
 

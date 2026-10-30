@@ -4,6 +4,14 @@ import { isUlid } from '../ids.js';
 import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
+  'package.publish',
+  'publish.approve',
+  'publish.reject',
+  'publish.expire',
+  'publish.scan',
+  'token.workload_issue',
+  'package.access_request',
+  'package.access_decide',
   'session.login',
   'session.logout',
   'session.reauth',
@@ -79,6 +87,33 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
+  'package.publish': [
+    'package',
+    'version',
+    'hold_approval',
+    'hold_scan',
+    'integrity',
+    'size_bytes',
+    'source',
+  ],
+  'publish.approve': ['token_id'],
+  'publish.reject': ['reason', 'token_id'],
+  'publish.expire': [],
+  'publish.scan': ['plugin', 'verdict', 'reason'],
+  'token.workload_issue': [
+    'trusted_publisher_id',
+    'repository_id',
+    'repository_owner_id',
+    'repository_visibility',
+    'workflow',
+    'environment',
+    'ref',
+    'package',
+    'token_id',
+    'expires_at',
+  ],
+  'package.access_request': ['package', 'project_id', 'reason'],
+  'package.access_decide': ['package', 'project_id', 'state', 'reason'],
   'session.login': [],
   'session.logout': [],
   'session.reauth': [],
@@ -200,8 +235,10 @@ function cleanString(value: string, limit: number, field: string): Cleaned {
 }
 
 function stringLimit(value: string, field: string): number {
-  if (field === 'package_name' && value.length <= MAX_KEY_LENGTH) {
-    for (const ecosystem of ['composer', 'npm'] as const) {
+  if ((field === 'package_name' || field === 'package') && value.length <= MAX_KEY_LENGTH) {
+    for (const ecosystem of field === 'package'
+      ? (['npm'] as const)
+      : (['composer', 'npm'] as const)) {
       try {
         if (
           displayName(packageKey(value, { ecosystem, legacyCase: ecosystem === 'npm' })) === value
@@ -340,8 +377,18 @@ function cleanChanges(
     for (const key of Object.keys(entry)) {
       if (!CHANGE_KEYS.has(key)) return { ok: false, reason: 'bad_value' };
       if (entry[key] === undefined) continue;
-      const cleaned =
-        field === 'provider' && IDENTITY_ACTIONS.has(action)
+      const integrity = action === 'package.publish' && field === 'integrity';
+      const value = entry[key];
+      const validIntegrity =
+        typeof value === 'string' &&
+        /^(?:sha512-[A-Za-z0-9+/]{85}[AQgw]==|sha1-[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=)$/.test(
+          value,
+        );
+      const cleaned = integrity
+        ? validIntegrity
+          ? { ok: true as const, value: value as string }
+          : { ok: false as const, reason: 'bad_value' as const }
+        : field === 'provider' && IDENTITY_ACTIONS.has(action)
           ? cleanProviderId(entry[key])
           : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;

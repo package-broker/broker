@@ -23,8 +23,15 @@ export interface RegistryConfigInput {
       }
     | undefined;
   readonly caps?:
-    | { readonly metadataBytes?: number | undefined; readonly archiveBytes?: number | undefined }
+    | {
+        readonly metadataBytes?: number | undefined;
+        readonly archiveBytes?: number | undefined;
+        readonly publishBodyBytes?: number | undefined;
+        readonly publishTarballBytes?: number | undefined;
+        readonly publishMetadataBytes?: number | undefined;
+      }
     | undefined;
+  readonly publish?: { readonly requireLicense?: boolean | undefined } | undefined;
   readonly npmAudit?: { readonly enabled?: boolean | undefined } | undefined;
 }
 

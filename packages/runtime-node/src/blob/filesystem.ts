@@ -475,6 +475,21 @@ export async function openFilesystemByteStore(
   }
 
   return Object.freeze({
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     async putVerified(storageKey, body, input) {
       let key: { parents: string[]; name: string };
       let expected: { sha256: string; size: number; mediaType: string };

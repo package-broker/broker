@@ -8,7 +8,7 @@ import { newSessionSecrets } from '@package-broker/core/auth/session';
 import { orgContext, type SqlExecutor, type SqlValue } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import { filterLogLevel } from '@package-broker/core/platform/observability';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
 import { resolveRegistryConfig } from '@package-broker/core/registry/registry-config';
@@ -969,7 +969,15 @@ describe('node registry wiring', () => {
         await gate;
         return { id: 'job-1', created: true };
       });
-      await boot(remote.transport, { jobs: { enqueue, get: async () => null } });
+      await boot(remote.transport, {
+        jobs: {
+          async enqueueStatements() {
+            throw new Error('not_implemented');
+          },
+          enqueue,
+          get: async () => null,
+        },
+      });
 
       expect((await get('/alpha/p2/acme/lib.json')).status).toBe(200);
       await sql("UPDATE upstream_state SET fresh_until = '2000-01-01T00:00:00.000Z'");
@@ -1063,7 +1071,13 @@ describe('node registry wiring', () => {
       const enqueue = vi.fn(() => new Promise<{ id: string; created: boolean }>(() => undefined));
       let closed = false;
       await boot(remote.transport, {
-        jobs: { enqueue, get: async () => null },
+        jobs: {
+          async enqueueStatements() {
+            throw new Error('not_implemented');
+          },
+          enqueue,
+          get: async () => null,
+        },
         shutdownDeadlineMs: 150,
         closeDatabase: async () => {
           closed = true;
@@ -1111,7 +1125,15 @@ describe('node registry wiring', () => {
     it('tracks the npm stale-while-revalidate background work through the execution port', async () => {
       const remote = upstream();
       const enqueue = vi.fn(async () => ({ id: 'job-1', created: true }));
-      await boot(remote.transport, { jobs: { enqueue, get: async () => null } });
+      await boot(remote.transport, {
+        jobs: {
+          async enqueueStatements() {
+            throw new Error('not_implemented');
+          },
+          enqueue,
+          get: async () => null,
+        },
+      });
       expect((await get('/alpha/npm/left-pad')).status).toBe(200);
       await sql("UPDATE upstream_state SET fresh_until = '2000-01-01T00:00:00.000Z'");
 
@@ -1130,7 +1152,15 @@ describe('node registry wiring', () => {
     it('hands the deferred work to an execution port when the caller supplies one', async () => {
       const remote = upstream();
       const enqueue = vi.fn(async () => ({ id: 'job-1', created: true }));
-      await boot(remote.transport, { jobs: { enqueue, get: async () => null } });
+      await boot(remote.transport, {
+        jobs: {
+          async enqueueStatements() {
+            throw new Error('not_implemented');
+          },
+          enqueue,
+          get: async () => null,
+        },
+      });
       expect((await get('/alpha/p2/acme/lib.json')).status).toBe(200);
       await sql("UPDATE upstream_state SET fresh_until = '2000-01-01T00:00:00.000Z'");
 

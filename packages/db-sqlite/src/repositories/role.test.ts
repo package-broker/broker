@@ -37,6 +37,7 @@ const NEW_ORG = '01J0NEWORG0000000000000000';
 
 function idsWith(prefix: string): Record<DefaultRoleKey, string> {
   return {
+    organization_publisher: `${prefix}PUBLS0000000000000000`.slice(0, 26),
     organization_admin: `${prefix}ADMIN0000000000000000`.slice(0, 26),
     organization_auditor: `${prefix}ORGAUD000000000000000`.slice(0, 26),
     project_owner: `${prefix}OWNER00000000000000000`.slice(0, 26),
@@ -348,10 +349,10 @@ const CUSTOM = {
 };
 
 describe('seedDefaultsStatements', () => {
-  it('1: seeds five roles whose stored permissions equal DEFAULT_ROLES', async () => {
+  it('1: seeds six roles whose stored permissions equal DEFAULT_ROLES', async () => {
     await seed(a, 'S1');
     const roles = await createRoleRepository(database.executor).list(a);
-    expect(roles).toHaveLength(5);
+    expect(roles).toHaveLength(6);
     for (const expected of DEFAULT_ROLES) {
       const stored = roles.find((role) => role.key === expected.key);
       expect(stored).toMatchObject({
@@ -395,7 +396,7 @@ describe('seedDefaultsStatements', () => {
 
   it('1: produces only scalar parameters and stamps timestamps from now', async () => {
     const statements = seedDefaultsStatements(a, { now: NOW, ids: idsWith('S1') });
-    expect(statements).toHaveLength(10);
+    expect(statements).toHaveLength(12);
     for (const statement of statements) {
       for (const param of statement.params) {
         expect(['string', 'number']).toContain(typeof param);
@@ -550,7 +551,7 @@ describe('list and get', () => {
     const repository = createRoleRepository(counted.executor);
     const roles = await repository.list(a);
     expect(counted.counts()).toEqual({ all: 1, batch: 0 });
-    expect(roles).toHaveLength(5);
+    expect(roles).toHaveLength(6);
 
     const admin = roles.find((role) => role.key === 'organization_admin');
     expect(await repository.get(a, admin?.id ?? '')).toEqual(admin);
@@ -805,7 +806,7 @@ describe('delete', () => {
     const auditor = await byKey(a, 'project_auditor');
     expect(await repository.delete(a, admin.id)).toBe('system');
     expect(await repository.delete(a, auditor.id)).toBe('system');
-    expect(await count('role')).toBe(5);
+    expect(await count('role')).toBe(6);
     expect(missingCatalogue((await byKey(a, 'organization_admin')).permissions)).toEqual([]);
   });
 
@@ -1139,7 +1140,7 @@ describe('rename guards', () => {
 });
 
 describe('concurrent seeding', () => {
-  it('4: two connections seeding with different ids leave five roles and the DEFAULT_ROLES sets', async () => {
+  it('4: two connections seeding with different ids leave six roles and the DEFAULT_ROLES sets', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pb-role-seed-'));
     const file = join(directory, 'store.sqlite');
     const shared = await openMigratedDatabase({ file, twoOrganizations: true });
@@ -1153,7 +1154,7 @@ describe('concurrent seeding', () => {
       ]);
 
       const roles = await createRoleRepository(shared.executor).list(orgs.a);
-      expect(roles).toHaveLength(5);
+      expect(roles).toHaveLength(6);
       for (const expected of DEFAULT_ROLES) {
         const stored = roles.find((role) => role.key === expected.key);
         expect([...(stored?.permissions ?? [])].sort()).toEqual([...expected.permissions].sort());

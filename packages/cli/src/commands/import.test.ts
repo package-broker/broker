@@ -925,6 +925,21 @@ describe('against the real import routes on SQLite', () => {
     const objects = new Map<string, Uint8Array>();
     const blobs = createBlobStore(
       {
+        async putStaged() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discardStaged() {
+          throw new Error('not_implemented');
+        },
+        async listStaged() {
+          throw new Error('not_implemented');
+        },
         async putVerified(key, body, input) {
           objects.set(key, new Uint8Array(await new Response(body).arrayBuffer()));
           return { size: input.size, mediaType: input.mediaType };

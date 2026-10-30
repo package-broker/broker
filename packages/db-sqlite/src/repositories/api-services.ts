@@ -29,7 +29,7 @@ import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-
 import { auditPendingStatement } from './audit-pending.js';
 import { createImportCredentialRepository } from './import-credential.js';
 import { createImportRunStore } from './import-run.js';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
 import { createCredentialRepository } from './credential.js';

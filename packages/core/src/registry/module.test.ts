@@ -185,6 +185,10 @@ function harness(options: { jobs?: boolean; ports?: Partial<PlatformPorts> } = {
     resolveDist: vi.fn(async () => null),
   };
   const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     enqueue: vi.fn((async () => ({ id: 'job-1', created: true })) as (
       ...args: unknown[]
     ) => Promise<{ id: string; created: boolean }>),

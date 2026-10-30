@@ -428,6 +428,13 @@ describe('version-state fenced batch', () => {
 });
 
 describe('catalogue adapter', () => {
+  it('budgets publishing at 40 statements and rejects until publishing is implemented', async () => {
+    expect(writer.statementBudget.publishVersion).toBe(40);
+    await expect(writer.publishVersion(org, {} as never, {} as never)).rejects.toThrow(
+      'not_implemented',
+    );
+  });
+
   it('implements the ports and covers every subset outcome at the type level', () => {
     expectTypeOf(writer).toMatchTypeOf<CatalogueWriter>();
     expectTypeOf(store).toMatchTypeOf<VisibilityStore>();

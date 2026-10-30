@@ -89,6 +89,21 @@ async function s3Fixture(): Promise<BlobLifecycleFixture> {
   });
 
   const guarded: ByteStore = {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     putVerified: (key, body, input) => byteStore.putVerified(key, body, input),
     async get(key, range) {
       if (state.failRead) {

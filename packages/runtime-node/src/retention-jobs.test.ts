@@ -60,6 +60,21 @@ async function boot({ deleteTimeoutMs = 30_000 } = {}) {
     bytes.delete(key);
   });
   const retentionBytes: ByteStore = {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     remove,
     head: async () => null,
     get: async () => null,
@@ -71,6 +86,18 @@ async function boot({ deleteTimeoutMs = 30_000 } = {}) {
     retention: { store: retentionBytes, deleteTimeoutMs, leaseMs: 900_000 },
     jobStore: createJobRepository(executor),
     blob: {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
       head: async () => null,
       get: async () => null,
       put: async () => {

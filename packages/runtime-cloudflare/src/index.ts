@@ -1183,6 +1183,11 @@ function retentionRegistrations(
             const removal = createBlobLifecycle({
               metadata,
               store: {
+                putStaged: (...args) => store.putStaged(...args),
+                openStaged: (...args) => store.openStaged(...args),
+                promote: (...args) => store.promote(...args),
+                discardStaged: (...args) => store.discardStaged(...args),
+                listStaged: (...args) => store.listStaged(...args),
                 putVerified: (...args) => store.putVerified(...args),
                 head: (...args) => store.head(...args),
                 get: (...args) => store.get(...args),

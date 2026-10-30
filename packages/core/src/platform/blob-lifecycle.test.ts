@@ -9,7 +9,7 @@ import {
 } from './blob.js';
 import { createBlobLifecycle } from './blob-lifecycle.js';
 import { createBlobRemoveJob } from './blob-remove-job.js';
-import { type JobContext, type Jobs, validateIdempotencyKey } from './jobs.js';
+import { type JobContext, type CoreJobs as Jobs, validateIdempotencyKey } from './jobs.js';
 
 const ctx = orgContext('org-a');
 const key = parseSha256('b'.repeat(64));
@@ -202,7 +202,16 @@ it('uses each organization context unchanged for recheck and physical storage', 
 
 it.each([true, false])('queue admission %s avoids byte removal', async (eligible) => {
   const enqueue = vi.fn<Jobs['enqueue']>(async () => ({ id: 'job', created: true }));
-  const service = createBlobLifecycle({ ...f.options, jobs: { enqueue, get: vi.fn() } });
+  const service = createBlobLifecycle({
+    ...f.options,
+    jobs: {
+      async enqueueStatements() {
+        throw new Error('not_implemented');
+      },
+      enqueue,
+      get: vi.fn(),
+    },
+  });
   f.metadata.canStartRemove.mockResolvedValue(eligible);
   for (const g of [generation, 'd'.repeat(32) as PurgeGeneration]) {
     await expect(service.removeBytes(ctx, key, g)).resolves.toBe(eligible ? 'queued' : 'refused');
@@ -355,7 +364,16 @@ it.each([
   'purgeBytes with queue admission, recheck %s and probe %s: %s',
   async (recheck, probe, expected) => {
     const enqueue = vi.fn<Jobs['enqueue']>(async () => ({ id: 'job', created: true }));
-    const service = createBlobLifecycle({ ...f.options, jobs: { enqueue, get: vi.fn() } });
+    const service = createBlobLifecycle({
+      ...f.options,
+      jobs: {
+        async enqueueStatements() {
+          throw new Error('not_implemented');
+        },
+        enqueue,
+        get: vi.fn(),
+      },
+    });
     f.metadata.canStartRemove.mockResolvedValueOnce(recheck).mockResolvedValueOnce(probe);
     await expect(service.purgeBytes(ctx, key, generation)).resolves.toBe(expected);
     expect(enqueue).toHaveBeenCalledTimes(expected === 'queued' ? 1 : 0);

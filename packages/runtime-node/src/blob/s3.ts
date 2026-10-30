@@ -463,6 +463,21 @@ export function createS3ByteStore(options: S3ByteStoreOptions): ByteStore {
   }
 
   return Object.freeze({
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
     async putVerified(storageKey, source, input) {
       validateKey(storageKey);
       if (

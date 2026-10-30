@@ -43,9 +43,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 58 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(58);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(58);
+  it('has 66 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(66);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(66);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -1344,4 +1344,39 @@ describe('source package request audit', () => {
       expect(JSON.parse(payloadOf(result)).changes).toEqual({ package_name: { new: name } });
     },
   );
+});
+
+describe('npm audit values', () => {
+  it.each(['sha512', 'sha1'] as const)(
+    'accepts a real %s SRI digest only for publish integrity',
+    async (algorithm) => {
+      const bytes = new Uint8Array(
+        await crypto.subtle.digest(
+          algorithm === 'sha512' ? 'SHA-512' : 'SHA-1',
+          new TextEncoder().encode('package tarball'),
+        ),
+      );
+      const digest = `${algorithm}-${btoa(String.fromCharCode(...bytes))}`;
+      expect(build('package.publish', { integrity: { new: digest } }).ok).toBe(true);
+      expect(build('publish.reject', { reason: { new: digest } }).ok).toBe(false);
+      for (const invalid of [
+        digest + 'x',
+        digest + '\n',
+        digest + '\r\n',
+        'sha512-abc',
+        digest.replace(/.$/, '!'),
+      ])
+        expect(build('package.publish', { integrity: { new: invalid } }).ok).toBe(false);
+    },
+  );
+  it.each([
+    'package.publish',
+    'token.workload_issue',
+    'package.access_request',
+    'package.access_decide',
+  ])('bounds npm package names in %s', (action) => {
+    expect(build(action, { package: { new: 'a'.repeat(214) } }).ok).toBe(true);
+    expect(build(action, { package: { new: 'a'.repeat(215) } }).ok).toBe(false);
+    expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(false);
+  });
 });

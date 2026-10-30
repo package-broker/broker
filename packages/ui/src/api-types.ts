@@ -1465,6 +1465,319 @@ export interface components {
         requestId: string;
       };
     };
+    NpmLoginApprovalBody: {
+      /** @enum {string} */
+      scope: 'read' | 'write';
+    };
+    NpmLoginConfirmResponse: {
+      /** @constant */
+      ok: true;
+    };
+    NpmLoginConfirmation: {
+      cliHostname: string | null;
+      createdAt: string;
+      expiresAt: string;
+      project: {
+        id: string;
+        name: string;
+        slug: string;
+      };
+      sourceIp: string | null;
+    };
+    NpmLoginPending: Record<string, never>;
+    NpmLoginStart: {
+      doneUrl: string;
+      loginUrl: string;
+    };
+    /** @default {} */
+    NpmLoginStartBody: {
+      create?: boolean;
+      hostname?: string;
+    };
+    NpmLoginToken: {
+      token: string;
+    };
+    NpmPublishAccepted:
+      | {
+          id: string;
+          /** @constant */
+          ok: true;
+          rev: number;
+        }
+      | {
+          held: {
+            approval: boolean;
+            scan: boolean;
+          };
+          id: string;
+          /** @constant */
+          ok: true;
+          status: string;
+        };
+    NpmWorkloadToken: {
+      created: string;
+      expires: string;
+      token: string;
+      /** @constant */
+      token_type: 'oidc';
+    };
+    PackageAccessApproveBody: {
+      /** @description At most 1000 UTF-8 bytes */
+      reason?: string;
+    };
+    PackageAccessRejectBody: {
+      /** @description At most 1000 UTF-8 bytes */
+      reason: string;
+    };
+    PackageAccessRequest: {
+      createdAt: string;
+      decidedAt: string | null;
+      decidedBy: {
+        name: string;
+      } | null;
+      decidedByUserId: string | null;
+      decisionReason: string | null;
+      expiresAt: string;
+      id: string;
+      packageId: string;
+      packageName: string;
+      project: {
+        id: string;
+        name: string;
+        slug: string;
+      } | null;
+      projectId: string;
+      reason: string | null;
+      requestedBy: {
+        name: string;
+        /** @constant */
+        type: 'user';
+      };
+      requestedByUserId: string;
+      revision: number;
+      /** @enum {string} */
+      state: 'pending' | 'approved' | 'rejected' | 'expired';
+      updatedAt: string;
+    };
+    PackageAccessRequestBody: {
+      packageId: string;
+      reason?: string;
+    };
+    PackageAccessRequestList: {
+      items: {
+        createdAt: string;
+        decidedAt: string | null;
+        decidedBy: {
+          name: string;
+        } | null;
+        decidedByUserId: string | null;
+        decisionReason: string | null;
+        expiresAt: string;
+        id: string;
+        packageId: string;
+        packageName: string;
+        project: {
+          id: string;
+          name: string;
+          slug: string;
+        } | null;
+        projectId: string;
+        reason: string | null;
+        requestedBy: {
+          name: string;
+          /** @constant */
+          type: 'user';
+        };
+        requestedByUserId: string;
+        revision: number;
+        /** @enum {string} */
+        state: 'pending' | 'approved' | 'rejected' | 'expired';
+        updatedAt: string;
+      }[];
+      next: string | null;
+    };
+    PackageAccessRequestListQuery: {
+      cursor?: string;
+      limit?: string;
+      /** @enum {string} */
+      state?: 'pending' | 'approved' | 'rejected' | 'expired';
+    };
+    PublishApproval: {
+      /** @enum {string} */
+      approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+      createdAt: string;
+      decidedAt: string | null;
+      decidedBy: {
+        name: string;
+      } | null;
+      decidedByUserId: string | null;
+      decisionReason: string | null;
+      distTags: {
+        [key: string]: string;
+      };
+      expiresAt: string;
+      holdApproval: boolean;
+      holdScan: boolean;
+      id: string;
+      packageId: string;
+      packageName: string;
+      project: {
+        id: string;
+        name: string;
+        slug: string;
+      } | null;
+      readmePending: boolean;
+      requestedBy: {
+        name: string;
+        /** @enum {string} */
+        type: 'user' | 'service';
+      };
+      requestedById: string;
+      /** @enum {string} */
+      requestedByType: 'user' | 'service';
+      requiredScanners: string[];
+      revision: number;
+      routeProjectId: string | null;
+      scanAttempts: number;
+      /** @enum {string} */
+      scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+      scanVerdicts: {
+        plugin: string;
+        reason?: string;
+        /** @enum {string} */
+        verdict: 'allow' | 'deny';
+      }[];
+      sourceId: string;
+      sourceName: string;
+      tokenId: string;
+      updatedAt: string;
+      version: string;
+      versionId: string;
+    };
+    PublishApproveBody: {
+      /** @description At most 1000 UTF-8 bytes */
+      reason?: string;
+    };
+    PublishList: {
+      items: {
+        /** @enum {string} */
+        approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+        createdAt: string;
+        decidedAt: string | null;
+        decidedBy: {
+          name: string;
+        } | null;
+        decidedByUserId: string | null;
+        decisionReason: string | null;
+        distTags: {
+          [key: string]: string;
+        };
+        expiresAt: string;
+        holdApproval: boolean;
+        holdScan: boolean;
+        id: string;
+        packageId: string;
+        packageName: string;
+        project: {
+          id: string;
+          name: string;
+          slug: string;
+        } | null;
+        readmePending: boolean;
+        requestedBy: {
+          name: string;
+          /** @enum {string} */
+          type: 'user' | 'service';
+        };
+        requestedById: string;
+        /** @enum {string} */
+        requestedByType: 'user' | 'service';
+        requiredScanners: string[];
+        revision: number;
+        routeProjectId: string | null;
+        scanAttempts: number;
+        /** @enum {string} */
+        scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+        scanVerdicts: {
+          plugin: string;
+          reason?: string;
+          /** @enum {string} */
+          verdict: 'allow' | 'deny';
+        }[];
+        sourceId: string;
+        sourceName: string;
+        tokenId: string;
+        updatedAt: string;
+        version: string;
+        versionId: string;
+      }[];
+      next: string | null;
+    };
+    PublishListQuery: {
+      cursor?: string;
+      limit?: string;
+      /** @enum {string} */
+      state?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+    };
+    PublishRejectBody: {
+      /** @description At most 1000 UTF-8 bytes */
+      reason: string;
+    };
+    RequestablePackage: {
+      id: string;
+      name: string;
+      /** @constant */
+      newProjectAccessMode: 'request';
+    };
+    TrustedPublisher: {
+      createdAt: string;
+      createdByName: string;
+      createdByUserId: string;
+      disabledAt: string | null;
+      environment: string;
+      id: string;
+      lastUsedAt: string | null;
+      packageName: string;
+      refPattern: string | null;
+      repository: string;
+      repositoryId: string;
+      repositoryOwnerId: string;
+      revision: number;
+      servicePrincipalId: string;
+      servicePrincipalName: string;
+      workflow: string;
+    };
+    TrustedPublisherCreateBody: {
+      environment: string;
+      packageName: string;
+      refPattern?: string;
+      repository: string;
+      workflow: string;
+    };
+    TrustedPublisherList: {
+      items: {
+        createdAt: string;
+        createdByName: string;
+        createdByUserId: string;
+        disabledAt: string | null;
+        environment: string;
+        id: string;
+        lastUsedAt: string | null;
+        packageName: string;
+        refPattern: string | null;
+        repository: string;
+        repositoryId: string;
+        repositoryOwnerId: string;
+        revision: number;
+        servicePrincipalId: string;
+        servicePrincipalName: string;
+        workflow: string;
+      }[];
+    };
+    VersionReadme: {
+      body: string;
+      filename: string;
+    };
   };
   responses: never;
   parameters: never;
@@ -1637,7 +1950,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -1646,7 +1959,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1707,7 +2020,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -1716,7 +2029,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1778,7 +2091,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -1787,7 +2100,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1852,7 +2165,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -1861,7 +2174,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1915,7 +2228,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -1924,7 +2237,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2000,7 +2313,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2066,7 +2379,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2075,7 +2388,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -5681,6 +5994,9 @@ export interface operations {
             | 'org:tokens:read'
             | 'org:tokens:revoke'
             | 'org:service-principals:write'
+            | 'org:packages:read'
+            | 'org:packages:publish'
+            | 'org:packages:approve'
             | 'org:packages:manage'
             | 'org:import:write'
             | 'org:import:approve'
@@ -6923,7 +7239,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;
@@ -6959,7 +7275,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Service unavailable */
+      /** @description Service unavailable; Publishing is busy, try again later */
       503: {
         headers: {
           [name: string]: unknown;
@@ -7157,7 +7473,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7588,7 +7904,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8099,6 +8415,9 @@ export interface operations {
             | 'org:tokens:read'
             | 'org:tokens:revoke'
             | 'org:service-principals:write'
+            | 'org:packages:read'
+            | 'org:packages:publish'
+            | 'org:packages:approve'
             | 'org:packages:manage'
             | 'org:import:write'
             | 'org:import:approve'
@@ -8177,7 +8496,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8321,6 +8640,9 @@ export interface operations {
             | 'org:tokens:read'
             | 'org:tokens:revoke'
             | 'org:service-principals:write'
+            | 'org:packages:read'
+            | 'org:packages:publish'
+            | 'org:packages:approve'
             | 'org:packages:manage'
             | 'org:import:write'
             | 'org:import:approve'
@@ -8619,7 +8941,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9098,7 +9420,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;
@@ -9709,7 +10031,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10116,7 +10438,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
       409: {
         headers: {
           [name: string]: unknown;

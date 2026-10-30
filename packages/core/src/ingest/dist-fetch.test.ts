@@ -7,7 +7,7 @@ import {
   BlobTooLargeError,
   parseSha256,
   type BlobInfo,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
 import { UpstreamError } from '../sources/policy-fetch.js';
@@ -107,6 +107,19 @@ function rig(
   const opens: Rig['opens'] = [];
   const logs: Rig['logs'] = [];
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
+
     async put(_ctx, key, body, input): Promise<BlobInfo> {
       events.push('put');
       puts.push({ refetchable: input.refetchable, mediaType: input.mediaType });

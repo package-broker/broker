@@ -7,7 +7,7 @@ import { archive, entry, stream } from '../../test-support/npm-publish';
 import { packTarball } from './tarball-pack';
 
 const read = (path: string) =>
-  stripTypeScriptTypes(readFileSync(new URL(path, import.meta.url), 'utf8'), { mode: 'transform' });
+  stripTypeScriptTypes(readFileSync(new URL(path, import.meta.url), 'utf8'), { mode: 'strip' });
 const requireRuntime = createRequire(
   new URL('../../../../runtime-cloudflare/package.json', import.meta.url),
 );

@@ -1,12 +1,12 @@
 export class PublishValidationError extends Error {
+  readonly code: string;
+  readonly status: number;
   readonly detail: string | undefined;
   override readonly name = 'PublishValidationError';
-  constructor(
-    readonly code: string,
-    readonly status = 400,
-    options?: ErrorOptions & { detail?: string },
-  ) {
+  constructor(code: string, status = 400, options?: ErrorOptions & { detail?: string }) {
     super(code, options);
+    this.code = code;
+    this.status = status;
     this.detail = options?.detail;
   }
 }

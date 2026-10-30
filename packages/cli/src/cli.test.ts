@@ -24,6 +24,8 @@ it('lists only working commands in --help', async () => {
       'build',
       'migrate',
       'bootstrap',
+      'sqlite restore',
+      'audit epoch bump',
       'cloudflare setup',
       'cloudflare provision',
       'cloudflare deploy',

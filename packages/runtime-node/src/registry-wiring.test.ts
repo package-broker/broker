@@ -1,6 +1,16 @@
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { createNpmHandleOf } from '@package-broker/core/registry/module';
+import type { RequestContext } from '@package-broker/core/plugin';
+import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { execFile } from 'node:child_process';
+import { createServer, type IncomingHttpHeaders } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { promisify } from 'node:util';
 import { createLocalLoginSeed } from './testing/local-login.js';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -327,6 +337,87 @@ describe('node registry wiring', () => {
     const kernel = await broker!.ready();
     return kernel.fetch(new Request(`${ORIGIN}${path}`, { headers }));
   }
+
+  it('authenticates whoami with personal and service bearer tokens and refuses an invalid token', async () => {
+    await sql(
+      "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'project:read' FROM role WHERE org_id = ?",
+      [orgId],
+    );
+    await sql('UPDATE user_account SET display_name = ? WHERE org_id = ?', ['reader', orgId]);
+    const tokens = await seedWhoamiTokens(db.executor, orgId, projectId);
+    await boot(upstream().transport);
+    for (const { token, username } of tokens) {
+      const response = await get('/alpha/npm/-/whoami', { authorization: `Bearer ${token}` });
+      expect(response.status, username ?? 'invalid token').toBe(username === null ? 401 : 200);
+      if (username !== null) expect(await response.json()).toEqual({ username });
+    }
+  });
+
+  it('runs npm whoami through the Node HTTP entry', async () => {
+    await sql(
+      "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'project:read' FROM role WHERE org_id = ?",
+      [orgId],
+    );
+    await requireNpm();
+    await sql('UPDATE user_account SET display_name = ? WHERE org_id = ?', ['reader', orgId]);
+    const tokens = await seedWhoamiTokens(db.executor, orgId, projectId);
+    await boot(upstream().transport);
+    await npmWhoami(
+      (path, headers) =>
+        broker!
+          .ready()
+          .then((kernel) => kernel.fetch(new Request(`${ORIGIN}${path}`, { headers }))),
+      '/alpha/npm/',
+      tokens,
+    );
+  });
+
+  it('serves whoami with a safe display name and the full fallback id', async () => {
+    await sql(
+      "INSERT INTO role_permission (org_id, role_id, permission) SELECT org_id, id, 'project:read' FROM role WHERE org_id = ?",
+      [orgId],
+    );
+    await boot(upstream().transport);
+    const [user] = await sql<{ id: string }>('SELECT id FROM user_account WHERE org_id = ?', [
+      orgId,
+    ]);
+    for (const name of ['reader', null, '', 'reader@example.test', 'two words']) {
+      await sql('UPDATE user_account SET display_name = ? WHERE org_id = ?', [name, orgId]);
+      const response = await get('/alpha/npm/-/whoami');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        username: name === 'reader' ? name : `user-${user!.id.toLowerCase()}`,
+      });
+    }
+    expect((await get('/alpha/npm/-/whoami', {})).status).toBe(401);
+    const serviceId = ulid();
+    await sql(
+      'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+      [serviceId, orgId, 'build-bot', user!.id],
+    );
+    const handleOf = createNpmHandleOf(
+      createUserRepository(db.executor),
+      createServicePrincipalRepository(db.executor),
+    );
+    const ctx = {
+      org: orgContext(orgId),
+      principal: { kind: 'service', id: serviceId },
+    } as RequestContext;
+    expect(await handleOf(ctx)).toBe('build-bot');
+    await sql('UPDATE service_principal SET name = ? WHERE id = ?', [
+      'bot@example.test',
+      serviceId,
+    ]);
+    expect(await handleOf(ctx)).toBe(`service-${serviceId.toLowerCase()}`);
+    expect(await handleOf({ ...ctx, org: orgContext(ulid()) })).toBeNull();
+    expect(
+      await handleOf({
+        ...ctx,
+        principal: { kind: 'user', id: user!.id },
+        org: orgContext(ulid()),
+      }),
+    ).toBeNull();
+  });
 
   async function sealed(key: string): Promise<string> {
     const store = createCredentialStore({
@@ -1113,3 +1204,130 @@ describe('node registry startup', () => {
     }
   });
 });
+
+async function requireNpm(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  try {
+    await promisify(execFile)('npm', ['--version'], { env, timeout: 3000 });
+  } catch {
+    throw new Error('npm whoami CLI tests require npm on PATH');
+  }
+}
+
+it('reports the npm on PATH requirement immediately when missing', async () => {
+  await expect(requireNpm({ PATH: '' })).rejects.toThrow(
+    'npm whoami CLI tests require npm on PATH',
+  );
+});
+
+async function seedWhoamiTokens(executor: SqlExecutor, orgId: string, projectId: string) {
+  const run = (sql: string, params: (string | number | null)[]) =>
+    executor.batch([{ sql, params }]);
+  const [user] = await executor.all<{ id: string }>({
+    sql: 'SELECT id FROM user_account WHERE org_id = ?',
+    params: [orgId],
+  });
+  const serviceId = ulid();
+  await run(
+    'INSERT INTO service_principal (id, org_id, name, project_id, created_by_user_id) VALUES (?, ?, ?, ?, ?)',
+    [serviceId, orgId, 'build-bot', projectId, user!.id],
+  );
+  await run(
+    'INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, ?)',
+    [orgId, serviceId, 'project:read'],
+  );
+  const keyring = createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]);
+  const cases: { token: string; username: string | null }[] = [];
+  for (const kind of ['pat', 'svc'] as const) {
+    const selector = kind === 'pat' ? 'aaaaaaaaaaaa' : 'bbbbbbbbbbbb';
+    const token = formatToken(kind, selector, crypto.getRandomValues(new Uint8Array(32)));
+    await run(
+      `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, read_only,
+      user_id, service_principal_id, project_id, created_by_user_id, expires_at, project_mode, validation_kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ulid(),
+        orgId,
+        kind,
+        selector,
+        await hashToken(keyring, keyring.currentVersion, token),
+        keyring.currentVersion,
+        'whoami-fixture',
+        '["read"]',
+        kind === 'pat' ? user!.id : null,
+        kind === 'svc' ? serviceId : null,
+        kind === 'svc' ? projectId : null,
+        user!.id,
+        new Date(Date.now() + 3600000).toISOString(),
+        'all',
+        kind === 'pat' ? 'local' : null,
+      ],
+    );
+    cases.push({ token, username: kind === 'pat' ? 'reader' : 'build-bot' });
+  }
+  cases.push({ token: formatToken('pat', 'cccccccccccc', new Uint8Array(32)), username: null });
+  return cases;
+}
+
+async function npmWhoami(
+  call: (path: string, headers: Headers) => Promise<Response>,
+  prefix: string,
+  cases: readonly { token: string; username: string | null }[],
+): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), 'pb-npm-whoami-'));
+  const statuses: number[] = [];
+  const server = createServer((request, response) => {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(request.headers as IncomingHttpHeaders)) {
+      if (Array.isArray(value)) for (const entry of value) headers.append(name, entry);
+      else if (value !== undefined) headers.set(name, value);
+    }
+    void call(request.url ?? '/', headers)
+      .then(async (reply) => {
+        statuses.push(reply.status);
+        response.writeHead(reply.status, Object.fromEntries(reply.headers));
+        response.end(await reply.text());
+      })
+      .catch(() => response.writeHead(500).end());
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+    for (const { token, username } of cases) {
+      statuses.length = 0;
+      await writeFile(
+        join(directory, 'npmrc'),
+        `//127.0.0.1:${port}${prefix}:_authToken=${token}\n`,
+        { mode: 0o600 },
+      );
+      const result = await promisify(execFile)(
+        'npm',
+        [
+          'whoami',
+          `--registry=http://127.0.0.1:${port}${prefix}`,
+          `--userconfig=${join(directory, 'npmrc')}`,
+          `--globalconfig=${join(directory, 'global-npmrc')}`,
+          '--update-notifier=false',
+          '--fetch-retries=0',
+          '--loglevel=silent',
+        ],
+        {
+          timeout: 5000,
+          env: { ...process.env, HOME: directory, npm_config_cache: join(directory, 'cache') },
+        },
+      ).then(
+        ({ stdout }) => ({ ok: true, stdout }),
+        () => ({ ok: false, stdout: '' }),
+      );
+      expect(statuses).toEqual([username === null ? 401 : 200]);
+      expect(result.ok).toBe(username !== null);
+      expect(result.stdout.trim()).toBe(username ?? '');
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+}

@@ -1,3 +1,5 @@
+import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
@@ -90,6 +92,7 @@ import { type ActorContext, type Administration } from '@package-broker/core/aut
 import type { ProjectActor } from '@package-broker/core/authz/project-actor';
 import {
   createRegistryModule,
+  createNpmHandleOf,
   type RegistryModule,
   type RegistryModuleDeps,
   type SourceCredential,
@@ -774,6 +777,10 @@ function assembleRegistry(input: {
 
   const module = createRegistryModule({
     runtime: 'node',
+    handleOf: createNpmHandleOf(
+      createUserRepository(executor),
+      createServicePrincipalRepository(executor),
+    ),
     registryJobs: registryJobDependencies({
       executor,
       providers: providerRegistry,

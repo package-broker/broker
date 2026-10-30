@@ -1,3 +1,5 @@
+import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
@@ -102,6 +104,7 @@ import {
 } from '@package-broker/core/registry/access-recorder';
 import {
   createRegistryModule,
+  createNpmHandleOf,
   type RegistryModule,
   type RegistryModuleDeps,
   type SourceCredential,
@@ -732,6 +735,10 @@ function buildRegistryModule(input: {
     });
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
+    handleOf: createNpmHandleOf(
+      createUserRepository(executor),
+      createServicePrincipalRepository(executor),
+    ),
     registryJobs: registryJobDependencies({
       executor,
       providers: providerRegistry,

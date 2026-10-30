@@ -43,8 +43,14 @@ function text(value: unknown): boolean {
   return cleaned.ok && cleaned.value === value;
 }
 
+function chainId(value: unknown): boolean {
+  return (
+    id(value) || (typeof value === 'string' && value.length === 32 && /^[0-9a-f]{32}$/.test(value))
+  );
+}
+
 function identity(input: AuditWireIdentity): void {
-  assert(id(input.chainId) && id(input.orgId) && seq(input.epoch));
+  assert(chainId(input.chainId) && id(input.orgId) && seq(input.epoch));
 }
 
 function chainFields(row: Record<string, unknown>): void {
@@ -123,7 +129,7 @@ export async function auditWireMarker(
   scope: MarkerScope,
   fields: AuditMarkerFields,
 ): Promise<AuditMarkerV1> {
-  assert((id(scope.chainId) || /^[0-9a-f]{32}$/.test(scope.chainId)) && seq(scope.epoch));
+  assert(chainId(scope.chainId) && seq(scope.epoch));
   if (scope.orgId !== undefined) assert(id(scope.orgId));
   const base = {
     chainId: scope.chainId,
@@ -203,6 +209,18 @@ export async function auditWireMarker(
       });
     case 'withheld':
       assert(typeof scope.orgId === 'string' && id(scope.orgId));
+      if (fields.reasonCode === 'unreadable') {
+        chainFields(fields as unknown as Record<string, unknown>);
+        return Object.freeze({
+          ...base,
+          kind: fields.kind,
+          reasonCode: fields.reasonCode,
+          orgId: scope.orgId,
+          seq: fields.seq,
+          prevHash: fields.prevHash,
+          hash: fields.hash,
+        });
+      }
       safeFields(fields as unknown as Record<string, unknown>);
       assert(fields.reasonCode === WITHHELD_REASON);
       return Object.freeze({
@@ -321,7 +339,17 @@ export async function auditWireRecord(
   const record = recordFields(scope, row);
   chainFields(record as unknown as Record<string, unknown>);
   assert(sourceIp === 'include' || sourceIp === 'omit');
-  assert(validEnvelope({ ...record, sourceIp: row.source_ip }));
+  if (!validEnvelope({ ...record, sourceIp: row.source_ip })) {
+    const marker = await auditWireMarker(scope, {
+      kind: 'withheld',
+      reasonCode: 'unreadable',
+      seq: row.seq,
+      prevHash: row.prev_hash,
+      hash: row.hash,
+    });
+    assert(marker.kind === 'withheld');
+    return marker;
+  }
   if (!payloadMatches(row)) {
     const marker = await auditWireMarker(scope, {
       ...record,

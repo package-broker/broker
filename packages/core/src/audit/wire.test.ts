@@ -80,6 +80,23 @@ function sqlPatch(payload: string, sql: string, value: string | number): string 
 }
 
 describe('audit wire records', () => {
+  it.each(['event', 'withheld'] as const)('accepts database chain ids for %s', async (kind) => {
+    const input = row();
+    if (kind === 'withheld') input.payload_json = '{';
+    expect(
+      await auditWireRecord({ ...scope, chainId: 'ab'.repeat(16) }, input, 'include'),
+    ).toMatchObject({ kind, chainId: 'ab'.repeat(16) });
+  });
+
+  it.each(['a'.repeat(31), 'a'.repeat(33), 'A'.repeat(32), 'g'.repeat(32), 'a'.repeat(32) + '\n'])(
+    'rejects malformed database chain ids',
+    async (chainId) => {
+      await expect(auditWireRecord({ ...scope, chainId }, row(), 'include')).rejects.toThrow(
+        new TypeError('Invalid audit wire data'),
+      );
+    },
+  );
+
   it('projects every chain field verbatim and labels source IP outside the hash input', async () => {
     const input = row('role.rename', { name: { old: 'Old name', new: 'New name' } });
     const output = await auditWireRecord(
@@ -274,6 +291,13 @@ describe('audit wire records', () => {
     ['seq', Number.MAX_SAFE_INTEGER + 1],
     ['prev_hash', 'a'.repeat(63)],
     ['hash', 'A'.repeat(64)],
+  ])('rejects invalid envelope field %s with a fixed error', async (field, value) => {
+    await expect(auditWireRecord(scope, { ...row(), [field]: value }, 'include')).rejects.toThrow(
+      new TypeError('Invalid audit wire data'),
+    );
+  });
+
+  it.each([
     ['actor_type', 'admin'],
     ['actor_id', 'hidden@example.test'],
     ['action', 'unknown.action'],
@@ -284,10 +308,19 @@ describe('audit wire records', () => {
     ['source_ip', 'host.test'],
     ['source_ip', '::1\n'],
     ['source_ip', '127.0.0.1:80'],
-  ])('rejects invalid envelope field %s with a fixed error', async (field, value) => {
-    await expect(auditWireRecord(scope, { ...row(), [field]: value }, 'include')).rejects.toThrow(
-      new TypeError('Invalid audit wire data'),
-    );
+  ])('withholds unreadable envelope field %s', async (field, value) => {
+    const item = await auditWireRecord(scope, { ...row(), [field]: value }, 'include');
+    expect(item).toEqual({
+      kind: 'withheld',
+      reasonCode: 'unreadable',
+      chainId: scope.chainId,
+      epoch: scope.epoch,
+      orgId: scope.orgId,
+      markerId: expect.any(String),
+      seq: row().seq,
+      prevHash: row().prev_hash,
+      hash: row().hash,
+    });
   });
 
   it('validates envelope fields even when payloads are withheld or source IP omitted', async () => {
@@ -297,10 +330,10 @@ describe('audit wire records', () => {
         { ...row(), payload_json: '{', actor_id: 'hidden@example.test' },
         'include',
       ),
-    ).rejects.toThrow('Invalid audit wire data');
+    ).resolves.toMatchObject({ kind: 'withheld', reasonCode: 'unreadable' });
     await expect(
       auditWireRecord(scope, { ...row(), source_ip: 'hidden@example.test' }, 'omit'),
-    ).rejects.toThrow('Invalid audit wire data');
+    ).resolves.toMatchObject({ kind: 'withheld', reasonCode: 'unreadable' });
     expect(await auditWireRecord(scope, { ...row(), source_ip: '::1' }, 'include')).toHaveProperty(
       'sourceIp',
       '::1',

@@ -109,6 +109,14 @@ function event(
 }
 
 describe('package version management', () => {
+  for (const action of ['release', 'quarantine', 'tombstone'] as const) {
+    it(`refuses ${action} of a publish-gated version before writing`, async () => {
+      const { call, store } = setup(Object.assign({}, managed, { publishGate: true }));
+      expect(await call({ ...input, action })).toEqual({ ok: false, error: 'publish_gate' });
+      noWrites(store);
+    });
+  }
+
   it('tombstones an organization version with a fenced audit and idempotency record', async () => {
     const { call, reader, store, sessions, log } = setup();
     const idempotency = {

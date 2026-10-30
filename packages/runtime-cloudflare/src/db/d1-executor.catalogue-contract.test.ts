@@ -9,7 +9,11 @@ import {
   runCatalogueRaceCase,
 } from '@package-broker/db-sqlite/contract/catalogue-race-contract';
 import { describeCatalogueReadContract } from '@package-broker/db-sqlite/contract/catalogue-read-contract';
-import { describeCatalogueWriteContract } from '@package-broker/db-sqlite/contract/catalogue-write-contract';
+import {
+  describeCatalogueWriteContract,
+  describeBlobSupersededContract,
+  describeNpmPublishWriterContract,
+} from '@package-broker/db-sqlite/contract/catalogue-write-contract';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import {
   loadMigrationSource,
@@ -18,7 +22,7 @@ import {
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 import { bridgedD1Database, D1_BRIDGE_SCRIPT } from './d1-bridge.test.support.js';
 
-const bindings = Array.from({ length: 96 }, (_, index) => `CDB${index}`);
+const bindings = Array.from({ length: 256 }, (_, index) => `CDB${index}`);
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -106,3 +110,7 @@ for (const order of ['first-then-second', 'second-then-first'] as const) {
     );
   });
 }
+
+describeNpmPublishWriterContract('d1', openPair);
+
+describeBlobSupersededContract('d1', openPair);

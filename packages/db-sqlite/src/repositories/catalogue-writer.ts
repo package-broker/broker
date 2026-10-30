@@ -3,6 +3,7 @@ import {
   D1_STATEMENTS_PER_INVOCATION,
 } from '@package-broker/core/db/port';
 import { sql } from 'kysely';
+import { publishVersion } from './catalogue-publish.js';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
   type CatalogueWriter,
@@ -96,7 +97,11 @@ function batchExecutor(executor: SqlExecutor): SqlExecutor {
 }
 
 /** Resolve the upsert winner inside each statement, including a concurrent creator's row. */
-function bindPackage(statement: Statement, placeholder: string, lookup: Statement): Statement {
+export function bindPackage(
+  statement: Statement,
+  placeholder: string,
+  lookup: Statement,
+): Statement {
   let index = 0;
   const params: Statement['params'][number][] = [];
   const text = statement.sql.replace(/\?/g, () => {
@@ -135,9 +140,7 @@ export function createCatalogueWriter(
   const reconcile = createCatalogueReconciler(bounded, { ...options, countUnseen: true });
   return {
     ...reconcile,
-    async publishVersion() {
-      throw new Error('not_implemented');
-    },
+    publishVersion: (ctx, guard, input) => publishVersion(bounded, ctx, guard, input),
     statementBudget: {
       publishVersion: 40,
       syncPackage: D1_STATEMENTS_PER_INVOCATION,
@@ -452,6 +455,8 @@ export function createVisibilityStore(
         and target_package.org_id = ${ctx.orgId}
       where target_version.id = ${versionId} and target_version.org_id = ${ctx.orgId}
         and target_package.id = ${packageId} and ${ownership})`;
+    const publishGateClear = sql<boolean>`not exists (
+      select 1 from publish_approval where org_id = ${ctx.orgId} and version_id = ${versionId})`;
     const statusMatches = sql<boolean>`exists (select 1 from version
       where id = ${versionId} and org_id = ${ctx.orgId} and status = ${expectedStatus})
       and ${versionTransition(expectedStatus, to, reason) ? sql`1` : sql`0`}`;
@@ -477,7 +482,10 @@ export function createVisibilityStore(
       bounded,
       ctx,
       fence,
-      assertGuard(sql<boolean>`(${present} and ${statusMatches} and ${blobReady})`, ctx),
+      assertGuard(
+        sql<boolean>`(${present} and ${publishGateClear} and ${statusMatches} and ${blobReady})`,
+        ctx,
+      ),
       [
         ...assertCheck(authority),
         ...plan.statements,
@@ -498,6 +506,7 @@ export function createVisibilityStore(
     };
     try {
       if (!(await holds(present))) return { ok: false, reason: 'not_found' };
+      if (!(await holds(publishGateClear))) return { ok: false, reason: 'publish_gate' };
       if (!(await holds(statusMatches))) return { ok: false, reason: 'conflict' };
       if (!(await holds(authority))) return { ok: false, reason: 'authority' };
       if (!(await holds(blobReady))) return { ok: false, reason: 'conflict' };

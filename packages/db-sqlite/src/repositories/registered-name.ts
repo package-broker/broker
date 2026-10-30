@@ -1,3 +1,5 @@
+import { npmClaimCover } from './catalogue-predicates.js';
+import { isNpmClaim } from '@package-broker/core/sources/claim-admission';
 import { sql, type Expression, type SqlBool } from 'kysely';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import {
@@ -38,6 +40,7 @@ export type RegisteredNameTarget = CoreRegisteredNameTarget;
 export type RegisteredNameRepository = CoreRegisteredNameRepository;
 
 export function isRegistrablePattern(pattern: string, ecosystem: Ecosystem): boolean {
+  if (ecosystem === 'npm' && isNpmClaim(pattern)) return true;
   if (!isValidPattern(pattern)) return false;
   const body = pattern.startsWith('@') ? pattern.slice(1) : pattern;
   if (body.length === 0 || body.startsWith('*') || body.startsWith('/')) return false;
@@ -61,7 +64,7 @@ export function sourceActivatable(ctx: OrgContext, sourceId: SourceRef): Guard {
                 and rn_act_c.pattern = rn_act_j.value || '/*'))))))`;
 }
 
-/** Patterns must satisfy the alphabet, 50-byte bound and wildcard limit; invalid rows never cover a key. */
+/** Legacy globs are bounded to 50 bytes; npm claims use equality or scope-prefix matching. */
 export function coveredByRegisteredNames(
   ctx: OrgContext,
   sourceId: SourceRef,
@@ -71,12 +74,13 @@ export function coveredByRegisteredNames(
   return sql<SqlBool>`exists (select 1 from registered_name as rn_cov
     where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}
       and rn_cov.ecosystem = ${ecosystem}
-      and (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'
+      and (${npmClaimCover(sql.ref('rn_cov.ecosystem'), sql.ref('rn_cov.pattern'), sql`${key}`)}
+      or (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'
       and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)
       and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}
       and length(rn_cov.pattern) - length(replace(rn_cov.pattern, '*', ''))
         <= ${sql.lit(MAX_PATTERN_WILDCARDS)}
-        then ${key} glob rn_cov.pattern else 0 end))`;
+        then ${key} glob rn_cov.pattern else 0 end)))`;
 }
 
 function probe(condition: Guard, negate: boolean): Statement {
@@ -150,7 +154,27 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
     return row?.source_id ?? null;
   }
 
+  function organizationProxy(ctx: OrgContext, id?: string): Guard {
+    return sql<SqlBool>`exists (select 1 from source as claim_proxy
+      where claim_proxy.org_id = ${ctx.orgId} and claim_proxy.type = 'npmjs_proxy'
+        ${id === undefined ? sql`` : sql`and claim_proxy.id = ${id}`})`;
+  }
+
   return {
+    async claimProxy(ctx) {
+      const rows = await executor.all<{ id: string }>(
+        compile(
+          db
+            .selectFrom('source')
+            .select('id')
+            .where('org_id', '=', ctx.orgId)
+            .where('type', '=', 'npmjs_proxy')
+            .orderBy('id')
+            .limit(1),
+        ),
+      );
+      return rows[0]?.id ?? null;
+    },
     async list(ctx, input) {
       if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
         throw new RangeError('invalid registered-name page limit');
@@ -174,6 +198,18 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       );
       const items = rows.slice(0, input.limit);
       return { items, next: rows.length > input.limit ? items.at(-1)!.id : null };
+    },
+    async get(ctx, id) {
+      const [row] = await executor.all<RegisteredNameRecord>(
+        compile(
+          db
+            .selectFrom('registered_name')
+            .select(['id', 'source_id as sourceId', 'ecosystem', 'pattern'])
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', id),
+        ),
+      );
+      return row ?? null;
     },
     async owner(ctx, id) {
       const [row] = await executor.all<{ sourceId: string; projectId: string | null }>(
@@ -205,29 +241,101 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       const source = await readSource(ctx, input.sourceId);
       if (source === null) return 'not_found';
       if (isProxy(source.type)) return 'proxy_source';
-      if (!isRegistrablePattern(input.pattern, source.ecosystem)) return 'invalid_pattern';
+      if (source.type === 'hosted' && source.project_id !== null) return 'conflict';
+      if (
+        source.type === 'hosted' && source.ecosystem === 'npm'
+          ? !isNpmClaim(input.pattern)
+          : !isValidPattern(input.pattern) || !isRegistrablePattern(input.pattern, source.ecosystem)
+      )
+        return 'invalid_pattern';
+      if (input.replace && (await readName(ctx, input.id)) !== input.sourceId) return 'not_found';
+      if (input.replace && (source.type !== 'hosted' || source.ecosystem !== 'npm'))
+        return 'conflict';
       const sameSource = sql<SqlBool>`exists (select 1 from registered_name as existing
         where existing.org_id = ${ctx.orgId}
-          and (existing.id = ${input.id}
+          and ${input.replace ? sql`existing.id <> ${input.id} and` : sql``} (existing.id = ${input.id}
             or (existing.source_id = ${input.sourceId} and existing.ecosystem = ${source.ecosystem}
               and existing.pattern = ${input.pattern})))`;
+      const exactDuplicate = sql<SqlBool>`exists (select 1 from registered_name
+        where org_id = ${ctx.orgId} and ecosystem = ${source.ecosystem}
+          and source_id <> ${input.sourceId} and pattern = ${input.pattern})`;
+      const storedOverlap =
+        source.type !== 'hosted' || source.ecosystem !== 'npm'
+          ? sql<SqlBool>`0`
+          : sql<SqlBool>`exists (select 1 from package as stored_package
+          join source as stored_source on stored_source.id = stored_package.source_id
+            and stored_source.org_id = ${ctx.orgId}
+          where stored_package.org_id = ${ctx.orgId} and stored_package.ecosystem = 'npm'
+            and stored_package.source_id <> ${input.sourceId}
+            and stored_source.type not in (${sql.join(PROXY_TYPES)})
+            and ${npmClaimCover(sql.lit('npm'), sql`${input.pattern}`, sql.ref('stored_package.name'))})`;
       const otherSource = sql<SqlBool>`exists (select 1 from registered_name as existing
         where existing.org_id = ${ctx.orgId} and existing.ecosystem = ${source.ecosystem}
-          and existing.pattern = ${input.pattern} and existing.source_id <> ${input.sourceId})`;
+          and existing.source_id <> ${input.sourceId}
+          and (existing.pattern = ${input.pattern}
+            ${
+              source.ecosystem !== 'npm'
+                ? sql``
+                : sql`or
+              ((${source.type} = 'hosted' or exists (select 1 from source as overlap_participant where overlap_participant.org_id = ${ctx.orgId} and overlap_participant.id = existing.source_id and overlap_participant.type = 'hosted')) and (
+              (${input.pattern.includes('*') ? 1 : 0} = 1
+                and substr(existing.pattern, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})) = substr(${input.pattern}, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})))
+              or
+              (case when length(existing.pattern) <= ${sql.lit(MAX_PATTERN_BYTES)} then ${input.pattern} glob existing.pattern else 0 end)
+              or (substr(existing.pattern, -2) = '/*' and instr(existing.pattern, '*') = length(existing.pattern)
+                and substr(${input.pattern}, 1, length(existing.pattern) - 1) = substr(existing.pattern, 1, length(existing.pattern) - 1))
+              ${input.pattern.endsWith('/*') ? sql`or substr(existing.pattern, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))`
+            }))`;
+      const cachedPublic =
+        source.type !== 'hosted' || source.ecosystem !== 'npm'
+          ? sql<SqlBool>`0`
+          : sql<SqlBool>`exists (
+        select 1 from package as claim_package join source as claim_source
+          on claim_source.id = claim_package.source_id and claim_source.org_id = ${ctx.orgId}
+        where claim_package.org_id = ${ctx.orgId} and claim_package.ecosystem = 'npm'
+          and claim_package.source_id <> ${input.sourceId}
+          and claim_source.type in ('npmjs_proxy', 'npm_registry')
+          and (claim_package.name = ${input.pattern}
+            ${input.pattern.endsWith('/*') ? sql`or substr(claim_package.name, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))`;
+      const verified =
+        source.type !== 'hosted' || source.ecosystem !== 'npm' || input.pattern.includes('*')
+          ? sql<SqlBool>`1`
+          : input.claimProbe === undefined
+            ? sql<SqlBool>`not ${organizationProxy(ctx)}`
+            : organizationProxy(ctx, input.claimProbe.proxyId);
+      const retainsPackages = input.replace
+        ? sql<SqlBool>`not exists (
+        select 1 from package as owned_package join registered_name as old_claim
+          on old_claim.org_id = ${ctx.orgId} and old_claim.id = ${input.id} and old_claim.source_id = ${input.sourceId}
+        where owned_package.org_id = ${ctx.orgId} and owned_package.source_id = ${input.sourceId}
+          and ${npmClaimCover(sql.lit('npm'), sql.ref('old_claim.pattern'), sql.ref('owned_package.name'))}
+          and not ${npmClaimCover(sql.lit('npm'), sql`${input.pattern}`, sql.ref('owned_package.name'))}
+      )`
+        : sql<SqlBool>`1`;
       const sourceUnchanged = sql<SqlBool>`exists (select 1 from source as owner
         where owner.id = ${input.sourceId} and owner.org_id = ${ctx.orgId}
           and owner.ecosystem = ${source.ecosystem}
-          and owner.type not in (${sql.join(PROXY_TYPES)}))`;
+          and owner.type = ${source.type}
+          and (owner.type <> 'hosted' or owner.project_id is null))`;
       const visible = sourceVisible(ctx, input.sourceId);
-      const insert = compile(
-        db.insertInto('registered_name').values({
-          id: input.id,
-          org_id: ctx.orgId,
-          source_id: input.sourceId,
-          ecosystem: source.ecosystem,
-          pattern: input.pattern,
-        }),
-      );
+      const insert = input.replace
+        ? compile(
+            db
+              .updateTable('registered_name')
+              .set({ pattern: input.pattern })
+              .where('org_id', '=', ctx.orgId)
+              .where('id', '=', input.id)
+              .where('source_id', '=', input.sourceId),
+          )
+        : compile(
+            db.insertInto('registered_name').values({
+              id: input.id,
+              org_id: ctx.orgId,
+              source_id: input.sourceId,
+              ecosystem: source.ecosystem,
+              pattern: input.pattern,
+            }),
+          );
       const outcome = await runOrgFenced(
         executor,
         ctx,
@@ -235,6 +343,21 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         assertGuard(allOf([held, sourceUnchanged]), ctx),
         [
           ...assertCheck(visible),
+          ...assertCheck(sql<SqlBool>`not ${otherSource}`),
+          ...assertCheck(sql<SqlBool>`not ${storedOverlap}`),
+          ...assertCheck(sql<SqlBool>`not ${cachedPublic}`),
+          ...assertCheck(verified),
+          ...assertCheck(retainsPackages),
+          ...(input.previousPattern === undefined
+            ? []
+            : assertCheck(
+                sql<SqlBool>`exists (select 1 from registered_name where org_id = ${ctx.orgId} and id = ${input.id} and source_id = ${input.sourceId} and pattern = ${input.previousPattern})`,
+              )),
+          ...(input.replace
+            ? assertCheck(
+                sql<SqlBool>`exists (select 1 from registered_name where org_id = ${ctx.orgId} and id = ${input.id} and source_id = ${input.sourceId})`,
+              )
+            : []),
           insert,
           auditPendingStatement(ctx, input.audit),
           ...(input.idempotency === undefined
@@ -260,6 +383,11 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         (await holds(liveIdempotencyCollision(ctx, input.idempotency)))
       )
         return 'conflict';
+      if (await holds(exactDuplicate)) return 'pattern_taken';
+      if ((await holds(otherSource)) || (await holds(storedOverlap))) return 'claim_overlap';
+      if (!(await holds(retainsPackages))) return 'claim_in_use';
+      if (await holds(cachedPublic)) return 'name_public';
+      if (!(await holds(verified))) return 'name_public_unverified';
       if (outcome.reason === 'conflict') return 'pattern_taken';
       if (outcome.reason === 'collision') return 'duplicate';
       return (await readSource(ctx, input.sourceId)) === null ? 'not_found' : 'conflict';

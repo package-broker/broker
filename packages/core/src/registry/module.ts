@@ -1,3 +1,4 @@
+import { probeNpmClaim } from '../sources/claim-admission.js';
 import type { SourcePackageProbe } from '../ingest/source-package.js';
 import { isUpstreamRefusal } from '../ingest/fill-shared.js';
 import { createComposerRepositoryProvider } from '../ingest/composer/composer-repository.js';
@@ -637,8 +638,25 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
 
   return Object.freeze({
     ecosystemRoutes,
-    async probePackage(ctx: OrgContext, sourceId: string, key: string, signal: AbortSignal) {
+    async probePackage(
+      ctx: OrgContext,
+      sourceId: string,
+      key: string,
+      signal: AbortSignal,
+      mode?: 'claim',
+    ) {
       try {
+        if (mode === 'claim') {
+          const source = await catalogue.sources.get(ctx, sourceId);
+          if (source === null || source.type !== 'npmjs_proxy' || source.ecosystem !== 'npm')
+            return 'unavailable';
+          const answer = await probeNpmClaim(
+            deps.policyFetch(userAgentOf(source), { sourceId }),
+            key,
+            signal,
+          );
+          return answer === null ? 'not_found' : answer === 'name_public' ? 'found' : 'unavailable';
+        }
         const plan = await planPackage(ctx, sourceId, key);
         if (plan === 'unsupported_package') return plan;
         if (plan === null) return 'unavailable';

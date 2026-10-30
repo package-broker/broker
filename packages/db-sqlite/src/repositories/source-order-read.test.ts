@@ -118,6 +118,8 @@ it('round-trips source order and changes the read ETag on reorder, attach and de
   const projectSources = createProjectSourceReader(executor);
   const projects = createProjectRepository(executor);
   const registeredNames = {
+    get: async () => null,
+    claimProxy: vi.fn().mockResolvedValue(null),
     list: vi.fn(),
     owner: vi.fn(),
     add: vi.fn(),

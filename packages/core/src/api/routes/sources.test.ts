@@ -168,6 +168,8 @@ async function fixture(
       get: vi.fn().mockResolvedValue({ settings: { retentionRemovedUpstreamDays: 30 } }),
     },
     registeredNames: {
+      get: async () => null,
+      claimProxy: async () => null,
       list: vi.fn(),
       owner: vi.fn(),
       add: vi.fn(),

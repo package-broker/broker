@@ -308,6 +308,10 @@ export interface SourceRepository {
 }
 
 export interface NewRegisteredName {
+  readonly replace?: boolean;
+  /** Supplied only after a definitive upstream 404; the batch rechecks this proxy's attachment. */
+  readonly previousPattern?: string;
+  readonly claimProbe?: { readonly proxyId: string };
   readonly audit: AuditEvent;
   readonly idempotency?: IdempotencyRecord;
   readonly id: string;
@@ -348,6 +352,8 @@ export interface RegisteredNamePage {
  * `indeterminate`: the response was lost and the write may have committed; re-read.
  */
 export interface RegisteredNameRepository {
+  get(ctx: OrgContext, id: string): Promise<RegisteredNameRecord | null>;
+  claimProxy(ctx: OrgContext): Promise<string | null>;
   /** Id-ordered page within the organization and source; limit is an integer from 1 to 100. */
   list(ctx: OrgContext, input: RegisteredNameListQuery): Promise<RegisteredNamePage>;
   owner(
@@ -363,6 +369,10 @@ export interface RegisteredNameRepository {
     | 'invalid_pattern'
     | 'proxy_source'
     | 'pattern_taken'
+    | 'claim_overlap'
+    | 'claim_in_use'
+    | 'name_public'
+    | 'name_public_unverified'
     | 'duplicate'
     | 'not_found'
     | 'forbidden'

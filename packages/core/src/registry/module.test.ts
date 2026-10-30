@@ -1279,3 +1279,28 @@ describe('manual package probe', () => {
     expect(h.policyFetch).not.toHaveBeenCalled();
   });
 });
+
+describe('claim probes', () => {
+  it.each(['node', 'cloudflare'] as const)(
+    'uses a bounded HEAD through policyFetch on %s',
+    async (runtime) => {
+      const h = harness();
+      h.deps = {
+        ...h.deps,
+        runtime,
+        catalogue: {
+          ...h.deps.catalogue,
+          sources: { get: vi.fn().mockResolvedValue(npmjsSource) },
+        },
+      };
+      const signal = new AbortController().signal;
+      expect(await h.module().probePackage(org, npmjsSource.id, 'widget', signal, 'claim')).toBe(
+        'found',
+      );
+      expect(h.policyFetch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ method: 'HEAD', maxBytes: 1024, timeoutMs: 5000, signal }),
+      );
+      expect(h.blob.get).not.toHaveBeenCalled();
+    },
+  );
+});

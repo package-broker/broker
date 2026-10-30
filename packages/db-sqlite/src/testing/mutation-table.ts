@@ -1,3 +1,4 @@
+import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
 import { entries as sourcePackageRequestEntries } from './mutation-table/source-package-request.js';
 import { entries as npmAuditSnapshotEntries } from './mutation-table/npm-audit-snapshot.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
@@ -134,6 +135,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...localLoginSetupEntries,
   ...visibilitySubsetEntries,
   ...visibilityAttachFactoryEntries,
+  ...registeredNameClaimProxyEntries,
   ...registeredNameFactoryEntries,
   ...importCredentialEntries,
   ...importAuthorityEntries,

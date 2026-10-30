@@ -3,6 +3,9 @@ const API_PREFIX = '/_pb/';
 const MAX_DETAILS = 20;
 
 const API_ERROR_CODES = [
+  'claim_overlap',
+  'name_public',
+  'name_public_unverified',
   'invalid_request',
   'unauthorized',
   'forbidden',

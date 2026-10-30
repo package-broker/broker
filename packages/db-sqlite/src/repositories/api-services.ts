@@ -99,6 +99,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     clock: systemClock,
   });
   const sourceService = createSourceService({
+    ...(input.sourcePackageProbe === undefined ? {} : { claimProbe: input.sourcePackageProbe }),
     sources,
     organizations,
     registeredNames,

@@ -1,3 +1,4 @@
+import { recordAuthorizationFailure } from '../internal/authorization-failure.js';
 import { reportHookError, runAccessChecks } from './access.js';
 import type { AccessCheckOptions, HookErrorHandler } from './access.js';
 import { orgContext } from '../db/port.js';
@@ -234,7 +235,10 @@ export async function authorizeRoute(
     reportHookError(onHookError, ENGINE_PLUGIN, new TypeError('malformed authorization decision'));
     return FORBIDDEN;
   }
-  if (!decision.allow) return decision;
+  if (!decision.allow) {
+    if (decision.status === 403) recordAuthorizationFailure(request);
+    return decision;
+  }
 
   const input = {
     org,
@@ -262,6 +266,7 @@ export async function authorizeRoute(
       const entry = Object.freeze({ plugin: hook.plugin, reason: denial.reason });
       if (onDeny !== undefined && !(denial.reason === 'hook_error' && reported))
         swallow(() => onDeny(entry));
+      recordAuthorizationFailure(request);
       return FORBIDDEN;
     }
   }

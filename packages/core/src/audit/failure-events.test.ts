@@ -322,6 +322,33 @@ describe('failure event limiter', () => {
     expect(h.stage).toHaveBeenCalledTimes(2);
   });
 
+  it.each([null, 'authenticated', 'org:invented:read'])(
+    'accepts null and rejects non-catalogue permissions (%s)',
+    async (permission) => {
+      const h = setup();
+      await h.recorder.record(ctx, {
+        action: 'access.denied',
+        actor: { type: 'user', id: ulid() },
+        routeTemplate: '/_pb/audit',
+        permission,
+        boundary: 'authenticated',
+        context: login().context,
+      });
+      expect(h.stage).toHaveBeenCalledTimes(permission === null ? 1 : 0);
+      if (permission === null) {
+        expect(JSON.parse(h.stage.mock.calls[0]![1].payloadJson).changes).toMatchObject({
+          permission: { new: null },
+          boundary: { new: 'authenticated' },
+        });
+      } else {
+        expect(h.log).toHaveBeenCalledWith({
+          level: 'error',
+          event: 'audit.failure_event_invalid',
+        });
+      }
+    },
+  );
+
   it('separates route and permission keys and accepts each authenticated principal type', async () => {
     const h = setup();
     const actorId = ulid();

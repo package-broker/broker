@@ -341,6 +341,7 @@ export const LOGIN_FAILURE_REASONS = [
 ] as const;
 
 function cleanFailureValue(value: unknown, field: string): Cleaned {
+  if (field === 'permission' && value === null) return { ok: true, value: null };
   const enums: Record<string, readonly string[]> = {
     method: LOGIN_FAILURE_METHODS,
     reason: LOGIN_FAILURE_REASONS,

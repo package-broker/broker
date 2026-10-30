@@ -1,3 +1,7 @@
+import { createFailureEvents } from '../audit/failure-events.js';
+import { authorizeRoute } from '../kernel/authorize.js';
+import type { AuthorizationRequest } from '../kernel/authorize.js';
+import type { AuditEvent } from '../audit/actions.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { createAuthModule, type AuthModuleOptions, type AuthRepositories } from './module.js';
@@ -13,7 +17,7 @@ const origin = 'https://broker.test';
 const clock = fixedClock('2026-10-16T00:00:00.000Z');
 const org = orgContext('org-1');
 
-function fixture(wired = true) {
+function fixture(wired = true, overrides: Partial<AuthModuleOptions> = {}) {
   const findActive = vi.fn(() => Promise.resolve(null));
   const repositories = new Proxy({}, { get: () => ({ findActive }) }) as AuthRepositories;
   const access: EngineAccessPort = {
@@ -45,6 +49,7 @@ function fixture(wired = true) {
     providers: new Map(),
     hooks: { 'access.check': [], 'auth.resolveIdentity': [], 'auth.mapGroups': [] },
     log: vi.fn(),
+    ...overrides,
     ...(wired
       ? {
           access: { access, providerAnchors: anchors, dispatch },
@@ -205,4 +210,207 @@ describe('auth module access wiring', () => {
     const source = readFileSync(new URL('./module.ts', import.meta.url), 'utf8');
     expect(source).not.toMatch(/create(?:Pat|ServiceToken|Token)|commander|yargs/);
   });
+});
+
+describe('authorization failure capture', () => {
+  const userId = '01JA0000000000000000000001';
+  const projectId = '01JA0000000000000000000002';
+  const template = '/_pb/projects/:project/audit';
+
+  function harness(mode: 'slow' | 'failing' | 'normal' = 'normal') {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stage = vi.fn<(ctx: typeof org, event: AuditEvent) => Promise<void>>(async () => {
+      if (mode === 'slow') await hold;
+      if (mode === 'failing') throw new Error('private staging failure');
+    });
+    const log = vi.fn();
+    const recorder = createFailureEvents({
+      deploymentId: 'test',
+      staging: { stage },
+      observability: { log, counter: vi.fn(), histogram: vi.fn() },
+      routeTemplates: new Set([template]),
+      now: () => clock.now(),
+    });
+    const { auth, access } = fixture(true, {
+      clientIp: () => '203.0.113.7',
+      recordFailure: (ctx, attempt) => {
+        void recorder.record(ctx, attempt);
+      },
+    });
+    vi.mocked(access.lookupSession).mockResolvedValue({
+      session: { id: 'session-1', csrfHash: 'unused' },
+      user: { id: userId },
+      project: { id: projectId },
+      identity: null,
+      organizationPermissions: [],
+      projectPermissions: ['project:read'],
+      protectedHolder: false,
+    });
+    const input: AuthorizationRequest = {
+      request: new Request(`${origin}/_pb/projects/private-name/audit?secret=private`, {
+        headers: { cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` },
+      }),
+      org,
+      params: { project: 'private-name' },
+      route: {
+        plugin: 'core',
+        method: 'GET',
+        path: template,
+        permission: 'project:audit:read',
+        boundary: 'project',
+      },
+    };
+    return { auth, access, input, recorder, stage, log, release };
+  }
+
+  it('records the resolved actor, project, compiled template and route permission for a 403', async () => {
+    const h = harness();
+    expect(await authorizeRoute(h.input, h.auth.authorization, [])).toEqual({
+      allow: false,
+      status: 403,
+    });
+    await h.recorder.drain(org);
+    expect(h.stage).toHaveBeenCalledExactlyOnceWith(
+      org,
+      expect.objectContaining({
+        action: 'access.denied',
+        actor: { type: 'user', id: userId },
+        target: { type: 'route', id: template },
+        projectId,
+        sourceIp: '203.0.113.7',
+      }),
+    );
+    expect(JSON.parse(h.stage.mock.calls[0]![1].payloadJson)).toMatchObject({
+      changes: {
+        permission: { new: 'project:audit:read' },
+        boundary: { new: 'project' },
+        count: { new: 1 },
+      },
+    });
+    expect(JSON.stringify(h.stage.mock.calls)).not.toMatch(/private-name|secret|private staging/);
+  });
+
+  it.each(['deny', 'throw'] as const)(
+    'captures a hook that will %s with the route permission',
+    async (mode) => {
+      const h = harness();
+      const input = { ...h.input, route: { ...h.input.route, permission: 'project:read' } };
+      expect(
+        await authorizeRoute(input, h.auth.authorization, [
+          {
+            plugin: 'guard',
+            handler: () => {
+              if (mode === 'throw') throw new Error('private hook data');
+              return { deny: true, reason: 'private hook data' };
+            },
+          },
+        ]),
+      ).toEqual({ allow: false, status: 403 });
+      await h.recorder.drain(org);
+      expect(h.stage).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(h.stage.mock.calls[0]![1].payloadJson).changes.permission.new).toBe(
+        'project:read',
+      );
+      expect(JSON.stringify(h.stage.mock.calls)).not.toContain('private hook data');
+    },
+  );
+
+  it.each(['authenticated', 'self'] as const)(
+    'captures %s step-up denials without a catalogue permission',
+    async (boundary) => {
+      const h = harness();
+      vi.mocked(h.access.lookupSession).mockResolvedValue({
+        session: { id: 'session-1', csrfHash: 'unused' },
+        user: { id: userId },
+        project: null,
+        identity: { id: 'identity-1', provider: 'oidc', fresh: false },
+        organizationPermissions: [],
+        projectPermissions: [],
+        protectedHolder: false,
+      });
+      const input = {
+        ...h.input,
+        route: { ...h.input.route, permission: 'authenticated', boundary },
+      };
+      expect(await authorizeRoute(input, h.auth.authorization, [])).toEqual({
+        allow: false,
+        status: 403,
+      });
+      await h.recorder.drain(org);
+      expect(h.stage).toHaveBeenCalledExactlyOnceWith(
+        org,
+        expect.objectContaining({ actor: { type: 'user', id: userId }, projectId: null }),
+      );
+      expect(JSON.parse(h.stage.mock.calls[0]![1].payloadJson).changes).toMatchObject({
+        permission: { new: null },
+        boundary: { new: 'authenticated' },
+      });
+    },
+  );
+
+  it.each(['same_origin', 'csrf'] as const)(
+    'does not stage a %s refusal for a resolved session',
+    async (mode) => {
+      const h = harness();
+      const input = {
+        ...h.input,
+        request: new Request(h.input.request.url, {
+          method: 'POST',
+          headers: {
+            cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}`,
+            origin: mode === 'same_origin' ? 'https://foreign.test' : origin,
+          },
+        }),
+      };
+      expect(await authorizeRoute(input, h.auth.authorization, [])).toEqual({
+        allow: false,
+        status: 403,
+      });
+      await h.recorder.drain(org);
+      expect(h.stage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['allowed', 'unauthorized', 'not_found'] as const)(
+    'does not record %s decisions',
+    async (mode) => {
+      const h = harness();
+      const input = { ...h.input, route: { ...h.input.route, permission: 'project:read' } };
+      if (mode === 'unauthorized') vi.mocked(h.access.lookupSession).mockResolvedValue(null);
+      if (mode === 'not_found') input.params = { project: 'invalid project' };
+      const decision = await authorizeRoute(input, h.auth.authorization, []);
+      expect(decision).toMatchObject(
+        mode === 'allowed'
+          ? { allow: true }
+          : { allow: false, status: mode === 'unauthorized' ? 401 : 404 },
+      );
+      await h.recorder.drain(org);
+      expect(h.stage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['slow', 'failing'] as const)(
+    'returns 403 without awaiting a %s store and shares the limiter across requests',
+    async (mode) => {
+      const h = harness(mode);
+      try {
+        for (let i = 0; i < 2; i++) {
+          expect(await authorizeRoute({ ...h.input }, h.auth.authorization, [])).toEqual({
+            allow: false,
+            status: 403,
+          });
+        }
+        await vi.waitFor(() => expect(h.stage).toHaveBeenCalledTimes(1));
+      } finally {
+        h.release();
+      }
+      await h.recorder.drain(org);
+      expect(h.stage).toHaveBeenCalledTimes(1);
+      if (mode === 'failing')
+        expect(h.log).toHaveBeenCalledWith({ level: 'error', event: 'audit.failure_event_failed' });
+    },
+  );
 });

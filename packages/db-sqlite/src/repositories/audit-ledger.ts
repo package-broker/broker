@@ -107,7 +107,7 @@ SELECT i.org_id, i.id, i.kind, i.chain_id, i.epoch,
     WHEN t.overlaps THEN NULL ELSE i.count + t.count END,
   i.sink_id, i.reason_code, i.policy, i.mode_generation, i.actor_type, i.actor_id, i.created_at, i.resolves_id
 FROM incoming AS i CROSS JOIN touched AS t CROSS JOIN conflict AS c
-WHERE c.found OR NOT EXISTS (
+WHERE (c.found OR NOT EXISTS (
   SELECT 1 FROM existing AS e CROSS JOIN absorbed AS a
   WHERE e.kind = i.kind AND e.chain_id = i.chain_id AND e.epoch = i.epoch
     AND e.sink_id IS i.sink_id AND e.reason_code = i.reason_code AND e.policy = i.policy
@@ -116,7 +116,7 @@ WHERE c.found OR NOT EXISTS (
     AND e.from_seq <= i.from_seq AND e.to_seq >= i.to_seq AND NOT a.overlaps
     AND e.count = i.count + a.count
     AND e.to_seq - e.from_seq = i.to_seq - i.from_seq + a.span
-)`;
+))`;
 
 const SUPERSEDE = `WITH covering AS (
     SELECT min(covering_gap.from_seq) AS from_seq, max(covering_gap.to_seq) AS to_seq,

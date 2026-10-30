@@ -215,12 +215,15 @@ export async function reconcileAuditSinks(
           }),
         );
       const fromSeq = custodyStart(old);
+      const custodyFromSeq =
+        !old.durableAck && registration.durableAck ? old.progressSeq + 1 : old.custodySeq + 1;
       sink = {
         ...sink,
         inflightRepr: JSON.stringify({
           ...representationOf(sink.inflightRepr),
-          custodyFromSeq:
-            !old.durableAck && registration.durableAck ? old.progressSeq + 1 : old.custodySeq + 1,
+          custodyFromSeq,
+          durableCustodySeq: custodyFromSeq - 1,
+          durableAckRanges: [],
         }),
       };
       const event = auditEvent({

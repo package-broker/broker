@@ -1,12 +1,18 @@
+import { jobFences } from '@package-broker/core/platform/job-fences';
+import type { JobContext } from '@package-broker/core/platform/jobs';
+import type { AuditLedgerEntry } from '@package-broker/core/audit/ledger';
+import { createAuditLedgerRepository } from '../repositories/audit-ledger.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   exportAuditBatch,
+  auditExportJob,
+  auditDurableCoverage,
   auditInflightEventRange,
   type AuditExportSnapshot,
   type AuditExportState,
 } from '@package-broker/core/audit/export';
 import { systemMutationFence } from '@package-broker/core/authz/fence';
-import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
+import { orgContext, type SqlExecutor, type Statement } from '@package-broker/core/db/port';
 import { createAuditExportRepository } from '../repositories/audit-export.js';
 import type { MigratedDatabase } from './migrated-database.js';
 
@@ -53,6 +59,510 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
     };
   }
   describe('audit export persistence', () => {
+    function incident(
+      snapshot: AuditExportSnapshot,
+      id = '01J00000000000000000000007',
+    ): AuditLedgerEntry & { readonly kind: 'uncertain' } {
+      return {
+        id,
+        kind: 'uncertain',
+        chainId: snapshot.chainId,
+        epoch: snapshot.epoch,
+        fromSeq: 1,
+        toSeq: 2,
+        count: 2,
+        sinkId: 'archive',
+        reasonCode: 'partial_rejected',
+        policy: snapshot.policy,
+        modeGeneration: snapshot.modeGeneration,
+        actorType: 'system',
+        actorId: null,
+        createdAt: '2026-10-30T00:00:00.000Z',
+      };
+    }
+
+    it('commits dispositions and retry state atomically and refuses stale saves without ledger effects', async () => {
+      const before = await port().read(org(), 'archive');
+      const entry = incident(before);
+      const next = {
+        ...sending(before.sink),
+        retryCountForSeq: 2,
+        custodySeq: 2,
+        inflightRepr: JSON.stringify({
+          custodyFromSeq: 1,
+          ...auditDurableCoverage(before.sink, undefined, [entry]),
+        }),
+      };
+      expect(await port().save(org(), fence(), before, next, 1, { ledger: [entry] })).toBe(true);
+      const ledger = createAuditLedgerRepository(database.executor);
+      expect(await ledger.page(org(), null, 10)).toEqual([entry]);
+      expect(
+        await port().save(org(), fence(), before, next, 1, {
+          ledger: [incident(before, '01J00000000000000000000008')],
+        }),
+      ).toBe(false);
+      expect(await ledger.page(org(), null, 10)).toEqual([entry]);
+      expect((await port().read(org(), 'archive')).sink).toEqual(next);
+    });
+
+    it('persists one hundred withheld dispositions within D1 statement and parameter limits', async () => {
+      const before = await port().read(org(), 'archive');
+      const ledger = Array.from(
+        { length: 100 },
+        (_, index): AuditLedgerEntry & { readonly kind: 'withheld' } => ({
+          ...incident(before, String(index + 1).padStart(26, '0')),
+          kind: 'withheld',
+          fromSeq: index + 1,
+          toSeq: index + 1,
+          count: 1,
+          reasonCode: 'content_unavailable',
+        }),
+      );
+      const batches: Statement[][] = [];
+      const executor: SqlExecutor = {
+        ...database.executor,
+        batch: async (statements) => {
+          expect(statements.length).toBeLessThanOrEqual(200);
+          for (const statement of statements)
+            expect(statement.params.length).toBeLessThanOrEqual(100);
+          batches.push([...statements]);
+          return database.executor.batch(statements);
+        },
+      };
+      expect(
+        await createAuditExportRepository(executor).save(
+          org(),
+          fence(),
+          before,
+          {
+            ...before.sink,
+            custodySeq: 100,
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              ...auditDurableCoverage(before.sink, undefined, ledger),
+            }),
+          },
+          1,
+          { ledger },
+        ),
+      ).toBe(true);
+      expect(batches).toHaveLength(1);
+      expect(batches[0]).toHaveLength(102);
+      expect(await createAuditLedgerRepository(database.executor).page(org(), null, 100)).toEqual(
+        ledger,
+      );
+    });
+
+    it('rolls back sink state if a ledger write fails', async () => {
+      const before = await port().read(org(), 'archive');
+      const entry = incident(before);
+      await createAuditLedgerRepository(database.executor).append(org(), [entry]);
+      await expect(
+        port().save(org(), fence(), before, sending(before.sink), 1, {
+          ledger: [{ ...entry, reasonCode: 'different' }],
+        }),
+      ).rejects.toThrow();
+      expect(await port().read(org(), 'archive')).toEqual(before);
+    });
+
+    it('lease expiry refuses both custody and ledger changes', async () => {
+      const before = await port().read(org(), 'archive');
+      await seed("UPDATE job SET lease_until = '2000-01-01T00:00:00.000Z'");
+      expect(
+        await port().save(
+          org(),
+          fence(),
+          before,
+          {
+            ...before.sink,
+            custodySeq: 2,
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              ...auditDurableCoverage(before.sink, undefined, [incident(before)]),
+            }),
+          },
+          1,
+          {
+            ledger: [incident(before)],
+          },
+        ),
+      ).toBe(false);
+      expect(await createAuditLedgerRepository(database.executor).page(org(), null, 10)).toEqual(
+        [],
+      );
+      expect(await port().read(org(), 'archive')).toEqual(before);
+    });
+
+    it('writes linked replay resolutions only in the covering durable ACK batch', async () => {
+      const before = await port().read(org(), 'archive');
+      const other = await port().read(foreign(), 'archive');
+      const ledger = createAuditLedgerRepository(database.executor);
+      const entry = incident(before);
+      await ledger.append(org(), [
+        entry,
+        { ...incident(before, '01J00000000000000000000008'), toSeq: 3, count: 3 },
+      ]);
+      await ledger.append(foreign(), [incident(other)]);
+      expect(await port().save(org(), fence(), before, sending(before.sink), 1)).toBe(true);
+      const sendingSnapshot = await port().read(org(), 'archive');
+      const next = {
+        ...sendingSnapshot.sink,
+        progressSeq: 2,
+        progressHash: 'a'.repeat(64),
+        custodySeq: 2,
+        inflightRepr: JSON.stringify({
+          custodyFromSeq: 1,
+          ...auditDurableCoverage(sendingSnapshot.sink, { from: 1, to: 2 }),
+        }),
+        inflightFrom: null,
+        inflightTo: null,
+        inflightBody: null,
+      };
+      expect(
+        await port().save(
+          org(),
+          fence({ id: 'export-job', owner: 'stale', fence: 3 }),
+          sendingSnapshot,
+          next,
+          1,
+          {
+            replayCreatedAt: '2026-10-30T00:00:00.000Z',
+            durableAck: { from: 1, to: 2 },
+          },
+        ),
+      ).toBe(false);
+      expect((await ledger.page(org(), null, 10)).filter((row) => row.kind === 'replay')).toEqual(
+        [],
+      );
+      expect(
+        await port().save(org(), fence(), sendingSnapshot, next, 1, {
+          replayCreatedAt: '2026-10-30T00:00:00.000Z',
+          durableAck: { from: 1, to: 2 },
+        }),
+      ).toBe(true);
+      const replays = (await ledger.page(org(), null, 10)).filter((row) => row.kind === 'replay');
+      expect(replays).toEqual([
+        expect.objectContaining({
+          kind: 'replay',
+          resolvesId: entry.id,
+          fromSeq: 1,
+          toSeq: 2,
+          sinkId: 'archive',
+        }),
+      ]);
+      expect(await ledger.page(foreign(), null, 10)).toEqual([incident(other)]);
+      expect((await port().read(org(), 'archive')).sink).toEqual(next);
+    });
+
+    it('resolves uncertainty across contiguous ACK batches and drains more than 100 incidents across saves', async () => {
+      const repository = port();
+      const before = await repository.read(org(), 'archive');
+      const ledger = createAuditLedgerRepository(database.executor);
+      const incidents = Array.from({ length: 105 }, (_, index) =>
+        incident(before, String(index + 1).padStart(26, '0')),
+      );
+      await ledger.append(org(), incidents);
+      let snapshot = before;
+      const createdAt = '2026-10-29T12:34:56.000Z';
+      for (const seq of [1, 2]) {
+        const send = { ...snapshot.sink, inflightFrom: seq, inflightTo: seq };
+        expect(await repository.save(org(), fence(), snapshot, send, 1)).toBe(true);
+        snapshot = await repository.read(org(), 'archive');
+        const next = {
+          ...snapshot.sink,
+          progressSeq: seq,
+          custodySeq: seq,
+          inflightRepr: JSON.stringify({
+            custodyFromSeq: 1,
+            ...auditDurableCoverage(snapshot.sink, { from: seq, to: seq }),
+          }),
+        };
+        expect(
+          await repository.save(org(), fence(), snapshot, next, 1, {
+            durableAck: { from: seq, to: seq },
+            replayCreatedAt: createdAt,
+          }),
+        ).toBe(true);
+        snapshot = await repository.read(org(), 'archive');
+        const rows = await ledger.page(org(), null, 500);
+        expect(rows.filter((row) => row.kind === 'replay')).toHaveLength(seq === 1 ? 0 : 100);
+      }
+      expect(
+        await repository.save(org(), fence(), snapshot, { ...snapshot.sink, attempt: 2 }, 1, {
+          replayCreatedAt: createdAt,
+        }),
+      ).toBe(true);
+      snapshot = await repository.read(org(), 'archive');
+      expect(
+        await repository.save(org(), fence(), snapshot, { ...snapshot.sink, attempt: 3 }, 1, {
+          replayCreatedAt: createdAt,
+        }),
+      ).toBe(true);
+      const replays = (await ledger.page(org(), null, 500)).filter((row) => row.kind === 'replay');
+      expect(replays).toHaveLength(105);
+      expect(new Set(replays.map((row) => row.resolvesId)).size).toBe(105);
+      expect(replays.every((row) => row.createdAt === createdAt)).toBe(true);
+    });
+
+    it('accounts for dispositions without resolving uncertainty until covering durable redelivery', async () => {
+      const repository = port();
+      let snapshot = await repository.read(org(), 'archive');
+      const skipped = {
+        ...incident(snapshot),
+        kind: 'skipped' as const,
+        fromSeq: 1,
+        toSeq: 1,
+        count: 1,
+      };
+      const uncertain = {
+        ...incident(snapshot, '01J00000000000000000000008'),
+        fromSeq: 2,
+        toSeq: 3,
+      };
+      for (const entry of [skipped, uncertain]) {
+        const next = {
+          ...snapshot.sink,
+          progressSeq: entry.toSeq,
+          custodySeq: entry.toSeq,
+          inflightRepr: JSON.stringify({
+            custodyFromSeq: 1,
+            ...auditDurableCoverage(snapshot.sink, undefined, [entry]),
+          }),
+        };
+        expect(await repository.save(org(), fence(), snapshot, next, 1, { ledger: [entry] })).toBe(
+          true,
+        );
+        snapshot = await repository.read(org(), 'archive');
+        expect(JSON.parse(snapshot.sink.inflightRepr!).durableCustodySeq).toBe(entry.toSeq);
+      }
+      for (const range of [
+        { from: 4, to: 4 },
+        { from: 2, to: 2 },
+        { from: 3, to: 3 },
+      ]) {
+        expect(
+          await repository.save(
+            org(),
+            fence(),
+            snapshot,
+            { ...snapshot.sink, inflightFrom: range.from, inflightTo: range.to },
+            1,
+          ),
+        ).toBe(true);
+        snapshot = await repository.read(org(), 'archive');
+        const next = {
+          ...snapshot.sink,
+          progressSeq: range.to,
+          inflightRepr: JSON.stringify({
+            custodyFromSeq: 1,
+            ...auditDurableCoverage(snapshot.sink, range),
+          }),
+        };
+        expect(
+          await repository.save(org(), fence(), snapshot, next, 1, {
+            durableAck: range,
+            replayCreatedAt: uncertain.createdAt,
+          }),
+        ).toBe(true);
+        snapshot = await repository.read(org(), 'archive');
+        expect(JSON.parse(snapshot.sink.inflightRepr!).durableCustodySeq).toBe(4);
+        const replays = (
+          await createAuditLedgerRepository(database.executor).page(org(), null, 10)
+        ).filter((row) => row.kind === 'replay');
+        expect(replays).toHaveLength(range.from === 3 ? 1 : 0);
+        if (range.from === 3) expect(replays[0]?.resolvesId).toBe(uncertain.id);
+      }
+    });
+
+    it('drains earned resolutions in the idle job loop even after durable ACK is disabled', async () => {
+      const repository = port();
+      const before = await repository.read(org(), 'archive');
+      const ledger = createAuditLedgerRepository(database.executor);
+      const incidents = Array.from({ length: 205 }, (_, index) =>
+        incident(before, String(index + 1).padStart(26, '0')),
+      );
+      for (let offset = 0; offset < incidents.length; offset += 100)
+        await ledger.append(org(), incidents.slice(offset, offset + 100));
+      expect(
+        await repository.save(
+          org(),
+          fence(),
+          before,
+          { ...before.sink, inflightFrom: 1, inflightTo: 2 },
+          1,
+        ),
+      ).toBe(true);
+      const snapshot = await repository.read(org(), 'archive');
+      expect(
+        await repository.save(
+          org(),
+          fence(),
+          snapshot,
+          {
+            ...snapshot.sink,
+            progressSeq: 2,
+            inflightFrom: null,
+            inflightTo: null,
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              ...auditDurableCoverage(snapshot.sink, { from: 1, to: 2 }),
+            }),
+          },
+          1,
+          { durableAck: { from: 1, to: 2 }, replayCreatedAt: '2026-10-30T00:00:00.000Z' },
+        ),
+      ).toBe(true);
+      await seed('UPDATE audit_sink SET durable_ack = 0 WHERE org_id = ?', org().orgId);
+      expect((await repository.read(org(), 'archive')).replayPending).toBe(true);
+      let deliveries = 0;
+      await auditExportJob(repository, {
+        id: 'archive',
+        generation: 1,
+        pluginVersion: '1',
+        sourceIp: 'omit',
+        rejectionRetries: 'terminal',
+        now: () => new Date('2026-10-30T00:00:00.000Z'),
+        sink: {
+          async deliver() {
+            deliveries++;
+            throw new Error('Unexpected delivery');
+          },
+        },
+      }).handler({}, {
+        org: org(),
+        signal: new AbortController().signal,
+        fences: jobFences({ id: 'export-job', owner: 'worker', fence: 3 }),
+        observability: { log() {} },
+      } as unknown as JobContext);
+      expect(deliveries).toBe(0);
+      expect(
+        (await ledger.page(org(), null, 500)).filter((row) => row.kind === 'replay'),
+      ).toHaveLength(205);
+      expect((await repository.read(org(), 'archive')).replayPending).toBe(false);
+    });
+
+    it('rejects forged custody frontiers with and without a durable ACK', async () => {
+      const repository = port();
+      const before = await repository.read(org(), 'archive');
+      expect(
+        await repository.save(
+          org(),
+          fence(),
+          before,
+          { ...before.sink, inflightFrom: 1, inflightTo: 2 },
+          1,
+        ),
+      ).toBe(true);
+      const snapshot = await repository.read(org(), 'archive');
+      for (const ack of [undefined, { from: 1, to: 2 }]) {
+        await expect(
+          repository.save(
+            org(),
+            fence(),
+            snapshot,
+            {
+              ...snapshot.sink,
+              progressSeq: ack ? 2 : 0,
+              inflightRepr: JSON.stringify({ custodyFromSeq: 1, durableCustodySeq: 99 }),
+            },
+            1,
+            { durableAck: ack },
+          ),
+        ).rejects.toThrow('Invalid audit durable custody frontier');
+        expect(await repository.read(org(), 'archive')).toEqual(snapshot);
+      }
+    });
+
+    it('guards replay insertion against a resolution committed after selection', async () => {
+      const repository = port();
+      const before = await repository.read(org(), 'archive');
+      const entry = incident(before);
+      const ledger = createAuditLedgerRepository(database.executor);
+      await ledger.append(org(), [entry]);
+      expect(await repository.save(org(), fence(), before, sending(before.sink), 1)).toBe(true);
+      const snapshot = await repository.read(org(), 'archive');
+      let inserted = false;
+      const executor: SqlExecutor = {
+        ...database.executor,
+        batch: async (statements) => {
+          if (!inserted) {
+            inserted = true;
+            await ledger.append(org(), [
+              {
+                ...entry,
+                id: '01J00000000000000000000008',
+                kind: 'replay',
+                resolvesId: entry.id,
+                reasonCode: 'durable_ack',
+              },
+            ]);
+          }
+          return database.executor.batch(statements);
+        },
+      };
+      expect(
+        await createAuditExportRepository(executor).save(
+          org(),
+          fence(),
+          snapshot,
+          {
+            ...snapshot.sink,
+            progressSeq: 2,
+            custodySeq: 2,
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              ...auditDurableCoverage(snapshot.sink, { from: 1, to: 2 }),
+            }),
+          },
+          1,
+          { durableAck: { from: 1, to: 2 }, replayCreatedAt: entry.createdAt },
+        ),
+      ).toBe(true);
+      expect(
+        (await ledger.page(org(), null, 10)).filter((row) => row.kind === 'replay'),
+      ).toHaveLength(1);
+    });
+
+    it('deduplicates withheld entries by sequence and sink inside the insert', async () => {
+      const repository = port();
+      const before = await repository.read(org(), 'archive');
+      const entry = {
+        ...incident(before),
+        kind: 'withheld' as const,
+        toSeq: 1,
+        count: 1,
+        reasonCode: 'unreadable',
+      };
+      expect(
+        await repository.save(
+          org(),
+          fence(),
+          before,
+          {
+            ...before.sink,
+            attempt: 1,
+            inflightRepr: JSON.stringify({
+              custodyFromSeq: 1,
+              ...auditDurableCoverage(before.sink, undefined, [entry]),
+            }),
+          },
+          1,
+          {
+            ledger: [entry],
+          },
+        ),
+      ).toBe(true);
+      const snapshot = await repository.read(org(), 'archive');
+      expect(
+        await repository.save(org(), fence(), snapshot, { ...snapshot.sink, attempt: 2 }, 1, {
+          ledger: [{ ...entry, id: '01J00000000000000000000008' }],
+        }),
+      ).toBe(true);
+      expect(await createAuditLedgerRepository(database.executor).page(org(), null, 10)).toEqual([
+        entry,
+      ]);
+    });
+
     it('reads a complete snapshot and writes exporter-owned sink fields, preserving foreign rows', async () => {
       const before = await port().read(org(), 'archive');
       expect(before).toMatchObject({
@@ -122,6 +632,7 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
         { inflightBody: '{}' },
         { inflightRepr: null },
         { attempt: 1 },
+        { retryCountForSeq: 1 },
         { nextAttemptAt: '2099-01-01T00:00:00.000Z' },
         { lastErrorCode: 'timeout' },
       ];
@@ -309,6 +820,7 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
               generation: 1,
               pluginVersion: '1.0',
               sourceIp: 'omit',
+              rejectionRetries: 3,
               now: () => new Date(),
               sink: {
                 deliver: async (batch) => {
@@ -321,9 +833,6 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
                     throughHash: batch.throughHash,
                   };
                 },
-              },
-              resolve: async () => {
-                throw new Error('Unexpected disposition');
               },
             },
             new AbortController().signal,

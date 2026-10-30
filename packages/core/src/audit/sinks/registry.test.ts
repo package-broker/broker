@@ -165,6 +165,8 @@ describe('audit sink registry', () => {
     expect(JSON.parse(f.next().inflightRepr!)).toEqual({
       ...JSON.parse(old.inflightRepr),
       custodyFromSeq: 11,
+      durableCustodySeq: 10,
+      durableAckRanges: [],
       registryMarkers: [
         expect.objectContaining({
           kind: 'receiver_changed',
@@ -325,12 +327,23 @@ describe('audit sink registry', () => {
   it.each([{ pluginId: 'audit-v2-archive' }, { kind: 'otlp' }, { durableAck: false }])(
     'records receiver configuration changes %j',
     async (change) => {
-      const old = await existing();
+      const old = {
+        ...(await existing()),
+        inflightRepr: JSON.stringify({
+          custodyFromSeq: 8,
+          durableCustodySeq: 99,
+          durableAckRanges: [{ from: 8, to: 99 }],
+        }),
+      };
       const f = fixture({ ...snapshot(), sinks: [old] });
       await reconcileAuditSinks(f.port, ctx, 2, [{ ...registration, ...change }], now);
       expect(f.save.mock.calls[0]![2].rebinds).toHaveLength(1);
       expect(f.next().inflightBody).toBeNull();
-      expect(JSON.parse(f.next().inflightRepr!).custodyFromSeq).toBe(11);
+      expect(JSON.parse(f.next().inflightRepr!)).toMatchObject({
+        custodyFromSeq: 11,
+        durableCustodySeq: 10,
+        durableAckRanges: [],
+      });
     },
   );
 
@@ -338,7 +351,11 @@ describe('audit sink registry', () => {
     const old = { ...(await existing()), durableAck: false };
     const f = fixture({ ...snapshot(), sinks: [old] });
     await reconcileAuditSinks(f.port, ctx, 2, [registration], now);
-    expect(JSON.parse(f.next().inflightRepr!).custodyFromSeq).toBe(13);
+    expect(JSON.parse(f.next().inflightRepr!)).toMatchObject({
+      custodyFromSeq: 13,
+      durableCustodySeq: 12,
+      durableAckRanges: [],
+    });
     expect(f.save.mock.calls[0]![2].rebinds).toHaveLength(1);
     expect(f.next()).toMatchObject({ custodySeq: 10, progressSeq: 12, durableAck: true });
   });

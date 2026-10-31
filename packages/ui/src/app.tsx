@@ -45,6 +45,7 @@ export const PAGES = {
   access: () => import('./pages/access.js').then((page) => page.AccessPage),
   sources: () => import('./pages/sources.js').then((page) => page.SourcesPage),
   packages: () => import('./pages/packages.js').then((page) => page.PackagesPage),
+  'npm-login': () => import('./pages/npm-login.js').then((page) => page.NpmLoginPage),
   tokens: () => import('./pages/tokens.js').then((page) => page.TokensPage),
   audit: () => import('./pages/audit.js').then((page) => page.AuditPage),
   import: () => import('./pages/import.js').then((page) => page.ImportPage),
@@ -79,7 +80,9 @@ export function parseHash(hash: string): ParsedHash {
   const candidate = query.get('project');
   const project = candidate !== null && SLUG.test(candidate) ? candidate : null;
   const name = path.startsWith('/') ? path.slice(1) : path;
-  const route = ROUTES.find((known) => known === name) ?? null;
+  const route = /^npm-login\/[A-Za-z0-9_-]{43}$/.test(name)
+    ? 'npm-login'
+    : (ROUTES.find((known) => known === name) ?? null);
   const raw = route !== null || path === '' || path === '/' ? null : path.slice(0, MAX_SHOWN);
   return { route, raw, project, query };
 }

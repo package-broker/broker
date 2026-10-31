@@ -167,9 +167,9 @@ const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
 const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
 
 function errorFormat(route: string | undefined): ErrorFormat {
-  return route === '/:project/npm' || route?.startsWith('/:project/npm/') === true
-    ? 'npm'
-    : 'nested';
+  if (route === undefined) return 'nested';
+  const reserved = RESERVED_ROOTS.some((root) => route === root || route.startsWith(`${root}/`));
+  return !reserved && /^\/[^/]+\/npm(?:\/|$)/.test(route) ? 'npm' : 'nested';
 }
 
 function authOrSessionPath(path: string): boolean {
@@ -791,7 +791,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   const reservedNotFound = (c: Context<KernelEnv>): Response => {
     c.env.guard.reason('route.not_found');
-    return routeNotFound(c.env.requestId);
+    const path = new URL(c.req.url).pathname;
+    return routeNotFound(c.env.requestId, errorFormat(path));
   };
   for (const root of RESERVED_ROOTS) {
     app.all(root, reservedNotFound);

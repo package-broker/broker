@@ -175,7 +175,7 @@ describe('browser bundle isolation', () => {
       }
       expect(
         outputs[entry].imports.filter((item: { kind: string }) => item.kind === 'dynamic-import'),
-      ).toHaveLength(7);
+      ).toHaveLength(8);
       const inputPaths = Object.keys(inputs).map((input) =>
         path.resolve(packageRoot, input).split(path.sep).join('/'),
       );

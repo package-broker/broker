@@ -1,3 +1,5 @@
+import { type NpmLoginDeps } from '@package-broker/core/api/routes/npm-login';
+import { createNpmLoginRepository } from './npm-login.js';
 import {
   createAuthModule,
   type AuthModule,
@@ -123,6 +125,7 @@ export interface AccessAssembly {
   readonly module: AuthModule;
   readonly providerAnchors: ProviderAnchorReader;
   readonly services: AccessServices;
+  readonly npmLogin: NpmLoginDeps;
 }
 
 export function createAccessServices(options: AccessServicesOptions): AccessAssembly {
@@ -278,5 +281,34 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     }),
     tokenList: wired('token reader', createTokenReader(executor)),
   });
-  return Object.freeze({ repositories, module, providerAnchors, services, anchors: anchorList });
+  const npmLogin = createNpmLoginRepository(executor, keyring);
+  const loginDeps: NpmLoginDeps = {
+    ...common,
+    clientIp: options.clientIp,
+    publicUrl: publicOrigin,
+    store: npmLogin,
+    projects: projectRepository,
+    sessions: module.sessions,
+    personal: (selectorHash) =>
+      createPersonalTokenService({
+        tokens: {
+          issuePersonal: (ctx, fence, input, mint) =>
+            npmLogin.approveNpmLogin(ctx, fence, input, mint, selectorHash),
+        },
+        sessions: module.sessions,
+        organizations,
+        providers: providerAnchors,
+        keyring,
+        lifetime: tokens.lifetime,
+        ...common,
+      }),
+  };
+  return Object.freeze({
+    repositories,
+    module,
+    providerAnchors,
+    services,
+    anchors: anchorList,
+    npmLogin: loginDeps,
+  });
 }

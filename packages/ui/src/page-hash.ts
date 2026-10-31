@@ -4,6 +4,7 @@ export type HashRoute =
   | 'sources'
   | 'packages'
   | 'tokens'
+  | 'npm-login'
   | 'audit'
   | 'import'
   | 'login'

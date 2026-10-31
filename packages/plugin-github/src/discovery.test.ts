@@ -1,3 +1,8 @@
+import { createBulkDiscovery } from '@package-broker/core/sources/bulk-discovery';
+import { orgContext } from '@package-broker/core/db/port';
+import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
+import type { ActorContext } from '@package-broker/core/authz/administration';
+import { vi } from 'vitest';
 import type { PlanEntry } from '@package-broker/core/plugin';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
@@ -28,6 +33,7 @@ interface Call {
 interface Repo {
   readonly name: string;
   readonly archived?: boolean;
+  readonly fork?: boolean;
   readonly branch?: string;
 }
 
@@ -71,6 +77,7 @@ function setup(repos: readonly Repo[], files: Files, total = repos.length) {
               full_name: `acme/${repo.name}`,
               owner: { login: 'acme' },
               archived: repo.archived ?? false,
+              fork: repo.fork ?? false,
               default_branch: repo.branch ?? 'main',
             })),
           }),
@@ -87,6 +94,7 @@ function setup(repos: readonly Repo[], files: Files, total = repos.length) {
             ? reply
             : JSON.stringify({
                 archived: repo?.archived ?? false,
+                fork: repo?.fork ?? false,
                 default_branch: repo?.branch ?? 'main',
               }),
           { status: typeof reply === 'number' ? reply : 200 },
@@ -162,8 +170,8 @@ describe('discoverRepositories', () => {
         repository: 'acme/web',
         ecosystem: 'npm',
         packageName: '@acme/web',
-        action: 'skipped',
-        reason: 'npm_from_vcs_unsupported',
+        action: 'new',
+        reason: null,
       },
       {
         repository: 'acme/empty',
@@ -278,6 +286,7 @@ describe('discoverRepositories', () => {
                 name: repo.name,
                 owner: { login: 'acme' },
                 archived: false,
+                fork: false,
                 default_branch: 'main',
               })),
             }),
@@ -354,9 +363,9 @@ describe('discoverRepositories', () => {
     const { entries } = await run(harness);
     expect(entries.map((e) => [e.repository, e.ecosystem, e.action, e.reason])).toEqual([
       ['acme/both', 'composer', 'new', null],
-      ['acme/both', 'npm', 'skipped', 'npm_from_vcs_unsupported'],
+      ['acme/both', 'npm', 'new', null],
       ['acme/mixed', 'composer', 'skipped', 'invalid_name'],
-      ['acme/mixed', 'npm', 'skipped', 'npm_from_vcs_unsupported'],
+      ['acme/mixed', 'npm', 'new', null],
     ]);
     expect(harness.calls).toHaveLength(5);
   });
@@ -485,15 +494,20 @@ describe('discoverRepositories', () => {
   });
 });
 
-function planOne(harness: ReturnType<typeof setup>, extra: Partial<PlanRepositoryOptions> = {}) {
-  return planRepository({
-    tokens: harness.tokens,
-    fetch: harness.fetch,
-    installationId: '42',
-    repository: 'acme/lib',
-    exists: () => false,
-    ...extra,
-  });
+async function planOne(
+  harness: ReturnType<typeof setup>,
+  extra: Partial<PlanRepositoryOptions> = {},
+) {
+  return (
+    await planRepository({
+      tokens: harness.tokens,
+      fetch: harness.fetch,
+      installationId: '42',
+      repository: 'acme/lib',
+      exists: () => false,
+      ...extra,
+    })
+  )[0]!;
 }
 
 describe('planRepository', () => {
@@ -551,7 +565,7 @@ describe('planRepository', () => {
     const harness = setup([{ name: 'lib', branch: 'release+1' }], {});
     const installationId = '12345678901234567890';
     expect((await planOne(harness, { installationId })).reason).toBe('no_manifest');
-    expect(harness.minted).toEqual([['lib']]);
+    expect(harness.minted).toEqual([null, ['lib']]);
     expect(harness.mintIds).toEqual([installationId]);
     expect(harness.calls.map((call) => call.url)).toEqual([
       'https://api.github.com/repos/acme/lib',
@@ -560,7 +574,9 @@ describe('planRepository', () => {
     ]);
     expect(
       harness.calls.every(
-        (call) => call.headers.get('authorization') === `Bearer ${CONTENTS_TOKEN}`,
+        (call) =>
+          call.headers.get('authorization') ===
+          `Bearer ${call.url.includes('/contents/') ? CONTENTS_TOKEN : LISTING_TOKEN}`,
       ),
     ).toBe(true);
     expect(harness.observed).toHaveLength(3);
@@ -622,7 +638,7 @@ describe('planRepository', () => {
         action: 'skipped',
         reason: 'error_404',
       });
-      expect(harness.calls).toHaveLength(0);
+      expect(harness.calls).toHaveLength(1);
     },
   );
 
@@ -637,7 +653,7 @@ describe('planRepository', () => {
       throw error;
     };
     await expect(planOne(harness)).rejects.toBe(error);
-    expect(harness.calls).toHaveLength(0);
+    expect(harness.calls).toHaveLength(1);
   });
 
   it.each([404, 451])('maps repository status %i without manifest requests', async (status) => {
@@ -669,4 +685,156 @@ describe('planRepository', () => {
     await expect(planOne(harness)).rejects.toMatchObject({ code: 'rate_limited', retryAfter: 30 });
     expect(harness.observed).toHaveLength(1);
   });
+});
+
+it.each([false, true])(
+  'fork opt-in applies to listing and re-planning: %s',
+  async (includeForks) => {
+    const f = setup([{ name: 'lib', fork: true }], { lib: { 'package.json': npm('widget') } });
+    const expected = includeForks
+      ? { action: 'new', packageName: 'widget' }
+      : { action: 'skipped', reason: 'fork' };
+    expect((await run(f, { includeForks })).entries[0]).toMatchObject(expected);
+    expect(await planOne(f, { includeForks })).toMatchObject(expected);
+    if (!includeForks)
+      expect(f.calls.some((call) => call.url.includes('/contents/package.json'))).toBe(false);
+  },
+);
+
+it.each(['listing', 'plan'])('refuses malformed fork flags in %s', async (mode) => {
+  const f = setup([{ name: 'lib', fork: 'yes' as unknown as boolean }], {
+    lib: { 'package.json': npm('widget') },
+  });
+  await expect(mode === 'listing' ? run(f) : planOne(f)).rejects.toMatchObject({
+    code: 'invalid_response',
+  });
+});
+
+it('still classifies Composer forks', async () => {
+  const f = setup([{ name: 'lib', fork: true }], {
+    lib: { 'composer.json': composer('acme/lib') },
+  });
+  expect((await run(f)).entries).toContainEqual(
+    expect.objectContaining({ ecosystem: 'composer', action: 'new', packageName: 'acme/lib' }),
+  );
+});
+it('refuses absent fork metadata when replanning', async () => {
+  const f = setup([{ name: 'lib' }], {
+    lib: { $repository: '{"archived":false,"default_branch":"main"}' },
+  });
+  await expect(planOne(f)).rejects.toMatchObject({ code: 'invalid_response' });
+});
+
+it('plans both manifests in acme/mixed for apply', async () => {
+  const f = setup([{ name: 'mixed' }], {
+    mixed: { 'composer.json': composer('acme/mixed'), 'package.json': npm('@acme/mixed') },
+  });
+  const page = await run(f);
+  expect(
+    await planRepository({
+      tokens: f.tokens,
+      fetch: f.fetch,
+      installationId: '42',
+      repository: 'acme/mixed',
+      exists: () => false,
+    }),
+  ).toEqual(page.entries);
+  expect(page.entries.map((entry) => entry.ecosystem)).toEqual(['composer', 'npm']);
+});
+it.each(['listing', 'plan'])('filters npm forks before narrowing tokens in %s', async (mode) => {
+  const f = setup([{ name: 'lib', fork: true }], { lib: { 'package.json': npm('widget') } });
+  const entries =
+    mode === 'listing'
+      ? (await run(f, { ecosystem: 'npm' })).entries
+      : [await planOne(f, { ecosystem: 'npm' })];
+  expect(entries).toEqual([expect.objectContaining({ ecosystem: 'npm', reason: 'fork' })]);
+  expect(f.minted).toEqual([null]);
+  expect(f.calls.some((call) => call.url.includes('/contents/'))).toBe(false);
+});
+it.each(['node_modules', 'favicon.ico', '~widget'])(
+  'classifies invalid npm name %s as skipped',
+  async (name) => {
+    const f = setup([{ name: 'lib' }], { lib: { 'package.json': npm(name) } });
+    expect((await run(f)).entries).toEqual([expect.objectContaining({ reason: 'invalid_name' })]);
+  },
+);
+it('refuses absent fork metadata in a listing', async () => {
+  const f = setup([], {});
+  const fetch = createPolicyFetch({
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          total_count: 1,
+          repositories: [
+            { name: 'lib', owner: { login: 'acme' }, archived: false, default_branch: 'main' },
+          ],
+        }),
+      ),
+    policy: createOutboundPolicy({ allowPrivateHosts: [], runtime: 'node', selfOrigins: [] }),
+    userAgent: 'test',
+  });
+  await expect(run(f, { fetch })).rejects.toMatchObject({ code: 'invalid_response' });
+});
+
+it('creates both acme/mixed manifests from dry-run through apply', async () => {
+  const f = setup([{ name: 'mixed' }], {
+    mixed: { 'composer.json': composer('acme/mixed'), 'package.json': npm('@acme/mixed') },
+  });
+  const create = vi.fn<
+    import('@package-broker/core/sources/source-service').SourceService['create']
+  >(async () => ({ ok: true as const, value: { id: crypto.randomUUID() } }));
+  const addRegisteredName = vi.fn(async () => ({ ok: true as const, value: { id: 'claim' } }));
+  const bulk = createBulkDiscovery({
+    credentials: {
+      resolve: async () => ({ credentialId: 'app', installationId: 42, upstream: {} as never }),
+    },
+    discovery: {
+      discover: (_ctx, _cred, request) => run(f, { exists: request.exists }),
+      plan: (_ctx, _cred, repository, exists) =>
+        planRepository({
+          tokens: f.tokens,
+          fetch: f.fetch,
+          installationId: '42',
+          repository,
+          exists,
+        }),
+    },
+    sources: {
+      create,
+      addRegisteredName,
+      enable: async () => ({ ok: true, value: null }),
+      delete: async () => ({ ok: true, value: null }),
+    },
+    existingRepository: { has: async () => false, hasSourceName: async () => false },
+  });
+  const ctx = orgContext('org');
+  const actor = {
+    kind: 'organization',
+    userId: 'user',
+    isOrganizationAdmin: true,
+    permissions: new Set(['org:sources:write']),
+  } as ActorContext;
+  const fence = mutationFence({ userId: 'user', sessionId: 'session' } as AuthenticatedActor, {});
+  expect(
+    await bulk.dryRun(ctx, actor, { credentialId: 'app', pattern: '*', cursor: null }),
+  ).toMatchObject({
+    ok: true,
+    value: {
+      entries: [
+        expect.objectContaining({ ecosystem: 'composer' }),
+        expect.objectContaining({ ecosystem: 'npm' }),
+      ],
+    },
+  });
+  expect(
+    await bulk.apply(
+      ctx,
+      actor,
+      fence,
+      { credentialId: 'app', repositories: ['acme/mixed'] },
+      { audit: { opId: 'op', requestId: 'req', sourceIp: null, tokenSelector: null } },
+    ),
+  ).toMatchObject({ ok: true, value: { created: 2, failed: 0 } });
+  expect(create.mock.calls.map((call) => call[3].ecosystem)).toEqual(['composer', 'npm']);
+  expect(addRegisteredName).toHaveBeenCalledTimes(2);
 });

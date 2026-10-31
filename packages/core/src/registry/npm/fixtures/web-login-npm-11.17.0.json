@@ -1,0 +1,17 @@
+{
+  "client": "npm",
+  "version": "11.17.0",
+  "transport": "make-fetch-happen stub; actual profile and registry URL/body serialization",
+  "requests": [
+    {
+      "method": "POST",
+      "url": "https://registry.example.test/demo/npm/-/v1/login",
+      "body": "{}"
+    },
+    {
+      "method": "GET",
+      "url": "https://registry.example.test/demo/npm/-/v1/done/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "body": null
+    }
+  ]
+}

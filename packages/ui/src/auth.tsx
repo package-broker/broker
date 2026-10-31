@@ -94,6 +94,7 @@ export function isNavigableLocation(location: string): boolean {
 }
 
 export function safePageHash(hash: string): string {
+  if (/^#\/npm-login\/[A-Za-z0-9_-]{43}$/.test(hash)) return hash;
   const match =
     /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?([\s\S]*))?$/.exec(hash);
   if (match === null || match[0] !== hash) return '#/projects';

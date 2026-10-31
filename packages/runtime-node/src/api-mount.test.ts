@@ -1,5 +1,6 @@
 import { sha256Hex } from '@package-broker/core/auth/primitives';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
+import type { KernelOptions } from '@package-broker/core/kernel/kernel';
 import { orgContext } from '@package-broker/core/db/port';
 import { createJobLoop } from './jobs/loop.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,11 +22,23 @@ import { createNodeServer, type NodeBroker } from './index.js';
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 
 const built = vi.hoisted(() => ({
+  kernels: [] as KernelOptions[],
   routes: [] as Array<readonly RouteDefinition[]>,
   dependencies: [] as ApiModuleDeps[],
   drop: undefined as string | undefined,
   policies: [] as unknown[],
 }));
+
+vi.mock('@package-broker/core/kernel/kernel', async (original) => {
+  const actual = await original<typeof import('@package-broker/core/kernel/kernel')>();
+  return {
+    ...actual,
+    createKernel: (options: KernelOptions) => {
+      built.kernels.push(options);
+      return actual.createKernel(options);
+    },
+  };
+});
 
 vi.mock('@package-broker/core/sources/source-service', async (original) => {
   const actual = await original<typeof import('@package-broker/core/sources/source-service')>();
@@ -116,6 +129,13 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ],
     jobs: [],
     ownerPacket: 'T531',
+  },
+  {
+    dependency: 'npmLogin',
+    constructed: 'npm login repository and personal token service',
+    routes: ['GET /_pb/me/npm-login/:selector', 'POST /_pb/me/npm-login/:selector'],
+    jobs: ['npm-login-expire'],
+    ownerPacket: 'NPM16',
   },
   {
     dependency: 'access',
@@ -329,9 +349,11 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
           ? 'NPM10'
           : entry.dependency === 'sourcePackages'
             ? 'T1041'
-            : entry.dependency === 'packageAccessRequests'
-              ? 'NPM12'
-              : 'T531',
+            : entry.dependency === 'npmLogin'
+              ? 'NPM16'
+              : entry.dependency === 'packageAccessRequests'
+                ? 'NPM12'
+                : 'T531',
     );
     for (const key of entry.routes) {
       expect(
@@ -533,6 +555,18 @@ describe('Node management API mount', () => {
         key,
       ).toHaveLength(1);
     }
+  });
+
+  it('mounts public npm login routes without registry services', async () => {
+    await create().ready();
+    expect(
+      built.kernels.at(-1)?.ecosystemRoutes?.map((route) => `${route.method} ${route.path}`),
+    ).toEqual(
+      expect.arrayContaining([
+        'POST /:project/npm/-/v1/login',
+        'GET /:project/npm/-/v1/done/:session',
+      ]),
+    );
   });
 
   it('mounts the package manage routes without a rebuild route', async () => {

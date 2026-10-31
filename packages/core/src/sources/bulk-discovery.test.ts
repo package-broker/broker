@@ -9,6 +9,7 @@ import {
   createBulkDiscovery,
   type BulkDiscoveryDeps,
   type DiscoveryCredential,
+  type DiscoveryPlanPage,
 } from './bulk-discovery.js';
 import { UpstreamError } from './policy-fetch.js';
 import type { SourceService, SourceServiceResult } from './source-service.js';
@@ -37,7 +38,14 @@ function setup(options: { names?: string[]; sourceNames?: string[]; failEnable?:
   const calls: string[] = [];
   const sources = new Map<
     string,
-    { id: string; credentialId: string; repository: string; status: string; names: string[] }
+    {
+      id: string;
+      credentialId: string;
+      repository: string;
+      ecosystem: 'composer' | 'npm';
+      status: string;
+      names: string[];
+    }
   >();
   const takenNames = new Set(options.names ?? []);
   const service: Pick<SourceService, 'create' | 'addRegisteredName' | 'enable' | 'delete'> = {
@@ -50,6 +58,7 @@ function setup(options: { names?: string[]; sourceNames?: string[]; failEnable?:
         id,
         credentialId: input.credentialId,
         repository: config.repository,
+        ecosystem: input.ecosystem,
         status: 'paused',
         names: [],
       });
@@ -85,14 +94,16 @@ function setup(options: { names?: string[]; sourceNames?: string[]; failEnable?:
     action: 'new',
     reason: null,
   });
-  const exists = async (repository: string) =>
-    [...sources.values()].some((source) => source.repository === repository);
+  const exists = async (repository: string, ecosystem: 'composer' | 'npm') =>
+    [...sources.values()].some(
+      (source) => source.repository === repository && source.ecosystem === ecosystem,
+    );
   const resolve = vi.fn(async (): Promise<DiscoveryCredential | null> => ({
     credentialId: 'app-credential',
     installationId: 7,
     upstream: {} as never,
   }));
-  const discover = vi.fn(async (_c, _cred, request) => {
+  const discover = vi.fn(async (_c, _cred, request): Promise<DiscoveryPlanPage> => {
     const entries: PlanEntry[] = [];
     for (const repository of ['acme/one', 'acme/two']) {
       const candidate = {
@@ -107,11 +118,13 @@ function setup(options: { names?: string[]; sourceNames?: string[]; failEnable?:
     }
     return { entries, nextCursor: '2' };
   });
-  const plan = vi.fn(async (_c, _cred, repository: string, existing) => {
-    const candidate = { repository, ecosystem: 'composer' as const, packageName: repository };
-    const entry = planFor(candidate);
-    return (await existing(candidate)) ? { ...entry, action: 'existing' as const } : entry;
-  });
+  const plan = vi.fn(
+    async (_c, _cred, repository: string, existing): Promise<readonly PlanEntry[]> => {
+      const candidate = { repository, ecosystem: 'composer' as const, packageName: repository };
+      const entry = planFor(candidate);
+      return [(await existing(candidate)) ? { ...entry, action: 'existing' as const } : entry];
+    },
+  );
   const hasSourceName = vi.fn(async (_ctx: OrgContext, name: string) =>
     (options.sourceNames ?? []).includes(name),
   );
@@ -119,7 +132,10 @@ function setup(options: { names?: string[]; sourceNames?: string[]; failEnable?:
     credentials: { resolve },
     discovery: { discover, plan },
     sources: service,
-    existingRepository: { has: (_c, repository) => exists(repository), hasSourceName },
+    existingRepository: {
+      has: (_c, repository, ecosystem) => exists(repository, ecosystem),
+      hasSourceName,
+    },
   };
   return {
     bulk: createBulkDiscovery(deps),
@@ -309,13 +325,15 @@ describe('bulk discovery', () => {
 
   it('skips entries the recomputed plan does not mark as new', async () => {
     const { bulk, plan, calls } = setup();
-    plan.mockResolvedValueOnce({
-      repository: 'acme/one',
-      ecosystem: 'npm',
-      packageName: 'one',
-      action: 'skipped',
-      reason: 'npm_from_vcs_unsupported',
-    });
+    plan.mockResolvedValueOnce([
+      {
+        repository: 'acme/one',
+        ecosystem: 'npm',
+        packageName: 'one',
+        action: 'skipped',
+        reason: 'fork',
+      },
+    ]);
     const result = await bulk.apply(
       ctx,
       admin,
@@ -330,29 +348,60 @@ describe('bulk discovery', () => {
     expect(calls).toEqual([]);
   });
 
-  it('skips a new npm entry with its reason and performs no writes', async () => {
-    const { bulk, plan, service } = setup();
-    plan.mockResolvedValueOnce({
-      repository: 'acme/one',
-      ecosystem: 'npm',
-      packageName: 'one',
-      action: 'new',
-      reason: 'npm_from_vcs_unsupported',
-    });
+  it('creates a new npm VCS source through registered-name admission', async () => {
+    const { bulk, plan, service, calls } = setup();
+    plan.mockResolvedValueOnce([
+      {
+        repository: 'acme/one',
+        ecosystem: 'npm',
+        packageName: 'one',
+        action: 'new',
+        reason: null,
+      },
+    ]);
     expect(
       await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
-    ).toMatchObject({
-      ok: true,
-      value: {
-        created: 0,
-        skipped: 1,
-        results: [
-          { repository: 'acme/one', outcome: 'skipped', reason: 'npm_from_vcs_unsupported' },
-        ],
-      },
-    });
-    expect(service.create).not.toHaveBeenCalled();
+    ).toMatchObject({ ok: true, value: { created: 1 } });
+    expect(service.create).toHaveBeenCalledWith(
+      ctx,
+      expect.anything(),
+      fence,
+      expect.objectContaining({ ecosystem: 'npm', type: 'vcs' }),
+      call,
+    );
+    expect(calls).toEqual(['create:acme/one', 'name:one', 'enable:src-1']);
   });
+
+  it.each(['name_public', 'name_public_unverified', 'claim_overlap'] as const)(
+    'skips a refused npm claim: %s',
+    async (error) => {
+      const { bulk, plan, service, calls } = setup();
+      plan.mockResolvedValueOnce([
+        {
+          repository: 'acme/one',
+          ecosystem: 'npm',
+          packageName: 'one',
+          action: 'new',
+          reason: null,
+        },
+      ]);
+      vi.mocked(service.addRegisteredName).mockResolvedValueOnce({ ok: false, error });
+      expect(
+        await bulk.apply(
+          ctx,
+          admin,
+          fence,
+          { credentialId: 'c', repositories: ['acme/one'] },
+          call,
+        ),
+      ).toMatchObject({
+        ok: true,
+        value: { skipped: 1, results: [{ outcome: 'skipped', reason: error }] },
+      });
+      expect(calls).toEqual(['create:acme/one', 'delete:src-1']);
+      expect(service.enable).not.toHaveBeenCalled();
+    },
+  );
 
   it('reports an orphaned paused source when cleanup fails after a name collision', async () => {
     const { bulk, service, sources } = setup({ names: ['acme/one'] });
@@ -564,13 +613,15 @@ describe('bulk discovery', () => {
 
   it('refuses a mismatched repository before writing', async () => {
     const { bulk, plan, service } = setup();
-    plan.mockResolvedValueOnce({
-      repository: 'other/repo',
-      ecosystem: 'composer',
-      packageName: 'acme/one',
-      action: 'existing',
-      reason: null,
-    });
+    plan.mockResolvedValueOnce([
+      {
+        repository: 'other/repo',
+        ecosystem: 'composer',
+        packageName: 'acme/one',
+        action: 'existing',
+        reason: null,
+      },
+    ]);
     expect(
       await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({
@@ -586,13 +637,15 @@ describe('bulk discovery', () => {
 
   it('accepts repository case differences and writes the requested name', async () => {
     const { bulk, plan, service } = setup();
-    plan.mockResolvedValueOnce({
-      repository: 'ACME/ONE',
-      ecosystem: 'composer',
-      packageName: 'acme/one',
-      action: 'new',
-      reason: null,
-    });
+    plan.mockResolvedValueOnce([
+      {
+        repository: 'ACME/ONE',
+        ecosystem: 'composer',
+        packageName: 'acme/one',
+        action: 'new',
+        reason: null,
+      },
+    ]);
     expect(
       await bulk.apply(ctx, admin, fence, { credentialId: 'c', repositories: ['acme/one'] }, call),
     ).toMatchObject({ ok: true, value: { created: 1, results: [{ repository: 'acme/one' }] } });
@@ -641,13 +694,15 @@ describe('bulk discovery', () => {
 
   it('stops on rate_limited and returns partial counters and cursor', async () => {
     const { bulk, plan } = setup();
-    plan.mockImplementationOnce(async (_c, _cred, repository) => ({
-      repository,
-      ecosystem: 'composer',
-      packageName: repository,
-      action: 'new',
-      reason: null,
-    }));
+    plan.mockImplementationOnce(async (_c, _cred, repository) => [
+      {
+        repository,
+        ecosystem: 'composer',
+        packageName: repository,
+        action: 'new',
+        reason: null,
+      },
+    ]);
     plan.mockRejectedValueOnce(
       Object.assign(new Error('private provider detail'), {
         name: 'DiscoveryError',
@@ -786,7 +841,10 @@ it('pins the public discovery plan contract', () => {
     | 'archived'
     | 'no_manifest'
     | 'invalid_name'
-    | 'npm_from_vcs_unsupported'
+    | 'fork'
+    | 'name_public'
+    | 'name_public_unverified'
+    | 'claim_overlap'
     | 'filtered_out'
     | 'error_451'
     | 'error_404'
@@ -800,7 +858,10 @@ it('pins the public discovery plan contract', () => {
       | 'archived'
       | 'no_manifest'
       | 'invalid_name'
-      | 'npm_from_vcs_unsupported'
+      | 'fork'
+      | 'name_public'
+      | 'name_public_unverified'
+      | 'claim_overlap'
       | 'filtered_out'
       | 'error_451'
       | 'error_404'
@@ -812,3 +873,141 @@ it('pins the public discovery plan contract', () => {
     readonly packageName: string;
   }>();
 });
+
+it.each([undefined, false, true])(
+  'forwards fork import opt-in to discovery and re-planning: %s',
+  async (includeForks) => {
+    const { bulk, discover, plan } = setup();
+    const options = includeForks === undefined ? {} : { includeForks };
+    await bulk.dryRun(ctx, admin, { credentialId: 'c', pattern: '*', cursor: null, ...options });
+    expect(discover).toHaveBeenCalledWith(
+      ctx,
+      expect.anything(),
+      expect.objectContaining({ includeForks: includeForks === true }),
+    );
+    await bulk.apply(
+      ctx,
+      admin,
+      fence,
+      { credentialId: 'c', repositories: ['acme/one'], ...options },
+      call,
+    );
+    expect(plan).toHaveBeenCalledWith(ctx, expect.anything(), 'acme/one', expect.any(Function), {
+      includeForks: includeForks === true,
+    });
+  },
+);
+
+it('applies both manifest entries in acme/mixed', async () => {
+  const f = setup();
+  f.plan.mockResolvedValueOnce([
+    {
+      repository: 'acme/mixed',
+      ecosystem: 'composer',
+      packageName: 'acme/mixed',
+      action: 'new',
+      reason: null,
+    },
+    {
+      repository: 'acme/mixed',
+      ecosystem: 'npm',
+      packageName: '@acme/mixed',
+      action: 'new',
+      reason: null,
+    },
+  ]);
+  expect(
+    await f.bulk.apply(
+      ctx,
+      admin,
+      fence,
+      { credentialId: 'c', repositories: ['acme/mixed'] },
+      call,
+    ),
+  ).toMatchObject({ ok: true, value: { created: 2, failed: 0 } });
+  expect([...f.sources.values()].map((source) => source.names)).toEqual([
+    ['acme/mixed'],
+    ['@acme/mixed'],
+  ]);
+});
+it.each(['node_modules', 'favicon.ico', '~widget'])(
+  'skips invalid npm candidate %s before create',
+  async (packageName) => {
+    const f = setup();
+    f.plan.mockResolvedValueOnce([
+      {
+        repository: 'acme/one',
+        ecosystem: 'npm',
+        packageName,
+        action: 'new',
+        reason: null,
+      },
+    ]);
+    expect(
+      await f.bulk.apply(
+        ctx,
+        admin,
+        fence,
+        { credentialId: 'c', repositories: ['acme/one'] },
+        call,
+      ),
+    ).toMatchObject({
+      ok: true,
+      value: { skipped: 1, failed: 0, results: [{ reason: 'invalid_name' }] },
+    });
+    expect(f.service.create).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['composer', 'npm'] as const)(
+  'discovers the other ecosystem in acme/mixed with an existing %s source',
+  async (existingEcosystem) => {
+    const f = setup();
+    f.sources.set('existing', {
+      id: 'existing',
+      credentialId: 'app-credential',
+      repository: 'acme/mixed',
+      ecosystem: existingEcosystem,
+      status: 'active',
+      names: [],
+    });
+    const candidates = (['composer', 'npm'] as const).map((ecosystem) => ({
+      repository: 'acme/mixed',
+      ecosystem,
+      packageName: ecosystem === 'composer' ? 'acme/mixed' : '@acme/mixed',
+    }));
+    const entries = async (exists: (candidate: DiscoveryCandidate) => boolean | Promise<boolean>) =>
+      Promise.all(
+        candidates.map(async (candidate): Promise<PlanEntry> => ({
+          ...candidate,
+          action: (await exists(candidate)) ? 'existing' : 'new',
+          reason: null,
+        })),
+      );
+    f.discover.mockImplementationOnce(async (_c, _credential, request) => ({
+      entries: await entries(request.exists),
+      nextCursor: null,
+    }));
+    expect(
+      await f.bulk.dryRun(ctx, admin, { credentialId: 'c', pattern: 'acme/*', cursor: null }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        entries: candidates.map((candidate) => ({
+          ...candidate,
+          action: candidate.ecosystem === existingEcosystem ? 'existing' : 'new',
+        })),
+      },
+    });
+    f.plan.mockImplementationOnce(async (_c, _credential, _repository, exists) => entries(exists));
+    expect(
+      await f.bulk.apply(
+        ctx,
+        admin,
+        fence,
+        { credentialId: 'c', repositories: ['acme/mixed'] },
+        call,
+      ),
+    ).toMatchObject({ ok: true, value: { existing: 1, created: 1, failed: 0 } });
+  },
+);

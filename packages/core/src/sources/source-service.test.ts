@@ -2575,7 +2575,7 @@ it('refuses manual upstream sync of a hosted source', async () => {
   expect(f.sources.syncNow).not.toHaveBeenCalled();
 });
 
-it.each(['npm_registry', 'vcs'])('does not probe non-hosted npm source %s', async (type) => {
+it.each(['npm_registry'])('does not probe registry npm source %s', async (type) => {
   const f = setup();
   f.sources.get.mockResolvedValue({
     ...input,
@@ -2657,5 +2657,81 @@ it('audits a replacement with old and new patterns', async () => {
   expect(audit.action).toBe('registered_name.update');
   expect(JSON.parse(audit.payloadJson)).toMatchObject({
     changes: { pattern: { old: '@old/*', new: '@new/*' } },
+  });
+});
+
+it.each(['found', 'unavailable', 'not_found'] as const)(
+  'probes VCS npm claims: %s',
+  async (answer) => {
+    const f = setup();
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'vcs',
+      ecosystem: 'npm',
+      credentialId: null,
+    } as SourceRecord);
+    f.registeredNames.claimProxy.mockResolvedValue('proxy');
+    f.claimProbe.mockResolvedValue(answer);
+    const result = await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: 'widget' },
+      call,
+    );
+    expect(result).toMatchObject(
+      answer === 'not_found'
+        ? { ok: true }
+        : { ok: false, error: answer === 'found' ? 'name_public' : 'name_public_unverified' },
+    );
+    expect(f.claimProbe).toHaveBeenCalled();
+    if (answer !== 'not_found') expect(f.registeredNames.add).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['lod*', '@sc*/foo', '@scope/pre*'])(
+  'refuses npm VCS legacy wildcard %s before the store',
+  async (pattern) => {
+    const { service, sources, registeredNames } = setup();
+    sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'vcs',
+      ecosystem: 'npm',
+      projectId: null,
+    });
+    expect(
+      await service.addRegisteredName(ctx, org, fence, { sourceId: 'source', pattern }, call),
+    ).toEqual({ ok: false, error: 'invalid_pattern' });
+    expect(registeredNames.add).not.toHaveBeenCalled();
+  },
+);
+
+it('warns when an npm VCS scope claim shadows public packages', async () => {
+  const { service, sources } = setup();
+  sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    type: 'vcs',
+    ecosystem: 'npm',
+    projectId: null,
+  });
+  expect(
+    await service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: '@scope/*' },
+      call,
+    ),
+  ).toMatchObject({
+    ok: true,
+    warnings: [
+      {
+        field: 'pattern',
+        message: 'This scope claim hides public packages in the scope that are not yet cached.',
+      },
+    ],
   });
 });

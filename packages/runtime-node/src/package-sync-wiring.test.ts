@@ -58,6 +58,7 @@ const AUTH_JOBS = [
   'core:import-verify:v1',
   'core:import-apply:v1',
   'core:import-rollback:v1',
+  'core:npm-login-expire:v1',
   'core:pat-offboarding:v1',
   'core:pat-offboarding-sweep:v1',
 ];

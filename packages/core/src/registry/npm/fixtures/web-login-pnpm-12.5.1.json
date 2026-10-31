@@ -1,0 +1,7 @@
+{
+  "client": "pnpm",
+  "version": "12.5.1",
+  "provenance": "Design revision 2 wire fixture; live capture pending because the sandbox cannot bind a loopback server",
+  "requests": [{ "method": "POST", "path": "/demo/npm/-/v1/login", "body": "{}" }],
+  "pending": { "status": 202, "body": {}, "retryAfter": "5" }
+}

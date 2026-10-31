@@ -1,4 +1,4 @@
-<!-- Pull requests target `main` and are squash-merged; the pull request title becomes the commit message, so it must follow Conventional Commits with the package directory as scope. -->
+<!-- Pull requests target `main`, never another pull request's branch, and are squash-merged; the pull request title becomes the commit message, so it must follow Conventional Commits with the package directory as scope. -->
 
 ## Summary
 

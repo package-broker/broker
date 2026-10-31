@@ -642,3 +642,9 @@ describe('API_EXEMPT_ROUTES', () => {
     expect(Object.isFrozen(API_EXEMPT_ROUTES)).toBe(true);
   });
 });
+
+it('refuses an incomplete package access request assembly before serving', () => {
+  expect(() => createApiModule({ ...dependencies(), packageAccessRequests: {} as never })).toThrow(
+    'API module requires dependency: dependencies.packageAccessRequests.ids',
+  );
+});

@@ -497,3 +497,141 @@ function credentialStore(executor: import('@package-broker/core/db/port').SqlExe
     clock: systemClock,
   });
 }
+
+it('mounts access request routes and consumes expiry with a local D1 binding', async () => {
+  const db = await localBinding();
+  const executor = createD1Executor(db);
+  await migrate(executor, await discoveredMigrations(), { holder: 'access-request-wiring' });
+  const org = orgContext(ulid());
+  await createOrganizationBootstrap(executor).bootstrap({
+    id: org.orgId,
+    slug: 'registry',
+    name: 'Registry',
+    now: new Date().toISOString(),
+  });
+  const env: Env = {
+    DB: db,
+    STORAGE: {
+      head: async () => null,
+      get: async () => null,
+      put: async () => null,
+      delete: async () => undefined,
+    } as unknown as R2BucketLike,
+    JOBS: { send: async () => undefined, sendBatch: async () => undefined },
+    PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+    PB_PUBLIC_URL: 'https://broker.test',
+    DEPLOYMENT_ID: 'access-request-wiring',
+  };
+  const kernelSpy = vi.spyOn(kernelModule, 'createKernel');
+  const worker = createWorker([], {
+    platformPorts: {
+      blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+      cache: { adapter: 'cache-api', namespace: 'access-request-wiring' },
+      jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 1 },
+      observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
+    },
+    cacheStorage: {
+      open: async () => ({
+        match: async () => undefined,
+        put: async () => undefined,
+        delete: async () => false,
+      }),
+    },
+    console: { log: () => undefined, error: () => undefined },
+  });
+  const specs = (await import('@package-broker/core/api/routes/package-access-requests-schemas'))
+    .PACKAGE_ACCESS_REQUEST_API_SPECS;
+  for (const spec of specs) {
+    const response = await worker.fetch(
+      new Request(`https://broker.test${spec.path.replace(/:[^/]+/g, 'demo')}`, {
+        method: spec.method,
+      }),
+      env,
+    );
+    expect(response.status).toBe(401);
+  }
+  const kernel = await kernelSpy.mock.results.at(-1)!.value;
+  const keys = kernel.coreRoutes.map(
+    (route: { method: string; path: string }) => `${route.method} ${route.path}`,
+  );
+  for (const spec of specs) expect(keys).toContain(`${spec.method} ${spec.path}`);
+  expect(
+    kernel.registration.jobs.filter(
+      (job: { qualifiedName: string }) => job.qualifiedName === 'core:package-access-expire:v1',
+    ),
+  ).toHaveLength(1);
+  const jobs = createJobRepository(executor);
+  const expiredId = await seedExpiredAccessRequest(executor, org.orgId);
+  const queued = await jobs.enqueue(org, {
+    id: ulid(),
+    type: 'core:package-access-expire:v1',
+    payloadJson: '{}',
+    idempotencyKey: ulid(),
+    resourceKey: null,
+    runAt: null,
+    maxAttempts: 1,
+    projectId: null,
+    initiatorTokenId: null,
+  });
+  const ack = vi.fn(),
+    retry = vi.fn();
+  const waited: Promise<unknown>[] = [];
+  await worker.queue(
+    { messages: [{ body: { v: 1, org: org.orgId, job: queued.id }, ack, retry }] },
+    env,
+    {
+      waitUntil: (work) => {
+        waited.push(work);
+      },
+    },
+  );
+  await Promise.all(waited);
+  expect(ack).toHaveBeenCalledOnce();
+  expect(retry).not.toHaveBeenCalled();
+  expect(await jobs.status(org, queued.id)).toMatchObject({ state: 'succeeded' });
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM package_access_request WHERE org_id = ? AND id = ?',
+      params: [org.orgId, expiredId],
+    }),
+  ).toEqual([{ state: 'expired' }]);
+  const audit = await executor.all<{ payload_json: string }>({
+    sql: "SELECT payload_json FROM audit_pending WHERE org_id = ? AND action = 'package.access_decide'",
+    params: [org.orgId],
+  });
+  expect(JSON.parse(audit[0]!.payload_json).changes.package.new).toBe('widget');
+});
+
+async function seedExpiredAccessRequest(
+  executor: import('@package-broker/core/db/port').SqlExecutor,
+  orgId: string,
+) {
+  const id = ulid(),
+    packageId = ulid(),
+    projectId = ulid(),
+    sourceId = ulid(),
+    userId = ulid();
+  await executor.batch([
+    {
+      sql: "INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'expiry', 'Expiry')",
+      params: [projectId, orgId],
+    },
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'expiry', 'npm', 'hosted')",
+      params: [sourceId, orgId],
+    },
+    {
+      sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES (?, ?, ?, 'npm', 'widget')",
+      params: [packageId, orgId, sourceId],
+    },
+    {
+      sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+      params: [userId, orgId, 'requester@example.test'],
+    },
+    {
+      sql: "INSERT INTO package_access_request (id, org_id, package_id, project_id, requested_by_user_id, expires_at) VALUES (?, ?, ?, ?, ?, '2000-01-01T00:00:00.000Z')",
+      params: [id, orgId, packageId, projectId, userId],
+    },
+  ]);
+  return id;
+}

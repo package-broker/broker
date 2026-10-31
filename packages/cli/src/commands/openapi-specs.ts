@@ -1,3 +1,4 @@
+import * as packageAccessRequests from '@package-broker/core/api/routes/package-access-requests-schemas';
 import { createApiModule, type ApiModuleDeps } from '@package-broker/core/api/module';
 import { AUTH_API } from '@package-broker/core/api/auth-schemas';
 import type { ApiRouteSpec } from '@package-broker/core/api/route';
@@ -22,6 +23,7 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 function stubDependencies(): ApiModuleDeps {
   const deps: Record<string, unknown> = {
     imports: {},
+    packageAccessRequests: {},
     sources: { service: { acceptRemoval: () => undefined } },
   };
   for (let round = 0; round < MAX_STUB_ROUNDS; round += 1) {
@@ -56,6 +58,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
     imports,
     organization,
     packages,
+    packageAccessRequests,
     projectAccess,
     projects,
     servicePrincipals,

@@ -1,4 +1,6 @@
 import type { KernelOptions } from '@package-broker/core/kernel/kernel';
+import { orgContext } from '@package-broker/core/db/port';
+import { createJobLoop } from './jobs/loop.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiModuleDeps } from '@package-broker/core/api/module';
 import type { RouteDefinition } from '@package-broker/core/plugin';
@@ -82,6 +84,19 @@ interface ManagementAssemblyEntry {
 }
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
+  {
+    dependency: 'packageAccessRequests',
+    constructed: 'SQLite access request repository with provider anchors',
+    routes: [
+      'POST /_pb/projects/:project/package-access-requests',
+      'GET /_pb/package-access-requests',
+      'POST /_pb/package-access-requests/:id/approve',
+      'POST /_pb/package-access-requests/:id/reject',
+      'GET /_pb/projects/:project/requestable-packages',
+    ],
+    jobs: ['package-access-expire'],
+    ownerPacket: 'NPM12',
+  },
   {
     dependency: 'organization',
     constructed: 'organization and user repositories; access administration',
@@ -322,7 +337,9 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
           ? 'T1041'
           : entry.dependency === 'npmLogin'
             ? 'NPM16'
-            : 'T531',
+            : entry.dependency === 'packageAccessRequests'
+              ? 'NPM12'
+              : 'T531',
     );
     for (const key of entry.routes) {
       expect(
@@ -404,6 +421,70 @@ describe('Node management API mount', () => {
   });
   const mountedKeys = (kernel: Awaited<ReturnType<NodeBroker['ready']>>) =>
     kernel.coreRoutes.map((route) => `${route.method} ${route.path}`);
+
+  it('mounts all access request routes and runs the concrete expiry job', async () => {
+    const kernel = await create({ platformServices: platformServices() }).ready();
+    const specs = (await import('@package-broker/core/api/routes/package-access-requests-schemas'))
+      .PACKAGE_ACCESS_REQUEST_API_SPECS;
+    for (const spec of specs) {
+      expect(mountedKeys(kernel)).toContain(`${spec.method} ${spec.path}`);
+      const response = await kernel.fetch(
+        new Request(`https://broker.test${spec.path.replace(/:[^/]+/g, 'demo')}`, {
+          method: spec.method,
+        }),
+      );
+      expect(response.status).toBe(401);
+    }
+    const job = kernel.registration.jobs.find(
+      (job) => job.qualifiedName === 'core:package-access-expire:v1',
+    );
+    expect(job).toBeDefined();
+    const org = await createOrganizationBootstrap(db.executor).findSingleton();
+    const expiredId = await seedExpiredAccessRequest(db.executor, org!.id);
+    const queued = await createJobRepository(db.executor).enqueue(orgContext(org!.id), {
+      id: ulid(),
+      type: 'core:package-access-expire:v1',
+      payloadJson: '{}',
+      idempotencyKey: ulid(),
+      resourceKey: null,
+      runAt: null,
+      maxAttempts: 1,
+      projectId: null,
+      initiatorTokenId: null,
+    });
+    const observability = {
+      log: () => undefined,
+      counter: () => undefined,
+      histogram: () => undefined,
+    };
+    const loop = createJobLoop({
+      executor: db.executor,
+      jobs: kernel.registration.jobs,
+      scope: kernel.jobScope,
+      observability,
+    });
+    loop.start();
+    try {
+      await vi.waitFor(async () => {
+        expect(
+          await createJobRepository(db.executor).status(orgContext(org!.id), queued.id),
+        ).toMatchObject({ state: 'succeeded' });
+      });
+    } finally {
+      await loop.stop();
+    }
+    expect(
+      await db.executor.all({
+        sql: 'SELECT state FROM package_access_request WHERE org_id = ? AND id = ?',
+        params: [org!.id, expiredId],
+      }),
+    ).toEqual([{ state: 'expired' }]);
+    const audit = await db.executor.all<{ payload_json: string }>({
+      sql: "SELECT payload_json FROM audit_pending WHERE org_id = ? AND action = 'package.access_decide'",
+      params: [org!.id],
+    });
+    expect(JSON.parse(audit[0]!.payload_json).changes.package.new).toBe('widget');
+  });
 
   it('refuses anonymous requests to every route in the API module table', async () => {
     const kernel = await create().ready();
@@ -545,3 +626,37 @@ describe('Node management API mount', () => {
     expect(config.outbound.allowPrivateHosts).toEqual(['mirror.internal']);
   });
 });
+
+async function seedExpiredAccessRequest(
+  executor: import('@package-broker/core/db/port').SqlExecutor,
+  orgId: string,
+) {
+  const id = ulid(),
+    packageId = ulid(),
+    projectId = ulid(),
+    sourceId = ulid(),
+    userId = ulid();
+  await executor.batch([
+    {
+      sql: "INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, 'expiry', 'Expiry')",
+      params: [projectId, orgId],
+    },
+    {
+      sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES (?, ?, 'expiry', 'npm', 'hosted')",
+      params: [sourceId, orgId],
+    },
+    {
+      sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES (?, ?, ?, 'npm', 'widget')",
+      params: [packageId, orgId, sourceId],
+    },
+    {
+      sql: 'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+      params: [userId, orgId, 'requester@example.test'],
+    },
+    {
+      sql: "INSERT INTO package_access_request (id, org_id, package_id, project_id, requested_by_user_id, expires_at) VALUES (?, ?, ?, ?, ?, '2000-01-01T00:00:00.000Z')",
+      params: [id, orgId, packageId, projectId, userId],
+    },
+  ]);
+  return id;
+}

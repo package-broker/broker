@@ -76,6 +76,38 @@ export interface VisibilitySubsetRepository {
   ): Promise<RemoveExplicitResult>;
 }
 
+export function explicitPackageStatement(
+  ctx: OrgContext,
+  projectId: string,
+  packageId: string,
+): Statement {
+  return compile(
+    db
+      .insertInto('project_package')
+      .columns(['org_id', 'project_id', 'package_id', 'origin', 'ecosystem', 'name'])
+      .expression(
+        db
+          .selectFrom('package')
+          .select([
+            'org_id',
+            sql<string>`${projectId}`.as('project_id'),
+            'id',
+            sql<'explicit'>`'explicit'`.as('origin'),
+            'ecosystem',
+            'name',
+          ])
+          .where('id', '=', packageId)
+          .where('org_id', '=', ctx.orgId),
+      )
+      .onConflict((conflict) =>
+        conflict
+          .columns(['project_id', 'package_id'])
+          .doUpdateSet({ origin: 'explicit' })
+          .where('project_package.origin', '<>', 'explicit'),
+      ),
+  );
+}
+
 function storablePattern(pattern: string): boolean {
   return (
     isValidPattern(pattern) && new TextEncoder().encode(pattern).length <= MAX_GLOB_PATTERN_BYTES
@@ -381,31 +413,7 @@ export function createVisibilitySubsetRepository(
         or (${orgHidden} and ${orgHeld})
         or (${ownHidden} and ${ownHeld})
       ))`;
-      const upsert = compile(
-        db
-          .insertInto('project_package')
-          .columns(['org_id', 'project_id', 'package_id', 'origin', 'ecosystem', 'name'])
-          .expression(
-            db
-              .selectFrom('package')
-              .select([
-                'org_id',
-                sql<string>`${input.projectId}`.as('project_id'),
-                'id',
-                sql<'explicit'>`'explicit'`.as('origin'),
-                'ecosystem',
-                'name',
-              ])
-              .where('id', '=', input.packageId)
-              .where('org_id', '=', ctx.orgId),
-          )
-          .onConflict((conflict) =>
-            conflict
-              .columns(['project_id', 'package_id'])
-              .doUpdateSet({ origin: 'explicit' })
-              .where('project_package.origin', '<>', 'explicit'),
-          ),
-      );
+      const upsert = explicitPackageStatement(ctx, input.projectId, input.packageId);
       const outcome = await runOrgFenced(
         executor,
         ctx,

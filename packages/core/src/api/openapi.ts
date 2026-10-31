@@ -239,10 +239,10 @@ export function generateOpenApi(
             ...PACKAGE_ACCESS_REQUEST_SCHEMAS,
             ...NPM_IDENTITY_SCHEMAS,
           }).map(([name, schema]) => {
-            const json = toJSONSchema(schema, {
-              target: 'draft-2020-12',
-              io: name.endsWith('Body') ? 'input' : 'output',
-            });
+            const io = name.endsWith('Body') ? 'input' : 'output';
+            const json = Object.hasOwn(PACKAGE_ACCESS_REQUEST_SCHEMAS, name)
+              ? toJsonSchema(schema, io)
+              : toJSONSchema(schema, { target: 'draft-2020-12', io });
             delete json.$schema;
             return [name, json];
           }),

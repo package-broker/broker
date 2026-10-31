@@ -16,8 +16,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.select.outputs.packages }}
+      full: ${{ steps.select.outputs.full }}
+      clientMatrix: ${{ steps.select.outputs.clientMatrix }}
+      uiBrowser: ${{ steps.select.outputs.uiBrowser }}
+      smokeCloudflare: ${{ steps.select.outputs.smokeCloudflare }}
+      smokeNode: ${{ steps.select.outputs.smokeNode }}
+      treeshake: ${{ steps.select.outputs.treeshake }}
+      pack: ${{ steps.select.outputs.pack }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = 0000000000000000000000000000000000000000 ]; then
+            node scripts/ci-scope.mjs --full < /dev/null
+          else
+            git diff --name-only -z "$BASE_SHA"..."$HEAD_SHA" | node scripts/ci-scope.mjs --head-branch "$HEAD_BRANCH"
+          fi
+
   install:
     name: install
+    needs: scope
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -47,9 +82,12 @@ jobs:
 
   typecheck:
     name: typecheck
-    needs: install
+    needs: [scope, install]
+    if: needs.scope.outputs.packages != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PACKAGES: ${{ needs.scope.outputs.packages }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -60,13 +98,15 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
+      - run: node scripts/ci-scope.mjs --check typecheck
 
   lint:
     name: lint
-    needs: install
+    needs: [scope, install]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PACKAGES: ${{ needs.scope.outputs.packages }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -77,13 +117,16 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
+      - run: node scripts/ci-scope.mjs --check lint
 
   unit:
     name: unit (${{ matrix.node }}, shard ${{ matrix.shard }}/2)
-    needs: install
+    needs: [scope, install]
+    if: needs.scope.outputs.packages != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PACKAGES: ${{ needs.scope.outputs.packages }}
     strategy:
       fail-fast: false
       matrix:
@@ -99,13 +142,16 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test --shard=${{ matrix.shard }}/2
-      - if: matrix.shard == 1
-        run: pnpm test:scripts
+      - run: node scripts/ci-scope.mjs --check unit --shard=${{ matrix.shard }}/2 --exclude '**/test-support/**' --exclude '**/*.browser.test.ts'
+      - if: matrix.shard == 1 && needs.scope.outputs.full == 'true'
+        run: |
+          pnpm test:scripts
+          node --test scripts/ci-scope.test.mjs
 
   build:
     name: build
-    needs: install
+    needs: [scope, install]
+    if: needs.scope.outputs.smokeCloudflare == 'true' || needs.scope.outputs.smokeNode == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -131,11 +177,13 @@ jobs:
         run: pnpm pb build --config broker.config.ts --target "$TARGET"
       - env:
           TARGET: ${{ matrix.target }}
+        if: (matrix.target == 'cloudflare' && needs.scope.outputs.smokeCloudflare == 'true') || (matrix.target == 'node' && needs.scope.outputs.smokeNode == 'true')
         run: pnpm smoke:"$TARGET"
 
   ui-e2e:
     name: ui-e2e
-    needs: install
+    needs: [scope, install]
+    if: needs.scope.outputs.uiBrowser == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -158,7 +206,8 @@ jobs:
 
   treeshake:
     name: treeshake
-    needs: install
+    needs: [scope, install]
+    if: needs.scope.outputs.treeshake == 'true' || needs.scope.outputs.pack == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -172,12 +221,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm check:treeshake
-      - run: pnpm check:pack
+      - if: needs.scope.outputs.treeshake == 'true'
+        run: pnpm check:treeshake
+      - if: needs.scope.outputs.pack == 'true'
+        run: pnpm check:pack
 
   client-matrix:
     name: client matrix (${{ matrix.client.name }}, Node ${{ matrix.node }})
-    needs: install
+    needs: [scope, install]
+    if: needs.scope.outputs.clientMatrix == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -225,7 +277,7 @@ jobs:
 
   dco:
     name: dco
-    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'github-actions[bot]'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -250,14 +302,23 @@ jobs:
   commit-gate:
     name: commit gate
     if: always()
-    needs: [install, pr-meta, dco, typecheck, lint, unit, build, ui-e2e, treeshake, client-matrix]
+    needs:
+      [scope, install, pr-meta, dco, typecheck, lint, unit, build, ui-e2e, treeshake, client-matrix]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every job to pass or be skipped
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Require selected jobs to pass
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          for result in $RESULTS; do
-            case "$result" in success|skipped) ;; *) echo "failed: $RESULTS"; exit 1 ;; esac
-          done
+          node --input-type=module -e '
+            import { commitGate } from "./scripts/ci-scope.mjs";
+            if (!commitGate(JSON.parse(process.env.NEEDS), { eventName: process.env.EVENT_NAME })) process.exit(1);
+          '

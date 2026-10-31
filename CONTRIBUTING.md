@@ -37,6 +37,8 @@ A pull request must pass the checks CI runs. The last two rows are not part of p
 | `pnpm smoke:prebuilt`                      | The packed prebuilt distributions install into a scratch project and start; needs `pnpm build`, `pnpm bundle`, `pnpm stage:prebuilt --write-cli-expected` and network access for `npm install`. The release workflow runs it |
 | `pnpm smoke:docker --functional`           | Builds the Docker image with the smoke fixture config and installs a fixture package through it with Composer; needs a Docker host, `openssl` and network access. See `fixtures/docker-smoke/README.md`                      |
 
+Following [ADR-028](docs/decisions/release-and-versioning.md#adr-028-pull-requests-test-only-what-they-change-the-release-tests-everything-end-to-end), CI always runs lint/format, DCO and title checks on pull requests, selects package checks and their transitive dependents plus integration checks whose inputs changed, and runs everything for shared inputs or a Release Please pull request.
+
 CI also checks the `Signed-off-by` trailer on every commit and the pull request title format (see below).
 
 `pnpm format` rewrites files to the Prettier style that `pnpm lint` checks.

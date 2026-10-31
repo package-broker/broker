@@ -202,11 +202,14 @@ jobs:
           cache: pnpm
       - name: Install pinned real clients (npm bundles npm-packlist 10.0.4)
         run: npm install --global --force npm@11.17.0 @yarnpkg/cli-dist@4.9.2
-      - uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # v2.35.5
+      - name: Install pinned Composer
         if: matrix.client.name == 'composer'
-        with:
-          php-version: '8.4'
-          tools: composer:2.10
+        run: |
+          curl -fsSLo composer.phar https://getcomposer.org/download/2.10.3/composer.phar
+          echo '7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6  composer.phar' | sha256sum --check --strict
+          sudo install -m 0755 composer.phar /usr/local/bin/composer
+          rm composer.phar
+          composer --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: node --test scripts/client-matrix.test.mjs

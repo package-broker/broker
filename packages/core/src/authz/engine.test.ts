@@ -51,6 +51,7 @@ interface State {
     projectMode: 'all' | 'selected' | null;
     scope: { level: ScopeLevel; readOnly: boolean } | null;
     lastUsedAt: string | null;
+    boundProjectIds?: readonly string[];
   };
   lookups: number;
   touches: string[];
@@ -99,6 +100,7 @@ async function tokenEnvelope(state: State): Promise<EngineTokenAccess> {
       bindingOk: t.bindingOk,
       projectMode: t.projectMode,
       scope: t.scope,
+      boundProjectIds: t.boundProjectIds ?? [],
     },
     projectVisible: false,
     principalStatus: t.principalStatus,
@@ -2123,5 +2125,115 @@ describe('projectActorOf parity with the engine', () => {
       );
       expect(held.has(name), name).toBe(decision.allow);
     }
+  });
+});
+
+describe('explicit organization publish alternative', () => {
+  async function exercise(change: (state: State) => void = () => undefined, denyHook = false) {
+    const state = freshState();
+    state.token.projectPermissions = [];
+    state.token.organizationPermissions = ['org:packages:publish'];
+    state.token.scope = { level: 'write', readOnly: false };
+    change(state);
+    const request = req({
+      headers: bearer(state.token.hashOf),
+      method: 'PUT',
+      permission: 'project:packages:write',
+    });
+    const declared = {
+      ...request,
+      route: { ...request.route, organizationAlternative: 'org:packages:publish' },
+    };
+    const hook = vi.fn(async () =>
+      denyHook ? { deny: true as const, reason: 'policy' } : undefined,
+    );
+    const decision = await authorizeRoute(declared, createAuthorizationEngine(deps(state)), [
+      { plugin: 'policy', handler: hook },
+    ]);
+    return { decision, hook, state };
+  }
+
+  it('allows a held organization permission with a write token on the same organization project', async () => {
+    const { decision, hook } = await exercise();
+    expect(decision).toMatchObject({
+      allow: true,
+      projectId: 'proj-1',
+      principal: { kind: 'user', id: 'user-1' },
+    });
+    expect(hook).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [
+      'missing permission',
+      (s: State) => {
+        s.token.organizationPermissions = [];
+      },
+    ],
+    [
+      'read scope',
+      (s: State) => {
+        s.token.scope = { level: 'read', readOnly: true };
+      },
+    ],
+    [
+      'read scope with inconsistent flag',
+      (s: State) => {
+        s.token.scope = { level: 'read', readOnly: false };
+      },
+    ],
+    [
+      'read only',
+      (s: State) => {
+        s.token.scope = { level: 'write', readOnly: true };
+      },
+    ],
+    [
+      'invalid binding',
+      (s: State) => {
+        s.token.bindingOk = false;
+      },
+    ],
+    [
+      'missing project',
+      (s: State) => {
+        s.token.project = null;
+      },
+    ],
+    [
+      'selected token missing project',
+      (s: State) => {
+        s.token.projectMode = 'selected';
+      },
+    ],
+    [
+      'inactive user',
+      (s: State) => {
+        s.token.principalStatus = 'disabled';
+      },
+    ],
+    [
+      'inactive service principal',
+      (s: State) => {
+        s.token.kind = 'svc';
+        s.token.hashOf = SVC;
+        s.token.principalStatus = 'disabled';
+      },
+    ],
+  ] as const)('refuses %s before hooks', async (_label, change) => {
+    const { decision, hook } = await exercise(change);
+    expect(decision.allow).toBe(false);
+    expect(hook).not.toHaveBeenCalled();
+  });
+  it('allows a selected write token covering the project', async () => {
+    const { decision } = await exercise((s) => {
+      s.token.projectMode = 'selected';
+      s.token.boundProjectIds = ['proj-1'];
+    });
+    expect(decision.allow).toBe(true);
+  });
+  it('retains deny-only hooks after alternative allowance', async () => {
+    const { decision, hook } = await exercise(undefined, true);
+    expect(decision).toEqual({ allow: false, status: 403 });
+    expect(hook).toHaveBeenCalledOnce();
   });
 });

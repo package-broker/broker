@@ -1,3 +1,4 @@
+import * as registryModule from '@package-broker/core/registry/module';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -206,7 +207,7 @@ describe('runtime-cloudflare', () => {
 const KEY_V1 = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 
 const STANZA: PlatformPortConfig = {
-  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 * 1024 },
+  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 50_000_000 },
   cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
   jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
   observability: {
@@ -1764,7 +1765,7 @@ it.each([undefined, true, false])(
       const worker = createWorker([], {
         ...(enabled === undefined ? {} : { vulnerability: { enabled } }),
         platformPorts: {
-          blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+          blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 50_000_000 },
           cache: { adapter: 'cache-api', namespace: 'vulnerability-test' },
           jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 1 },
           observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
@@ -2050,3 +2051,43 @@ describe('runtime MCP mount', () => {
     }
   });
 });
+
+it.each([1024, 50000000, 60000000])(
+  'resolves the Worker publish cap for blob ceiling %s and warns only when clamped',
+  async (maxBytes) => {
+    const createModule = vi.spyOn(registryModule, 'createRegistryModule');
+    const log = vi.fn();
+    try {
+      const worker = createWorker([], {
+        ...quiet,
+        log,
+        platformPorts: { ...STANZA, blob: { ...STANZA.blob, maxBytes } },
+        cacheStorage: fakeCaches(),
+      });
+      const env = boundEnv();
+      await worker.services(env);
+      await worker.services(env);
+      expect(createModule.mock.calls[0]?.[0].registry.caps.publishTarballBytes).toBe(
+        Math.min(maxBytes, 50000000),
+      );
+      expect(
+        log.mock.calls
+          .map(([entry]) => entry)
+          .filter((entry) => entry.event === 'registry.publish_cap_clamped'),
+      ).toEqual(
+        maxBytes < 50000000
+          ? [
+              {
+                level: 'warn',
+                event: 'registry.publish_cap_clamped',
+                publish_tarball_bytes: 50000000,
+                blob_max_bytes: maxBytes,
+              },
+            ]
+          : [],
+      );
+    } finally {
+      createModule.mockRestore();
+    }
+  },
+);

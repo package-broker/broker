@@ -874,9 +874,9 @@ export function SourceForm({
               ) : null}
               {type === 'hosted' ? (
                 <p className="text-sm text-neutral-600">
-                  Register package names, then enable this source to publish. Use an exact lowercase
-                  npm name or @scope/*. A scope claim hides public packages in that scope that are
-                  not yet cached.
+                  npm publishing is available. Register package names, then enable this source. Use
+                  an exact lowercase npm name or @scope/*. A scope claim hides public packages in
+                  that scope that are not yet cached.
                 </p>
               ) : null}
               {!editing && type !== 'hosted' ? (

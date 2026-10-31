@@ -1,6 +1,25 @@
+import { DbError } from '@package-broker/core/db/errors';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join as pathJoin } from 'node:path';
+import type { AuthorizationDecision } from '@package-broker/core/kernel/authorize';
+import { createPublishService } from '@package-broker/core/registry/module';
+import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
+import { REGISTRY_DEFAULTS } from '@package-broker/core/registry/registry-config';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { createAccessRepository } from '../repositories/access.js';
+import { createBlobRepository } from '../repositories/blob.js';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+} from '../repositories/catalogue-publish-guard.js';
 import { publishRoutes } from '@package-broker/core/api/routes/publishes';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
+import { PUBLISH_APPROVAL_WINDOW_MS } from '@package-broker/core/db/publishes';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import { createBlobReferenceReader } from '../repositories/blob-references.js';
 import { bootstrapAdmin } from '../repositories/admin-bootstrap.js';
@@ -180,6 +199,492 @@ export function describeNpmPublishWriterContract(
       await opened.close();
     }
   }
+  describe(`npm publish service on ${name}`, () => {
+    it('scopes publish source, token binding and blob reads to the organization', () =>
+      run(async (e) => {
+        const reads = createPublishReads(e);
+        const foreign = orgContext('other');
+        expect(await reads.source(foreign, 'widget')).toEqual([]);
+        expect(await reads.packageBinding(foreign, 'token')).toBeNull();
+        expect(await reads.blobId(foreign, 'a'.repeat(64))).toBeNull();
+        expect((await reads.source(ctx, 'widget'))[0]?.id).toBe('source');
+        expect(await reads.packageBinding(ctx, 'token')).toEqual({ packageName: null });
+        expect(await reads.blobId(ctx, 'a'.repeat(64))).toBe('blob');
+        await e.batch([st("UPDATE token SET package_name = '@scope/bound'")]);
+        expect(await reads.packageBinding(ctx, 'token')).toEqual({ packageName: '@scope/bound' });
+      }));
+
+    async function flow(
+      e: SqlExecutor,
+      w: Awaited<ReturnType<typeof world>>,
+      options: {
+        held?: boolean;
+        policy?: boolean;
+        mutation?: string;
+        project?: boolean;
+        unclaimed?: boolean;
+        contentType?: string;
+        missingAttachments?: boolean;
+        superseded?: boolean;
+        initial?: string;
+        tags?: Record<string, string>;
+        duplicate?: boolean;
+        bound?: boolean;
+        organizationFallback?: boolean;
+        descriptionBytes?: number;
+        writerFailure?: boolean;
+        clientInfoEcho?: boolean;
+      } = {},
+    ) {
+      const runtime = '../../../runtime-node/src/';
+      const { nodeCodecs } = await import(
+        new URL(runtime + 'codec/node-codec.ts', import.meta.url).href
+      );
+      const { openFilesystemByteStore } = await import(
+        new URL(runtime + 'blob/filesystem.ts', import.meta.url).href
+      );
+      const core = '../../../core/src/test-support/npm-publish.ts';
+      const { entry, archive } = await import(new URL(core, import.meta.url).href);
+      const directory = await mkdtemp(pathJoin(await realpath(tmpdir()), 'npm9-contract-'));
+      try {
+        const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(5) }]);
+        const token = formatToken('svc', 'abcdefghijkl', new Uint8Array(32).fill(9));
+        await e.batch([st('UPDATE token SET hash = ?', await hashToken(keyring, 1, token))]);
+        if (options.held) await e.batch([st('UPDATE source SET require_publish_approval = 1')]);
+        if (options.unclaimed) await e.batch([st('DELETE FROM registered_name')]);
+        if (options.project)
+          await e.batch([
+            st('DELETE FROM service_principal_permission'),
+            st(
+              "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES ('org','principal','project:packages:write')",
+            ),
+            st(
+              "INSERT OR IGNORE INTO project_source (org_id, project_id, source_id) VALUES ('org','project','source')",
+            ),
+            st('UPDATE source SET default_visible_to_new_projects = 1'),
+          ]);
+        if (options.organizationFallback)
+          await e.batch([
+            st(
+              "INSERT INTO service_principal_permission (org_id,service_principal_id,permission) VALUES ('org','principal','org:packages:publish')",
+            ),
+          ]);
+        if (options.bound)
+          await e.batch([
+            st("UPDATE service_principal SET project_id = 'project'"),
+            st("UPDATE token SET project_id = 'project'"),
+            st('UPDATE source SET default_visible_to_new_projects = 1'),
+          ]);
+        if (options.initial) await e.batch([st(options.initial)]);
+        const bytes = gzipSync(
+          archive(
+            entry('package/package.json', JSON.stringify({ name: 'widget', version: '2.0.0' })),
+            entry('package/README.md', '# Widget'),
+          ),
+        );
+        const body = JSON.stringify({
+          name: 'widget',
+          versions: {
+            '2.0.0': {
+              name: 'widget',
+              version: '2.0.0',
+              ...(options.descriptionBytes === undefined
+                ? {}
+                : { description: 'x'.repeat(options.descriptionBytes) }),
+              _npmUser: { name: 'forged-handle' },
+              maintainers: [{ name: 'forged-maintainer', email: 'forged@example.test' }],
+              _npmOperationalInternal: { host: 'forged-host' },
+              _npmVersion: options.clientInfoEcho ? token : '11.17.0',
+              _nodeVersion: '24.0.0',
+            },
+          },
+          'dist-tags': options.tags ?? { latest: '2.0.0' },
+          ...(options.missingAttachments
+            ? {}
+            : {
+                _attachments: {
+                  'widget-2.0.0.tgz': { data: bytes.toString('base64'), length: bytes.length },
+                },
+              }),
+        });
+        const request = () =>
+          new Request('https://broker.test/project/npm/widget', {
+            method: 'PUT',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': options.contentType ?? 'application/json',
+              'content-length': String(Buffer.byteLength(body)),
+            },
+            body,
+          });
+        const physical = await openFilesystemByteStore({ root: directory });
+        const removed: string[] = [];
+        if (options.superseded) {
+          await physical.putVerified('npm-publish/old', new Blob(['old']).stream(), {
+            sha256: await sha256Hex('old'),
+            size: 3,
+            mediaType: 'application/gzip',
+          });
+          await e.batch([
+            st(
+              "INSERT INTO blob (id, org_id, sha256, size_bytes, media_type, storage_key, refetchable) VALUES ('superseded','org',?,?,'application/gzip','npm-publish/old',0)",
+              createHash('sha256').update(bytes).digest('hex'),
+              bytes.length,
+            ),
+          ]);
+        }
+        const promotionStore = options.superseded
+          ? {
+              ...physical,
+              head: (key: string) =>
+                key === 'npm-publish/old' ? Promise.resolve(null) : physical.head(key),
+            }
+          : physical;
+        const blob = createBlobStore(
+          promotionStore,
+          createBlobRepository(e, {
+            supersededObjects: {
+              remove: async (key) => {
+                removed.push(key);
+                await physical.remove(key);
+              },
+              counter: () => undefined,
+            },
+          }),
+          {
+            admission: createBlobUploadAdmission(),
+          },
+        );
+        let discardCalls = 0;
+        const publish = createPublishService({
+          reads: createPublishReads(e),
+          lookupToken: createAccessRepository(e).lookupToken,
+          anchors: async () => [],
+          admitted: (org, input) => checkPublishAdmission(e, org, input),
+          writeGuard: createPublishWriteGuard,
+          writer: {
+            publishVersion: async (...args) => {
+              if (options.writerFailure)
+                throw new DbError('unique', 'fixture', { constraint: 'audit_pending.id' });
+              if (options.mutation) await e.batch([st(options.mutation)]);
+              return w.writer.publishVersion(...args);
+            },
+          },
+          hasPublishPolicy: () => options.policy === true,
+          blob: {
+            ...blob,
+            discard: async (...args) => {
+              discardCalls += 1;
+              await blob.discard(...args);
+            },
+          },
+          codecs: nodeCodecs,
+          registry: { ...REGISTRY_DEFAULTS, outbound: { allowPrivateHosts: [], selfOrigins: [] } },
+          clock: fixedClock(NOW),
+          publicUrl: 'https://broker.test',
+        });
+        const authorization = createAuthorizationEngine({
+          access: createAccessRepository(e),
+          providerAnchors: async () => [],
+          publicOrigin: 'https://broker.test',
+          patValidation: patValidationGate,
+          tokenUse: {
+            keyring,
+            nowMs: () => Date.now(),
+            dispatch: () => undefined,
+            log: () => undefined,
+          },
+        });
+        let engineDecision: AuthorizationDecision | undefined;
+        const kernel = await createKernel({
+          platform: 'node',
+          plugins: [],
+          ports: {
+            organizations: { get: async () => null },
+            clock: fixedClock(NOW),
+            ids: { ulid },
+          },
+          resolveOrg: async () => ctx,
+          health: async () => true,
+          packageResolver: { resolve: async () => ({ kind: 'absent' }) },
+          authorization: {
+            authorize: async (input) => {
+              const decision = await authorization.authorize(input);
+              engineDecision = decision;
+              return decision;
+            },
+          },
+          ecosystemRoutes: [
+            {
+              method: 'PUT',
+              path: '/:project/npm/:a',
+              permission: 'project:packages:write',
+              boundary: 'project',
+              organizationAlternative: 'org:packages:publish',
+              handler: (context) => publish(context, 'widget'),
+            },
+          ],
+        });
+        const response = await kernel.fetch(request());
+        let duplicateStatus: number | undefined;
+        if (options.duplicate) duplicateStatus = (await kernel.fetch(request())).status;
+        const value = await response.json();
+        const versions = await e.all<{ status: string; publisher: string }>(
+          st(
+            "SELECT v.status, a.actor_id as publisher, json_extract(a.payload_json, '$.changes.authority.new') as authority FROM version v JOIN audit_pending a ON a.target_id = v.id WHERE v.org_id = 'org'",
+          ),
+        );
+        return {
+          discardCalls,
+          metadata: await e.all<{ metadata: string }>(
+            st("SELECT metadata_json as metadata FROM version WHERE org_id = 'org'"),
+          ),
+          engineDecision,
+          duplicateStatus,
+          removed,
+          oldPresent: await physical.head('npm-publish/old'),
+          response,
+          value,
+          versions,
+          staged: await physical.listStaged('2099-01-01T00:00:00.000Z'),
+        };
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+    it.each([false, true])('stage → promote → fenced publishVersion, approval=%s', (held) =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { held });
+        expect(result.response.status).toBe(held ? 202 : 201);
+        expect(result.engineDecision?.allow).toBe(true);
+        expect(result.value).toMatchObject({ ok: true, id: 'widget@2.0.0' });
+        expect(result.staged).toEqual([]);
+        expect(result.versions).toEqual([
+          {
+            status: held ? 'quarantined' : 'active',
+            publisher: 'principal',
+            authority: 'organization',
+          },
+        ]);
+        const rows = await e.all<{ key: string; refetchable: number }>(
+          st(
+            "SELECT storage_key as key, refetchable FROM blob WHERE org_id = 'org' AND sha256 <> ?",
+            'a'.repeat(64),
+          ),
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.key).toMatch(/^npm-publish\//);
+        expect(rows[0]!.refetchable).toBe(0);
+      }),
+    );
+    it('expires a service-created approval at the shared fourteen-day boundary', () =>
+      run(async (e, w) => {
+        expect((await flow(e, w, { held: true })).response.status).toBe(202);
+        const repo = createPublishesRepository(e);
+        const expiry = Date.parse(NOW) + PUBLISH_APPROVAL_WINDOW_MS;
+        expect(PUBLISH_APPROVAL_WINDOW_MS).toBe(14 * 86400000);
+        expect(await repo.listExpired(ctx, new Date(expiry - 1).toISOString())).toEqual([]);
+        expect(await repo.listExpired(ctx, new Date(expiry).toISOString())).toHaveLength(1);
+        await createPublishApprovalExpireJob({ publishes: repo }).handler({}, {
+          org: ctx,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock: fixedClock(new Date(expiry).toISOString()), ids: { ulid } },
+        } as never);
+        expect(await e.all(st('SELECT approval_state FROM publish_approval'))).toEqual([
+          { approval_state: 'expired' },
+        ]);
+        expect(await e.all(st('SELECT status,tombstone_reason FROM version'))).toEqual([
+          { status: 'tombstoned', tombstone_reason: 'expired' },
+        ]);
+      }));
+    it('stage → promote → publishVersion removes the superseded physical key', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { superseded: true });
+        expect(result.response.status).toBe(201);
+        expect(result.removed).toEqual(['npm-publish/old']);
+        expect(result.oldPresent).toBeNull();
+        expect(result.staged).toEqual([]);
+      }));
+    it('attributes metadata to principal id and kind rather than the whoami handle', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w);
+        const metadata = JSON.parse(result.metadata[0]!.metadata);
+        expect(metadata.maintainers).toEqual([{ id: 'principal', kind: 'service' }]);
+        expect(metadata).not.toHaveProperty('_npmOperationalInternal');
+        expect(metadata._npmVersion).toBe('11.17.0');
+        expect(metadata._nodeVersion).toBe('24.0.0');
+        expect(metadata.dist.tarball).toBe(
+          'https://broker.test/project/npm/widget/-/widget-2.0.0.tgz',
+        );
+        expect(metadata._npmUser).toEqual({
+          id: 'principal',
+          kind: 'service',
+        });
+      }));
+    it('applies the manifest cap after principal attribution and discards staging', () =>
+      run(async (e, w) => {
+        const first = await flow(e, w);
+        const baseline = new TextEncoder().encode(first.metadata[0]!.metadata).length;
+        const result = await flow(e, w, { descriptionBytes: 262144 - baseline - 17 + 1 });
+        expect(result.response.status).toBe(413);
+        expect(result.value).toMatchObject({ code: 'manifest_too_large' });
+        expect(result.discardCalls).toBe(1);
+        expect(result.staged).toEqual([]);
+        expect(result.metadata).toHaveLength(1);
+      }));
+    it('maps immutable version reuse to 409', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { duplicate: true });
+        expect(result.response.status).toBe(201);
+        expect(result.duplicateStatus).toBe(409);
+        expect(result.versions).toHaveLength(1);
+      }));
+    it('allows an organization publisher with a project-bound write token only through admission', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { bound: true });
+        expect(result.engineDecision).toMatchObject({ allow: true });
+        expect(result.response.status).toBe(201);
+      }));
+    it('refuses an organization publisher through an unattached route project', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, {
+          project: true,
+          organizationFallback: true,
+          initial: 'DELETE FROM project_source',
+        });
+        expect(result.response.status).toBe(403);
+        expect(result.value).toMatchObject({ code: 'not_admitted' });
+        expect(result.versions).toEqual([]);
+        expect(await e.all(st('SELECT count(*) as n FROM project_package'))).toEqual([{ n: 0 }]);
+      }));
+    it('accepts a project publisher admitted to the hosted claim', () =>
+      run(async (e, w) => {
+        expect((await flow(e, w, { project: true })).response.status).toBe(201);
+      }));
+    it.each([
+      [
+        'paused preflight',
+        { initial: "UPDATE source SET status = 'paused'" },
+        409,
+        'source_paused',
+      ],
+      [
+        'inactive principal',
+        { initial: "UPDATE service_principal SET status = 'suspended'" },
+        401,
+        'unauthorized',
+      ],
+      [
+        'read scope',
+        { initial: `UPDATE token SET scopes_json = '["read"]', read_only = 1` },
+        404,
+        'not_found',
+      ],
+      [
+        'lost organization permission',
+        { initial: 'DELETE FROM service_principal_permission' },
+        404,
+        'not_found',
+      ],
+      [
+        'package binding',
+        { initial: "UPDATE token SET package_name = 'another'" },
+        403,
+        'package_binding',
+      ],
+      [
+        'project admission removed',
+        { project: true, initial: 'DELETE FROM project_source' },
+        403,
+        'not_admitted',
+      ],
+      ['wrong tag target', { tags: { latest: '9.0.0' } }, 400, 'invalid_tags'],
+      ['tag grammar', { tags: { BAD: '2.0.0' } }, 400, 'invalid_tags'],
+      ['semver tag', { tags: { '1.0.0': '2.0.0' } }, 400, 'invalid_tags'],
+      [
+        'tag cap',
+        { tags: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`tag${i}`, '2.0.0'])) },
+        400,
+        'too_many_tags',
+      ],
+      [
+        'bound organization token without admission',
+        { bound: true, initial: 'DELETE FROM project_source' },
+        403,
+        'not_admitted',
+      ],
+      ['unrelated unique failure', { writerFailure: true }, 503, 'unavailable'],
+      [
+        'project archived after promote',
+        { mutation: "UPDATE project SET status = 'archived'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'claim removed after promote',
+        { mutation: 'DELETE FROM registered_name' },
+        403,
+        'forbidden',
+      ],
+      [
+        'principal suspended after promote',
+        { mutation: "UPDATE service_principal SET status = 'suspended'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'token expired after promote',
+        { mutation: "UPDATE token SET expires_at = '2000-01-01T00:00:00.000Z'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'publish permission removed after promote',
+        { mutation: 'DELETE FROM service_principal_permission' },
+        403,
+        'forbidden',
+      ],
+      [
+        'bound token admission removed after promote',
+        { bound: true, mutation: 'DELETE FROM project_source' },
+        403,
+        'forbidden',
+      ],
+      ['client info credential echo', { clientInfoEcho: true }, 400, 'invalid_manifest'],
+      ['scanner', { policy: true }, 503, 'scan_gate_unavailable'],
+      ['unclaimed', { unclaimed: true }, 409, 'name_not_claimed'],
+      ['content type', { contentType: 'text/plain' }, 415, 'unsupported_media_type'],
+      ['missing attachments', { missingAttachments: true }, 405, 'write_unsupported'],
+      [
+        'revoked after promote',
+        { mutation: "UPDATE token SET revoked_at = '2026-10-30T00:00:00.000Z'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'paused after promote',
+        { mutation: "UPDATE source SET status = 'paused'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'approval flips after promote',
+        { mutation: 'UPDATE source SET require_publish_approval = 1' },
+        403,
+        'forbidden',
+      ],
+    ] as const)('refuses %s without version or audit', (_label, options, status, code) =>
+      run(async (e, w) => {
+        const result = await flow(e, w, options);
+        expect(result.response.status).toBe(status);
+        expect(result.value).toMatchObject({ code });
+        expect(result.response.headers.get('cache-control')).toBe('no-store');
+        expect(result.versions).toEqual([]);
+        expect(result.staged).toEqual([]);
+      }),
+    );
+  });
   describe(`npm publish writer on ${name}`, () => {
     async function held(e: SqlExecutor, w: Awaited<ReturnType<typeof world>>) {
       await e.batch([
@@ -1129,7 +1634,7 @@ export function describeNpmPublishWriterContract(
           await expect(w.writer.publishVersion(ctx, w.guard, w.input())).rejects.toThrow();
           expect(await e.all(st('SELECT count(*) as n FROM package'))).toEqual([{ n: 0 }]);
         }));
-    it('requires current admission for project publishers and permits organization publishers', () =>
+    it('requires current admission for project and organization publishers', () =>
       run(async (e, w) => {
         await e.all(
           st("UPDATE service_principal_permission SET permission='project:packages:write'"),
@@ -1139,8 +1644,14 @@ export function describeNpmPublishWriterContract(
         await e.all(
           st("UPDATE service_principal_permission SET permission='org:packages:publish'"),
         );
-        await w.writer.publishVersion(ctx, w.guard, w.input());
-        expect(await e.all(st('SELECT count(*) as n FROM version'))).toEqual([{ n: 1 }]);
+        await expect(w.writer.publishVersion(ctx, w.guard, w.input())).rejects.toThrow();
+        expect(await e.all(st('SELECT count(*) as n FROM project_package'))).toEqual([{ n: 0 }]);
+      }));
+    it('refuses a detached hosted source for an organization publisher in the mutation fence', () =>
+      run(async (e, w) => {
+        await e.all(st('DELETE FROM project_source'));
+        await expect(w.writer.publishVersion(ctx, w.guard, w.input())).rejects.toThrow();
+        expect(await e.all(st('SELECT count(*) as n FROM project_package'))).toEqual([{ n: 0 }]);
       }));
     it('refuses a detached hosted source for a project publisher', () =>
       run(async (e, w) => {

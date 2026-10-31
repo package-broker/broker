@@ -1104,6 +1104,15 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Publish integration fixtures load fixed Node codec, filesystem byte-store and tar fixture modules; these modules do not read SQL result changes.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n      ) #1",
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'blob/filesystem.ts', import.meta.url).href\n      ) #1",
+        'db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(new URL(core, import.meta.url).href) #1',
+      ],
+    },
+    {
+      reason:
         'Codec contract deliberately imports its runtime adapter; fixture dependency boundary is manually reviewed.',
       sites: [
         'db-sqlite/src/contract/codec-contract.ts:dynamic dependency: import(/* @vite-ignore */ url) #1',

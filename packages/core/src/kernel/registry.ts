@@ -12,7 +12,6 @@ import {
   type PortName,
   type SourceProviderFactory,
   type SourceProviderContext,
-  type RouteDefinition,
 } from '../plugin.js';
 import type { IdentityProviderFactory } from '../identity/port.js';
 import { canonicalAnchor } from '../identity/providers.js';
@@ -30,6 +29,7 @@ import {
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
 import {
+  type RouteDefinition,
   routeApiProblems,
   routeBoundaryProblems,
   routePathProblem,

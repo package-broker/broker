@@ -584,6 +584,17 @@ describe('build with platformPorts', () => {
     expect((await readManifest(result.outDir)).platformPorts).toBeNull();
   }, 60_000);
 
+  it.each(['node', 'cloudflare'] as const)(
+    'builds %s with a blob ceiling below the publish cap',
+    async (target) => {
+      const ports = target === 'node' ? NODE_PORTS : CLOUDFLARE_PORTS;
+      const stanza = { ...ports, blob: { ...ports.blob, maxBytes: 1024 } };
+      const config = await writeConfig(target, { [target]: stanza });
+      const result = await build({ configPath: config, target, cwd: project, runtimeEntry });
+      expect((await readManifest(result.outDir)).platformPorts).toEqual(stanza);
+    },
+  );
+
   const rejected: [string, unknown, string, 'node' | 'cloudflare'][] = [
     [
       'a Cloudflare R2 stanza reused for node',

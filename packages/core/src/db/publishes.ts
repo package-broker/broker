@@ -3,6 +3,8 @@ import type { AnyMutationFence } from '../authz/fence.js';
 import type { OrgContext } from './port.js';
 
 export const PUBLISH_PURGE_WINDOW_DAYS = 7;
+export const PUBLISH_APPROVAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
 export const PUBLISH_APPROVAL_EXPIRY_BATCH_SIZE = 10;
 
 export const PUBLISH_APPROVAL_STATES = [

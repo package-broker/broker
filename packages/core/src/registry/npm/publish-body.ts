@@ -445,7 +445,7 @@ export async function scanPublishBody(
 export interface ValidatePublishBodyOptions extends PublishBodyOptions {
   readonly codecs: Pick<Codecs, 'digestTap' | 'gunzip'>;
   readonly origin: NpmVersionOrigin;
-  readonly tarballUrl: string;
+  readonly tarballUrl: string | ((version: string) => string);
   readonly requireLicense?: boolean;
 }
 export interface ValidatedPublishBody extends PublishBodyResult {
@@ -588,7 +588,10 @@ async function validatePublishBodyInner(
       {
         ...scanned.manifest,
         dist: {
-          tarball: options.tarballUrl,
+          tarball:
+            typeof options.tarballUrl === 'function'
+              ? options.tarballUrl(scanned.version)
+              : options.tarballUrl,
           integrity: formatIntegrity('sha512', digests.sha512),
           shasum: Array.from(digests.sha1, (b) => b.toString(16).padStart(2, '0')).join(''),
           fileCount: capturedArchive.fileCount,

@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
@@ -28,6 +28,7 @@ import {
   prepareClient,
   harnessAssert as assert,
   PACKAGES,
+  PUBLISH_PACKAGES,
   clientCommands,
   checkResult,
   checkTraffic,
@@ -37,6 +38,7 @@ import {
   fixtureReply,
   runCommand,
   matrixStep,
+  safeFailureReason,
 } from './client-matrix.mjs';
 
 const root = resolve(import.meta.dirname, '..');
@@ -115,8 +117,56 @@ export async function seed(executor) {
       id,
     ]);
   }
+  const publishPrincipal = ulid();
+  await sql(
+    'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+    [publishPrincipal, orgId, 'matrix-publisher', userId],
+  );
+  await sql(
+    "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, 'org:packages:publish')",
+    [orgId, publishPrincipal],
+  );
+  const publishToken = formatToken(
+    'svc',
+    'publishabcde',
+    crypto.getRandomValues(new Uint8Array(32)),
+  );
+  await sql(
+    `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, read_only, service_principal_id, expires_at, project_mode) VALUES (?, ?, 'svc', 'publishabcde', ?, 1, 'publish', '["write"]', 0, ?, ?, 'all')`,
+    [
+      ulid(),
+      orgId,
+      await hashToken(keyring, 1, publishToken),
+      publishPrincipal,
+      new Date(Date.now() + 3600000).toISOString(),
+    ],
+  );
+  for (const held of [false, true]) {
+    const sourceId = ulid();
+    await sql(
+      "INSERT INTO source (id, org_id, name, ecosystem, type, require_publish_approval, default_visible_to_new_projects) VALUES (?, ?, ?, 'npm', 'hosted', ?, 1)",
+      [sourceId, orgId, held ? 'Held publishes' : 'Active publishes', Number(held)],
+    );
+    await sql('INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)', [
+      orgId,
+      projectId,
+      sourceId,
+    ]);
+    for (const name of PUBLISH_PACKAGES.filter((name) => name.endsWith(held ? 'held' : 'active'))) {
+      await sql(
+        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'npm', ?)",
+        [ulid(), orgId, sourceId, name],
+      );
+    }
+  }
   return {
     token,
+    publishToken,
+    inspectPublish: async (name) =>
+      executor.all({
+        sql: `SELECT v.status, b.refetchable FROM version v JOIN package p ON p.id = v.package_id AND p.org_id = v.org_id JOIN blob b ON b.id = v.blob_id AND b.org_id = v.org_id WHERE v.org_id = ? AND p.name = ?`,
+        params: [orgId, name],
+      }),
     detach: () =>
       sql('DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?', [
         orgId,
@@ -128,7 +178,7 @@ export async function seed(executor) {
 
 async function frontServer(routes) {
   let dispatch;
-  let failure = false;
+  let failure;
   let auditStatus = 200;
   const server = createServer(async (incoming, outgoing) => {
     try {
@@ -152,8 +202,8 @@ async function frontServer(routes) {
       headers['content-length'] = String(bytes.length);
       outgoing.writeHead(response.status, headers);
       outgoing.end(bytes);
-    } catch {
-      failure = true;
+    } catch (error) {
+      failure ??= safeFailureReason(error);
       outgoing.writeHead(502).end();
     }
   });
@@ -168,13 +218,24 @@ async function frontServer(routes) {
     expectAudit: (status) => {
       auditStatus = status;
     },
-    assertHealthy: () => assert.equal(failure, false, 'Registry bridge failed'),
+    assertHealthy: () => assert.ok(failure === undefined, `Registry bridge failed: ${failure}`),
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections();
         server.close(resolve);
       }),
   };
+}
+
+export async function openMatrixBlobStore(executor, directory, origin) {
+  return createBlobStore(
+    await openFilesystemByteStore({ root: join(directory, 'blobs') }),
+    createBlobRepository(executor, { purgeLeaseSeconds: 900 }),
+    {
+      admission: createBlobUploadAdmission(),
+      maxBytes: resolveRegistryConfig(undefined, 'node', origin).caps.publishTarballBytes,
+    },
+  );
 }
 
 async function bootNode(directory, origin, audits, cleanup) {
@@ -187,11 +248,7 @@ async function bootNode(directory, origin, audits, cleanup) {
       executor: db.executor,
       auth: { keyring, publicOrigin: origin, env: {} },
       platformServices: {
-        blob: createBlobStore(
-          await openFilesystemByteStore({ root: join(directory, 'blobs') }),
-          createBlobRepository(db.executor, { purgeLeaseSeconds: 900 }),
-          { admission: createBlobUploadAdmission(), maxBytes: 1_048_576 },
-        ),
+        blob: await openMatrixBlobStore(db.executor, directory, origin),
         cache: createLruCache({}),
         jobStore: createJobRepository(db.executor),
       },
@@ -305,6 +362,7 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
         }
         await step(name, async () => {
           const result = await runCommand(command.command, command.args, project, env, { debug });
+          front.assertHealthy();
           checkResult(result, name, client);
         });
       }
@@ -317,6 +375,53 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
           );
         }
       });
+      for (const name of PUBLISH_PACKAGES) {
+        await step(`publish ${name}`, async () => {
+          const publishRoot = join(directory, 'publish-' + PUBLISH_PACKAGES.indexOf(name));
+          const publisher = await prepareClient(
+            publishRoot,
+            client,
+            `${front.origin}/alpha/npm/`,
+            broker.publishToken,
+          );
+          await writeFile(
+            join(publisher.project, 'package.json'),
+            JSON.stringify({ name, version: '1.0.0', main: 'index.js', license: 'MIT' }),
+          );
+          await writeFile(join(publisher.project, 'index.js'), 'module.exports = true;\n');
+          await writeFile(join(publisher.project, 'README.md'), '# Publish fixture\n');
+          const command = commands.publish;
+          const result = await runCommand(
+            command.command,
+            command.args,
+            publisher.project,
+            publisher.env,
+            { debug },
+          );
+          front.assertHealthy();
+          checkResult(result, 'publish', client);
+          const held = name.endsWith('held');
+          assert.ok(
+            routes.includes(`publish:${name}:${held ? 202 : 201}`),
+            'Missing real publish traffic',
+          );
+          const stored = await broker.inspectPublish(name);
+          assert.equal(stored.length, 1, 'Missing published version');
+          assert.equal(
+            stored[0].status,
+            held ? 'quarantined' : 'active',
+            'Incorrect published state',
+          );
+          assert.equal(stored[0].refetchable, 0, 'Published blob must not be refetched');
+          const read = await broker.dispatch(
+            new Request(`${front.origin}/alpha/npm/${encodeURIComponent(name)}`, {
+              headers: { authorization: `Bearer ${broker.token}` },
+            }),
+          );
+          assert.equal(read.status, held ? 404 : 200, 'Incorrect published visibility');
+          await read.body?.cancel();
+        });
+      }
       const forwardedBeforeRefusal = audits.length;
       await step('detach proxy', () => broker.detach());
       front.expectAudit(501);

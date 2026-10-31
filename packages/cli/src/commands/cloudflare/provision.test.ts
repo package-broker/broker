@@ -28,7 +28,7 @@ const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: TOKEN };
 const identity = installIdentity({ accountId: ACCOUNT, workerName: 'broker' });
 let project: string;
 const ports = {
-  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 50_000_000 },
   cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
   jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
   observability: {

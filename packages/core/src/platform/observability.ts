@@ -33,6 +33,8 @@ export interface SafeLogRecord {
   readonly method?: string;
   readonly status?: number;
   readonly duration_ms?: number;
+  readonly publish_tarball_bytes?: number;
+  readonly blob_max_bytes?: number;
   readonly project_id?: string | null;
   readonly token_id?: string | null;
   readonly user_id?: string | null;
@@ -79,6 +81,8 @@ export const LOG_FIELDS = [
   'method',
   'status',
   'duration_ms',
+  'publish_tarball_bytes',
+  'blob_max_bytes',
   'project_id',
   'token_id',
   'user_id',
@@ -356,6 +360,8 @@ const packageKey: FieldCheck = (v) =>
 const FIELD_CHECKS: Readonly<
   Record<Exclude<LogField, 'level' | 'event' | 'error_name'>, FieldCheck>
 > = {
+  publish_tarball_bytes: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
+  blob_max_bytes: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
   timestamp: matches(TIMESTAMP),
   service: (v) => v === 'package-broker',
   deployment_id: matches(DEPLOYMENT_ID),

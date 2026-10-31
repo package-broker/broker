@@ -1,3 +1,4 @@
+import { entries as oidcEntries } from './mutation-table/oidc.js';
 import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
 import { entries as publishGuardEntries } from './mutation-table/catalogue-publish-guard.js';
 import { entries as publishesEntries } from './mutation-table/publishes.js';
@@ -232,6 +233,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sourceSyncReadsEntries,
   ...sourceSelectionEntries,
   ...selectedKeysEntries,
+  ...oidcEntries,
 ];
 
 export function checkCompleteness(

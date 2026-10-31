@@ -97,9 +97,9 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'size_bytes',
     'source',
   ],
-  'publish.approve': ['token_id'],
-  'publish.reject': ['reason', 'token_id'],
-  'publish.expire': [],
+  'publish.approve': ['package', 'version', 'token_id'],
+  'publish.reject': ['package', 'version', 'reason', 'token_id'],
+  'publish.expire': ['package', 'version'],
   'publish.scan': ['plugin', 'verdict', 'reason'],
   'token.workload_issue': [
     'trusted_publisher_id',
@@ -392,7 +392,9 @@ function cleanChanges(
           : { ok: false as const, reason: 'bad_value' as const }
         : field === 'provider' && IDENTITY_ACTIONS.has(action)
           ? cleanProviderId(entry[key])
-          : cleanValue(entry[key], field);
+          : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
+            ? cleanString(value, 1000, field)
+            : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
       cleanedEntry[key] = cleaned.value;
     }

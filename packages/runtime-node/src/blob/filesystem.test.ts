@@ -460,7 +460,7 @@ describe('filesystem bytes with sqlite metadata lifecycle wiring', () => {
       const retry = (await f.lifecycle.claimPurge(org, key))!;
       expect(retry).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, retry)).toBe(true);
-      expect(f.removeCalls()).toBe(3);
+      expect(f.removeCalls()).toBe(2);
       expect(await f.lifecycle.markDeleted(org, key, retry)).toBe(true);
       await expect(stat(f.pathOf(org, key))).rejects.toMatchObject({ code: 'ENOENT' });
     },
@@ -476,7 +476,7 @@ describe('filesystem bytes with sqlite metadata lifecycle wiring', () => {
     expect(recovered).not.toBeNull();
     expect(recovered).not.toBe(first);
     expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
-    expect(f.removeCalls()).toBe(2);
+    expect(f.removeCalls()).toBe(1);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
     expect(await f.store.head(org, key)).toBeNull();
@@ -1136,27 +1136,33 @@ describe('filesystem byte store', () => {
     const gate = new Promise<void>((resolve) => {
       resume = resolve;
     });
-    let sent = false;
-    const body = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        if (!sent) {
-          sent = true;
-          controller.enqueue(data.slice(0, 6));
-          return;
-        }
-        await gate;
-        controller.enqueue(data.slice(6));
-        controller.close();
-      },
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      reached = resolve;
     });
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(data.slice(0, 6));
+            return;
+          }
+          reached();
+          await gate;
+          controller.enqueue(data.slice(6));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
     const pending = first.putVerified(KEY(digest), body, {
       sha256: digest,
       size: data.length,
       ...PLAIN,
     });
-    for (let i = 0; i < 100 && (await stagedIn(root)) === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+    await reading;
     expect(await stagedIn(root)).toBe(1);
     const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
     await utimes(join(root, '.staging', own!), old, old);

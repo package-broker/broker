@@ -2,6 +2,9 @@ import type { AuditEvent } from '../audit/actions.js';
 import type { AnyMutationFence } from '../authz/fence.js';
 import type { OrgContext } from './port.js';
 
+export const PUBLISH_PURGE_WINDOW_DAYS = 7;
+export const PUBLISH_APPROVAL_EXPIRY_BATCH_SIZE = 10;
+
 export const PUBLISH_APPROVAL_STATES = [
   'not_required',
   'pending',
@@ -96,8 +99,18 @@ export interface PublishTransitionResult {
   readonly revision: number;
 }
 
+export interface PublishInspection extends PublishApproval {
+  readonly packageName: string;
+  readonly version: string;
+  readonly sourceName: string;
+  readonly requestedBy: { readonly type: 'user' | 'service'; readonly name: string };
+  readonly decidedBy: { readonly name: string } | null;
+  readonly project: { readonly id: string; readonly slug: string; readonly name: string } | null;
+}
+
 export interface PublishesRepository {
-  get(ctx: OrgContext, id: string): Promise<PublishApproval | null>;
+  listExpired(ctx: OrgContext, now: string): Promise<readonly PublishInspection[]>;
+  get(ctx: OrgContext, id: string): Promise<PublishInspection | null>;
   list(
     ctx: OrgContext,
     query: {
@@ -105,7 +118,7 @@ export interface PublishesRepository {
       readonly cursor?: string;
       readonly limit: number;
     },
-  ): Promise<{ readonly items: readonly PublishApproval[]; readonly next: string | null }>;
+  ): Promise<{ readonly items: readonly PublishInspection[]; readonly next: string | null }>;
   decide(
     ctx: OrgContext,
     fence: AnyMutationFence,
@@ -185,28 +198,4 @@ export interface PackageAccessRequestRepository {
     fence: AnyMutationFence,
     input: PackageAccessDecision,
   ): Promise<{ readonly changed: boolean; readonly revision: number }>;
-}
-
-async function notImplemented(): Promise<never> {
-  throw new Error('not_implemented');
-}
-
-export function createPublishesRepository(): PublishesRepository {
-  return {
-    get: notImplemented,
-    list: notImplemented,
-    decide: notImplemented,
-    expire: notImplemented,
-    scan: notImplemented,
-    rescan: notImplemented,
-  };
-}
-
-export function createPackageAccessRequestRepository(): PackageAccessRequestRepository {
-  return {
-    get: notImplemented,
-    list: notImplemented,
-    request: notImplemented,
-    decide: notImplemented,
-  };
 }

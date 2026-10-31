@@ -191,6 +191,10 @@ export function createBlobRepository(
         throw new BlobValidationError();
       }
       requireGeneration(input.generation);
+      const storageKey =
+        input.npmPublishHandle === undefined
+          ? blobStorageKey(ctx.orgId, sha256)
+          : stagedStorageKey(input.npmPublishHandle, sha256);
       const upsert = db
         .insertInto('blob')
         .values({
@@ -198,10 +202,7 @@ export function createBlobRepository(
           org_id: ctx.orgId,
           sha256,
           size_bytes: input.size,
-          storage_key:
-            input.npmPublishHandle === undefined
-              ? blobStorageKey(ctx.orgId, sha256)
-              : stagedStorageKey(input.npmPublishHandle, sha256),
+          storage_key: storageKey,
           media_type: input.mediaType,
           refetchable: input.refetchable ? 1 : 0,
           purge_generation: input.generation,
@@ -257,7 +258,7 @@ export function createBlobRepository(
           options.supersededObjects &&
           old?.deleted_at === null &&
           old.storage_key.startsWith('npm-publish/') &&
-          old.storage_key !== blobStorageKey(ctx.orgId, sha256)
+          old.storage_key !== storageKey
         ) {
           let outcome: 'removed' | 'error' = 'removed';
           try {

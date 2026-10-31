@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeVersion } from '../registry/composer/version-parser.js';
-import { VersionError, validateVersion } from './versions.js';
+import { VersionError, validateVersion, compareNpmVersions } from './versions.js';
 
 const composer = (version: string, versionNormalized: string) =>
   validateVersion({ ecosystem: 'composer', version, versionNormalized });
@@ -173,5 +173,20 @@ describe('npm versions', () => {
     expect(() =>
       validateVersion({ ecosystem: 'pypi' as 'npm', version: '1.0.0', versionNormalized: '1.0.0' }),
     ).toThrow(VersionError);
+  });
+});
+
+describe('npm approval ordering', () => {
+  it.each([
+    ['1.0.0', '2.0.0', -1],
+    ['10.0.0', '2.0.0', 1],
+    ['1.0.0-alpha', '1.0.0', -1],
+    ['1.0.0-alpha.2', '1.0.0-alpha.10', -1],
+    ['1.0.0-2', '1.0.0-alpha', -1],
+    ['1.0.0-beta', '1.0.0-alpha', 1],
+    ['1.0.0-alpha.1', '1.0.0-alpha', 1],
+    ['1.0.0', '1.0.0', 0],
+  ])('orders %s relative to %s', (a, b, expected) => {
+    expect(Math.sign(compareNpmVersions(a as string, b as string))).toBe(expected);
   });
 });

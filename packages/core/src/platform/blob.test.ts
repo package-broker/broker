@@ -19,7 +19,6 @@ import {
   blobStorageKey,
   stagedStorageKey,
   stagedListPrefix,
-  expireStagedCapabilities,
   orgStorageSegment,
   createBlobProbe,
   createBlobUploadAdmission,
@@ -2202,7 +2201,7 @@ it('Round 3 expires an abandoned capability on access', async () => {
     now.mockRestore();
   }
 });
-it('Round 3 cached dedup preserves refetchability and key', async () => {
+it('Round 3 cached dedup narrows refetchability and preserves key', async () => {
   const f = stagingFixture();
   const store = createBlobStore(f.byteStore, f.metadata, opts());
   const bytes = enc.encode('cached');
@@ -2220,7 +2219,7 @@ it('Round 3 cached dedup preserves refetchability and key', async () => {
   const dedup = await store.promote(ctx, staged, { refetchable: false });
   expect(dedup).toEqual({ ...original, generation: dedup.generation });
   expect(dedup.generation).not.toBe(original.generation);
-  expect(f.rowRefetchable(key)).toBe(true);
+  expect(f.rowRefetchable(key)).toBe(false);
   expect(reserve).toHaveBeenCalledExactlyOnceWith(ctx, key);
   expect(f.objects.has(blobStorageKey(ctx.orgId, key))).toBe(true);
   expect(f.objects.has(stagedStorageKey(staged.handle, key))).toBe(false);
@@ -2258,20 +2257,71 @@ it('Round 3 reads the stored npm key once for get head and probe', async () => {
   expect(head.mock.calls.map(([k]) => k)).toEqual([storageKey]);
 });
 
-it('Round 3 sweep expires abandoned capabilities even after the clock returns', async () => {
+it('expires abandoned capabilities while idle and releases the timer', async () => {
+  vi.useFakeTimers();
+  try {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('abandoned')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    });
+    const started = Date.now();
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(24 * 3600 * 1000);
+    expect(vi.getTimerCount()).toBe(1);
+    await drain(await store.openStaged(ctx, staged));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.setSystemTime(started);
+    await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+it.each(['discard', 'promote', 'failed discard', 'failed promote'] as const)(
+  'releases the capability timer after %s',
+  async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const f = stagingFixture();
+      const store = createBlobStore(f.byteStore, f.metadata, opts());
+      const staged = await store.stage(ctx, streamOf([enc.encode('timer')]), {
+        maxBytes: 10,
+        mediaType: 'application/gzip',
+      });
+      expect(vi.getTimerCount()).toBe(1);
+      const failure = new Error('storage unavailable');
+      if (outcome === 'failed discard')
+        f.byteStore.discardStaged = async () => {
+          throw failure;
+        };
+      if (outcome === 'failed promote')
+        f.byteStore.promote = async () => {
+          throw failure;
+        };
+      const result = outcome.includes('discard')
+        ? store.discard(ctx, staged)
+        : store.promote(ctx, staged, { refetchable: false });
+      if (outcome.startsWith('failed')) await expect(result).rejects.toBe(failure);
+      else await result;
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+it('keeps staged capabilities within their owning store instance', async () => {
   const f = stagingFixture();
-  const store = createBlobStore(f.byteStore, f.metadata, opts());
-  const staged = await store.stage(ctx, streamOf([enc.encode('abandoned')]), {
+  const owner = createBlobStore(f.byteStore, f.metadata, opts());
+  const sibling = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await owner.stage(ctx, streamOf([enc.encode('owned')]), {
     maxBytes: 10,
     mediaType: 'application/gzip',
   });
-  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 24 * 3600 * 1000 + 1);
-  try {
-    expireStagedCapabilities(f.byteStore);
-  } finally {
-    clock.mockRestore();
-  }
-  await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  await expect(sibling.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  await owner.discard(ctx, staged);
 });
 it('Round 3 encodes organization segments consistently for staging and content keys', () => {
   expect(orgStorageSegment(ctx.orgId)).toBe(
@@ -2356,7 +2406,7 @@ it.each(['missing', 'scheduled'] as const)(
     f.metadata.reserve = async (org, digest) => {
       const generation = await reserve(org, digest);
       const row = await f.metadata.find(org, digest);
-      f.metadata.find = async () =>
+      f.metadata.narrowRefetchable = async () =>
         state === 'missing' ? null : { ...row!, purgeAfter: '2020-01-01T00:00:00.000Z' };
       return generation;
     };

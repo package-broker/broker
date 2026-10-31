@@ -176,10 +176,7 @@ describe('scan, schedule, deadline, claim and removal', () => {
 
     await pastDeadline();
     await h.runPurge();
-    expect(h.remove.mock.calls).toEqual([
-      [`npm-publish/${blobStorageKey(a.orgId, D1)}`],
-      [blobStorageKey(a.orgId, D1)],
-    ]);
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(a.orgId, D1)]]);
     expect((await rowOf(D1))?.deleted_at).not.toBeNull();
   });
 
@@ -188,10 +185,7 @@ describe('scan, schedule, deadline, claim and removal', () => {
     await publish(h.repo);
     await age(D1, 8);
     await h.runScan();
-    expect(h.remove.mock.calls).toEqual([
-      [`npm-publish/${blobStorageKey(a.orgId, D1)}`],
-      [blobStorageKey(a.orgId, D1)],
-    ]);
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(a.orgId, D1)]]);
     expect((await rowOf(D1))?.deleted_at).not.toBeNull();
   });
 
@@ -297,10 +291,7 @@ describe('a tombstoned reference attached to an orphan-scheduled blob', () => {
     const h = await scheduled();
     await attach(366);
     await h.runPurge();
-    expect(h.remove.mock.calls).toEqual([
-      [`npm-publish/${blobStorageKey(a.orgId, D1)}`],
-      [blobStorageKey(a.orgId, D1)],
-    ]);
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(a.orgId, D1)]]);
     expect((await rowOf(D1))?.deleted_at).not.toBeNull();
   });
 });

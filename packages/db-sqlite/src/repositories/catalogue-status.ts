@@ -106,7 +106,7 @@ function releasable(ctx: OrgContext, versionId: string): Guard {
   return sql<SqlBool>`exists (select 1 from version as target_version
     where target_version.id = ${versionId} and target_version.org_id = ${ctx.orgId}
       and target_version.status = 'quarantined'
-      and not exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = target_version.id)
+      and not exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = target_version.id and (pa.approval_state = 'pending' or pa.scan_state in ('queued', 'running', 'failed')))
       and ${leaseNotLive(ctx, 'target_version')})`;
 }
 
@@ -125,7 +125,7 @@ export function createCatalogueStatusRepository(
           .selectFrom('version as target_version')
           .select([
             'target_version.status as status',
-            sql<number>`exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = target_version.id)`.as(
+            sql<number>`exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = target_version.id and (pa.approval_state = 'pending' or pa.scan_state in ('queued', 'running', 'failed')))`.as(
               'publish_gate',
             ),
           ])

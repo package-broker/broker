@@ -79,10 +79,16 @@ function records(bytes: Uint8Array): Record<string, string> {
   }
   return result;
 }
-function effectivePath(path: string, directory: boolean, max: number): string {
+const encoder = new TextEncoder();
+function effectivePath(
+  path: string,
+  directory: boolean,
+  max: number,
+): { path: string; bytes: number } {
   if (directory && path.endsWith('/')) path = path.slice(0, -1);
+  const bytes = encoder.encode(path).length;
   if (
-    new TextEncoder().encode(path).length > max ||
+    bytes > max ||
     path.includes('\0') ||
     path.includes('\\') ||
     /^[A-Za-z]:/.test(path) ||
@@ -91,7 +97,7 @@ function effectivePath(path: string, directory: boolean, max: number): string {
     invalid('path');
   if (path.split('/').some((p) => p === '' || p === '..' || p === '.' || /^[A-Za-z]:/.test(p)))
     invalid('path_segments');
-  return path;
+  return { path, bytes };
 }
 
 function limit(value: number | undefined, ceiling: number): number {
@@ -137,6 +143,7 @@ async function scanTarball(
   signal?: AbortSignal,
 ): Promise<TarballWalkResult> {
   let repositoryRoot: string | undefined;
+  let repositoryPrefixBytes = 0;
   const cap = limit(options.maxUnpackedBytes, 256 * 1024 * 1024);
   const maxEntries = limit(options.maxEntries, 50_000);
   const maxExtensionBytes = limit(options.maxExtensionBytes, 65536);
@@ -180,6 +187,7 @@ async function scanTarball(
   }
   let local: Record<string, string> = Object.create(null) as Record<string, string>;
   const paths = new Set<string>();
+  let pathBytes = 0;
   let entries = 0,
     fileCount = 0,
     unpackedSize = 0,
@@ -246,6 +254,7 @@ async function scanTarball(
         invalid('size_bounds');
       if (extension && size > maxExtensionBytes) invalid('extension_cap');
       let path = '';
+      let pathSize = 0;
       let capture = 0;
       let sink: RepositoryTarSink | undefined;
       if (!extension) {
@@ -253,13 +262,23 @@ async function scanTarball(
         if (repository) {
           if (/[\r\n]/.test(rawPath)) invalid('repository_path');
           const normalized = effectivePath('package/' + rawPath, type === '5', maxPathBytes);
-          const components = normalized.slice(8).split('/');
-          repositoryRoot ??= components[0]!;
+          const components = normalized.path.slice(8).split('/');
+          if (repositoryRoot === undefined) {
+            repositoryRoot = components[0]!;
+            repositoryPrefixBytes = 8 + encoder.encode(repositoryRoot).length;
+          }
           if (components[0] !== repositoryRoot) invalid('repository_root');
           if (components.length === 1 && type !== '5') invalid('repository_root');
           path = components.slice(1).join('/');
-        } else path = effectivePath(rawPath, type === '5', maxPathBytes);
+          pathSize = normalized.bytes - repositoryPrefixBytes - (components.length > 1 ? 1 : 0);
+        } else {
+          const normalized = effectivePath(rawPath, type === '5', maxPathBytes);
+          path = normalized.path;
+          pathSize = normalized.bytes;
+        }
         if (paths.has(path)) invalid('duplicate_path');
+        pathBytes += pathSize;
+        if (pathBytes > 16 * 1024 * 1024) invalid('path_bytes');
         paths.add(path);
         if (!(repository && type === '2') && (attrs.linkpath || headerLink)) invalid('linkpath');
         if (type === '2' && size !== 0) invalid('symlink_size');

@@ -1,3 +1,5 @@
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { auditPendingStatement } from './audit-pending.js';
 import { sql, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
@@ -352,6 +354,38 @@ function adminTopUpStatements(ctx: OrgContext, now: string): ScalarStatement[] {
   return [scalar(bumpEpoch), scalar(epochBumpedOnce), scalar(revise), scalar(insert)];
 }
 
+function publisherSeedAudit(
+  ctx: OrgContext,
+  input: { readonly now: string; readonly roleIds: Readonly<Record<DefaultRoleKey, string>> },
+): ScalarStatement {
+  const role = DEFAULT_ROLES.find((role) => role.key === 'organization_publisher')!;
+  const event = auditEvent({
+    id: newOpId(),
+    now: input.now,
+    action: 'role.create',
+    actor: { type: 'system', id: null },
+    target: { type: 'role', id: input.roleIds.organization_publisher },
+    context: { opId: newOpId(), requestId: newOpId(), sourceIp: null, tokenSelector: null },
+    changes: {
+      key: { new: role.key },
+      name: { new: role.name },
+      scope: { new: role.scope },
+      permissions: { new: role.permissions },
+    },
+  });
+  if (!event.ok) throw new TypeError('invalid_role_audit');
+  return auditPendingStatement(
+    ctx,
+    event.event,
+    scalar({
+      compile: () =>
+        sql<boolean>`not exists(select 1 from role where org_id=${ctx.orgId} and key='organization_publisher') and exists(select 1 from role where org_id=${ctx.orgId} and key='organization_admin')`.compile(
+          db,
+        ),
+    }),
+  ) as ScalarStatement;
+}
+
 function rowsOf(result: { readonly rows: readonly unknown[] } | undefined): number {
   return result === undefined ? 0 : result.rows.length;
 }
@@ -475,6 +509,7 @@ export async function bootstrapAdminWithTopUp(
   const results = await executor.batch([
     existed,
     ...topUp,
+    publisherSeedAudit(ctx, input),
     ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
     user,
     ...adminGrantStatements(
@@ -556,6 +591,7 @@ export async function bootstrapSsoAdmin(
     .batch([
       ...guards,
       ...topUp,
+      publisherSeedAudit(ctx, input),
       ...seedDefaultsStatements(ctx, { now: input.now, ids: input.roleIds }),
       ...userStatements,
       ...adminGrantStatements(ctx, { subject, grantId: input.grantId, now: input.now }, null),

@@ -233,6 +233,7 @@ function roleIs(ctx: OrgContext, id: string, ...extra: readonly Guard[]): Guard 
 }
 
 interface PermissionGuards {
+  readonly insertedOnly?: boolean;
   readonly matchByKey?: string;
   readonly unprotectedOnly?: boolean;
   readonly organizationScopeOnly?: boolean;
@@ -261,6 +262,7 @@ function insertPermissions(
           .where('r.key', '=', guards.matchByKey)
           .where('r.is_system', '=', 1)
           .where('r.protects_last_holder', '=', 1);
+  if (guards.insertedOnly === true) source = source.where(sql<boolean>`changes()=1`);
   if (guards.unprotectedOnly === true) source = source.where('r.protects_last_holder', '=', 0);
   if (guards.organizationScopeOnly === true) source = source.where('r.scope', '=', 'organization');
   const fresh = guards.freshRole;
@@ -327,7 +329,11 @@ export function seedDefaultsStatements(
         ctx,
         id,
         role.permissions,
-        role.protectsLastHolder ? { matchByKey: role.key } : {},
+        role.protectsLastHolder
+          ? { matchByKey: role.key }
+          : role.key === 'organization_publisher'
+            ? { insertedOnly: true }
+            : {},
       ),
     ];
   });

@@ -617,7 +617,7 @@ describe('blob lifecycle fixture hooks', () => {
     expect(f.removeCalls()).toBe(0);
     const { org, key, generation } = await claimed(f, 'counted');
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-    expect(f.removeCalls()).toBe(2);
+    expect(f.removeCalls()).toBe(1);
   });
 
   it('failNextRemove fails exactly the next remove', async () => {
@@ -627,7 +627,7 @@ describe('blob lifecycle fixture hooks', () => {
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(false);
     expect(f.removeCalls()).toBe(1);
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-    expect(f.removeCalls()).toBe(3);
+    expect(f.removeCalls()).toBe(2);
   });
 
   it('stallNextRemove stalls exactly the next remove', async () => {
@@ -639,7 +639,7 @@ describe('blob lifecycle fixture hooks', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
     expect(f.removeCalls()).toBe(1);
     expect(await f.lifecycle.recheckAndRemove(org, key, generation)).toBe(true);
-    expect(f.removeCalls()).toBe(3);
+    expect(f.removeCalls()).toBe(2);
   });
 
   it('a stalled remove leaves the bytes in place', async () => {

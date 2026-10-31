@@ -6,6 +6,7 @@ import { auditRoutes } from './routes/audit.js';
 import { importRoutes } from './routes/import.js';
 import { organizationRoutes } from './routes/organization.js';
 import { packageManageRoutes } from './routes/package-manage.js';
+import { publishRoutes } from './routes/publishes.js';
 import { packageRoutes } from './routes/packages.js';
 import { myPermissionsRoute, myProjectPermissionsRoute } from './routes/permissions.js';
 import { projectAccessRoutes } from './routes/project-access.js';
@@ -22,6 +23,7 @@ export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
   readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
+  readonly publishes: Parameters<typeof publishRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
   readonly projects: Parameters<typeof projectRoutes>[0];
   readonly access: Parameters<typeof accessRoutes>[0];
@@ -67,6 +69,7 @@ const REQUIRED_DEPENDENCIES = {
     sessions: { authenticate: true, isReauthFresh: true },
     personal: true,
   },
+  publishes: { ...CONTEXT_METHODS, publishes: { get: true, list: true, decide: true } },
   organization: {
     ...CONTEXT_METHODS,
     organizations: { get: true },
@@ -273,6 +276,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
+    ...publishRoutes(deps.publishes),
     ...auditRoutes(deps.audit),
     ...packageManageRoutes(deps.packageManage),
     ...(deps.imports == null ? [] : importRoutes(deps.imports)),

@@ -6,11 +6,11 @@ export const publishApprovalState = z.enum(PUBLISH_APPROVAL_STATES);
 export const publishScanState = z.enum(PUBLISH_SCAN_STATES);
 const id = z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
 const revision = z.number().int().positive();
-export const decisionReason = z
-  .string()
-  .max(1000)
-  .refine((value) => new TextEncoder().encode(value).length <= 1000, 'Reason exceeds 1000 bytes')
-  .describe('At most 1000 UTF-8 bytes');
+const reasonText = z.string().max(1000).describe('At most 1000 UTF-8 bytes');
+export const decisionReason = reasonText.refine(
+  (value) => new TextEncoder().encode(value).length <= 1000,
+  'Reason exceeds 1000 bytes',
+);
 export const publishApproveBody = z.strictObject({ reason: decisionReason.optional() });
 export const publishRejectBody = z.strictObject({ reason: decisionReason.min(1) });
 export const publishListQuery = z.strictObject({
@@ -77,9 +77,71 @@ export const versionReadme = z.strictObject({ filename: z.string(), body: z.stri
 export const PUBLISH_SCHEMAS = {
   NpmPublishAccepted: npmPublishAccepted,
   PublishApproval: publishApproval,
-  PublishApproveBody: publishApproveBody,
-  PublishRejectBody: publishRejectBody,
   PublishListQuery: publishListQuery,
   PublishList: publishList,
   VersionReadme: versionReadme,
 };
+
+const publishParams = z.strictObject({ id });
+export const publishListSpec = {
+  method: 'GET',
+  path: '/_pb/publishes',
+  boundary: 'organization',
+  permission: 'org:packages:read',
+  api: {
+    operationId: 'listPublishes',
+    summary: 'List held publishes',
+    tags: ['publishes'],
+    query: publishListQuery,
+    responses: { 200: publishList },
+  },
+} as const;
+export const publishGetSpec = {
+  method: 'GET',
+  path: '/_pb/publishes/:id',
+  boundary: 'organization',
+  permission: 'org:packages:read',
+  api: {
+    operationId: 'getPublish',
+    summary: 'Inspect a held publish',
+    tags: ['publishes'],
+    params: publishParams,
+    responses: { 200: publishApproval },
+  },
+} as const;
+export const publishApproveSpec = {
+  method: 'POST',
+  path: '/_pb/publishes/:id/approve',
+  boundary: 'organization',
+  permission: 'org:packages:approve',
+  concurrency: 'if-match',
+  api: {
+    operationId: 'approvePublish',
+    summary: 'Approve a publish',
+    tags: ['publishes'],
+    params: publishParams,
+    body: z.strictObject({ reason: reasonText.optional() }),
+    responses: { 200: publishApproval },
+  },
+} as const;
+export const publishRejectSpec = {
+  method: 'POST',
+  path: '/_pb/publishes/:id/reject',
+  boundary: 'organization',
+  permission: 'org:packages:approve',
+  concurrency: 'if-match',
+  api: {
+    operationId: 'rejectPublish',
+    summary: 'Reject a publish',
+    tags: ['publishes'],
+    params: publishParams,
+    body: z.strictObject({ reason: reasonText.min(1) }),
+    responses: { 200: publishApproval },
+  },
+} as const;
+export const publishSpecs = [
+  publishListSpec,
+  publishGetSpec,
+  publishApproveSpec,
+  publishRejectSpec,
+];

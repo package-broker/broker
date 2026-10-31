@@ -1,6 +1,7 @@
+import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
+import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
 import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
 import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
-import { expireStagedCapabilities } from '@package-broker/core/platform/blob';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
@@ -1203,10 +1204,7 @@ function retentionRegistrations(
                 openStaged: (...args) => store.openStaged(...args),
                 promote: (...args) => store.promote(...args),
                 discardStaged: (...args) => store.discardStaged(...args),
-                listStaged: (...args) => {
-                  expireStagedCapabilities(store);
-                  return store.listStaged(...args);
-                },
+                listStaged: (...args) => store.listStaged(...args),
                 putVerified: (...args) => store.putVerified(...args),
                 head: (...args) => store.head(...args),
                 get: (...args) => store.get(...args),
@@ -1238,10 +1236,7 @@ function retentionRegistrations(
             : createBlobPurgeJob({
                 lifecycle,
                 staged: {
-                  listStaged: (...args) => {
-                    expireStagedCapabilities(store);
-                    return store.listStaged(...args);
-                  },
+                  listStaged: (...args) => store.listStaged(...args),
                   async discardStaged(handle) {
                     checkSignal();
                     await executor.batch(guard);
@@ -1771,6 +1766,11 @@ export function createWorker(
                       if (services === undefined) throw new JobError('handler_error');
                       return services.retention;
                     })),
+                registerObservedJob(
+                  createPublishApprovalExpireJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor),
+                  }),
+                ),
                 registerObservedJob(
                   auditSealJob(createAuditSealRepository(executor as SqlExecutor)),
                 ),

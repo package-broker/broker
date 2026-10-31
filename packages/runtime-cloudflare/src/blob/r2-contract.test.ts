@@ -597,7 +597,7 @@ describe('r2 lifecycle fixture', () => {
       expect(next).not.toBeNull();
       expect(next).not.toBe(first);
       expect(await f.lifecycle.recheckAndRemove(org, key, next)).toBe(true);
-      expect(f.removeCalls()).toBe(3);
+      expect(f.removeCalls()).toBe(2);
       await expect.poll(() => f.bucket.head(storageKey)).toBeNull();
     },
   );

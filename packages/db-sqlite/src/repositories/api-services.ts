@@ -1,4 +1,5 @@
 import { npmLoginRoutes } from '@package-broker/core/api/routes/npm-login';
+import { createPublishesRepository } from './publishes.js';
 import { createSourcePackageStore } from './source-package-request.js';
 import type { SourcePackageProbe } from '@package-broker/core/ingest/source-package';
 import { createProjectGrantReader } from './project-grant-read.js';
@@ -118,6 +119,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
   try {
     const module = createApiModule({
       npmLogin: access.npmLogin,
+      publishes: { ...common, publishes: createPublishesRepository(executor, anchors) },
       organization: {
         ...common,
         organizations,

@@ -1,4 +1,16 @@
+import { publishRoutes } from '@package-broker/core/api/routes/publishes';
+import { sha256Hex } from '@package-broker/core/auth/primitives';
+import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
+import { jobFences } from '@package-broker/core/platform/job-fences';
+import { createBlobReferenceReader } from '../repositories/blob-references.js';
+import { bootstrapAdmin } from '../repositories/admin-bootstrap.js';
+import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import { describe, expect, it } from 'vitest';
+import {
+  mutationFence,
+  systemMutationFence,
+  type AuthenticatedActor,
+} from '@package-broker/core/authz/fence';
 import { orgContext, type SqlExecutor, type Statement } from '@package-broker/core/db/port';
 import type { PublishVersionInput } from '@package-broker/core/db/catalogue';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
@@ -17,6 +29,8 @@ import { createMcpTools } from '@package-broker/core/mcp/tools';
 import { packageRoutes } from '@package-broker/core/api/routes/packages';
 import type { RequestContext, PluginPorts } from '@package-broker/core/plugin';
 import { distTagStatements } from '../repositories/catalogue-write-tags.js';
+import { createCatalogueStatusRepository } from '../repositories/catalogue-status.js';
+import { createVisibilityStore } from '../repositories/catalogue-writer.js';
 import { createCatalogueWriter } from '../repositories/catalogue-writer.js';
 import { createPublishWriteGuard } from '../repositories/catalogue-publish-guard.js';
 import { createCatalogueReader } from '../repositories/catalogue.js';
@@ -167,6 +181,643 @@ export function describeNpmPublishWriterContract(
     }
   }
   describe(`npm publish writer on ${name}`, () => {
+    async function held(e: SqlExecutor, w: Awaited<ReturnType<typeof world>>) {
+      await e.batch([
+        st('UPDATE source SET require_publish_approval=1'),
+        st(
+          "INSERT INTO user_account (id,org_id,email) VALUES ('approver','org','approver@example.test')",
+        ),
+        st(
+          "INSERT INTO identity_provider_binding (org_id,provider,anchor) VALUES ('org','oidc','oidc:https://idp.example.test')",
+        ),
+        st(
+          "INSERT INTO identity (id,org_id,user_id,provider,subject,email,email_verified,validated_at) VALUES ('approver-identity','org','approver','oidc','approver','approver@example.test',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        ),
+        st(
+          "INSERT INTO session (id,org_id,user_id,secret_hash,csrf_hash,expires_at,last_seen_at) VALUES ('session','org','approver',?,?,'2099-01-01T00:00:00.000Z',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+          'a'.repeat(64),
+          'b'.repeat(64),
+        ),
+        st(
+          "INSERT INTO role (id,org_id,key,name,scope) VALUES ('approver-role','org','approver','Approver','organization')",
+        ),
+        st("INSERT INTO role_permission VALUES ('org','approver-role','org:packages:approve')"),
+        st(
+          "INSERT INTO access_grant (id,org_id,role_id,scope,subject_type,subject_value) VALUES ('grant','org','approver-role','organization','email','approver@example.test')",
+        ),
+      ]);
+      const result = await w.writer.publishVersion(ctx, w.guard, w.input(true));
+      const repo = createPublishesRepository(e, [
+        {
+          provider: 'oidc',
+          anchor: 'oidc:https://idp.example.test',
+          emailAuthoritative: true,
+          emailAuthoritativeDomains: ['example.test'],
+        },
+      ]);
+      const fence = mutationFence(
+        { userId: 'approver', sessionId: 'session' } as AuthenticatedActor,
+        {},
+      );
+      const input = {
+        id: result.approvalId!,
+        expectedRevision: 1,
+        expectedApprovalState: 'pending' as const,
+        expectedScanState: 'not_required' as const,
+        now: NOW,
+        event: { ...w.input().event, id: ulid(), action: 'publish.approve' as const },
+        decision: 'approved' as const,
+        decidedByUserId: 'approver',
+      };
+      return { repo, fence, input, result };
+    }
+    it.each([
+      ['pending', 'not_required', true],
+      ['approved', 'not_required', false],
+      ['rejected', 'not_required', false],
+      ['expired', 'not_required', false],
+      ['approved', 'queued', true],
+      ['approved', 'running', true],
+      ['approved', 'failed', true],
+      ['approved', 'allowed', false],
+      ['approved', 'denied', false],
+    ] as const)(
+      'management gates %s/%s only while unresolved',
+      (approvalState, scanState, blocked) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.batch([
+            st("INSERT INTO cache_epoch(org_id,version) VALUES ('org','epoch')"),
+            st(
+              'UPDATE publish_approval SET approval_state=?,scan_state=?,hold_scan=?,decided_by_user_id=?,decided_at=?',
+              approvalState,
+              scanState,
+              scanState === 'not_required' ? 0 : 1,
+              ['approved', 'rejected'].includes(approvalState) ? 'approver' : null,
+              approvalState === 'pending' ? null : NOW,
+            ),
+            st('UPDATE package SET held_until_active=0'),
+            st("INSERT INTO role_permission VALUES ('org','approver-role','org:packages:manage')"),
+            st("INSERT INTO role_permission VALUES ('org','approver-role','org:sources:write')"),
+          ]);
+          const packageId = h.result.packageId;
+          const versionId = 'version-1.0.0';
+          expect(
+            (await w.admin.findManagedVersion(ctx, { packageId, versionId, projectId: null }))
+              ?.publishGate ?? false,
+          ).toBe(blocked);
+          const anchors = [
+            {
+              provider: 'oidc',
+              anchor: 'oidc:https://idp.example.test',
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test'],
+            },
+          ];
+          const store = createVisibilityStore(e, { providerAnchors: anchors });
+          const base = {
+            packageId,
+            versionId,
+            manage: { kind: 'organization' as const },
+            audit: h.input.event,
+          };
+          for (const method of [
+            'releaseQuarantine',
+            'quarantineVersion',
+            'tombstoneVersion',
+          ] as const) {
+            const expectedStatus =
+              method === 'quarantineVersion' ? ('active' as const) : ('quarantined' as const);
+            await e.all(st('UPDATE version SET status=?', expectedStatus));
+            const result = await store[method](ctx, h.fence, {
+              ...base,
+              audit: { ...h.input.event, id: ulid() },
+              expectedStatus,
+              reason: method === 'quarantineVersion' ? 'admin_quarantine' : 'admin_tombstone',
+            } as never);
+            expect(result.ok).toBe(!blocked);
+            if (blocked) expect(result).toMatchObject({ reason: 'publish_gate' });
+          }
+          await e.all(st("UPDATE version SET status='quarantined'"));
+          const result = await createCatalogueStatusRepository(e, {
+            providerAnchors: anchors,
+          }).releaseQuarantine(ctx, h.fence, { versionId });
+          expect(result.ok).toBe(!blocked);
+          if (blocked) expect(result).toMatchObject({ reason: 'publish_gate' });
+        }),
+    );
+    it('late approval preserves a quarantined newer latest', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(st('UPDATE source SET require_publish_approval=0'));
+        await w.writer.publishVersion(ctx, w.guard, w.input(false, '2.0.0'));
+        await e.all(st("UPDATE version SET status='quarantined' WHERE version='2.0.0'"));
+        expect(await h.repo.decide(ctx, h.fence, h.input)).toMatchObject({ changed: true });
+        expect(await e.all(st("SELECT version_id FROM dist_tag WHERE tag='latest'"))).toEqual([
+          { version_id: 'version-2.0.0' },
+        ]);
+      }));
+    it('lists fifty inspections in one bounded statement', () =>
+      run(async (e, w) => {
+        await held(e, w);
+        for (let i = 1; i < 50; i++)
+          await w.writer.publishVersion(ctx, w.guard, w.input(true, `1.0.${i}`));
+        let count = 0;
+        const statements: Statement[] = [];
+        const counted = {
+          ...e,
+          all: async <R>(statement: Statement) => {
+            count++;
+            statements.push(statement);
+            return e.all<R>(statement);
+          },
+          batch: e.batch.bind(e),
+        };
+        const page = await createPublishesRepository(counted).list(ctx, { limit: 50 });
+        expect(page.items).toHaveLength(50);
+        expect(count).toBe(1);
+        expect(statements[0]!.sql).toMatch(/limit \?/);
+        expect(statements[0]!.params.at(-1)).toBe(51);
+      }));
+    it.each(['rejected', 'expired'] as const)(
+      '%s does not schedule purge for a shared active blob',
+      (state) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(st('UPDATE source SET require_publish_approval=0'));
+          await w.writer.publishVersion(ctx, w.guard, w.input(false, '2.0.0'));
+          if (state === 'rejected')
+            await h.repo.decide(ctx, h.fence, {
+              ...h.input,
+              decision: 'rejected',
+              reason: 'Policy',
+            });
+          else {
+            await e.all(st("UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z'"));
+            await h.repo.expire(
+              ctx,
+              systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {}),
+              h.input,
+            );
+          }
+          expect(await e.all(st('SELECT purge_after FROM blob'))).toEqual([{ purge_after: null }]);
+        }),
+    );
+    it('approval activates version, readme, description and tags atomically', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE version SET metadata_json=json_set(metadata_json,'$.description','Approved description')",
+          ),
+        );
+        expect(await h.repo.decide(ctx, h.fence, h.input)).toEqual({
+          changed: true,
+          active: true,
+          revision: 2,
+        });
+        expect(await e.all(st('SELECT status FROM version'))).toEqual([{ status: 'active' }]);
+        expect(await e.all(st('SELECT held_until_active,description FROM package'))).toEqual([
+          { held_until_active: 0, description: 'Approved description' },
+        ]);
+        expect((await w.reader.distTags(ctx, ref))?.tags).toEqual({ latest: '1.0.0' });
+        expect(await createPackageReadmeReader(e).get(ctx, ref)).toEqual({
+          filename: 'README.md',
+          body: '# Widget',
+        });
+        expect(
+          await h.repo.decide(ctx, h.fence, {
+            ...h.input,
+            decision: 'rejected',
+            reason: 'Rejected',
+            event: { ...h.input.event, id: ulid() },
+          }),
+        ).toMatchObject({ changed: false });
+        expect(await e.all(st('SELECT count(*) n FROM audit_pending'))).toEqual([{ n: 2 }]);
+      }));
+    for (const [label, change] of [
+      ['stale revision', 'UPDATE publish_approval SET revision=2'],
+      ['changed scan state', "UPDATE publish_approval SET hold_scan=1,scan_state='allowed'"],
+      ['non-quarantined version', "UPDATE version SET status='active'"],
+      [
+        'self approval',
+        "UPDATE publish_approval SET requested_by_type='user',requested_by_id='approver'",
+      ],
+      ['expired request', "UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z'"],
+      ['revoked session', "UPDATE session SET revoked_at='2000-01-01T00:00:00.000Z'"],
+      ['lost permission', 'DELETE FROM role_permission'],
+    ])
+      it(`approval refuses ${label} without side effects`, () =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(st(change!));
+          const before = await e.all(st('SELECT * FROM publish_approval'));
+          const beforePackage = await e.all(st('SELECT * FROM package'));
+          const beforeBlob = await e.all(st('SELECT * FROM blob'));
+          const beforeVersion = await e.all(st('SELECT * FROM version'));
+          expect(await h.repo.decide(ctx, h.fence, h.input)).toMatchObject({ changed: false });
+          expect(await e.all(st('SELECT * FROM publish_approval'))).toEqual(before);
+          expect(await e.all(st('SELECT * FROM package'))).toEqual(beforePackage);
+          expect(await e.all(st('SELECT * FROM blob'))).toEqual(beforeBlob);
+          expect(await e.all(st('SELECT * FROM version'))).toEqual(beforeVersion);
+          expect(await e.all(st('SELECT count(*) n FROM audit_pending'))).toEqual([{ n: 1 }]);
+          expect(await e.all(st('SELECT count(*) n FROM dist_tag'))).toEqual([{ n: 0 }]);
+        }));
+    it('approval preserves the scan hold', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(st("UPDATE publish_approval SET hold_scan=1,scan_state='queued'"));
+        expect(
+          await h.repo.decide(ctx, h.fence, { ...h.input, expectedScanState: 'queued' }),
+        ).toEqual({ changed: true, active: false, revision: 2 });
+        expect(await e.all(st('SELECT status FROM version'))).toEqual([{ status: 'quarantined' }]);
+        expect(await e.all(st('SELECT count(*) n FROM dist_tag'))).toEqual([{ n: 0 }]);
+      }));
+    it('reject tombstones and schedules blob purge in seven days', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        expect(
+          await h.repo.decide(ctx, h.fence, {
+            ...h.input,
+            decision: 'rejected',
+            reason: 'Policy refusal',
+            event: { ...h.input.event, action: 'publish.reject' },
+          }),
+        ).toMatchObject({ changed: true, active: false });
+        expect(
+          await e.all(st('SELECT status,tombstone_reason,tombstoned_at FROM version')),
+        ).toEqual([{ status: 'tombstoned', tombstone_reason: 'rejected', tombstoned_at: NOW }]);
+        expect(await e.all(st('SELECT purge_after FROM blob'))).toEqual([
+          { purge_after: '2026-11-06T00:00:00.000Z' },
+        ]);
+      }));
+    it('expiry is due-only, leased, revision-guarded and audited once', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        const fence = systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {});
+        expect(await h.repo.expire(ctx, fence, h.input)).toMatchObject({ changed: false });
+        await e.all(st("UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z'"));
+        expect(
+          await h.repo.expire(ctx, fence, {
+            ...h.input,
+            event: { ...h.input.event, action: 'publish.expire' },
+          }),
+        ).toEqual({ changed: true, active: false, revision: 2 });
+        expect(await h.repo.expire(ctx, fence, h.input)).toMatchObject({ changed: false });
+        expect(await e.all(st('SELECT status,tombstone_reason FROM version'))).toEqual([
+          { status: 'tombstoned', tombstone_reason: 'expired' },
+        ]);
+        expect(await e.all(st('SELECT count(*) n FROM audit_pending'))).toEqual([{ n: 2 }]);
+      }));
+    it('late approval keeps a newer latest and its description', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(st('UPDATE source SET require_publish_approval=0'));
+        await w.writer.publishVersion(ctx, w.guard, w.input(false, '2.0.0'));
+        expect(await h.repo.decide(ctx, h.fence, h.input)).toMatchObject({
+          changed: true,
+          active: true,
+        });
+        expect((await w.reader.distTags(ctx, ref))?.tags).toEqual({ latest: '2.0.0' });
+        expect(await e.all(st('SELECT description FROM package'))).toEqual([
+          { description: 'Public description' },
+        ]);
+      }));
+    it('rejected hosted blobs remain eligible for their scheduled purge', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await h.repo.decide(ctx, h.fence, {
+          ...h.input,
+          decision: 'rejected',
+          reason: 'Policy refusal',
+        });
+        const reader = createBlobReferenceReader(e);
+        expect(await reader.stillEligible(ctx, 'a'.repeat(64))).toBe(true);
+        expect(await reader.scheduledIneligible(ctx, { limit: 10 })).toEqual([]);
+      }));
+    it('expired page is organization-scoped and capped at ten', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        for (let i = 1; i <= 10; i++)
+          await w.writer.publishVersion(ctx, w.guard, w.input(true, `1.0.${i}`));
+        expect(await h.repo.listExpired(ctx, NOW)).toEqual([]);
+        await e.all(st("UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z'"));
+        expect(await h.repo.listExpired(ctx, NOW)).toHaveLength(10);
+        expect(await h.repo.listExpired(orgContext('other'), NOW)).toEqual([]);
+        expect((await h.repo.list(ctx, { limit: 2, state: 'pending' })).next).not.toBeNull();
+        const first = await h.repo.list(ctx, { limit: 2 });
+        const next = await h.repo.list(ctx, { limit: 2, cursor: first.next! });
+        expect(next.items.some((item) => first.items.some((prior) => prior.id === item.id))).toBe(
+          false,
+        );
+        let continued = 0;
+        await createPublishApprovalExpireJob({ publishes: h.repo }).handler({}, {
+          org: ctx,
+          jobId: 'job',
+          idempotencyKey: 'expiry',
+          attempt: 1,
+          fence: 1,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: {
+            clock: fixedClock(NOW),
+            ids: { ulid },
+            platform: {
+              jobs: {
+                enqueue: async () => {
+                  continued++;
+                  return { id: 'continuation', created: true };
+                },
+              },
+            },
+          },
+        } as never);
+        expect(
+          await e.all(st("SELECT count(*) n FROM publish_approval WHERE approval_state='expired'")),
+        ).toEqual([{ n: 10 }]);
+        expect(continued).toBe(1);
+        const audits = await e.all<{ payload_json: string }>(
+          st("SELECT payload_json FROM audit_pending WHERE action='publish.expire'"),
+        );
+        expect(audits).toHaveLength(10);
+        for (const audit of audits)
+          expect(JSON.parse(audit.payload_json)).toMatchObject({
+            changes: { package: { new: 'widget' }, version: { new: expect.any(String) } },
+          });
+      }));
+    it('expiry refuses a lost job lease', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(st("UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z'"));
+        await e.all(st('UPDATE job SET fence=2'));
+        await expect(
+          h.repo.expire(
+            ctx,
+            systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {}),
+            h.input,
+          ),
+        ).rejects.toThrow();
+        expect((await h.repo.get(ctx, h.input.id))?.approvalState).toBe('pending');
+        expect(await e.all(st('SELECT count(*) n FROM audit_pending'))).toEqual([{ n: 1 }]);
+      }));
+    it('decisions are scoped to the organization', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        expect(await h.repo.decide(orgContext('other'), h.fence, h.input)).toMatchObject({
+          changed: false,
+        });
+        expect((await h.repo.get(ctx, h.input.id))?.approvalState).toBe('pending');
+      }));
+    it('rejection requires a nonempty reason of at most 1000 UTF-8 bytes', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        for (const reason of [
+          '',
+          'é'.repeat(501),
+          'https://user:password@example.test/archive',
+          'person@example.test',
+        ])
+          await expect(
+            h.repo.decide(ctx, h.fence, { ...h.input, decision: 'rejected', reason }),
+          ).rejects.toThrow('invalid_decision_reason');
+        expect((await h.repo.get(ctx, h.input.id))?.approvalState).toBe('pending');
+      }));
+    it('publisher role bootstrap is insert-only and audited on each backend', () =>
+      run(async (e) => {
+        await e.all(st("INSERT INTO cache_epoch(org_id,version) VALUES ('org','epoch')"));
+        const ids = Object.fromEntries(DEFAULT_ROLES.map((role) => [role.key, ulid()])) as Record<
+          DefaultRoleKey,
+          string
+        >;
+        const input = {
+          email: 'bootstrap@example.test',
+          userId: ulid(),
+          setupHash: 'a'.repeat(64),
+          setupExpiresAt: '2099-01-01T00:00:00.000Z',
+          grantId: ulid(),
+          roleIds: ids,
+          opId: ulid(),
+          now: NOW,
+        };
+        await bootstrapAdmin(e, ctx, input);
+        expect(
+          await e.all(st("SELECT count(*) n FROM audit_pending WHERE action='role.create'")),
+        ).toEqual([{ n: 0 }]);
+        await e.all(st("DELETE FROM role WHERE org_id='org' AND key='organization_publisher'"));
+        await bootstrapAdmin(e, ctx, input);
+        await e.all(
+          st(
+            "UPDATE role SET name='Preserved' WHERE key='organization_publisher' AND org_id='org'",
+          ),
+        );
+        await bootstrapAdmin(e, ctx, input);
+        expect(
+          await e.all(
+            st("SELECT name FROM role WHERE org_id='org' AND key='organization_publisher'"),
+          ),
+        ).toEqual([{ name: 'Preserved' }]);
+        expect(
+          await e.all(st("SELECT count(*) n FROM audit_pending WHERE action='role.create'")),
+        ).toEqual([{ n: 1 }]);
+      }));
+    it('exports safe display names without account e-mails or credentials', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st("UPDATE service_principal SET name='https://user:password@example.test/archive'"),
+        );
+        await e.all(st("UPDATE source SET name='person@example.test'"));
+        const item = await h.repo.get(ctx, h.input.id);
+        expect(item?.requestedBy.name).toBe('Service');
+        expect(item?.sourceName).toBe('Source');
+        expect(JSON.stringify(item)).not.toContain('password');
+        expect(JSON.stringify(item)).not.toContain('example.test');
+      }));
+    it('concurrent approve and reject record exactly one decision', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        const outcomes = await Promise.all([
+          h.repo.decide(ctx, h.fence, h.input),
+          h.repo.decide(ctx, h.fence, {
+            ...h.input,
+            decision: 'rejected',
+            reason: 'Policy refusal',
+            event: { ...h.input.event, id: ulid(), action: 'publish.reject' },
+          }),
+        ]);
+        expect(outcomes.filter((result) => result.changed)).toHaveLength(1);
+        expect(
+          await e.all(
+            st(
+              "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject')",
+            ),
+          ),
+        ).toEqual([{ n: 1 }]);
+      }));
+    for (const decision of ['approve', 'reject'] as const)
+      it(`approval API ${decision} has the same HTTP contract on both runtimes`, () =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          const id = ulid();
+          await e.all(st('UPDATE publish_approval SET id=? WHERE id=?', id, h.input.id));
+          const csrf = 'B'.repeat(43),
+            csrfHash = await sha256Hex(csrf);
+          const engine = createAuthorizationEngine({
+            access: {
+              lookupSession: async () => ({
+                session: { id: 'session', csrfHash },
+                user: { id: 'approver' },
+                identity: null,
+                protectedHolder: false,
+                project: null,
+                organizationPermissions: ['org:packages:read', 'org:packages:approve'],
+                projectPermissions: [],
+              }),
+              lookupToken: async () => null,
+              touchSession: async () => true,
+              touchToken: async () => true,
+            },
+            tokenUse: {
+              keyring: createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]),
+              nowMs: () => 0,
+              dispatch: () => undefined,
+              log: () => undefined,
+            },
+            patValidation: patValidationGate,
+            publicOrigin: 'https://broker.test',
+            providerAnchors: async () => [],
+          });
+          const kernel = await createKernel({
+            platform: name === 'd1' ? 'cloudflare' : 'node',
+            plugins: [],
+            ports: {
+              organizations: { get: async () => null },
+              clock: fixedClock(NOW),
+              ids: { ulid },
+            },
+            resolveOrg: async () => ctx,
+            health: async () => true,
+            log: () => undefined,
+            authorization: engine,
+            coreRoutes: publishRoutes({
+              publishes: h.repo,
+              clock: fixedClock(NOW),
+              ids: { ulid },
+              clientIp: () => null,
+            }),
+          });
+          const call = (path: string, method = 'GET', match?: string) =>
+            kernel.fetch(
+              new Request('https://broker.test' + path, {
+                method,
+                headers: {
+                  cookie: `__Host-pb_session=${'A'.repeat(43)}; __Host-pb_csrf=${csrf}`,
+                  origin: 'https://broker.test',
+                  ...(method === 'POST'
+                    ? { 'content-type': 'application/json', 'x-csrf-token': csrf }
+                    : {}),
+                  ...(match ? { 'if-match': match } : {}),
+                },
+                ...(method === 'POST'
+                  ? {
+                      body: JSON.stringify(
+                        decision === 'reject' ? { reason: 'Policy refusal' } : {},
+                      ),
+                    }
+                  : {}),
+              }),
+            );
+          const listed = await call('/_pb/publishes?state=pending');
+          expect(listed.status).toBe(200);
+          expect(((await listed.json()) as { items: { id: string }[] }).items[0]?.id).toBe(id);
+          const inspected = await call('/_pb/publishes/' + id);
+          expect(inspected.status).toBe(200);
+          expect(inspected.headers.get('etag')).toBe('"r1"');
+          expect((await call(`/_pb/publishes/${id}/${decision}`, 'POST')).status).toBe(428);
+          const decided = await call(`/_pb/publishes/${id}/${decision}`, 'POST', '"r1"');
+          expect(decided.status).toBe(200);
+          expect(decided.headers.get('etag')).toBe('"r2"');
+          expect((await call(`/_pb/publishes/${id}/${decision}`, 'POST', '"r1"')).status).toBe(409);
+          expect(
+            await e.all(
+              st(
+                "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject')",
+              ),
+            ),
+          ).toEqual([{ n: 1 }]);
+        }));
+    it('refuses decisions for a different actor or fence kind', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        const system = systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {});
+        await expect(h.repo.decide(ctx, system, h.input)).rejects.toThrow('invalid_publish_fence');
+        await expect(h.repo.expire(ctx, h.fence, h.input)).rejects.toThrow('invalid_publish_fence');
+        await expect(
+          h.repo.expire(
+            ctx,
+            systemMutationFence('purge', { id: 'job', owner: 'owner', fence: 1 }, {}),
+            h.input,
+          ),
+        ).rejects.toThrow('invalid_publish_fence');
+        await expect(
+          h.repo.decide(ctx, h.fence, { ...h.input, decidedByUserId: 'different' }),
+        ).rejects.toThrow('invalid_publish_actor');
+      }));
+    it('refuses an already decided approval even while the scan holds it', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,scan_state='queued',approval_state='approved',decided_by_user_id='approver',decided_at='2026-10-30T00:00:00.000Z'",
+          ),
+        );
+        expect(
+          await h.repo.decide(ctx, h.fence, {
+            ...h.input,
+            expectedApprovalState: 'approved',
+            expectedScanState: 'queued',
+          }),
+        ).toMatchObject({ changed: false });
+      }));
+    it('fences a latest change between inspection and the decision batch', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(st('UPDATE source SET require_publish_approval=0'));
+        const raced = createPublishesRepository(
+          {
+            ...e,
+            batch: async (statements) => {
+              await w.writer.publishVersion(ctx, w.guard, w.input(false, '2.0.0'));
+              return e.batch(statements);
+            },
+          },
+          [
+            {
+              provider: 'oidc',
+              anchor: 'oidc:https://idp.example.test',
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test'],
+            },
+          ],
+        );
+        expect(await raced.decide(ctx, h.fence, h.input)).toMatchObject({ changed: false });
+        expect((await h.repo.get(ctx, h.input.id))?.approvalState).toBe('pending');
+        expect((await w.reader.distTags(ctx, ref))?.tags).toEqual({ latest: '2.0.0' });
+      }));
+    it('self-rejection does not use the self-approval refusal', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st("UPDATE publish_approval SET requested_by_type='user',requested_by_id='approver'"),
+        );
+        expect(
+          await h.repo.decide(ctx, h.fence, {
+            ...h.input,
+            decision: 'rejected',
+            reason: 'Rejected by requester',
+          }),
+        ).toMatchObject({ changed: true, active: false });
+      }));
     it('resolves the package audit target inside the publication batch', () =>
       run(async (e, w) => {
         const result = await w.writer.publishVersion(ctx, w.guard, w.input());

@@ -234,6 +234,18 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ownerPacket: 'T531',
   },
   {
+    dependency: 'publishes',
+    constructed: 'publishes repository',
+    routes: [
+      'GET /_pb/publishes',
+      'GET /_pb/publishes/:id',
+      'POST /_pb/publishes/:id/approve',
+      'POST /_pb/publishes/:id/reject',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM10',
+  },
+  {
     dependency: 'packages',
     constructed: 'package admin reader and vulnerability status reader',
     routes: [
@@ -304,11 +316,13 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
     expect(entry.ownerPacket).toBe(
-      entry.dependency === 'sourcePackages'
-        ? 'T1041'
-        : entry.dependency === 'npmLogin'
-          ? 'NPM16'
-          : 'T531',
+      entry.dependency === 'publishes'
+        ? 'NPM10'
+        : entry.dependency === 'sourcePackages'
+          ? 'T1041'
+          : entry.dependency === 'npmLogin'
+            ? 'NPM16'
+            : 'T531',
     );
     for (const key of entry.routes) {
       expect(

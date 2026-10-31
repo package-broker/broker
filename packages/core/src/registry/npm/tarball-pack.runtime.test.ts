@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { gunzipSync } from 'node:zlib';
 import { afterAll, expect, it } from 'vitest';
-import type { Codecs } from '../../platform/codec';
-import { archive, entry, stream } from '../../test-support/npm-publish';
-import { packTarball } from './tarball-pack';
+import type { Codecs } from '../../platform/codec.js';
+import { archive, entry, stream } from '../../test-support/npm-publish.js';
+import { packTarball } from './tarball-pack.js';
 
 const read = (path: string) =>
   stripTypeScriptTypes(readFileSync(new URL(path, import.meta.url), 'utf8'), { mode: 'strip' });
@@ -19,7 +19,7 @@ const { Miniflare, convertV4MiniflareOptions } = requireRuntime('miniflare') as 
   convertV4MiniflareOptions(options: object): object;
 };
 const moduleCode = (file: string) =>
-  read('./' + file + '.ts').replaceAll(/from '(\.\/[a-z-]+)'/g, "from '$1.mjs'");
+  read('./' + file + '.ts').replaceAll(/from '(\.\/[a-z-]+)\.js'/g, "from '$1.mjs'");
 const codecCore = read('../../platform/codec.ts');
 const codecURL = 'data:text/javascript;base64,' + Buffer.from(codecCore).toString('base64');
 const nodeCode = read('../../../../runtime-node/src/codec/node-codec.ts').replaceAll(

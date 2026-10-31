@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.3...core-v2.0.0-rc.4) (2026-10-31)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **auth:** hide SSO confirmation when the provider cannot prove a fresh sign-in ([#987](https://github.com/package-broker/broker/issues/987)) ([1f1ccca](https://github.com/package-broker/broker/commit/1f1cccaa65fcecea157010d606aacde91976f429)), closes [#964](https://github.com/package-broker/broker/issues/964)
+* **blob:** staged writes for streamed npm publishes ([#996](https://github.com/package-broker/broker/issues/996)) ([e04b746](https://github.com/package-broker/broker/commit/e04b74640be5bbfe1fa30dd757cc5fb49d45a36d))
+* **catalogue:** publishVersion writer, tag patch mode and held-version invisibility ([#1002](https://github.com/package-broker/broker/issues/1002)) ([f790eb4](https://github.com/package-broker/broker/commit/f790eb48d3a20fb28b8d208d8dc4d54a99820a37))
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **db:** migration 0002 for npm publish approval, access requests and readmes ([#1000](https://github.com/package-broker/broker/issues/1000)) ([afdea50](https://github.com/package-broker/broker/commit/afdea5017d5309a9593e6a2abd2e2f8336c15da0))
+* **registry:** aggregate memory bounds for the npm walker and re-pack ([#1007](https://github.com/package-broker/broker/issues/1007)) ([03f398c](https://github.com/package-broker/broker/commit/03f398c981a8d871d2503e3a38d5512897777179))
+* **registry:** npm publish size limits and licence switch ([#994](https://github.com/package-broker/broker/issues/994)) ([773f910](https://github.com/package-broker/broker/commit/773f9108cb519f9a3fadc9fee403bf3c9a8f37c6))
+* **registry:** npm web login with browser approval ([#1012](https://github.com/package-broker/broker/issues/1012)) ([f39fa8e](https://github.com/package-broker/broker/commit/f39fa8e2ac7673a4685de1b4e0aa308cb0b2d71a))
+* **registry:** npm whoami on both runtimes ([#995](https://github.com/package-broker/broker/issues/995)) ([59a68dd](https://github.com/package-broker/broker/commit/59a68ddc4bbd86cd820e3e83ab2095a0f593037b))
+* **registry:** re-pack GitHub repository tarballs into npm packages ([#999](https://github.com/package-broker/broker/issues/999)) ([331cc05](https://github.com/package-broker/broker/commit/331cc05ee008e824d6e2141cf5766d2f5865e374))
+* **registry:** streaming npm publish body scanner and tar walker ([#993](https://github.com/package-broker/broker/issues/993)) ([4ec7dfa](https://github.com/package-broker/broker/commit/4ec7dfaf784e2d0d20ee3c9e8c5b386699c5ad1f))
+* **registry:** verify GitHub Actions OIDC tokens for npm trusted publishing ([#1011](https://github.com/package-broker/broker/issues/1011)) ([783e2ea](https://github.com/package-broker/broker/commit/783e2ea9011ccba6fd7b27329308c3d36133984e))
+* **sources:** build npm packages from GitHub and Git repository tags ([#1015](https://github.com/package-broker/broker/issues/1015)) ([403f684](https://github.com/package-broker/broker/commit/403f68463ff041faab588a295f2ef4e9f2fd5eed))
+* **sources:** hosted claims follow-ups and copy before publishing ([#1006](https://github.com/package-broker/broker/issues/1006)) ([c72ca04](https://github.com/package-broker/broker/commit/c72ca04d047143465a9f74bc8bc435c7c47b1143))
+* **sources:** hosted npm sources with claim admission ([#997](https://github.com/package-broker/broker/issues/997)) ([6af51fb](https://github.com/package-broker/broker/commit/6af51fb3c53de6a0b0c76dfabe35a622581589d8))
+* **sources:** npm packages from GitHub repositories with claim admission ([#1013](https://github.com/package-broker/broker/issues/1013)) ([a712143](https://github.com/package-broker/broker/commit/a7121436e0ef57595561a7fd31192cba28f0ef88))
+
 ## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.2...core-v2.0.0-rc.3) (2026-10-28)
 
 

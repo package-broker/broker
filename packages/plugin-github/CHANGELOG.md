@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.0-rc.4](https://github.com/package-broker/broker/compare/plugin-github-v0.1.0-rc.3...plugin-github-v0.1.0-rc.4) (2026-10-31)
+
+
+### Features
+
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **sources:** build npm packages from GitHub and Git repository tags ([#1015](https://github.com/package-broker/broker/issues/1015)) ([403f684](https://github.com/package-broker/broker/commit/403f68463ff041faab588a295f2ef4e9f2fd5eed))
+* **sources:** npm packages from GitHub repositories with claim admission ([#1013](https://github.com/package-broker/broker/issues/1013)) ([a712143](https://github.com/package-broker/broker/commit/a7121436e0ef57595561a7fd31192cba28f0ef88))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+
 ## [0.1.0-rc.3](https://github.com/package-broker/broker/compare/plugin-github-v0.1.0-rc.2...plugin-github-v0.1.0-rc.3) (2026-10-28)
 
 

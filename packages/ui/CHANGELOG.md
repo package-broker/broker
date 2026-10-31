@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.3...ui-v2.0.0-rc.4) (2026-10-31)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **auth:** hide SSO confirmation when the provider cannot prove a fresh sign-in ([#987](https://github.com/package-broker/broker/issues/987)) ([1f1ccca](https://github.com/package-broker/broker/commit/1f1cccaa65fcecea157010d606aacde91976f429)), closes [#964](https://github.com/package-broker/broker/issues/964)
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **registry:** npm web login with browser approval ([#1012](https://github.com/package-broker/broker/issues/1012)) ([f39fa8e](https://github.com/package-broker/broker/commit/f39fa8e2ac7673a4685de1b4e0aa308cb0b2d71a))
+* **sources:** build npm packages from GitHub and Git repository tags ([#1015](https://github.com/package-broker/broker/issues/1015)) ([403f684](https://github.com/package-broker/broker/commit/403f68463ff041faab588a295f2ef4e9f2fd5eed))
+* **sources:** hosted claims follow-ups and copy before publishing ([#1006](https://github.com/package-broker/broker/issues/1006)) ([c72ca04](https://github.com/package-broker/broker/commit/c72ca04d047143465a9f74bc8bc435c7c47b1143))
+* **sources:** hosted npm sources with claim admission ([#997](https://github.com/package-broker/broker/issues/997)) ([6af51fb](https://github.com/package-broker/broker/commit/6af51fb3c53de6a0b0c76dfabe35a622581589d8))
+* **sources:** npm packages from GitHub repositories with claim admission ([#1013](https://github.com/package-broker/broker/issues/1013)) ([a712143](https://github.com/package-broker/broker/commit/a7121436e0ef57595561a7fd31192cba28f0ef88))
+* **ui:** pending publishes, access requests and package detail page ([#1018](https://github.com/package-broker/broker/issues/1018)) ([8a55f55](https://github.com/package-broker/broker/commit/8a55f55a5d868c82ef765dc95b38924f110e161b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+
 ## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.2...ui-v2.0.0-rc.3) (2026-10-28)
 
 

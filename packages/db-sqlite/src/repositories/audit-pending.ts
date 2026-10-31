@@ -4,6 +4,7 @@ import { isUlid } from '@package-broker/core/ids';
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const RESERVE_ACTIONS = new Set([
+  'setup.complete',
   'identity.block',
   'user.suspend',
   'token.revoke',

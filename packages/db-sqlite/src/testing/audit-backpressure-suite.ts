@@ -7,7 +7,20 @@ import { noopObservability } from '@package-broker/core/platform/observability';
 import { sql } from 'kysely';
 import { assertGuard, runOrgFenced } from '../kysely.js';
 import { auditPendingStatement, auditReserveStatements } from '../repositories/audit-pending.js';
-import { ulid } from '@package-broker/core/ids';
+import { createLocalSetupService } from '@package-broker/core/auth/local-setup';
+import { randomToken, sha256Hex } from '@package-broker/core/auth/primitives';
+import { createSessionService } from '@package-broker/core/auth/session';
+import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
+import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
+import { createSecretCipher } from '@package-broker/core/secrets/cipher';
+import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { bootstrapAdmin, resetLocalLogin } from '../repositories/admin-bootstrap.js';
+import { createCredentialRepository } from '../repositories/credential.js';
+import { createLocalLoginReader } from '../repositories/local-login.js';
+import { createLocalLoginSetupWriter } from '../repositories/local-login-setup.js';
+import { createSessionRepository } from '../repositories/session.js';
+import { fixedClock, ulid } from '@package-broker/core/ids';
 import { createUnlinkRepository } from '../repositories/unlink.js';
 import { createAuditPruneRepository } from '../repositories/audit-prune.js';
 import { seedAuditFork } from './audit-fork-suite.js';
@@ -27,6 +40,7 @@ const event: AuditEvent = {
   payloadJson: '{}',
 };
 const reserve: readonly AuditAction[] = [
+  'setup.complete',
   'session.login',
   'session.logout',
   'session.reauth',
@@ -112,6 +126,112 @@ export function auditBackpressureSuite(open: () => Promise<MigratedDatabase>): v
     it.each(reserve)('keeps %s in the reserve', async (action) => {
       await database.executor.batch([business(), stage(action)]);
       expect(await pending()).toEqual([{ action }]);
+    });
+    it.each([false, true])('finishes local setup while refusing (reset=%s)', async (reset) => {
+      const { executor } = database;
+      const ctx = database.orgs!.a;
+      const now = event.occurredAt;
+      const clock = fixedClock(now);
+      const token = randomToken(32);
+      const email = 'setup-admin@example.test';
+      const userId = ulid();
+      const roleIds = Object.fromEntries(DEFAULT_ROLES.map(({ key }) => [key, ulid()])) as Record<
+        DefaultRoleKey,
+        string
+      >;
+      const setup = {
+        email,
+        userId,
+        setupHash: await sha256Hex(token),
+        setupExpiresAt: '2026-10-31T10:00:00.000Z',
+        grantId: ulid(),
+        roleIds,
+        opId: ulid(),
+        now,
+      };
+      expect(await bootstrapAdmin(executor, ctx, setup)).toBe('created');
+      const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(1) }]);
+      const service = createLocalSetupService({
+        reader: createLocalLoginReader(executor),
+        writer: createLocalLoginSetupWriter(executor),
+        credentials: createCredentialStore({
+          repository: createCredentialRepository(executor),
+          cipher: createSecretCipher(keyring, 'credential-encryption'),
+          ids: { ulid },
+          clock,
+        }),
+        sessions: createSessionService({
+          sessions: createSessionRepository(executor),
+          clock,
+          publicOrigin: 'https://broker.example.test',
+        }),
+        keyring,
+        clock,
+        ids: { ulid },
+      });
+      const finish = async (setupToken: string) => {
+        const started = await service.start(ctx, setupToken);
+        expect(started.ok).toBe(true);
+        if (!started.ok) throw new Error('Setup did not start');
+        return service.finish(
+          ctx,
+          {
+            token: setupToken,
+            password: 'correct horse battery staple',
+            code: await totpCode(
+              base32Decode(started.secret),
+              Math.floor(Date.parse(now) / 30_000),
+            ),
+          },
+          { requestId: ulid(), ip: null, userAgent: null, previousSecretHash: null },
+        );
+      };
+      expect(await finish(token)).toMatchObject({ ok: true, userId });
+      if (reset) {
+        const resetToken = randomToken(32);
+        expect(
+          await resetLocalLogin(executor, ctx, {
+            ...setup,
+            setupHash: await sha256Hex(resetToken),
+            opId: ulid(),
+          }),
+        ).toBe('reset');
+        expect(await finish(resetToken)).toMatchObject({ ok: true, userId });
+      }
+      expect(await pending()).toEqual(
+        Array.from({ length: reset ? 2 : 1 }, () => ({ action: 'setup.complete' })),
+      );
+      expect(
+        await executor.all({
+          sql: 'SELECT password_hash, totp_enabled_at, setup_hash FROM local_login WHERE org_id = ? AND user_id = ?',
+          params: [ctx.orgId, userId],
+        }),
+      ).toEqual([
+        {
+          password_hash: expect.stringContaining('pbkdf2-sha256$'),
+          totp_enabled_at: now,
+          setup_hash: null,
+        },
+      ]);
+      expect(
+        await executor.all({
+          sql: 'SELECT id FROM session WHERE org_id = ? AND user_id = ? AND revoked_at IS NULL',
+          params: [ctx.orgId, userId],
+        }),
+      ).toHaveLength(1);
+      expect(
+        await executor.all({
+          sql: 'SELECT policy, capacity_state FROM audit_chain WHERE org_id = ?',
+          params: [ctx.orgId],
+        }),
+      ).toEqual([{ policy: 'required', capacity_state: 'refusing' }]);
+      await expect(executor.batch([business(), stage()])).rejects.toMatchObject({
+        kind: 'backlog_full',
+      });
+      expect(
+        await executor.all({ sql: 'SELECT id FROM project WHERE org_id = ?', params: [ctx.orgId] }),
+      ).toEqual([]);
+      expect(await pending()).toHaveLength(reset ? 2 : 1);
     });
     it('propagates refusal through an organization fence and rolls back its cache epoch', async () => {
       const ctx = database.orgs!.a;

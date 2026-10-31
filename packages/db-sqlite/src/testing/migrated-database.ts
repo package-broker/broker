@@ -200,3 +200,10 @@ export async function auditBackpressureSuite(open: () => Promise<MigratedDatabas
   const { auditBackpressureSuite: run } = await import('./audit-backpressure-suite.js');
   run(open);
 }
+
+export async function auditEffectiveRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditEffectiveRepositorySuite: run } = await import('./audit-effective-suite.js');
+  run(open);
+}

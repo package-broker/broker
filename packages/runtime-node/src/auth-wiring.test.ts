@@ -220,6 +220,7 @@ describe('node auth wiring', () => {
     plugins: readonly PluginDefinition[] = [],
   ): Promise<NodeBroker> {
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins,
       migrations: await migrationSources(),
       env: env(overrides),
@@ -530,6 +531,7 @@ describe('node auth wiring', () => {
     async (setting, warns) => {
       const records: Array<Readonly<Record<string, unknown>>> = [];
       const broker = await startNode({
+        audit: { acceptNoDurableAudit: true },
         plugins: [],
         migrations: await migrationSources(),
         env: env({ PB_TRUSTED_PROXY: setting }),

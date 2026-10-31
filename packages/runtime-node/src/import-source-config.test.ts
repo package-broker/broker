@@ -177,6 +177,7 @@ async function testImport(legacy: boolean) {
   const records: Readonly<Record<string, unknown>>[] = [];
   const broker = createNodeServer([plugin], {
     executor: db.executor,
+    audit: { acceptNoDurableAudit: true },
     auth: { keyring, publicOrigin: ORIGIN, env: {} },
     platformServices: {
       blob: blobs,

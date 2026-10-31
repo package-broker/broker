@@ -55,6 +55,9 @@ describe('Node audit job registration', () => {
         ['core:vulnerability-sync:v1', { everySeconds: 300 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400, resourceKey: 'audit-verify' }],
+        ['core:audit-maintain:v1', { everySeconds: 60, resourceKey: 'audit-maintain' }],
+        ['core:audit-health-observe:v1', { everySeconds: 60, resourceKey: 'audit-health-observe' }],
+        ['core:audit-frontier:v1', { everySeconds: 86400, resourceKey: 'audit-frontier' }],
       ]);
       await executor.batch([
         {

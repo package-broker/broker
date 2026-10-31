@@ -257,6 +257,7 @@ describe('runtime SSO providers on the node runtime', () => {
   ): Promise<{ broker: NodeBroker; kernel: Kernel }> {
     const plugins: PluginDefinition[] = [ssoOidc(compiled)];
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins,
       migrations: await migrationSources(),
       env,

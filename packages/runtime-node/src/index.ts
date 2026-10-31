@@ -1,4 +1,9 @@
-import { resolveAuditJournalBudget } from '@package-broker/core/audit/effective';
+import { createNodeAudit } from './audit.js';
+import { createAuditStatusReader } from '@package-broker/db-sqlite/repositories/audit-status';
+import {
+  AuditResolutionError,
+  resolveAuditJournalBudget,
+} from '@package-broker/core/audit/effective';
 import { createFailureEvents } from '@package-broker/core/audit/failure-events';
 import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
@@ -315,6 +320,9 @@ export interface NodeServerOptions {
   readonly platformServices?: PlatformServices;
   readonly authorization?: AuthorizationEngine;
   readonly audit?: BrokerConfig['audit'];
+  readonly auditEnv?: Readonly<Record<string, string | undefined>>;
+  readonly auditPlatformPorts?: BrokerConfig['platformPorts'];
+  readonly auditGeneration?: number;
   /** Token lifetime maxima; an invalid value fails server creation. */
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
@@ -966,10 +974,11 @@ export function createNodeServer(
   const shutdownMs = seams.shutdownDeadlineMs ?? SHUTDOWN_IDLE_MS;
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
+  const auditEnv = options.auditEnv ?? { ...process.env, ...options.auth?.env };
   const maxJournalBytes = resolveAuditJournalBudget(
     options.audit,
     'node',
-    options.auth?.env.PB_AUDIT_POLICY ?? process.env.PB_AUDIT_POLICY,
+    auditEnv.PB_AUDIT_POLICY,
   );
   const auditCapacity = maxJournalBytes === null ? {} : { maxJournalBytes };
   const lifetime = resolveTokenLifetime(options.tokens);
@@ -979,6 +988,7 @@ export function createNodeServer(
 
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);
+  const resolveOrganization = createOrgResolver({ findSingleton: bootstrap.findSingleton });
 
   const ports: PluginPorts = Object.freeze({
     organizations: Object.freeze({ get: repository.get }),
@@ -1036,6 +1046,7 @@ export function createNodeServer(
         },
         options.observability?.level,
       );
+    let audit: Awaited<ReturnType<typeof createNodeAudit>> | undefined;
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
@@ -1054,7 +1065,7 @@ export function createNodeServer(
               },
               {
                 events: AUDIT_EVENTS,
-                reasonCodes: new Set(),
+                reasonCodes: KERNEL_REASON_CODES,
                 routeTemplates: new Set(),
               },
             ),
@@ -1143,7 +1154,7 @@ export function createNodeServer(
       options.platformServices as
         (PlatformServices & { readonly retention?: RetentionStorage }) | undefined
     )?.retention;
-    const registration = collectRegistrations(plugins, {
+    let registration = collectRegistrations(plugins, {
       ...(registry === undefined ? {} : { sourceProviderContext: registry.sourceProviderContext }),
       ...(packageResolver === undefined ? {} : { packageResolver }),
       coreJobs:
@@ -1168,6 +1179,52 @@ export function createNodeServer(
               ...(auth === undefined ? [] : patOffboardingRegistrations(executor, patJobs, log)),
             ],
     });
+    const auditEnabled =
+      options.executor !== undefined ||
+      registration.audit.trail !== null ||
+      registration.audit.sinks.length > 0 ||
+      options.audit !== undefined ||
+      auditEnv.PB_AUDIT_POLICY !== undefined;
+    if (auditEnabled && options.platformServices !== undefined) {
+      const schedules = [
+        { name: 'audit-maintain', everySeconds: 60, resourceKey: 'audit-maintain' },
+        { name: 'audit-health-observe', everySeconds: 60, resourceKey: 'audit-health-observe' },
+        { name: 'audit-frontier', everySeconds: 86400, resourceKey: 'audit-frontier' },
+        ...registration.audit.sinks.map(({ definition }) => ({
+          name: `audit-export-${definition.id}`,
+          everySeconds: 60,
+          resourceKey: `audit-export:${definition.id}`,
+        })),
+      ];
+      registration = {
+        ...registration,
+        jobs: [
+          ...registration.jobs,
+          ...schedules.map(({ name, ...schedule }) =>
+            registerAuditJob({
+              name,
+              version: 1,
+              maxAttempts: 3,
+              schedule,
+              validate: (payload) => {
+                if (
+                  payload === null ||
+                  typeof payload !== 'object' ||
+                  Array.isArray(payload) ||
+                  Reflect.ownKeys(payload).length !== 0
+                )
+                  throw new JobError('invalid_payload');
+                return {};
+              },
+              async handler(payload, context) {
+                const job = audit?.jobs.find((job) => job.name === name);
+                if (job !== undefined) await job.handler(job.validate(payload), context);
+              },
+            }),
+          ),
+        ],
+      };
+    }
     if (registry !== undefined && options.platformServices !== undefined) {
       await registry.bindSourceProviders(registration.sourceProviders.values());
       registry.bindJobs(
@@ -1240,6 +1297,35 @@ export function createNodeServer(
         ? []
         : createApiRoutes({
             registration,
+            ...(options.platformServices === undefined
+              ? {}
+              : {
+                  auditJobs: createRepositoryJobs({
+                    store: options.platformServices.jobStore,
+                    jobs: registration.jobs,
+                    clock: systemClock,
+                    ids: { ulid },
+                  })('core', { projectId: null, tokenId: null }),
+                }),
+            ...(!auditEnabled
+              ? {}
+              : {
+                  effectiveAudit: (org: OrgContext) => audit!.effective(org),
+                  auditStatus: {
+                    reader: createAuditStatusReader(executor),
+                    effective: (org: OrgContext) => audit!.effective(org),
+                    modeSource: (org: OrgContext) => audit!.status.modeSource(org),
+                  },
+                  auditHealth: {
+                    read: (org: OrgContext) => audit!.health.read(org),
+                  },
+                  auditTrail: { effective: (org: OrgContext) => audit!.effective(org) },
+                  auditAlerts: {
+                    raise: (org: OrgContext) => {
+                      void audit!.raise(org, 'audit.withheld');
+                    },
+                  },
+                }),
             clientIp,
             executor,
             runtime: 'node',
@@ -1323,7 +1409,11 @@ export function createNodeServer(
       publicOrigin: auth?.publicOrigin,
       registration,
       ports,
-      resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
+      resolveOrg: async (request?: Request) => {
+        const org = await resolveOrganization();
+        if (audit !== undefined) await audit.resolveRequest(org, request);
+        return org;
+      },
       health: async () => (await bootstrap.findSingleton()) !== null,
       ...(migrations === undefined
         ? {}
@@ -1336,6 +1426,56 @@ export function createNodeServer(
       coreRoutes,
       ...(authorization === undefined ? {} : { authorization }),
     });
+    if (auditEnabled) {
+      audit = await createNodeAudit({
+        config: {
+          platform: 'node',
+          plugins,
+          ...(options.audit === undefined ? {} : { audit: options.audit }),
+          ...(options.auditPlatformPorts === undefined
+            ? {}
+            : { platformPorts: options.auditPlatformPorts }),
+        },
+        env: (name) => auditEnv[name],
+        executor,
+        dispatch: dispatchFailures,
+        observability: createObservability(
+          obsSink,
+          { deploymentId, runtime: 'node', requestId: null, plugin: 'core' },
+          { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+        ),
+        ...(options.observability?.deploymentId === undefined
+          ? {}
+          : { deploymentId: options.observability.deploymentId }),
+        generation: options.auditGeneration ?? 0,
+        maxJournalBytes,
+        telemetryActive:
+          options.observability !== undefined &&
+          options.auditPlatformPorts?.node?.observability.endpointEnv !== undefined &&
+          Boolean(auditEnv[options.auditPlatformPorts.node.observability.endpointEnv]),
+        registration: () => kernel.registration,
+      });
+    }
+    if (
+      audit !== undefined &&
+      options.executor !== undefined &&
+      (options.servingGate === undefined || (await options.servingGate()))
+    ) {
+      const organization = await bootstrap.findSingleton();
+      if (organization !== null) {
+        const org = await resolveOrganization();
+        try {
+          await audit.probe(org, AbortSignal.timeout(1500));
+        } catch (error) {
+          if (!(error instanceof AuditResolutionError) || error.transient)
+            log({
+              level: 'error',
+              event: 'audit.effective_unavailable',
+              reason_code: 'audit.effective_unavailable',
+            });
+        }
+      }
+    }
     for (const template of kernel.routeTemplates) failureRouteTemplates.add(template);
     const services: NodeServices = Object.freeze({
       providerAnchors: access?.providerAnchors ?? NO_ANCHORS,

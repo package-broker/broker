@@ -231,6 +231,7 @@ async function nodeDelivery(out, expected, manifest) {
       PB_SQLITE_PATH: database,
       PB_MASTER_KEY: MASTER_KEY,
       PB_PUBLIC_URL: origin,
+      PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
       PB_ORG_SLUG: 'install',
       PB_ORG_NAME: 'Installation',
     },

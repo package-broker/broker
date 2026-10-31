@@ -99,6 +99,7 @@ describe('createNodeServer', () => {
     overrides: { closeDatabase?: () => Promise<void> } = {},
   ): NodeBroker {
     return createNodeServer(plugins, {
+      audit: { acceptNoDurableAudit: true },
       executor: opened.executor,
       log,
       ...overrides,
@@ -200,6 +201,7 @@ describe('createNodeServer', () => {
     const { plugin } = brokerPlugin('whoami');
     const entries: Array<Readonly<Record<string, unknown>>> = [];
     const broker = createNodeServer([plugin], {
+      audit: { acceptNoDurableAudit: true },
       executor: opened.executor,
       log: (entry) => {
         entries.push(entry);

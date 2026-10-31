@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { isUlid } from '../ids.js';
 import { orgContext } from '../db/port.js';
 import { AUDIT_NONE_WARNING, validateAuditBuild } from './effective.js';
 import {
@@ -103,9 +102,8 @@ describe('mode none', () => {
         tokenSelector: null,
       });
       const payload = JSON.parse(event.payloadJson);
-      expect(isUlid(payload.op_id)).toBe(true);
-      expect(isUlid(payload.request_id)).toBe(true);
-      expect(new Set([...options().ids, payload.op_id, payload.request_id]).size).toBe(5);
+      expect(payload.op_id).toBeNull();
+      expect(payload.request_id).toBeNull();
       expect(JSON.parse(event.payloadJson).changes).toEqual({
         from_mode: { new: 'trail' },
         to_mode: { new: 'none' },
@@ -299,12 +297,10 @@ describe('mode none', () => {
     expect(auditNoneStatus(await port.snapshot(ctx)).cutoverSeq).toBe(0);
   });
 
-  it('uses the pending mode as the transition source', async () => {
+  it('refuses to replace an already pending cutover', async () => {
     const port = storage({ ...initial, pendingMode: 'export' });
-    await enterAuditNone(port, ctx, options());
-    expect(JSON.parse(port.record.mock.calls[0]![4].payloadJson).changes.from_mode).toEqual({
-      new: 'export',
-    });
+    expect(await enterAuditNone(port, ctx, options())).toEqual({ outcome: 'contended' });
+    expect(port.record).not.toHaveBeenCalled();
   });
 
   it.each([{ generation: -1 }, { generation: NaN }, { ids: ['invalid', 'invalid', 'invalid'] }])(

@@ -1,3 +1,4 @@
+import { AuditResolutionError, claimAuditResolutionLog } from '../audit/effective.js';
 import { API_ERROR_CODES } from '../api/response.js';
 import { UpstreamError } from '../sources/policy-fetch.js';
 import { DbError } from '../db/errors.js';
@@ -56,6 +57,14 @@ interface Mapping {
 }
 
 function mappingOf(error: unknown): Mapping {
+  if (error instanceof AuditResolutionError) {
+    return {
+      status: 503,
+      code: error.code,
+      message: 'Audit is unavailable',
+      ...(error.transient ? { retryAfterSeconds: 5 } : {}),
+    };
+  }
   if (error instanceof UpstreamError && error.code === 'refused') {
     return { ...API_ERROR_CODES.upstream_refused, code: 'upstream_refused' };
   }
@@ -105,7 +114,7 @@ export function errorResponse(
   format: ErrorFormat = 'nested',
 ): Response {
   const { status, code, message, retryAfterSeconds } = mappingOf(error);
-  if (status >= 500) logError(log, requestId, error);
+  if (status >= 500 && claimAuditResolutionLog(error)) logError(log, requestId, error);
   const response = envelopeResponse(status, code, message, requestId, envelopeReason(code), format);
   if (retryAfterSeconds !== undefined)
     response.headers.set('Retry-After', String(retryAfterSeconds));

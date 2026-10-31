@@ -200,10 +200,10 @@ export function resolveOrgAudit(options: OrgAuditOptions): OrgAuditResult {
   const policySource = storedPolicy === 'required' ? 'stored' : build.policySource;
   const persistRaise = policy === 'required' && storedPolicy !== 'required';
   const refuse = (code: OrgAuditRefusalCode): OrgAuditResult => ({ ok: false, code, persistRaise });
-  if (policy === 'required' && build.accepted) return refuse('required_acceptance');
   if (policy === 'required' && build.maxJournalBytes === null) {
     return refuse('journal_budget_required');
   }
+  if (policy === 'required' && build.accepted) return refuse('required_acceptance');
   const trailActive = build.trailPresent && (policy === 'required' || build.trailEnabled);
   const warnings: string[] = [];
   if (policy === 'required' && build.trailToggleConfigured) {
@@ -254,4 +254,53 @@ export function resolveOrgAudit(options: OrgAuditOptions): OrgAuditResult {
       warnings,
     },
   };
+}
+
+export class AuditResolutionError extends Error {
+  constructor(
+    readonly code:
+      | OrgAuditRefusalCode
+      | 'audit_cutover_refused'
+      | 'audit_generation_stale'
+      | 'audit_unavailable'
+      | 'audit_verification_unavailable',
+    readonly fenceWrites = true,
+  ) {
+    super(code);
+    this.name = 'AuditResolutionError';
+  }
+
+  get transient(): boolean {
+    return this.code === 'audit_unavailable';
+  }
+}
+
+const reportedAuditRefusals = new WeakSet<AuditResolutionError>();
+
+export function claimAuditResolutionLog(error: unknown): boolean {
+  if (!(error instanceof AuditResolutionError) || error.transient) return true;
+  if (reportedAuditRefusals.has(error)) return false;
+  reportedAuditRefusals.add(error);
+  return true;
+}
+
+const reportedAuditRequests = new WeakSet<Request>();
+
+export function logAuditUnavailable(
+  request: Request,
+  log: (record: {
+    level: 'error';
+    event: 'audit.effective_unavailable';
+    reason_code: 'audit.effective_unavailable';
+  }) => void,
+  error?: unknown,
+): void {
+  if (reportedAuditRequests.has(request)) return;
+  reportedAuditRequests.add(request);
+  if (!claimAuditResolutionLog(error)) return;
+  log({
+    level: 'error',
+    event: 'audit.effective_unavailable',
+    reason_code: 'audit.effective_unavailable',
+  });
 }

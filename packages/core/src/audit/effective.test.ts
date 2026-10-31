@@ -764,3 +764,14 @@ it.each([
     expect(build.accepted).toBe(source !== null);
   },
 );
+
+it('prioritizes the stored-required journal budget over acceptance and missing paths', () => {
+  const build = validateAuditBuild(
+    { platform: 'node', plugins: [], audit: { acceptNoDurableAudit: true } },
+    () => undefined,
+    'node',
+  );
+  expect(
+    resolveOrgAudit({ build, storedPolicy: 'required', sinks: [], alertPathActive: false }),
+  ).toEqual({ ok: false, code: 'journal_budget_required', persistRaise: false });
+});

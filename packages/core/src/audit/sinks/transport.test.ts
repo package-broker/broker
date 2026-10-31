@@ -261,7 +261,7 @@ describe('AuditBoundFetch', () => {
     'https://0.0.0.0',
     'https://[64:ff9b::7f00:1]',
     'https://[::127.0.0.1]',
-    'https://[::ffff:127.0.0.1]',
+    'https://[::ffff:169.254.170.2]',
   ])('refuses unsafe destination %s before sending', (url) => {
     const fetchImpl = vi.fn<typeof fetch>();
     expect(() =>
@@ -278,9 +278,8 @@ describe('AuditBoundFetch', () => {
   it.each([
     'http://localhost:4318',
     'https://127.1',
-    'http://169.254.1.1',
     'http://[::1]',
-    'https://[fe80::1]',
+    'http://[::ffff:127.0.0.1]',
     'https://localhost.',
     'http://10.0.0.1',
     'https://172.16.0.1',
@@ -839,4 +838,23 @@ describe('round 3 isolation and input regressions', () => {
     expect(contentType).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0]?.[1]?.body).toBe('{}');
   });
+});
+
+it.each([
+  '169.254.1.1',
+  '169.254.170.2',
+  '169.254.170.23',
+  '[fe80::1]',
+  '[fd00:ec2::23]',
+  '[::ffff:169.254.170.2]',
+  '[64:ff9b::a9fe:a9fe]',
+])('refuses %s even when private sink egress is enabled', (host) => {
+  expect(() =>
+    transport({ endpoint: `https://${host}`, audit: { egress: { allowPrivate: ['audit'] } } }),
+  ).toThrow(expect.objectContaining({ code: 'invalid_endpoint' }));
+});
+it('allows opted-in IPv6 loopback in core endpoint validation', () => {
+  expect(() =>
+    transport({ endpoint: 'http://[::1]:8080', audit: { egress: { allowPrivate: ['audit'] } } }),
+  ).not.toThrow();
 });

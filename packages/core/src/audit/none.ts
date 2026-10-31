@@ -1,5 +1,5 @@
 import type { OrgContext } from '../db/port.js';
-import { isUlid, ulid } from '../ids.js';
+import { isUlid } from '../ids.js';
 import { auditEvent, type AuditEvent } from './actions.js';
 import {
   AUDIT_NONE_WARNING,
@@ -87,6 +87,8 @@ export async function enterAuditNone(
   const resolved = resolveOrgAudit({ ...options.audit, storedPolicy: snapshot.policy });
   if (!resolved.ok) return { outcome: 'refused', code: resolved.code };
   if (resolved.effective.mode !== 'none') return { outcome: 'not_none' };
+  if (snapshot.pendingMode !== null && snapshot.pendingMode !== 'none')
+    return { outcome: 'contended' };
   if ((snapshot.pendingMode ?? snapshot.mode) === 'none') {
     return { outcome: 'degraded', status: auditNoneStatus(snapshot) };
   }
@@ -116,8 +118,8 @@ export async function enterAuditNone(
     action: 'audit.mode_change',
     actor: { type: 'system', id: null },
     context: {
-      opId: ulid(),
-      requestId: ulid(),
+      opId: null,
+      requestId: null,
       sourceIp: null,
       tokenSelector: null,
     },

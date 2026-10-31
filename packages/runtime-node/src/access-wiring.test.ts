@@ -471,6 +471,7 @@ describe('node access wiring', () => {
   ): Promise<{ broker: NodeBroker; base: string }> {
     const base = `http://127.0.0.1:${port}`;
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins: [plugin],
       migrations: await migrationSources(),
       ...(tokens === undefined ? {} : { tokens }),
@@ -717,7 +718,11 @@ describe('node access wiring', () => {
     const errors: string[] = [];
     let started: NodeBroker | undefined;
     await runEntry(
-      Promise.resolve({ plugins: [plugin], migrations: await migrationSources() }),
+      Promise.resolve({
+        plugins: [plugin],
+        migrations: await migrationSources(),
+        audit: { acceptNoDurableAudit: true },
+      }),
       {
         PORT: String(port),
         PB_SQLITE_PATH: path,

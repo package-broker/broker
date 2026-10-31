@@ -319,11 +319,11 @@ export function payloadMatches(row: AuditRow): boolean {
       target: { type: row.target_type, id: row.target_id },
       projectId: row.project_id,
       context: {
-        opId: payload['op_id'] as string,
-        requestId: payload['request_id'] as string,
+        opId: payload['op_id'] as string | null,
+        requestId: payload['request_id'] as string | null,
         tokenSelector: row.token_selector,
         sourceIp: row.source_ip,
-      },
+      } as AuditEventInput['context'],
       ...(payload['changes'] === undefined
         ? {}
         : { changes: payload['changes'] as NonNullable<AuditEventInput['changes']> }),

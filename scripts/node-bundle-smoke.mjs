@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { checkNodeAuditModes } from './node-audit-smoke.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -237,6 +238,9 @@ async function checkAuditJobs(database) {
     assert.deepEqual(
       schedules().map((row) => [row.name, row.every_seconds]),
       [
+        ['core:audit-frontier:v1', 86400],
+        ['core:audit-health-observe:v1', 60],
+        ['core:audit-maintain:v1', 60],
         ['core:audit-seal:v1', 60],
         ['core:audit-verify:v1', 86400],
         ['core:blob-purge:v1', 3600],
@@ -361,7 +365,7 @@ async function stopChild() {
   await waitExit(child, 2_000).catch(() => {});
 }
 
-async function startBundle(source) {
+async function startBundle(source, extraEnv = {}) {
   if (copy !== undefined) await rm(copy, { recursive: true, force: true });
   childStdout = '';
   childStderr = '';
@@ -422,6 +426,8 @@ async function startBundle(source) {
     PB_PUBLIC_URL: `http://127.0.0.1:${port}`,
     PB_BLOB_ROOT: join(copy, 'data', 'blobs'),
     DEPLOYMENT_ID: 'smoke',
+    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
+    ...extraEnv,
   };
   delete env['NODE_PATH'];
   delete env['PB_MASTER_KEY_FILE'];
@@ -810,6 +816,8 @@ async function run() {
   child.kill('SIGTERM');
   const code = await waitExit(child, EXIT_TIMEOUT_MS);
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
+  step = 'checking audit modes';
+  await checkNodeAuditModes({ root: REPO_ROOT, startBundle, stopChild, mintSession });
   console.log('smoke:node SIGTERM exit code 0');
 
   if (PREBUILT) {

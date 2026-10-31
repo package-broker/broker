@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { auditEvent, type AuditAction, type AuditEventInput } from './actions.js';
 import { canonicalRow, type AuditRow } from './chain.js';
 import { isUlid } from '../ids.js';
-import { auditWireMarker, auditWireRecord, type AuditMarkerFields } from './wire.js';
+import {
+  payloadMatches,
+  auditWireMarker,
+  auditWireRecord,
+  type AuditMarkerFields,
+} from './wire.js';
 
 const ID = '01JZZZZZZZZZZZZZZZZZZZZZZY';
 const ORG = '01JZZZZZZZZZZZZZZZZZZZZZZX';
@@ -553,4 +558,17 @@ describe('audit wire markers', () => {
       new TypeError('Invalid audit wire data'),
     );
   });
+});
+
+it('keeps system mode events with null correlation ids readable on the wire', () => {
+  const system = {
+    ...row('audit.mode_change', { source: { new: 'cli' } }),
+    actor_type: 'system' as const,
+    actor_id: null,
+    source_ip: null,
+    token_selector: null,
+    payload_json: '{"changes":{"source":{"new":"cli"}},"op_id":null,"request_id":null}',
+  };
+  expect(payloadMatches(system)).toBe(true);
+  expect(payloadMatches({ ...system, actor_type: 'user', actor_id: ID })).toBe(false);
 });

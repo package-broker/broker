@@ -437,6 +437,7 @@ async function boot(remote: ReturnType<typeof upstream>) {
     [remote.plugin],
     {
       executor: db.executor,
+      audit: { acceptNoDurableAudit: true },
       auth: { keyring: keyring(), publicOrigin: ORIGIN, env: {} },
       platformServices: {
         blob: createBlobStore(

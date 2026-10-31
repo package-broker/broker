@@ -1,3 +1,5 @@
+export const DEFAULT_AUDIT_REJECTION_RETRIES = 3;
+
 import type { AuditSinkState } from './sinks/registry.js';
 
 interface CustodyRepresentation {
@@ -51,7 +53,7 @@ export function auditCustodySeq(
     : sink.custodySeq;
 }
 
-export function validateAuditSkipAfter(retries: unknown): void {
+export function validateAuditSkipAfter(retries: unknown = DEFAULT_AUDIT_REJECTION_RETRIES): void {
   if (typeof retries !== 'number' || !Number.isInteger(retries) || retries < 1 || retries > 10)
     throw new TypeError('Invalid audit rejection configuration');
 }

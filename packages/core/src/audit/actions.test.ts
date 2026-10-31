@@ -1582,3 +1582,17 @@ describe('source package request audit', () => {
     },
   );
 });
+
+it('records system actions without invented correlation ids and refuses null ids for users', () => {
+  const context = { opId: null, requestId: null, sourceIp: null, tokenSelector: null };
+  const system = build(
+    'audit.mode_change',
+    { source: { new: 'cli' } },
+    { actor: { type: 'system', id: null }, context },
+  );
+  expect(JSON.parse(payloadOf(system))).toMatchObject({ op_id: null, request_id: null });
+  expect(build('audit.mode_change', { source: { new: 'cli' } }, { context })).toEqual({
+    ok: false,
+    reason: 'bad_value',
+  });
+});

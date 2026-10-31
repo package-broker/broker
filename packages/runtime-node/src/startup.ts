@@ -89,6 +89,7 @@ export interface StartOptions {
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
   readonly audit?: BrokerConfig['audit'];
+  readonly auditGeneration?: number;
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
@@ -773,6 +774,11 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
 
     broker = createNodeServer(options.plugins, {
       trustedProxy,
+      auditEnv: options.env ?? process.env,
+      ...(options.auditGeneration === undefined
+        ? {}
+        : { auditGeneration: options.auditGeneration }),
+      ...(ports === null ? {} : { auditPlatformPorts: { node: ports } }),
       executor: opened.executor,
       migrations: options.migrations,
       closeDatabase,

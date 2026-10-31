@@ -171,6 +171,7 @@ async function boot(options: { jobs?: boolean; mode?: 'real' | 'missing' | 'thro
   const logged: unknown[] = [];
   const broker = createNodeServer([plugin], {
     executor: db.executor,
+    audit: { acceptNoDurableAudit: true },
     auth: { keyring: keyring(), publicOrigin: ORIGIN, env: {} },
     ...(options.jobs === false
       ? {}

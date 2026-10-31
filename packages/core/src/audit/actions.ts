@@ -203,7 +203,10 @@ export interface AuditEventInput {
   now: string;
   action: AuditAction;
   actor: { type: AuditActorType; id: string | null };
-  context: AuditContext;
+  context: Omit<AuditContext, 'opId' | 'requestId'> & {
+    opId: string | null;
+    requestId: string | null;
+  };
   target: { type: string; id: string | null };
   projectId?: string | null;
   changes?: Record<string, { old?: AuditValue; new?: AuditValue }>;
@@ -428,8 +431,8 @@ function checkEnvelope(input: AuditEventInput): AuditRefusal | null {
   const context: unknown = input.context;
   if (!isPlainObject(context)) return 'bad_value';
   const checks: Array<[unknown, string, boolean]> = [
-    [context.opId, 'id', false],
-    [context.requestId, 'id', false],
+    [context.opId, 'id', actorType === 'system'],
+    [context.requestId, 'id', actorType === 'system'],
     [input.id, 'id', false],
     [input.now, 'now', false],
     [input.actor.id, 'id', true],
@@ -441,7 +444,11 @@ function checkEnvelope(input: AuditEventInput): AuditRefusal | null {
     const refusal = envelopeString(value, field, nullable);
     if (refusal !== null) return refusal;
   }
-  if (!isBrokerId(context.opId) || !isBrokerId(context.requestId)) return 'bad_value';
+  if (
+    (context.opId !== null && !isBrokerId(context.opId)) ||
+    (context.requestId !== null && !isBrokerId(context.requestId))
+  )
+    return 'bad_value';
   if (!isUtcTimestamp(input.now)) return 'bad_value';
   if (context.tokenSelector !== null && !TOKEN_SELECTOR.test(String(context.tokenSelector))) {
     return 'bad_value';

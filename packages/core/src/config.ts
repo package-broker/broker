@@ -1,3 +1,4 @@
+export { DEFAULT_AUDIT_REJECTION_RETRIES } from './audit/export-state.js';
 import type { BrokerAuditConfig } from './audit/config.js';
 import type { LogLevel } from './platform/observability.js';
 import { assetDeclarationProblems, type AssetDeclaration } from './asset-provider.js';

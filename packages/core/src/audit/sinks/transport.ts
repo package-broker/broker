@@ -1,4 +1,4 @@
-import { isPrivateHost, isCloudMetadataHost } from '../../platform/private-host.js';
+import { isPrivateHost, isAuditDeniedHost } from '../../platform/private-host.js';
 import { classifyAddress } from '../../sources/url-policy.js';
 import { AuditSinkConfigError } from '../plugin-api.js';
 import type { AuditBoundFetch, AuditDestinationSpec, AuditSinkErrorCode } from '../plugin-api.js';
@@ -79,7 +79,7 @@ function endpoint(raw: string, runtime: 'docker' | 'cloudflare', allowPrivate = 
   const host = url.hostname.replace(/\.$/, '');
   const ipv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host);
   if (
-    isCloudMetadataHost(host) ||
+    isAuditDeniedHost(host) ||
     (!host.startsWith('[') && (host.startsWith('.') || host.endsWith('.') || host.includes('..')))
   ) {
     throw new AuditSinkConfigError('invalid_endpoint');

@@ -57,7 +57,7 @@ export function createAuditNoneRepository(
           AND c.cutover_seq IS ${expected.cutoverSeq} AND c.policy = ${expected.policy}
           AND c.restore_pending = ${Number(expected.restorePending)}
           AND c.policy = 'availability' AND c.restore_pending = 0
-          AND coalesce(c.pending_mode, c.mode) != 'none'
+          AND c.pending_mode IS NULL AND c.mode != 'none'
           AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ${ctx.orgId}
             AND s.generation > ${generation}))`),
       ];

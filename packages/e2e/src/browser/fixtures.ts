@@ -123,6 +123,7 @@ export async function startNodeFixture(): Promise<Fixture> {
       ...process.env,
       PORT: String(port),
       PB_SQLITE_PATH: database,
+      PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
       PB_ORG_SLUG: 'e2e',
       PB_ORG_NAME: 'E2E',
       PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',

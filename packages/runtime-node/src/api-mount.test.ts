@@ -343,6 +343,7 @@ describe('Node management API mount', () => {
   ): NodeBroker =>
     (broker = createNodeServer([], {
       executor: db.executor,
+      audit: { acceptNoDurableAudit: true },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',
@@ -474,6 +475,7 @@ describe('Node management API mount', () => {
     );
     broker = createNodeServer([], {
       executor: db.executor,
+      audit: { acceptNoDurableAudit: true },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',

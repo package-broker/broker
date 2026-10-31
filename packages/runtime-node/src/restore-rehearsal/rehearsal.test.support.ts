@@ -316,6 +316,7 @@ export async function startDeployment(
   const keyPath = join(paths.secrets, 'master-key');
   void _context;
   return startNode({
+    audit: { acceptNoDurableAudit: true },
     plugins: [],
     migrations: await discoveredMigrations(),
     env: {

@@ -668,6 +668,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Loads the effective transition suite; persistence counts RETURNING rows without changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-effective-suite.js') #1",
+      ],
+    },
+    {
+      reason:
         'Loads the shared cutover persistence suite; registration counts RETURNING rows and never executor changes metadata.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-cutover-suite.js') #1",
@@ -4047,6 +4054,12 @@ function inboundForeignKeys(sql: readonly string[], parents: readonly string[]) 
 }
 
 describe('D1 changes read-site scan', () => {
+  it('inventories effective transitions as RETURNING-counted writes', () => {
+    const source = sourcesUnder(ROOT)['db-sqlite/src/repositories/audit-effective.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(source).toContain('RETURNING org_id');
+    expect(source).toContain('result.at(-1)?.rows.length === 1');
+  });
   const sources = sourcesUnder(ROOT);
 
   it('inventories cutover registration as RETURNING-counted writes without changes metadata', () => {

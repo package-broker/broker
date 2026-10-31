@@ -1,3 +1,4 @@
+import { DEFAULT_AUDIT_REJECTION_RETRIES } from '@package-broker/core';
 import {
   AuditSinkConfigError,
   definePlugin,
@@ -176,7 +177,7 @@ export default function auditWebhook(options: AuditWebhookOptions) {
         activation: options.activation ?? 'build',
         custody: options.durableAck === true ? 'durable' : 'delivery',
         sourceIp: options.sourceIp ?? 'include',
-        skipAfter: options.skipAfter ?? 3,
+        skipAfter: options.skipAfter ?? DEFAULT_AUDIT_REJECTION_RETRIES,
         create: createSink,
       },
     ],

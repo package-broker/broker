@@ -1,3 +1,4 @@
+import { logAuditUnavailable } from '../../audit/effective.js';
 import type { AuditTrailDefinition, AuditTrailRequest } from '../../audit/plugin-api.js';
 import type { KernelLog } from '../../kernel/errors.js';
 import type { AuditWithheldMarkerV1 } from '../../audit/plugin-api.js';
@@ -112,12 +113,8 @@ export function auditRoutes(
       if ('ok' in result && !result.ok) throw new Error('Audit configuration refused');
       active = 'ok' in result ? result.effective.trailActive : result.trailActive;
       if (typeof active !== 'boolean') throw new Error('Audit configuration unavailable');
-    } catch {
-      dispatch.log({
-        level: 'error',
-        event: 'audit.effective_unavailable',
-        reason_code: 'audit.effective_unavailable',
-      });
+    } catch (error) {
+      logAuditUnavailable(ctx.request, dispatch.log, error);
       return { error: 'audit_trail_unavailable' };
     }
     const context = createAuditTrailContext(ctx.org, active, dispatch.services);

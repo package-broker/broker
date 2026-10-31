@@ -218,6 +218,7 @@ describe('node access smoke over HTTP', () => {
 
   async function boot(): Promise<string> {
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins: [plugin],
       migrations: await migrationSources(),
       env: {

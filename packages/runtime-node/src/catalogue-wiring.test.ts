@@ -195,6 +195,7 @@ describe('node catalogue wiring on node:sqlite', () => {
     );
     broker = createNodeServer([plugin], {
       executor: db.executor,
+      audit: { acceptNoDurableAudit: true },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',

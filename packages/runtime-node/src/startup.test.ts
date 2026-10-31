@@ -440,6 +440,7 @@ describe('startNode', () => {
     const key = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
     const path = databasePath();
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins: [],
       migrations: await discoveredMigrations(),
       mcp: { enabled: true },

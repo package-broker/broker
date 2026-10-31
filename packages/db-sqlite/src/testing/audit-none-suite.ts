@@ -126,16 +126,14 @@ export function auditNoneRepositorySuite(open: () => Promise<MigratedDatabase>):
       const [, ledger] = await state();
       expect(ledger!.every((row) => row.from_seq === 1 && row.to_seq === 1)).toBe(true);
     });
-    it('records the pending mode as the previous mode', async () => {
+    it('preserves an already pending cutover without staging a replacement', async () => {
       await run(
         "UPDATE audit_chain SET pending_mode = 'export', cutover_seq = 2 WHERE org_id = ?",
         org.orgId,
       );
-      expect(await enter()).toMatchObject({ outcome: 'degraded' });
-      const [, , pending] = await state();
-      expect(JSON.parse(pending![0]!.payload_json as string)).toMatchObject({
-        changes: { from_mode: { new: 'export' } },
-      });
+      const before = await state();
+      expect(await enter()).toEqual({ outcome: 'contended' });
+      expect(await state()).toEqual(before);
     });
     it.each([
       "chain_id = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",

@@ -705,7 +705,13 @@ syncBuiltinESMExports();
       );
       const child = spawn(process.execPath, ['--import', preload, script], {
         cwd: copy,
-        env: { ...env, ...options.nodeEnv, PB_SQLITE_PATH: database, TMPDIR: nodeTmp },
+        env: {
+          ...env,
+          PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
+          ...options.nodeEnv,
+          PB_SQLITE_PATH: database,
+          TMPDIR: nodeTmp,
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout?.on('data', record);

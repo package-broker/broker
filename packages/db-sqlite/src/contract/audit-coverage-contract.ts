@@ -77,6 +77,16 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     stagingCalls: 1,
   },
   {
+    actions: ['audit.mode_change'],
+    callers: ['db-sqlite/src/repositories/audit-effective.ts'],
+    repository: 'audit-effective',
+    batchGuard:
+      'executor.batch; organization snapshot CAS, restore and highest sink generation guards',
+    cardinality:
+      '1 per effective mode or raised policy transition; unchanged or contended transitions stage zero',
+    stagingCalls: 1,
+  },
+  {
     actions: ['session.login_failed', 'access.denied'],
     callers: ['core/src/audit/failure-events.ts'],
     repository: 'audit-failure',

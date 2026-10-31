@@ -230,6 +230,7 @@ describe('step 6 release gate on the node runtime', () => {
 
   async function boot(): Promise<string> {
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins: [plugin],
       migrations: await migrationSources(),
       env: {

@@ -167,6 +167,27 @@ describe('shared API assembly', () => {
     },
   );
 
+  it('refuses verification without platform services with a fixed code', async () => {
+    const assemble = vi.spyOn(api, 'createApiModule');
+    const registration = collectRegistrations([
+      {
+        id: 'trail',
+        package: '@test/trail',
+        apiVersion: 4,
+        platforms: ['node'],
+        binds: ['audit-trail'],
+        auditTrail: { create: () => ({ handle: async () => ({ items: [], next: null }) }) },
+      },
+    ]);
+    createApiRoutes({ ...options, registration });
+    await expect(
+      assemble.mock.calls[0]![0].auditTrail!.services.requestVerification(database.orgs!.a),
+    ).rejects.toMatchObject({
+      code: 'audit_verification_unavailable',
+      message: 'audit_verification_unavailable',
+    });
+  });
+
   it('keeps a composed trail fenced when effective configuration is unavailable', async () => {
     const create = vi.fn();
     const registration = collectRegistrations([

@@ -1,9 +1,12 @@
+import { AuditResolutionError } from '@package-broker/core/audit/effective';
 import {
   createObservability,
   noopObservability,
   type Observability,
 } from '@package-broker/core/platform/observability';
 import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import type { EffectiveAuditReader } from '@package-broker/core/audit/status';
+import type { ApiModuleDeps } from '@package-broker/core/api/module';
 import type { AuditTrailContext } from '@package-broker/core/audit/plugin-api';
 import { requestVerification } from '@package-broker/core/audit/verify';
 import type { Jobs } from '@package-broker/core/platform/jobs';
@@ -106,6 +109,10 @@ export interface ApiRoutesOptions {
   readonly registration?: Pick<Registration, 'audit'>;
   readonly auditTrail?: Omit<AuditTrailDispatch, 'trail' | 'log' | 'services'> &
     Partial<Pick<AuditTrailDispatch, 'services'>>;
+  readonly auditJobs?: Jobs;
+  readonly effectiveAudit?: EffectiveAuditReader;
+  readonly auditStatus?: ApiModuleDeps['auditStatus'];
+  readonly auditHealth?: ApiModuleDeps['auditHealth'];
   readonly runtime: 'node' | 'cloudflare';
   readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
@@ -175,6 +182,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         organizations,
         users,
         administration: services.administration,
+        ...(input.effectiveAudit === undefined ? {} : { effectiveAudit: input.effectiveAudit }),
         lifetime,
       },
       projects: {
@@ -257,6 +265,8 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         readStatuses: input.vulnerability.readStatuses,
       },
       audit: auditReader(executor, observability),
+      ...(input.auditStatus === undefined ? {} : { auditStatus: input.auditStatus }),
+      ...(input.auditHealth === undefined ? {} : { auditHealth: input.auditHealth }),
       ...(input.registration?.audit.trail == null
         ? {}
         : {
@@ -273,8 +283,16 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
                     createAuditJournalReader(executor, org, observability).list(query),
                   head: (org) => createAuditJournalReader(executor, org, observability).head(),
                 },
-                requestVerification: async () => {
-                  throw new Error('Audit verification unavailable');
+                requestVerification: async (org) => {
+                  if (input.auditJobs === undefined)
+                    throw new AuditResolutionError('audit_verification_unavailable');
+                  await createAuditTrailServices(
+                    executor,
+                    org,
+                    input.auditJobs,
+                    systemClock,
+                    observability,
+                  ).requestVerification();
                 },
               },
               log,

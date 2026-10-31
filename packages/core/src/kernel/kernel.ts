@@ -101,7 +101,7 @@ export interface KernelOptions {
   readonly plugins: readonly PluginDefinition[];
   readonly registration?: Registration;
   readonly ports: PluginPorts;
-  readonly resolveOrg: () => Promise<OrgContext>;
+  readonly resolveOrg: (request?: Request) => Promise<OrgContext>;
   /** Uncached database probe, called on every readiness request. */
   readonly health: () => Promise<boolean>;
   /** Bundled migration comparison; a pass is cached for this kernel lifetime. */
@@ -566,7 +566,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ? AUTHENTICATED_PLACEHOLDER
         : null);
     if (permission === null) {
-      const org = route.needsOrg === false ? null : await resolveOrg();
+      const org = route.needsOrg === false ? null : await resolveOrg(c.req.raw);
       return invoke(route, c, org, null, null, {
         principal: null,
         projectId: null,
@@ -578,7 +578,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       });
     }
 
-    const org = await resolveOrg();
+    const org = await resolveOrg(c.req.raw);
     let accepted: EngineCopy | undefined;
     let engineOpen = true;
     let engineFailed = false;
@@ -780,7 +780,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   });
   app.get('/health/ready', async (c) => {
     c.env.scope.set({ route: '/health/ready' });
-    const response = await readyResponse(health, resolveOrg, c.env.requestId, {
+    const response = await readyResponse(health, () => resolveOrg(c.req.raw), c.env.requestId, {
       log: c.env.log,
       ...(schemaMatches === undefined ? {} : { schemaMatches }),
     });

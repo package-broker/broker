@@ -300,6 +300,7 @@ describe('runEntry', () => {
       plugins: [],
       migrations: [],
       env: {},
+      auditGeneration: 0,
       log: expect.any(Function),
       ...(observability === undefined ? {} : { observability }),
     });
@@ -330,6 +331,26 @@ describe('runEntry', () => {
     expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0].audit).toBe(audit);
     expect(test.exit).not.toHaveBeenCalled();
   });
+
+  it.each([undefined, 17])(
+    'reads audit manifest build_generation %s with a zero fallback',
+    async (generation) => {
+      const { broker } = fakeBroker();
+      const test = harness(() => Promise.resolve(broker));
+      await runEntry(
+        Promise.resolve({
+          plugins: [],
+          migrations: [],
+          ...(generation === undefined ? {} : { audit: { build_generation: generation } }),
+        }),
+        {},
+        test.runtime,
+      );
+      expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0].auditGeneration).toBe(
+        generation ?? 0,
+      );
+    },
+  );
 
   it('forwards tokens', async () => {
     const { broker } = fakeBroker();
@@ -495,6 +516,7 @@ describe('entry platform ports and failure handling', () => {
       plugins: [],
       migrations: [],
       env: {},
+      auditGeneration: 0,
       log: expect.any(Function),
       platformPorts,
     });
@@ -514,6 +536,7 @@ describe('entry platform ports and failure handling', () => {
       plugins: [],
       migrations: [],
       env: {},
+      auditGeneration: 0,
       log: expect.any(Function),
     });
   });

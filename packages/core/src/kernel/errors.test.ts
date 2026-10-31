@@ -1,3 +1,4 @@
+import { AuditResolutionError } from '../audit/effective.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultLog, envelopeResponse, errorResponse, logError, responseReason } from './errors.js';
 import type { KernelLog } from './errors.js';
@@ -64,6 +65,25 @@ describe('envelopeResponse', () => {
 });
 
 describe('errorResponse', () => {
+  it.each([
+    ['none_not_accepted', null],
+    ['durable_path_required', null],
+    ['audit_cutover_refused', null],
+    ['audit_generation_stale', null],
+    ['audit_unavailable', '5'],
+    ['audit_verification_unavailable', null],
+  ] as const)('maps audit refusal %s with retry hint %s', async (code, retry) => {
+    const { log, entries } = recorder();
+    const error = new AuditResolutionError(code);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = errorResponse(error, 'request', log);
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe(retry);
+      expect(await response.json()).toMatchObject({ error: { code } });
+    }
+    expect(entries).toHaveLength(error.transient ? 2 : 1);
+  });
+
   it('logs upstream refusals only at debug through both error entry points', () => {
     const { log, entries } = recorder();
     const error = new UpstreamError('refused', undefined, 'destination');

@@ -91,6 +91,7 @@ runMcpContract(
           }),
         );
       const broker = await startNode({
+        audit: { acceptNoDurableAudit: true },
         plugins: [],
         mcp: { enabled: true },
         migrations: await migrationSources(),

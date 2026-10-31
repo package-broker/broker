@@ -82,6 +82,7 @@ describe('Node management API personal access token lifecycle', () => {
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
     const broker = await startNode({
+      audit: { acceptNoDurableAudit: true },
       plugins: [],
       migrations: await migrationSources(),
       env: {

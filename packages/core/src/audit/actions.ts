@@ -207,6 +207,17 @@ export interface AuditEvent {
   payloadJson: string;
 }
 
+export function withPackageAuditName(event: AuditEvent, packageName: string): AuditEvent {
+  const payload = JSON.parse(event.payloadJson) as { changes?: Record<string, unknown> };
+  return {
+    ...event,
+    payloadJson: sortedJson({
+      ...payload,
+      changes: { ...payload.changes, package: { new: packageName } },
+    }),
+  };
+}
+
 export interface AuditEventInput {
   id: string;
   now: string;
@@ -380,21 +391,29 @@ function cleanChanges(
       if (!CHANGE_KEYS.has(key)) return { ok: false, reason: 'bad_value' };
       if (entry[key] === undefined) continue;
       const integrity = action === 'package.publish' && field === 'integrity';
+      const accessReason =
+        (action === 'package.access_request' || action === 'package.access_decide') &&
+        field === 'reason';
       const value = entry[key];
       const validIntegrity =
         typeof value === 'string' &&
         /^(?:sha512-[A-Za-z0-9+/]{85}[AQgw]==|sha1-[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=)$/.test(
           value,
         );
-      const cleaned = integrity
-        ? validIntegrity
-          ? { ok: true as const, value: value as string }
-          : { ok: false as const, reason: 'bad_value' as const }
-        : field === 'provider' && IDENTITY_ACTIONS.has(action)
-          ? cleanProviderId(entry[key])
-          : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
+      const cleaned =
+        accessReason && typeof value === 'string'
+          ? new TextEncoder().encode(value).length <= 1000
             ? cleanString(value, 1000, field)
-            : cleanValue(entry[key], field);
+            : { ok: false as const, reason: 'bad_value' as const }
+          : integrity
+            ? validIntegrity
+              ? { ok: true as const, value: value as string }
+              : { ok: false as const, reason: 'bad_value' as const }
+            : field === 'provider' && IDENTITY_ACTIONS.has(action)
+              ? cleanProviderId(entry[key])
+              : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
+                ? cleanString(value, 1000, field)
+                : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
       cleanedEntry[key] = cleaned.value;
     }

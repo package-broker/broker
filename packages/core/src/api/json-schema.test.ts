@@ -1,3 +1,4 @@
+import { UTF8_REASON_CHECK } from './utf8-reason.js';
 import { describe, expect, it } from 'vitest';
 import * as z from 'zod';
 import * as mini from 'zod/mini';
@@ -234,4 +235,14 @@ describe('toJsonSchema', () => {
     expect(toJsonSchema(schema, 'input').required).toBeUndefined();
     expect(toJsonSchema(schema, 'output').required).toEqual(['value']);
   });
+});
+
+it('exports the exact UTF-8 reason check with its byte limit', () => {
+  const schema = z.string().max(1000).check(UTF8_REASON_CHECK);
+  expect(toJsonSchema(schema, 'input')).toMatchObject({
+    maxLength: 1000,
+    'x-pb-max-utf8-bytes': 1000,
+  });
+  expect(schema.safeParse('é'.repeat(500)).success).toBe(true);
+  expect(schema.safeParse('é'.repeat(501)).success).toBe(false);
 });

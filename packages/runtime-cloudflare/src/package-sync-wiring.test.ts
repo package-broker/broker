@@ -495,6 +495,7 @@ const BASE_JOBS = [
   'core:source-poll:v1',
   'core:retention-scan:v1',
   'core:blob-purge:v1',
+  'core:package-access-expire:v1',
   'core:audit-seal:v1',
   'core:audit-verify:v1',
   'core:import-verify:v1',

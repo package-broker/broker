@@ -1,3 +1,4 @@
+import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
 import { routesConflict } from '../kernel/routes.js';
 import type { RouteDefinition } from '../plugin.js';
 import { accessRoutes } from './routes/access.js';
@@ -40,6 +41,7 @@ export interface ApiModuleDeps {
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
   readonly imports?: Parameters<typeof importRoutes>[0];
+  readonly packageAccessRequests?: Parameters<typeof packageAccessRequestRoutes>[0];
   readonly extensions?: readonly ApiRouteFactory[];
 }
 
@@ -50,7 +52,7 @@ export const API_EXEMPT_ROUTES = Object.freeze({
   '/_pb/openapi.json': 'Serves the generated OpenAPI document.',
 });
 
-type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports'> &
+type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports' | 'packageAccessRequests'> &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
   readonly [K in keyof T]?: T[K] extends (...args: never[]) => unknown
@@ -233,6 +235,15 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
   const { imports, ...required } = REQUIRED_DEPENDENCIES;
   requireDependencies(deps, required, 'dependencies');
   if (deps.imports != null) requireDependencies(deps, { imports }, 'dependencies');
+  if (deps.packageAccessRequests !== undefined)
+    requireDependencies(
+      deps.packageAccessRequests,
+      {
+        ...CONTEXT_METHODS,
+        repository: { request: true, list: true, get: true, decide: true, requestable: true },
+      },
+      'dependencies.packageAccessRequests',
+    );
   if (deps.packageManage.rebuild !== undefined) {
     requireDependencies(
       deps.packageManage.rebuild,
@@ -266,6 +277,9 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
     ...publishRoutes(deps.publishes),
+    ...(deps.packageAccessRequests === undefined
+      ? []
+      : packageAccessRequestRoutes(deps.packageAccessRequests)),
     ...auditRoutes(deps.audit),
     ...packageManageRoutes(deps.packageManage),
     ...(deps.imports == null ? [] : importRoutes(deps.imports)),

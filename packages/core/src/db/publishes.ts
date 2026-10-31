@@ -142,6 +142,10 @@ export interface PublishesRepository {
 }
 
 export interface PackageAccessRequest {
+  readonly packageName: string;
+  readonly requestedBy: { readonly type: 'user'; readonly name: string };
+  readonly decidedBy: { readonly name: string } | null;
+  readonly project: { readonly id: string; readonly slug: string; readonly name: string };
   readonly id: string;
   readonly packageId: string;
   readonly projectId: string;
@@ -178,7 +182,39 @@ export interface PackageAccessDecision {
   readonly event: AuditEvent;
 }
 
+export interface RequestablePackage {
+  readonly id: string;
+  readonly name: string;
+  readonly newProjectAccessMode: 'request';
+}
+
+export interface AccessRequestPage {
+  readonly cursor?: string;
+  readonly limit: number;
+}
+
+export class PackageAccessRequestError extends Error {
+  constructor(
+    readonly code:
+      | 'forbidden'
+      | 'conflict'
+      | 'not_found'
+      | 'unavailable'
+      | 'invalid_request'
+      | 'source_not_attached',
+  ) {
+    super(code);
+    this.name = 'PackageAccessRequestError';
+  }
+}
+
 export interface PackageAccessRequestRepository {
+  requestable(
+    ctx: OrgContext,
+    projectId: string,
+    page: AccessRequestPage,
+  ): Promise<{ readonly items: readonly RequestablePackage[]; readonly next: string | null }>;
+  due(ctx: OrgContext): Promise<readonly PackageAccessRequest[]>;
   get(ctx: OrgContext, id: string): Promise<PackageAccessRequest | null>;
   list(
     ctx: OrgContext,

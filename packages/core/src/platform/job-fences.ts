@@ -35,3 +35,10 @@ export function jobLeaseOf(context: { readonly fences?: JobFences }): JobGuard |
   const fences = context.fences;
   return fences === undefined ? null : (leases.get(fences) ?? null);
 }
+
+export function jobPurgeFence(context: {
+  readonly fences?: JobFences;
+}): SystemMutationFence | null {
+  const lease = jobLeaseOf(context);
+  return lease === null ? null : systemMutationFence('purge', lease, {});
+}

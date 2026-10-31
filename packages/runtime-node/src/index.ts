@@ -1,5 +1,7 @@
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
 import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
+import { createPackageAccessExpiryJob } from '@package-broker/core/api/routes/package-access-requests-expiry';
+import { createPackageAccessRequestRepository } from '@package-broker/db-sqlite/repositories/package-access-requests';
 import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
 import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
@@ -1174,6 +1176,9 @@ export function createNodeServer(
               ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
               registerIngestJob(
                 createPublishApprovalExpireJob({ publishes: createPublishesRepository(executor) }),
+              ),
+              registerIngestJob(
+                createPackageAccessExpiryJob(createPackageAccessRequestRepository(executor, [])),
               ),
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),

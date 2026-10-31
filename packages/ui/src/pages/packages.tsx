@@ -25,8 +25,10 @@ import { IdText } from '../components/ui/id-text.js';
 import { ListState } from '../components/ui/list-state.js';
 import { FilterToolbar } from '../components/ui/toolbar.js';
 
-export type PackageItem =
-  operations['listPackages']['responses'][200]['content']['application/json']['items'][number];
+export type PackageItem = Omit<
+  operations['listPackages']['responses'][200]['content']['application/json']['items'][number],
+  'visibleToNewProjects' | 'newProjectAccessMode' | 'revision'
+>;
 export type VersionItem =
   operations['listPackageVersions']['responses'][200]['content']['application/json']['items'][number];
 type PackageStatus = PackageItem['status'];

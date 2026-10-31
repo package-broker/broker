@@ -30,12 +30,19 @@ const item: PackageListItem = {
   ecosystem: 'npm',
   name: '@acme/lib',
   latestVersion: '1.0.0',
+  visibleToNewProjects: true,
+  newProjectAccessMode: 'none',
+  revision: 1,
   status: 'active',
   source: { id: OTHER, name: 'Private', type: 'hosted', projectId: ID },
   versionCount: 2,
   lastSyncedAt: null,
 };
 const version: VersionListItem = {
+  integrity: null,
+  distTags: [],
+  publishedBy: null,
+  approvedBy: null,
   id: ID,
   version: '1.0.0',
   stability: 'stable',
@@ -486,3 +493,39 @@ for (const path of [paths[1]!, paths[3]!]) {
     });
   });
 }
+
+it('projects publication attribution without extra account fields', async () => {
+  const f = await fixture({
+    listVersions: async () => ({
+      items: [
+        {
+          ...version,
+          integrity: 'sha512-public',
+          distTags: ['latest', 'next'],
+          publishedBy: { kind: 'user', displayName: 'Publisher', email: 'private@example.test' },
+          approvedBy: {
+            displayName: 'Approver',
+            decidedAt: '2026-10-30T00:00:00.000Z',
+            token: 'private-token',
+          },
+        },
+      ],
+      next: null,
+    }),
+  });
+  const response = await f.request(`/_pb/packages/${ID}/versions`);
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  expect(JSON.parse(body)).toMatchObject({
+    items: [
+      {
+        integrity: 'sha512-public',
+        distTags: ['latest', 'next'],
+        publishedBy: { kind: 'user', displayName: 'Publisher' },
+        approvedBy: { displayName: 'Approver', decidedAt: '2026-10-30T00:00:00.000Z' },
+      },
+    ],
+  });
+  expect(body).not.toContain('private@example.test');
+  expect(body).not.toContain('private-token');
+});

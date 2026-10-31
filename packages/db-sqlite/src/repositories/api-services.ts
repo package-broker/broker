@@ -1,3 +1,4 @@
+import { createPackageDetailRepository } from './package-detail.js';
 import { createPublishesRepository } from './publishes.js';
 import { createPackageAccessRequestRepository } from './package-access-requests.js';
 import { createSourcePackageStore } from './source-package-request.js';
@@ -204,6 +205,11 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         visibility: packages.visibility,
         projectSources: createProjectSourceReader(executor),
         projects,
+      },
+      packageDetail: {
+        ...common,
+        repository: createPackageDetailRepository(executor, anchors),
+        idempotency,
       },
       packages: {
         ...createPackageAdminReader(executor),

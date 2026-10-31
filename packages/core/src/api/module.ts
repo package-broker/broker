@@ -1,6 +1,7 @@
+import { packageDetailRoutes } from './routes/package-detail.js';
 import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
 import { routesConflict } from '../kernel/routes.js';
-import type { RouteDefinition } from '../plugin.js';
+import type { RouteDefinition } from '../kernel/routes.js';
 import { accessRoutes } from './routes/access.js';
 import { auditRoutes } from './routes/audit.js';
 import { importRoutes } from './routes/import.js';
@@ -41,6 +42,7 @@ export interface ApiModuleDeps {
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
   readonly imports?: Parameters<typeof importRoutes>[0];
+  readonly packageDetail?: Parameters<typeof packageDetailRoutes>[0];
   readonly packageAccessRequests?: Parameters<typeof packageAccessRequestRoutes>[0];
   readonly extensions?: readonly ApiRouteFactory[];
 }
@@ -52,7 +54,10 @@ export const API_EXEMPT_ROUTES = Object.freeze({
   '/_pb/openapi.json': 'Serves the generated OpenAPI document.',
 });
 
-type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports' | 'packageAccessRequests'> &
+type RouteDependencies = Omit<
+  ApiModuleDeps,
+  'extensions' | 'imports' | 'packageAccessRequests' | 'packageDetail'
+> &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
   readonly [K in keyof T]?: T[K] extends (...args: never[]) => unknown
@@ -235,6 +240,16 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
   const { imports, ...required } = REQUIRED_DEPENDENCIES;
   requireDependencies(deps, required, 'dependencies');
   if (deps.imports != null) requireDependencies(deps, { imports }, 'dependencies');
+  if (deps.packageDetail !== undefined)
+    requireDependencies(
+      deps.packageDetail,
+      {
+        ...CONTEXT_METHODS,
+        repository: { packageName: true, readme: true, setAccess: true },
+        idempotency: { find: true },
+      },
+      'dependencies.packageDetail',
+    );
   if (deps.packageAccessRequests !== undefined)
     requireDependencies(
       deps.packageAccessRequests,
@@ -276,6 +291,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
+    ...(deps.packageDetail === undefined ? [] : packageDetailRoutes(deps.packageDetail)),
     ...publishRoutes(deps.publishes),
     ...(deps.packageAccessRequests === undefined
       ? []

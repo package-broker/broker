@@ -83,6 +83,12 @@ const vulnerability = z.strictObject({
 });
 const versionItem = z.strictObject({
   vulnerability,
+  integrity: z.string().nullable(),
+  distTags: z.array(z.string()),
+  publishedBy: z
+    .strictObject({ kind: z.enum(['user', 'service', 'system']), displayName: z.string() })
+    .nullable(),
+  approvedBy: z.strictObject({ displayName: z.string(), decidedAt: z.string() }).nullable(),
   id: ulid,
   version: z.string(),
   stability: z.enum(['dev', 'alpha', 'beta', 'RC', 'stable']),
@@ -118,7 +124,15 @@ function scopeSpecs(boundary: 'project' | 'organization') {
             }),
         responses: {
           200: z.strictObject({
-            items: z.array(packageItem),
+            items: z.array(
+              scoped
+                ? packageItem
+                : packageItem.extend({
+                    visibleToNewProjects: z.boolean(),
+                    newProjectAccessMode: z.enum(['none', 'request']),
+                    revision: z.number().int().positive(),
+                  }),
+            ),
             next: (scoped ? projectCursor : organizationCursor).nullable(),
           }),
         },

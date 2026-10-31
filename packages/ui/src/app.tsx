@@ -82,7 +82,9 @@ export function parseHash(hash: string): ParsedHash {
   const name = path.startsWith('/') ? path.slice(1) : path;
   const route = /^npm-login\/[A-Za-z0-9_-]{43}$/.test(name)
     ? 'npm-login'
-    : (ROUTES.find((known) => known === name) ?? null);
+    : /^packages\/[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(name)
+      ? 'packages'
+      : (ROUTES.find((known) => known === name) ?? null);
   const raw = route !== null || path === '' || path === '/' ? null : path.slice(0, MAX_SHOWN);
   return { route, raw, project, query };
 }

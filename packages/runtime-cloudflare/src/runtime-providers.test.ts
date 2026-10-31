@@ -1,7 +1,4 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
@@ -11,9 +8,9 @@ import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { rebindProvider } from '@package-broker/db-sqlite/repositories/provider-binding';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
@@ -190,19 +187,10 @@ beforeEach(() => {
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
 let sources: MigrationSource[] | undefined;
 
 async function coreMigrations(): Promise<MigrationSource[]> {
-  sources ??= await Promise.all(
-    ['0001_init.sql'].map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
+  sources ??= await discoveredMigrations();
   return sources;
 }
 

@@ -1,4 +1,5 @@
 declare module '#pb-manifest' {
+  export const audit: import('@package-broker/core/config').BrokerConfig['audit'];
   import type { PluginDefinition } from '@package-broker/core/plugin';
   import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
   export const migrations: readonly Pick<

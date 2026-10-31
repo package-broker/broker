@@ -1,6 +1,7 @@
 import type { BrokerConfig } from '../config.js';
 import type { Platform } from '../plugin.js';
 import {
+  auditJournalBudgetProblem,
   brokerAuditProblems,
   DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES,
   snapshotAuditBuildConfig,
@@ -23,6 +24,7 @@ export type AuditEffectiveConfigErrorCode =
 export type OrgAuditRefusalCode =
   | 'invalid_stored_policy'
   | 'invalid_sink_state'
+  | 'journal_budget_required'
   | 'required_acceptance'
   | 'durable_path_required'
   | 'alert_path_required'
@@ -86,6 +88,24 @@ export type OrgAuditResult =
 export const AUDIT_NONE_WARNING =
   'Security events are not durably retained by this broker. Exporting previous history does not cover future activity.';
 
+/** Resolves the shared budget before repositories or capacity jobs are constructed. */
+export function resolveAuditJournalBudget(
+  audit: BrokerConfig['audit'],
+  target: Platform,
+  policyEnv?: string,
+): number | null {
+  const budget =
+    audit?.capacity?.maxJournalBytes ??
+    (target === 'cloudflare' ? DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES : null);
+  if (budget !== null && auditJournalBudgetProblem(budget, target) !== null) {
+    throw new AuditEffectiveConfigError('invalid_config');
+  }
+  if ((audit?.policy === 'required' || policyEnv === 'required') && budget === null) {
+    throw new AuditEffectiveConfigError('journal_budget_required');
+  }
+  return budget;
+}
+
 /** Deployment validation never reads organization state or creates plugins. */
 export function validateAuditBuild(
   config: BrokerConfig,
@@ -126,9 +146,7 @@ export function validateAuditBuild(
   if (policy !== 'required' && toggle !== undefined && toggle !== 'on' && toggle !== 'off') {
     throw new AuditEffectiveConfigError('invalid_trail_env');
   }
-  const maxJournalBytes =
-    captured.audit?.capacity?.maxJournalBytes ??
-    (target === 'cloudflare' ? DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES : null);
+  const maxJournalBytes = resolveAuditJournalBudget(captured.audit, target, policyEnv);
   if (trail !== undefined && maxJournalBytes === null) {
     throw new AuditEffectiveConfigError('journal_budget_required');
   }
@@ -183,6 +201,9 @@ export function resolveOrgAudit(options: OrgAuditOptions): OrgAuditResult {
   const persistRaise = policy === 'required' && storedPolicy !== 'required';
   const refuse = (code: OrgAuditRefusalCode): OrgAuditResult => ({ ok: false, code, persistRaise });
   if (policy === 'required' && build.accepted) return refuse('required_acceptance');
+  if (policy === 'required' && build.maxJournalBytes === null) {
+    return refuse('journal_budget_required');
+  }
   const trailActive = build.trailPresent && (policy === 'required' || build.trailEnabled);
   const warnings: string[] = [];
   if (policy === 'required' && build.trailToggleConfigured) {

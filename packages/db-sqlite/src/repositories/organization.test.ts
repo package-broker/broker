@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DbError } from '@package-broker/core/db/errors';
 import type {
@@ -9,12 +8,9 @@ import type {
 import { orgContext } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { migrate } from '../migrations/runner.js';
-import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
+import { discoveredMigrations } from '../testing/migrated-database.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
 import { createOrganizationBootstrap, createOrganizationRepository } from './organization.js';
-
-const initUrl = new URL('../../migrations/0001_init.sql', import.meta.url);
-const initText = readFileSync(initUrl, 'utf8');
 
 const FIRST = {
   id: '01J0ACME000000000000000000',
@@ -64,12 +60,10 @@ function recordingExecutor(executor: ScalarSqlExecutor): Recording {
 }
 
 let opened: OpenedExecutor;
-let init: MigrationSource;
 
 beforeEach(async () => {
   opened = openNodeSqliteExecutor();
-  init = await loadMigrationSource('core', '0001_init.sql', initText);
-  await migrate(opened.executor, [init], { holder: 't99' });
+  await migrate(opened.executor, await discoveredMigrations(), { holder: 't99' });
 });
 
 afterEach(async () => {

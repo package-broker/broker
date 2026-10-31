@@ -151,3 +151,20 @@ describe('assertBatchStatementCount', () => {
     );
   });
 });
+
+it.each([
+  new Error('NOT NULL constraint failed: audit_pending.created_at'),
+  new Error('D1_ERROR: NOT NULL constraint failed: audit_pending.created_at: SQLITE_CONSTRAINT'),
+  new Error('executor failed', {
+    cause: new Error('NOT NULL constraint failed: audit_pending.created_at'),
+  }),
+])('classifies capacity refusal with fixed text and no raw cause', (input) => {
+  const error = classifySqliteError(input);
+  expect(error).toMatchObject({
+    name: 'DbError',
+    kind: 'backlog_full',
+    constraint: 'audit_pending.created_at',
+    message: 'Audit backlog is full',
+  });
+  expect(error.cause).toBeUndefined();
+});

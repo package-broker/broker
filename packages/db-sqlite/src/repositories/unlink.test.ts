@@ -259,6 +259,42 @@ async function untouched(): Promise<void> {
 }
 
 describe('unlinkIdentity', () => {
+  it.each([false, true])(
+    'required refusal reserves unlink only with a new block (existing=%s)',
+    async (existing) => {
+      await executor.batch([
+        stmt(
+          "UPDATE audit_chain SET policy = 'required', capacity_state = 'refusing' WHERE org_id = ?",
+          org.orgId,
+        ),
+      ]);
+      if (existing)
+        await executor.batch([
+          stmt(
+            'INSERT INTO identity_block (org_id, provider, issuer, subject, blocked_at, blocked_by_user_id) VALUES (?, ?, ?, ?, ?, ?)',
+            org.orgId,
+            OIDC,
+            ANCHOR,
+            'sub-target',
+            NOW,
+            ACTOR,
+          ),
+        ]);
+      const result = unlinkIdentity(executor, org, fenceOf(ACTOR, ACTOR_SESSION), input());
+      if (existing) {
+        await expect(result).rejects.toMatchObject({ kind: 'backlog_full' });
+        expect(await count('identity', 'id = ?', TARGET_OIDC)).toBe(1);
+        expect(await count('audit_pending')).toBe(0);
+      } else {
+        await expect(result).resolves.toBe('unlinked');
+        expect(
+          (await rows('SELECT action FROM audit_pending WHERE org_id = ?', org.orgId))
+            .map((row) => row.action)
+            .sort(),
+        ).toEqual(['identity.block', 'identity.unlink']);
+      }
+    },
+  );
   it('blocks the subject, revokes bound tokens, deletes sessions and the identity, and keeps the rest', async () => {
     const outcome = await unlinkIdentity(executor, org, fenceOf(ACTOR, ACTOR_SESSION), input());
 

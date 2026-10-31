@@ -182,6 +182,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
         '',
@@ -207,6 +208,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
         '',
@@ -234,6 +236,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
         '',
@@ -798,6 +801,27 @@ describe('built plugin order round trip', () => {
       });
       const loaded = (await import(pathToFileURL(result.bundle).href)) as { tokens: unknown };
       expect(loaded.tokens).toEqual(tokens);
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
+    'carries the configured audit budget into the %s bundle',
+    async (target) => {
+      const configPath = path.join(project, 'audit.config.ts');
+      const audit = { capacity: { maxJournalBytes: 64 * 1024 * 1024 } };
+      await writeFile(
+        configPath,
+        `export default ${JSON.stringify({ platform: target, plugins: [], audit })};`,
+      );
+      await writeFile(runtimeEntry, "export { audit } from '#pb-manifest';\n");
+      const result = await build({
+        configPath,
+        target,
+        outDir: path.join(project, target),
+        runtimeEntry,
+      });
+      const loaded = (await import(pathToFileURL(result.bundle).href)) as { audit: unknown };
+      expect(loaded.audit).toEqual(audit);
     },
   );
 

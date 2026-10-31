@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { mkdtemp, rm } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import {
@@ -12,16 +11,10 @@ import {
   type PluginPorts,
 } from '@package-broker/core/plugin';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
 import { createNodeServer, type NodeBroker } from './index.js';
-
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
 
 const log = (): void => undefined;
 
@@ -80,12 +73,9 @@ describe('createNodeServer', () => {
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'pb-runtime-node-server-'));
     opened = openBetterSqliteExecutor(join(directory, 'broker.db'));
-    const init = await loadMigrationSource(
-      'core',
-      '0001_init.sql',
-      await readFile(join(migrationsDirectory, '0001_init.sql'), 'utf8'),
-    );
-    await migrate(opened.executor, [init], { holder: 'runtime-node-server-test' });
+    await migrate(opened.executor, await discoveredMigrations(), {
+      holder: 'runtime-node-server-test',
+    });
   });
 
   afterEach(async () => {
@@ -115,7 +105,7 @@ describe('createNodeServer', () => {
     });
   }
 
-  it('1: 503 before bootstrap, the id after, ready 200, and 503 once the table is dropped', async () => {
+  it('1: 503 before bootstrap, the id after, ready 200, and 503 once the table is renamed', async () => {
     const { plugin } = brokerPlugin('whoami');
     const broker = brokerFor([plugin]);
     const base = await listen(broker);
@@ -135,7 +125,10 @@ describe('createNodeServer', () => {
     expect(ready.status).toBe(200);
     expect(await ready.json()).toEqual({ status: 'ready' });
 
-    await opened.executor.all({ sql: 'DROP TABLE organization', params: [] });
+    await opened.executor.all({
+      sql: 'ALTER TABLE organization RENAME TO unavailable_organization',
+      params: [],
+    });
 
     const notReady = await fetch(`${base}/health/ready`);
     expect(notReady.status).toBe(503);

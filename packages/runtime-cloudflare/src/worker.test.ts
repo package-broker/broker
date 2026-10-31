@@ -1,14 +1,10 @@
-import { readFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { ulid } from '@package-broker/core/ids';
 import { definePlugin } from '@package-broker/core/plugin';
 import type { PluginDefinition, PluginPorts } from '@package-broker/core/plugin';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
-import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
 import { createWorker } from './index.js';
@@ -29,28 +25,12 @@ afterAll(async () => {
   await mf.dispose();
 });
 
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
-let init: MigrationSource | undefined;
-
-async function initSource(): Promise<MigrationSource> {
-  init ??= await loadMigrationSource(
-    'core',
-    '0001_init.sql',
-    await readFile(join(migrationsDirectory, '0001_init.sql'), 'utf8'),
-  );
-  return init;
-}
-
 async function migratedDatabase(): Promise<D1DatabaseLike> {
   const binding = bindings[next];
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
   const db = (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
-  await migrate(createD1Executor(db), [await initSource()], {
+  await migrate(createD1Executor(db), await discoveredMigrations(), {
     holder: 'worker-test',
   });
   return db;
@@ -150,8 +130,10 @@ describe('createWorker', () => {
     expect(first.status).toBe(200);
 
     const executor = createD1Executor(db);
-    await executor.batch([{ sql: 'PRAGMA defer_foreign_keys = on', params: [] }]);
-    await executor.all({ sql: 'DROP TABLE organization', params: [] });
+    await executor.all({
+      sql: 'ALTER TABLE organization RENAME TO unavailable_organization',
+      params: [],
+    });
 
     const second = await worker.fetch(request('/health/ready'), env(db));
     expect(second.status).toBe(503);
@@ -273,9 +255,11 @@ describe('createWorker', () => {
 it('reports schema drift through the Worker with a real Miniflare D1 database', async () => {
   const db = await migratedDatabase();
   await bootstrap(db);
-  const source = await initSource();
+  const sources = await discoveredMigrations();
+  const [source] = sources;
+  if (source === undefined) throw new Error('missing core migration');
   const executor = createD1Executor(db);
-  const worker = () => createWorker([], { migrations: [source], log: () => undefined });
+  const worker = () => createWorker([], { migrations: sources, log: () => undefined });
   const ready = (app: ReturnType<typeof createWorker>) =>
     app.fetch(request('/health/ready'), env(db));
   const healthy = await ready(worker());

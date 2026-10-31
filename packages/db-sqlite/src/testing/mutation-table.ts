@@ -128,7 +128,7 @@ import type { MutationEntry } from './mutation-table/harness.js';
 export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
-export const mutationTable: readonly MutationEntry[] = [
+const registeredEntries: readonly MutationEntry[] = [
   ...auditCutoverEntries,
   ...auditNoneEntries,
   ...auditPruneEntries,
@@ -251,6 +251,50 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sourceSelectionEntries,
   ...selectedKeysEntries,
 ];
+
+const stagingBuilders = new Set([
+  'createApiRoutes',
+  'createAuditApiExportStore',
+  'createAuditCutoverRepository',
+  'createAuditNoneRepository',
+  'createAuditFailureRepository',
+  'createAuditForkRepository',
+  'createAuditSinkRepository',
+  'createGrantRepository',
+  'createImportVerificationStore',
+  'createVisibilityStore',
+  'createImportRollbackStore',
+  'createIdentityBlockRepository',
+  'createImportJournalStore',
+  'createLocalLoginSetupWriter',
+  'createLoginWriter',
+  'createPatOffboardingRepository',
+  'createRegisteredNameRepository',
+  'createLocalLoginSuccessWriter',
+  'createRoleRepository',
+  'createSessionRepository',
+  'createVisibilitySubsetRepository',
+  'createVisibilityAttachRepository',
+  'createSourcePackageStore',
+  'visibilityAuditStatements',
+  'createSourceRepository',
+]);
+
+export const mutationTable: readonly MutationEntry[] = registeredEntries.map((entry) =>
+  !stagingBuilders.has(entry.builder)
+    ? entry
+    : {
+        ...entry,
+        waivers: [
+          ...(entry.waivers ?? []),
+          {
+            locate: /audit_chain\.org_id = input\.pending_org_id/,
+            reason:
+              'The shared staging capacity scope is mutation-tested by auditPendingStatement; callers do not supply this predicate.',
+          },
+        ],
+      },
+);
 
 export function checkCompleteness(
   sources: Readonly<Record<string, string>>,

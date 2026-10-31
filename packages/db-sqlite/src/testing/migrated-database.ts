@@ -195,3 +195,8 @@ export async function auditCutoverRepositorySuite(
   const { auditCutoverRepositorySuite: run } = await import('./audit-cutover-suite.js');
   run(open);
 }
+
+export async function auditBackpressureSuite(open: () => Promise<MigratedDatabase>): Promise<void> {
+  const { auditBackpressureSuite: run } = await import('./audit-backpressure-suite.js');
+  run(open);
+}

@@ -8,15 +8,11 @@ import { BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS, blobPurgeTiming } fro
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
 import type { ByteStore } from '@package-broker/core/platform/blob';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
-import { readFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { ulid } from '@package-broker/core/ids';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
-import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor } from './db/d1-executor.js';
 import { orgContext } from '@package-broker/core/db/port';
@@ -803,19 +799,9 @@ afterAll(async () => {
   await mf.dispose();
 });
 
-const requireFromHere = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(requireFromHere.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
-
 async function migratedDatabase(): Promise<{ db: D1DatabaseLike; orgId: string }> {
   const db = (await mf.getD1Database('IDB0')) as unknown as D1DatabaseLike;
-  const sources: MigrationSource[] = await Promise.all(
-    ['0001_init.sql'].map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
+  const sources = await discoveredMigrations();
   await migrate(createD1Executor(db), sources, { holder: 'index-test' });
   const orgId = ulid();
   await createOrganizationBootstrap(createD1Executor(db)).bootstrap({

@@ -18,7 +18,7 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
-  it('has exactly the 17 audit events', () => {
+  it('has exactly the 18 audit events', () => {
     expect([...AUDIT_EVENTS].sort()).toEqual([
       'audit.alert',
       'audit.chain_broken',
@@ -28,6 +28,7 @@ describe('vocabularies', () => {
       'audit.effective_unavailable',
       'audit.failure_event_failed',
       'audit.failure_event_invalid',
+      'audit.failure_event_refused',
       'audit.failure_events_cap',
       'audit.loss',
       'audit.seal.contended',
@@ -43,7 +44,7 @@ describe('vocabularies', () => {
     expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
-    expect(AUDIT_EVENTS.size).toBe(17);
+    expect(AUDIT_EVENTS.size).toBe(18);
   });
 
   it('has exactly the 5 kernel events', () => {
@@ -52,7 +53,7 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 50 reason codes', () => {
+  it('has exactly the registered reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
         'audit.effective_unavailable',
@@ -70,6 +71,7 @@ describe('vocabularies', () => {
         'error.not_bootstrapped',
         'error.misconfigured',
         'error.unavailable',
+        'error.audit_backlog_full',
         'error.internal',
         'error.upstream_refused',
         'db.unique',
@@ -77,6 +79,7 @@ describe('vocabularies', () => {
         'db.not_null',
         'db.check',
         'db.busy',
+        'db.backlog_full',
         'db.too_big',
         'db.unknown',
         'health.not_ready',
@@ -107,7 +110,7 @@ describe('vocabularies', () => {
         'audit.chain_integrity',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(50);
+    expect(KERNEL_REASON_CODES.size).toBe(52);
   });
 
   it('matches the port CODE pattern for every value', () => {
@@ -169,6 +172,7 @@ describe('mapping functions', () => {
     ['not_bootstrapped', 'error.not_bootstrapped'],
     ['misconfigured', 'error.misconfigured'],
     ['unavailable', 'error.unavailable'],
+    ['audit_backlog_full', 'error.audit_backlog_full'],
     ['internal', 'error.internal'],
     ['something_else', 'error.internal'],
   ])('maps envelope code %s to %s', (code, reason) => {
@@ -181,6 +185,7 @@ describe('mapping functions', () => {
     'not_null',
     'check',
     'busy',
+    'backlog_full',
     'too_big',
     'unknown',
   ])('maps DbError kind %s to db.%s', (kind) => {

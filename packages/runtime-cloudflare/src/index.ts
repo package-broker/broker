@@ -1,3 +1,4 @@
+import { resolveAuditJournalBudget } from '@package-broker/core/audit/effective';
 import { createFailureEvents } from '@package-broker/core/audit/failure-events';
 import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
@@ -285,6 +286,7 @@ export type Env = {
   readonly PB_MASTER_KEY_PREVIOUS?: string;
   readonly PB_KEYRING_RESEED?: string;
   readonly PB_PUBLIC_URL?: string;
+  readonly PB_AUDIT_POLICY?: string;
   readonly [binding: `PB_IDP_${string}`]: string | undefined;
 };
 
@@ -339,6 +341,7 @@ export interface WorkerOptions {
   readonly platformPorts?: PlatformPortConfig | null;
   /** Registry settings; an invalid value fails startup. Dist URLs use the origin of PB_PUBLIC_URL only, so a path-prefixed public URL is unsupported. */
   readonly registry?: RegistryConfigInput;
+  readonly audit?: BrokerConfig['audit'];
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
@@ -1599,6 +1602,12 @@ export function createWorker(
       ...(options.observability === undefined ? {} : { observability: options.observability }),
     });
     if (observabilityProblems.length > 0) throw new KernelConfigError(observabilityProblems);
+    const maxJournalBytes = resolveAuditJournalBudget(
+      options.audit,
+      'cloudflare',
+      env?.PB_AUDIT_POLICY,
+    );
+    const auditCapacity = maxJournalBytes === null ? {} : { maxJournalBytes };
     const lifetime = resolveTokenLifetime(options.tokens);
     const patJobs = createPatJobHolder();
     const config = stanza;
@@ -1725,7 +1734,7 @@ export function createWorker(
                       return services.retention;
                     })),
                 registerObservedJob(
-                  auditSealJob(createAuditSealRepository(executor as SqlExecutor)),
+                  auditSealJob(createAuditSealRepository(executor as SqlExecutor, auditCapacity)),
                 ),
                 registerObservedJob(
                   auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor)),

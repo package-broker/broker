@@ -258,6 +258,24 @@ beforeEach(async () => {
 afterEach(async () => close());
 
 describe('service token rotation batch', () => {
+  it('rotates and stages both events while required capacity is refusing', async () => {
+    await oldToken();
+    await executor.batch([
+      stmt(
+        "UPDATE audit_chain SET policy = 'required', capacity_state = 'refusing' WHERE org_id = ?",
+        a.orgId,
+      ),
+    ]);
+    const repository = createTokenRepository(executor);
+    await expect(repository.issueService(a, fence(), input(), mint)).rejects.toMatchObject({
+      kind: 'backlog_full',
+    });
+    expect((await repository.rotateService(a, fence(), input(), mint)).status).toBe('rotated');
+    expect((await rows('audit_pending')).map((row) => row.action).sort()).toEqual([
+      'token.issue',
+      'token.rotate',
+    ]);
+  });
   it('persists the rotation replay record without plaintext in its organization', async () => {
     await oldToken();
     const request = input();
@@ -541,8 +559,30 @@ describe('service token rotation batch', () => {
 
 async function organizationRotation() {
   await oldToken(null);
+  await executor.batch([
+    stmt(
+      "UPDATE audit_chain SET policy = 'required', capacity_state = 'refusing' WHERE org_id = ?",
+      a.orgId,
+    ),
+  ]);
   const now = iso(0);
   const repository = createTokenRepository(executor);
+  await expect(
+    repository.issueService(
+      a,
+      fence(),
+      input({
+        servicePrincipalId: SP_WIDE,
+        projectId: null,
+        authority: {
+          permission: 'org:service-principals:write',
+          organizationAdmin: true,
+          covers: ['project:read'],
+        },
+      }),
+      mint,
+    ),
+  ).rejects.toMatchObject({ kind: 'backlog_full' });
   const service = createServiceTokenService({
     tokens: repository,
     principals: {

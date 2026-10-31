@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { BrokerConfig } from '../config.js';
 import type { PluginDefinition } from '../plugin.js';
-import { DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES, MIN_AUDIT_JOURNAL_BYTES } from './config.js';
+import {
+  DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES,
+  MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES,
+  MIN_AUDIT_JOURNAL_BYTES,
+} from './config.js';
 import {
   AUDIT_NONE_WARNING,
   AuditEffectiveConfigError,
   validateAuditBuild,
+  resolveAuditJournalBudget,
   resolveOrgAudit,
   type AuditEffectiveConfigErrorCode,
   type OrgAuditRefusalCode,
@@ -91,6 +96,63 @@ function orgError(input: EffectiveAuditOptions, code: OrgAuditRefusalCode) {
 }
 
 describe('effective audit configuration', () => {
+  it.each(['build', 'env'] as const)('refuses required Node without a budget from %s', (source) => {
+    const input = options(
+      [sink('durable')],
+      {
+        ...(source === 'build' ? { policy: 'required' as const } : {}),
+        alerts: { webhookEnv: 'AUDIT_ALERT_URL' },
+      },
+      source === 'env' ? { PB_AUDIT_POLICY: 'required' } : {},
+    );
+    const error = bootError(
+      { ...input, target: 'node', config: { ...input.config, platform: 'node' } },
+      'journal_budget_required',
+    );
+    expect(error).toMatchObject({ message: 'Invalid effective audit configuration' });
+  });
+  it('resolves one explicit journal budget for both runtimes and preserves the Worker default', () => {
+    for (const target of ['node', 'cloudflare'] as const) {
+      expect(
+        resolveAuditJournalBudget(
+          { capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES } },
+          target,
+        ),
+      ).toBe(MIN_AUDIT_JOURNAL_BYTES);
+    }
+    expect(resolveAuditJournalBudget(undefined, 'cloudflare', 'required')).toBe(
+      DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES,
+    );
+  });
+
+  it.each([
+    ['node', MIN_AUDIT_JOURNAL_BYTES, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1],
+    [
+      'cloudflare',
+      MIN_AUDIT_JOURNAL_BYTES,
+      MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES,
+      MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES + 1,
+    ],
+  ] as const)('bounds the %s journal budget at boot', (target, min, max, aboveMax) => {
+    const resolve = (maxJournalBytes: number) =>
+      resolveAuditJournalBudget({ capacity: { maxJournalBytes } }, target);
+    expect(resolve(min)).toBe(min);
+    expect(resolve(max)).toBe(max);
+    for (const budget of [1, min - 1, aboveMax]) {
+      let caught: unknown;
+      try {
+        resolve(budget);
+      } catch (value) {
+        caught = value;
+      }
+      expect(caught).toBeInstanceOf(AuditEffectiveConfigError);
+      expect(caught).toMatchObject({
+        code: 'invalid_config',
+        message: 'Invalid effective audit configuration',
+      });
+    }
+  });
+
   it('uses the composed trail and Cloudflare budget by default', () => {
     expect(resolveEffectiveAuditConfig(options())).toEqual({
       policy: 'availability',
@@ -290,6 +352,44 @@ describe('effective audit configuration', () => {
         },
       }).maxJournalBytes,
     ).toBe(MIN_AUDIT_JOURNAL_BYTES);
+  });
+
+  it('refuses a stored required organization on Node without a journal budget', () => {
+    const input = {
+      ...options([sink('durable')], { alerts: { webhookEnv: 'AUDIT_ALERT_URL' } }),
+      target: 'node' as const,
+      sinks: [{ id: 'archive', state: 'active' as const }],
+      alertPathActive: true,
+    };
+    input.config = { ...input.config, platform: 'node' };
+    const build = validateAuditBuild(input.config, input.env, 'node');
+    expect(build.maxJournalBytes).toBeNull();
+    expect(resolveOrgAudit({ ...input, build, storedPolicy: 'required' })).toEqual({
+      ok: false,
+      code: 'journal_budget_required',
+      persistRaise: false,
+    });
+    expect(resolveOrgAudit({ ...input, build })).toMatchObject({
+      ok: true,
+      effective: { policy: 'availability', mode: 'export', maxJournalBytes: null },
+    });
+    const budgeted = validateAuditBuild(
+      {
+        ...input.config,
+        audit: { ...input.config.audit, capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES } },
+      },
+      input.env,
+      'node',
+    );
+    expect(resolveOrgAudit({ ...input, build: budgeted, storedPolicy: 'required' })).toEqual({
+      ok: true,
+      effective: expect.objectContaining({
+        policy: 'required',
+        policySource: 'stored',
+        mode: 'export',
+        maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES,
+      }),
+    });
   });
 
   it.each([{ plugins: [] }, { plugins: [sink('durable')] }])(

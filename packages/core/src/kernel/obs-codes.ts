@@ -28,6 +28,7 @@ export const AUDIT_EVENTS = frozenSet([
   'audit.alert',
   'audit.failure_event_invalid',
   'audit.failure_event_failed',
+  'audit.failure_event_refused',
   'audit.failure_events_cap',
   'audit.sealed',
   'audit.delivery_partial_success',
@@ -58,6 +59,7 @@ const REASON_CODES = [
   'error.not_bootstrapped',
   'error.misconfigured',
   'error.unavailable',
+  'error.audit_backlog_full',
   'error.internal',
   'error.upstream_refused',
   'db.unique',
@@ -65,6 +67,7 @@ const REASON_CODES = [
   'db.not_null',
   'db.check',
   'db.busy',
+  'db.backlog_full',
   'db.too_big',
   'db.unknown',
   'health.not_ready',
@@ -125,6 +128,7 @@ const ENVELOPE_REASONS: ReadonlyMap<string, KernelReasonCode> = new Map([
   ['not_bootstrapped', 'error.not_bootstrapped'],
   ['misconfigured', 'error.misconfigured'],
   ['unavailable', 'error.unavailable'],
+  ['audit_backlog_full', 'error.audit_backlog_full'],
   ['upstream_refused', 'error.upstream_refused'],
 ]);
 
@@ -138,6 +142,7 @@ const DB_REASONS: Readonly<Record<DbErrorKind, KernelReasonCode>> = {
   not_null: 'db.not_null',
   check: 'db.check',
   busy: 'db.busy',
+  backlog_full: 'db.backlog_full',
   too_big: 'db.too_big',
   unknown: 'db.unknown',
 };

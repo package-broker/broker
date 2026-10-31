@@ -274,7 +274,7 @@ export async function runFenced(
   try {
     return { ok: true, results: await executor.batch([...guard, ...mutations]) };
   } catch (error) {
-    if (!(error instanceof DbError)) throw error;
+    if (!(error instanceof DbError) || error.kind === 'backlog_full') throw error;
     if (error.kind === 'unknown') return { ok: false, reason: 'indeterminate' };
     if (!CONSTRAINT_KINDS.has(error.kind)) return { ok: false, reason: 'unclassified' };
     return { ok: false, reason: await classifyFailure(executor, probes) };

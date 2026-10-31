@@ -1,4 +1,5 @@
 import {
+  audit,
   mcp,
   migrations,
   observability,
@@ -20,6 +21,7 @@ export default createWorker(plugins, {
   migrations,
   observability,
   ...(registry === undefined ? {} : { registry }),
+  ...(audit === undefined ? {} : { audit }),
   ...(tokens === undefined ? {} : { tokens }),
   ...(vulnerability === undefined ? {} : { vulnerability }),
   ...(mcp === undefined ? {} : { mcp }),

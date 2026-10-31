@@ -402,7 +402,7 @@ describe('audit seal on Miniflare D1', () => {
       sealed: 100,
       headSeq: 301,
     });
-    expect(batches.map((batch) => batch.length)).toEqual([198, 6, 105]);
+    expect(batches.map((batch) => batch.length)).toEqual([196, 8, 105]);
     expect(
       Math.max(...batches.flatMap((batch) => batch.map((statement) => statement.params.length))),
     ).toBe(29);
@@ -485,7 +485,7 @@ describe('audit seal on Miniflare D1', () => {
       integrity: ['boundary_mismatch', 'seq_gap'],
       cause: expect.objectContaining({ message: 'recovery interrupted' }),
     });
-    expect(batches).toEqual([199, 6]);
+    expect(batches).toEqual([197, 8]);
     expect(await repo.seal(a)).toEqual({
       outcome: 'empty',
       repaired: true,

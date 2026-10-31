@@ -88,6 +88,7 @@ export interface StartOptions {
   readonly platformPorts?: PlatformPortConfig | null;
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
+  readonly audit?: BrokerConfig['audit'];
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
@@ -775,6 +776,16 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       executor: opened.executor,
       migrations: options.migrations,
       closeDatabase,
+      ...(options.audit === undefined && options.env['PB_AUDIT_POLICY'] === undefined
+        ? {}
+        : {
+            audit: {
+              ...options.audit,
+              ...(options.env['PB_AUDIT_POLICY'] === 'required'
+                ? { policy: 'required' as const }
+                : {}),
+            },
+          }),
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),

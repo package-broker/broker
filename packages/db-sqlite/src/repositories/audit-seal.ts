@@ -116,8 +116,8 @@ const GAP_ABOVE_SQL = `FROM audit_ledger t
   WHERE t.org_id = ? AND t.chain_id = ? AND t.epoch = ? AND t.reason_code IN ('seq_gap', 'capacity')
   AND t.sink_id IS NULL AND t.kind = 'gap' AND t.superseded_by IS NULL`;
 const GAP_ABOVE_FENCE = ` AND NOT EXISTS (SELECT 1 ${GAP_ABOVE_SQL} AND t.to_seq > ?)`;
-/** Two ledger statements per gap plus the CAS and its assertion stay below 200 with a reset. */
-const GAPS_PER_BATCH = 98;
+/** 97 gaps, a reset, the CAS and assertion, and the capacity update fit within 200 statements. */
+const GAPS_PER_BATCH = 97;
 const PENDING_ATTEMPTS = 3;
 
 /**
@@ -355,6 +355,7 @@ function insertStatement(row: AuditRow): Statement {
 }
 
 export interface AuditSealOptions {
+  readonly maxJournalBytes?: number;
   /** Ledger id generator; ids must be ULIDs. */
   readonly ids?: () => string;
 }
@@ -363,12 +364,34 @@ export function createAuditSealRepository(
   executor: SqlExecutor,
   options: AuditSealOptions = {},
 ): AuditSealRepository {
+  if (
+    options.maxJournalBytes !== undefined &&
+    (!Number.isSafeInteger(options.maxJournalBytes) || options.maxJournalBytes < 1)
+  )
+    throw new TypeError('Invalid audit capacity budget');
   const ledger = createAuditLedgerRepository(executor);
   const ids = options.ids ?? (() => ulid());
 
-  async function submit(statements: readonly Statement[]): Promise<boolean> {
+  async function submit(ctx: OrgContext, statements: readonly Statement[]): Promise<boolean> {
     try {
-      await executor.batch(statements);
+      await executor.batch([
+        ...statements,
+        ...(options.maxJournalBytes === undefined
+          ? []
+          : [
+              {
+                sql: `UPDATE audit_chain SET capacity_state = CASE
+            WHEN journal_bytes >= ? THEN 'refusing'
+            WHEN journal_bytes <= ? THEN 'ok' ELSE capacity_state END
+            WHERE org_id = ? AND policy = 'required'`,
+                params: [
+                  options.maxJournalBytes,
+                  options.maxJournalBytes - Math.ceil(options.maxJournalBytes / 20),
+                  ctx.orgId,
+                ],
+              },
+            ]),
+      ]);
       return true;
     } catch (error) {
       if (isChainConflict(error)) return false;
@@ -465,7 +488,7 @@ export function createAuditSealRepository(
               ],
             };
       if (
-        !(await submit([
+        !(await submit(ctx, [
           compareAndSet(ctx, i === 0 ? head : recovered, state, fence),
           ...assertCheck(sql`changes() = 1`),
           ...ledger.statements(ctx, entries),
@@ -487,7 +510,7 @@ export function createAuditSealRepository(
     head: Head,
     pending: number,
   ): Promise<Head | null> {
-    const recorded = await submit([
+    const recorded = await submit(ctx, [
       compareAndSet(ctx, head, head, undefined, true),
       ...assertCheck(sql`changes() = 1`),
       ...ledger.statements(ctx, [
@@ -555,7 +578,10 @@ export function createAuditSealRepository(
         sql: PENDING_SQL,
         params: [orgId, limit],
       });
-      if (pending.length === 0) return { outcome: 'empty', ...extra() };
+      if (pending.length === 0) {
+        if (options.maxJournalBytes !== undefined) await submit(ctx, []);
+        return { outcome: 'empty', ...extra() };
+      }
 
       const statements: Statement[] = [
         compareAndSet(ctx, head, head, {
@@ -582,7 +608,7 @@ export function createAuditSealRepository(
         params: [seq, prevHash, pending.length, orgId, head.head_seq + 1, seq, orgId],
       });
 
-      if (await submit(statements))
+      if (await submit(ctx, statements))
         return {
           outcome: 'sealed',
           sealed: pending.length,

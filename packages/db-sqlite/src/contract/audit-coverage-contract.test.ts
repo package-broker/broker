@@ -79,14 +79,20 @@ describe('audit coverage inventory', () => {
   });
 
   it('pins all direct staging sites so new repository paths and calls require inventory review', () => {
-    for (const builder of ['auditPendingStatement', 'visibilityAuditStatements']) {
+    for (const builder of [
+      'auditPendingStatement',
+      'auditReserveStatements',
+      'visibilityAuditStatements',
+    ]) {
       const actual = readdirSync(repositories)
         .filter(
           (name) =>
             name.endsWith('.ts') &&
             !name.endsWith('.test.ts') &&
             name !==
-              (builder === 'auditPendingStatement' ? 'audit-pending.ts' : 'visibility-audit.ts'),
+              (builder === 'visibilityAuditStatements'
+                ? 'visibility-audit.ts'
+                : 'audit-pending.ts'),
         )
         .map((name) => ({
           repository: name.slice(0, -3),

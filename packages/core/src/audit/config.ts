@@ -13,7 +13,21 @@ export const MIN_AUDIT_JOURNAL_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES = 4 * 1024 * 1024 * 1024;
 
 // The journal plus its 1% reserve (§2.8) must fit in D1's 10 GB database limit.
-const MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES = Math.floor(10_000_000_000 / 1.01);
+export const MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES = Math.floor(10_000_000_000 / 1.01);
+
+export function auditJournalBudgetProblem(budget: unknown, target: Platform): string | null {
+  if (
+    typeof budget !== 'number' ||
+    !Number.isSafeInteger(budget) ||
+    budget < MIN_AUDIT_JOURNAL_BYTES
+  ) {
+    return 'audit.capacity.maxJournalBytes: must be a safe integer of at least 64 MiB';
+  }
+  if (target === 'cloudflare' && budget > MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES) {
+    return 'audit.capacity.maxJournalBytes: exceeds the Cloudflare database limit with reserve';
+  }
+  return null;
+}
 
 const CORE_ENV_NAMES = new Set([
   'DB',
@@ -250,18 +264,8 @@ export function brokerAuditProblems(config: BrokerConfig, target: Platform): str
     }
     problems.push(...unknownKeys(section, keys, 'audit.' + name));
     if (name === 'capacity' && section.maxJournalBytes !== undefined) {
-      const budget = section.maxJournalBytes;
-      if (
-        typeof budget !== 'number' ||
-        !Number.isSafeInteger(budget) ||
-        budget < MIN_AUDIT_JOURNAL_BYTES
-      ) {
-        problems.push('audit.capacity.maxJournalBytes: must be a safe integer of at least 64 MiB');
-      } else if (target === 'cloudflare' && budget > MAX_CLOUDFLARE_AUDIT_JOURNAL_BYTES) {
-        problems.push(
-          'audit.capacity.maxJournalBytes: exceeds the Cloudflare database limit with reserve',
-        );
-      }
+      const problem = auditJournalBudgetProblem(section.maxJournalBytes, target);
+      if (problem !== null) problems.push(problem);
     }
     if (
       name === 'alerts' &&

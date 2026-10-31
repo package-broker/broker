@@ -322,6 +322,15 @@ describe('runEntry', () => {
     expect(test.exit).not.toHaveBeenCalled();
   });
 
+  it('forwards the configured audit budget to startup', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    const audit = { capacity: { maxJournalBytes: 64 * 1024 * 1024 } };
+    await runEntry(Promise.resolve({ plugins: [], migrations: [], audit }), {}, test.runtime);
+    expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0].audit).toBe(audit);
+    expect(test.exit).not.toHaveBeenCalled();
+  });
+
   it('forwards tokens', async () => {
     const { broker } = fakeBroker();
     const test = harness(() => Promise.resolve(broker));

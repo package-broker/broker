@@ -799,7 +799,7 @@ describe('createAuditSealRepository', () => {
           integrity: ['seq_gap'],
           cause: expect.objectContaining({ kind: 'busy' }),
         });
-        expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(98);
+        expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(97);
         expect(await pendingIds(a.orgId)).toHaveLength(100);
       }
       expect(await createAuditSealRepository(recording).seal(a)).toMatchObject({
@@ -808,7 +808,7 @@ describe('createAuditSealRepository', () => {
         headSeq: 301,
       });
       expect(batches.map((batch) => batch.length)).toEqual(
-        interrupt ? [198, 6, 6, 105] : [198, 6, 105],
+        interrupt ? [196, 8, 8, 105] : [196, 8, 105],
       );
       expect(
         Math.max(...batches.flatMap((batch) => batch.map((statement) => statement.params.length))),
@@ -817,6 +817,43 @@ describe('createAuditSealRepository', () => {
       expect(await pendingIds(a.orgId)).toEqual([]);
     },
   );
+
+  it('keeps recovery within 200 statements with 98 gaps, a reset and a capacity budget', async () => {
+    const { a } = orgs();
+    await addPending(a.orgId, 1, 100);
+    await addPending(a.orgId, 101, 97);
+    const repository = createAuditSealRepository(executor);
+    await repository.seal(a);
+    await repository.seal(a);
+    await executor.batch([
+      { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq % 2 = 0', params: [a.orgId] },
+      {
+        sql: 'UPDATE audit_chain SET boundary_prev_hash = ? WHERE org_id = ?',
+        params: ['e'.repeat(64), a.orgId],
+      },
+    ]);
+    const sizes: number[] = [];
+    const recording: SqlExecutor = {
+      ...executor,
+      all: (statement) => executor.all(statement),
+      batch: (statements) => {
+        sizes.push(statements.length);
+        expect(statements.length).toBeLessThanOrEqual(200);
+        return executor.batch(statements);
+      },
+    };
+    await expect(
+      createAuditSealRepository(recording, { maxJournalBytes: 1_000_000 }).seal(a),
+    ).resolves.toMatchObject({
+      outcome: 'empty',
+      repaired: true,
+      integrity: ['boundary_mismatch', 'seq_gap'],
+    });
+    expect(sizes).toEqual([198, 5, 1]);
+    const entries = await createAuditLedgerRepository(executor).page(a, null, 500);
+    expect(entries.filter((entry) => entry.kind === 'gap')).toHaveLength(98);
+    expect(entries.filter((entry) => entry.kind === 'chain_reset')).toHaveLength(1);
+  });
 
   it('writes the reset with the first boundary rewrite and resumes an interrupted recovery with gaps only', async () => {
     const { a } = orgs();
@@ -849,13 +886,13 @@ describe('createAuditSealRepository', () => {
       integrity: ['boundary_mismatch', 'seq_gap'],
       cause: expect.objectContaining({ kind: 'busy' }),
     });
-    expect(batches).toEqual([199, 6]);
+    expect(batches).toEqual([197, 8]);
     const ledger = createAuditLedgerRepository(executor);
     const first = await ledger.page(a, null, 500);
     expect(first.filter((entry) => entry.kind === 'chain_reset')).toEqual([
       expect.objectContaining({ reasonCode: 'tamper_detected', fromSeq: 1, toSeq: 201 }),
     ]);
-    expect(first.filter((entry) => entry.kind === 'gap')).toHaveLength(98);
+    expect(first.filter((entry) => entry.kind === 'gap')).toHaveLength(97);
     expect(
       await executor.all({
         sql: 'SELECT head_seq, boundary_seq, boundary_prev_hash, boundary_reason FROM audit_chain WHERE org_id = ?',

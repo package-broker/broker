@@ -1,3 +1,4 @@
+import { DbError } from '../db/errors.js';
 import type { OrgContext } from '../db/port.js';
 import { ulid } from '../ids.js';
 import type { BoundCacheKey, Cache, CacheEnvelope } from '../platform/cache.js';
@@ -232,9 +233,14 @@ export function createFailureEvents(options?: FailureEventsOptions): {
       };
       payload.changes.count.new = count;
       await options.staging.stage(ctx, { ...result.event, payloadJson: JSON.stringify(payload) });
-    } catch {
+    } catch (error) {
       suppressed(options);
-      report(options, 'audit.failure_event_failed');
+      report(
+        options,
+        error instanceof DbError && error.kind === 'backlog_full'
+          ? 'audit.failure_event_refused'
+          : 'audit.failure_event_failed',
+      );
     }
   }
   return {

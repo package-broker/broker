@@ -761,6 +761,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Loads the shared fork persistence suite for Node and D1 tests; no executor change counts are read.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-fork-suite.js') #1",
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-backpressure-suite.js') #1",
       ],
     },
     {
@@ -1604,7 +1605,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         'db-sqlite/src/repositories/audit-pending.ts:SQL text: `INSERT INTO audit_pending\n  (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip,\n   action, target_type, target_id, project_id, payload_json)` #1',
         "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'audit insert must bind at most 100 parameters' #1",
-        'db-sqlite/src/repositories/audit-pending.ts:SQL input: sql:\n      when === undefined\n        ? `${INSERT} VALUES (${values})`\n        : `${INSERT} SELECT ${values} WHERE ${when.sql}` #1',
+        "db-sqlite/src/repositories/audit-pending.ts:SQL input: sql: `${INSERT}\n    SELECT pending_id, pending_org_id, ${createdAt}, pending_actor_type, pending_actor_id, pending_token_selector, pending_source_ip,\n      pending_action, pending_target_type, pending_target_id, pending_project_id, pending_payload_json\n    FROM (\n      SELECT ? AS pending_id, ? AS pending_org_id, ? AS pending_created_at, ? AS pending_actor_type, ? AS pending_actor_id,\n        ? AS pending_token_selector, ? AS pending_source_ip, ? AS pending_action, ? AS pending_target_type,\n        ? AS pending_target_id, ? AS pending_project_id, ? AS pending_payload_json\n    ) AS input${when === undefined ? '' : ` WHERE ${when.sql}`}` #1",
       ],
     },
     {

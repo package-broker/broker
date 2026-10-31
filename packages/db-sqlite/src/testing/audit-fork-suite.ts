@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { confirmAuditRestore, detectAuditFork } from '@package-broker/core/audit/fork';
 import { reconcileAuditSinks } from '@package-broker/core/audit/sinks/registry';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { auditPendingStatement } from '../repositories/audit-pending.js';
 import { createAuditForkRepository } from '../repositories/audit-fork.js';
 import { createAuditSinkRepository } from '../repositories/audit-sink.js';
 import { createAuditSealRepository } from '../repositories/audit-seal.js';
@@ -109,6 +111,86 @@ export async function auditForkRepositorySuite(
         now,
         actor,
       });
+    it.each(['unblock', 'confirm_restore'] as const)(
+      'relieves the backlog through %s while required capacity is refusing',
+      async (operation) => {
+        for (let index = 0; index < 3; index++) {
+          const id = ulid();
+          const result = auditEvent({
+            id,
+            now: now.toISOString(),
+            action: 'project.update',
+            actor,
+            target: { type: 'project', id: null },
+            context: { opId: id, requestId: id, tokenSelector: null, sourceIp: null },
+          });
+          if (!result.ok) throw new Error('Invalid audit fixture');
+          await database.executor.batch([auditPendingStatement(org, result.event)]);
+        }
+        await createAuditSealRepository(database.executor).seal(org);
+        await database.executor.batch([
+          {
+            sql: "UPDATE audit_chain SET mode = 'export', pending_mode = NULL, capacity_state = 'refusing', restore_pending = ? WHERE org_id = ?",
+            params: [operation === 'confirm_restore' ? 1 : 0, org.orgId],
+          },
+          {
+            sql: "UPDATE audit_sink SET state = 'blocked', blocked_reason = ?, progress_seq = 0, progress_hash = ?, custody_seq = 0 WHERE org_id = ?",
+            params: [operation === 'confirm_restore' ? 'fork' : 'rejected', zero, org.orgId],
+          },
+        ]);
+        const ordinary = auditPendingStatement(org, {
+          id: ulid(),
+          occurredAt: now.toISOString(),
+          actor,
+          tokenSelector: null,
+          sourceIp: null,
+          action: 'project.update',
+          target: { type: 'organization', id: org.orgId },
+          projectId: null,
+          payloadJson: '{}',
+        });
+        await expect(database.executor.batch([ordinary])).rejects.toMatchObject({
+          kind: 'backlog_full',
+        });
+        const beforeBytes = (await rows('audit_chain')).find(
+          (row) => row.org_id === org.orgId,
+        )!.journal_bytes;
+        if (operation === 'unblock') {
+          expect(await admin({ operation: 'unblock', sinkId: 'archive' })).toEqual({
+            result: 'applied',
+          });
+        } else {
+          expect(await confirm(1)).toBe('confirmed');
+        }
+        expect((await port.read(org)).sinks[0]).toMatchObject({ state: 'active', custodySeq: 0 });
+        expect((await rows('audit_pending')).filter((row) => row.org_id === org.orgId)).toEqual([
+          expect.objectContaining({ action: 'audit.sink_admin' }),
+        ]);
+        await createAuditSealRepository(database.executor).seal(org);
+        expect((await exportUntilIdle()).length).toBeGreaterThan(0);
+        const delivered = await port.read(org);
+        expect(delivered.sinks[0]!.custodySeq).toBe(delivered.headSeq);
+        expect((await rows('audit_chain')).find((row) => row.org_id === org.orgId)).toMatchObject({
+          mode: 'export',
+          pending_mode: null,
+          restore_pending: 0,
+        });
+        expect(
+          await createAuditPruneRepository(database.executor, undefined, {
+            maxJournalBytes: 1000,
+          }).prune(org, {
+            generation: 2,
+            configuredSinkIds: ['archive'],
+            trailActive: false,
+          }),
+        ).toMatchObject({ outcome: 'pruned' });
+        const relieved = (await rows('audit_chain')).find((row) => row.org_id === org.orgId)!;
+        expect(relieved.journal_bytes).toBeLessThan(Number(beforeBytes));
+        expect(relieved.capacity_state).toBe('ok');
+        await expect(database.executor.batch([ordinary])).resolves.toBeDefined();
+        expect((await rows('audit_ledger')).some((row) => row.kind === 'gap')).toBe(false);
+      },
+    );
     it('lists without changing evidence or verification or exposing frozen bodies or destinations', async () => {
       const before = await contents();
       const result = await admin({ operation: 'list' });

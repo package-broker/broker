@@ -58,6 +58,21 @@ export async function runSourceAcceptRemoval(options: AcceptRemovalOptions): Pro
       console.log('Removal acceptance armed for the next refused sync.');
       return 0;
     }
+    if (response.status === 503) {
+      const body: unknown = await response.json().catch(() => null);
+      if (
+        typeof body === 'object' &&
+        body !== null &&
+        'error' in body &&
+        typeof body.error === 'object' &&
+        body.error !== null &&
+        'code' in body.error &&
+        body.error.code === 'audit_backlog_full'
+      ) {
+        say('audit backlog is full');
+        return 1;
+      }
+    }
     say(
       response.status === 409
         ? 'no acceptable refusal to accept'

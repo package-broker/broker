@@ -1,3 +1,5 @@
+import * as sealModule from '@package-broker/db-sqlite/repositories/audit-seal';
+import { MIN_AUDIT_JOURNAL_BYTES } from '@package-broker/core/audit/config';
 import { describe, expect, it, vi } from 'vitest';
 import type { SafeLogRecord, ObsRecord } from '@package-broker/core/platform/observability';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
@@ -6,13 +8,24 @@ import { createJobLoop } from './jobs/loop.js';
 import { createNodeServer } from './index.js';
 
 describe('Node audit job registration', () => {
+  it('refuses required boot without a journal budget', () => {
+    expect(() => createNodeServer([], { audit: { policy: 'required' } })).toThrow(
+      expect.objectContaining({
+        code: 'journal_budget_required',
+        message: 'Invalid effective audit configuration',
+      }),
+    );
+  });
+
   it('registers the core schedules and runs the real repositories, detecting tampering', async () => {
     const database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
     const { executor } = database;
     const org = database.orgs!.a;
     const records: ObsRecord[] = [];
+    const seal = vi.spyOn(sealModule, 'createAuditSealRepository');
     const broker = createNodeServer([], {
       executor,
+      audit: { capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES } },
       platformServices: {
         jobStore: createJobRepository(executor),
         blob: {
@@ -32,6 +45,7 @@ describe('Node audit job registration', () => {
     });
     try {
       const kernel = await broker.ready();
+      expect(seal).toHaveBeenCalledWith(executor, { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES });
       expect(
         kernel.registration.jobs.map(({ qualifiedName, definition }) => [
           qualifiedName,
@@ -118,6 +132,7 @@ describe('Node audit job registration', () => {
         value: 1,
       });
     } finally {
+      seal.mockRestore();
       await broker.close();
       await database.close();
     }

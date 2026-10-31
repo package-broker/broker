@@ -647,3 +647,20 @@ describe('responseReason', () => {
     expect(await response.text()).not.toContain('error.internal');
   });
 });
+
+it('maps backlog_full independently of constraint metadata and logs its dedicated reason', async () => {
+  const log = vi.fn();
+  const response = errorResponse(new DbError('backlog_full', 'private data'), 'request', log);
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({
+    error: { code: 'audit_backlog_full', message: 'Audit backlog is full' },
+  });
+  expect(responseReason(response)).toBe('error.audit_backlog_full');
+  expect(log).toHaveBeenCalledExactlyOnceWith({
+    level: 'error',
+    event: 'http.error',
+    request_id: 'request',
+    error_name: 'DbError',
+    reason_code: 'db.backlog_full',
+  });
+});

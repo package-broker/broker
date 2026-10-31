@@ -65,6 +65,9 @@ function mappingOf(error: unknown): Mapping {
   if (error instanceof SecretsConfigError || error instanceof KernelConfigError) {
     return { status: 503, code: 'misconfigured', message: 'Server is not configured' };
   }
+  if (error instanceof DbError && error.kind === 'backlog_full') {
+    return { status: 503, code: 'audit_backlog_full', message: 'Audit backlog is full' };
+  }
   if (error instanceof DbError && error.kind === 'busy') {
     return { status: 503, code: 'unavailable', message: 'Try again later' };
   }

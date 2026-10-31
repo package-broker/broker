@@ -1,10 +1,7 @@
-import { readFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
 import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -32,23 +29,12 @@ afterAll(async () => {
   await mf.dispose();
 });
 
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
-
 async function database(applyVerifierMigration = true): Promise<D1DatabaseLike> {
   const binding = bindings[next];
   next += 1;
   if (binding === undefined) throw new Error('out of D1 bindings');
   const db = (await mf.getD1Database(binding)) as unknown as D1DatabaseLike;
-  const names = ['0001_init.sql'];
-  const sources = await Promise.all(
-    names.map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
+  const sources = await discoveredMigrations();
   await migrate(createD1Executor(db), sources, { holder: 'keyring-verifier-test' });
   if (!applyVerifierMigration)
     await createD1Executor(db).all({ sql: 'DROP TABLE keyring_verifier', params: [] });

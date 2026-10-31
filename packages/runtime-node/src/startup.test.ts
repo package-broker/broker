@@ -5,6 +5,7 @@ import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS, blobPurgeTiming } from './startup.js';
 import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycle';
 import type { ByteStore } from '@package-broker/core/platform/blob';
@@ -406,7 +407,7 @@ describe('startNode', () => {
     async (enabled) => {
       const broker = await startNode({
         plugins: [],
-        migrations: [await initSource()],
+        migrations: await discoveredMigrations(),
         ...(enabled === undefined ? {} : { mcp: { enabled } }),
         env: {
           PB_SQLITE_PATH: databasePath(),
@@ -440,7 +441,7 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: await discoveredMigrations(),
       mcp: { enabled: true },
       env: {
         PB_SQLITE_PATH: path,
@@ -536,7 +537,7 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [healthyPlugin()],
-      migrations: [await initSource()],
+      migrations: await discoveredMigrations(),
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -588,7 +589,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: await discoveredMigrations(),
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -622,7 +623,7 @@ describe('startNode', () => {
     const path = databasePath();
     const first = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: await discoveredMigrations(),
       env: {
         PB_SQLITE_PATH: path,
         PB_ORG_SLUG: 'acme',
@@ -637,7 +638,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource()],
+        migrations: await discoveredMigrations(),
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'other',
@@ -670,7 +671,7 @@ describe('startNode', () => {
       const failure = await rejection(
         startNode({
           plugins: [broken],
-          migrations: [await initSource()],
+          migrations: await discoveredMigrations(),
           env: {
             PB_SQLITE_PATH: path,
             PB_ORG_SLUG: 'acme',
@@ -696,7 +697,7 @@ describe('startNode', () => {
     const failure = await rejection(
       startNode({
         plugins: [],
-        migrations: [await initSource()],
+        migrations: await discoveredMigrations(),
         env: {
           PB_SQLITE_PATH: path,
           PB_ORG_SLUG: 'acme',
@@ -810,7 +811,7 @@ describe('startNode', () => {
     ): Promise<NodeBroker> {
       return startNode({
         plugins: [probePlugin()],
-        migrations: [await initSource()],
+        migrations: await discoveredMigrations(),
         env: env(databasePath(), extraEnv),
         ...(platformPorts === undefined ? {} : { platformPorts }),
         stdout: capture().stream,
@@ -865,7 +866,7 @@ describe('startNode', () => {
               },
             },
           ],
-          migrations: [await initSource()],
+          migrations: await discoveredMigrations(),
           env: { ...env(databasePath(`n-${String(platformPorts)}.sqlite`)), DEPLOYMENT_ID: '' },
           ...(platformPorts === undefined ? {} : { platformPorts }),
         });
@@ -924,7 +925,7 @@ describe('startNode', () => {
         const failure = await rejection(
           startNode({
             plugins: [probePlugin()],
-            migrations: [await initSource()],
+            migrations: await discoveredMigrations(),
             env: env(path, extra),
             platformPorts: stanza,
             stdout: capture().stream,
@@ -1373,7 +1374,7 @@ describe('startNode', () => {
       };
       const broker = await startNode({
         plugins: [stuck],
-        migrations: [await initSource()],
+        migrations: await discoveredMigrations(),
         env: env(databasePath()),
         platformPorts: ports,
         stdout: out.stream,
@@ -1418,7 +1419,7 @@ describe('startNode', () => {
       const failure = await rejection(
         startNode({
           plugins: [healthyPlugin()],
-          migrations: [await initSource()],
+          migrations: await discoveredMigrations(),
           env: { ...env(databasePath()), PB_ORG_NAME: undefined },
           platformPorts: ports,
           stdout: out.stream,

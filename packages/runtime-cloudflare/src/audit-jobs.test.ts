@@ -1,3 +1,5 @@
+import * as sealModule from '@package-broker/db-sqlite/repositories/audit-seal';
+import { MIN_AUDIT_JOURNAL_BYTES } from '@package-broker/core/audit/config';
 import { describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { ulid } from '@package-broker/core/ids';
@@ -135,12 +137,14 @@ describe.each([
   it('registers both schedules and verifies bounded sealed pages, then detects tampering', async () => {
     const { db, close } = await open();
     const spy = vi.spyOn(kernelModule, 'createKernel');
+    const seal = vi.spyOn(sealModule, 'createAuditSealRepository');
     try {
       const executor = createD1Executor(db);
       await migrate(executor, await discoveredMigrations(), { holder: 'audit-jobs-test' });
       const { a, b } = await seedTwoOrganizations(executor);
       const records: unknown[] = [];
       const worker = createWorker([], {
+        audit: { capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES } },
         platformPorts,
         console: {
           log: (record) => void records.push(record),
@@ -170,6 +174,9 @@ describe.each([
       expect((await worker.fetch(new Request('https://broker.test/health/live'), env)).status).toBe(
         200,
       );
+      expect(seal).toHaveBeenCalledWith(expect.anything(), {
+        maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES,
+      });
       const registration = spy.mock.calls.at(-1)![0].registration!;
       expect(
         registration.jobs.map(({ qualifiedName, definition }) => [
@@ -271,6 +278,7 @@ describe.each([
       );
       expect(records).not.toContainEqual(expect.objectContaining({ event: 'audit.verified' }));
     } finally {
+      seal.mockRestore();
       spy.mockRestore();
       await close();
     }

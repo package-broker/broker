@@ -172,7 +172,11 @@ function capacityEligible(ctx: OrgContext, options: AuditCapacityOptions): State
 export function createAuditPruneRepository(
   executor: SqlExecutor,
   observability: Observability = noopObservability,
+  options: { readonly maxJournalBytes?: number } = {},
 ): AuditPrunePort & AuditCapacityPort {
+  const budget = options.maxJournalBytes;
+  if (budget !== undefined && (!Number.isSafeInteger(budget) || budget < 1))
+    throw new TypeError('Invalid audit capacity budget');
   const health = createAuditHealthService({
     port: createAuditHealthRepository(executor),
     clock: { now: () => new Date() },
@@ -402,6 +406,14 @@ export function createAuditPruneRepository(
       },
       ...clearAuditVerificationStatements(ctx),
     );
+    if (budget !== undefined)
+      statements.push({
+        sql: `UPDATE audit_chain SET capacity_state = CASE
+        WHEN journal_bytes >= ? THEN 'refusing'
+        WHEN journal_bytes <= ? THEN 'ok' ELSE capacity_state END
+        WHERE org_id = ? AND policy = 'required'`,
+        params: [budget, budget - Math.ceil(budget / 20), ctx.orgId],
+      });
     try {
       const results = await executor.batch(statements);
       const deleted = results.at(deleteIndex)!.rows.length;

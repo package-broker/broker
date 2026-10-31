@@ -26,7 +26,7 @@ interface CoverageEntry {
   readonly batchGuard: string;
   readonly cardinality: string;
   readonly stagingCalls: number;
-  readonly stagingBuilder?: 'visibilityAuditStatements';
+  readonly stagingBuilder?: 'visibilityAuditStatements' | 'auditReserveStatements';
   readonly callerBuilders?: readonly {
     readonly caller: string;
     readonly call: string;
@@ -180,12 +180,13 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     actions: ['identity.unlink', 'identity.block'],
     callers: ['core/src/authz/unlink-service.ts'],
     repository: 'unlink',
+    stagingBuilder: 'auditReserveStatements',
     batchGuard: 'runOrgFenced; live authority, identity ownership and remaining sign-in method',
     cardinality: '1 unlink plus 0 or 1 block, conditional on changes() = 1',
-    stagingCalls: 2,
+    stagingCalls: 1,
   },
   {
-    actions: ['token.issue', 'token.revoke', 'token.rotate'],
+    actions: ['token.issue', 'token.revoke'],
     callers: [
       'core/src/authz/pat-service.ts',
       'core/src/authz/service-token-service.ts',
@@ -194,9 +195,19 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     repository: 'token',
     batchGuard:
       'runOrgFenced; live actor/service principal, revision and performed operation guards',
+    cardinality: '1 issue/revoke',
+    stagingCalls: 3,
+  },
+  {
+    actions: ['token.rotate', 'token.issue'],
+    callers: ['core/src/authz/service-token-service.ts'],
+    repository: 'token',
+    stagingBuilder: 'auditReserveStatements',
+    batchGuard:
+      'runOrgFenced; live actor/service principal, revision and performed operation guards',
     cardinality:
-      '1 issue/revoke; rotation: issue plus 0 or 1 rotate; stored payload patched with json_set',
-    stagingCalls: 5,
+      '0 or 1 rotate followed by 1 issue; required refusal lifted only by the rotate insert; stored payload patched with json_set',
+    stagingCalls: 1,
   },
   {
     actions: ['token.revoke'],

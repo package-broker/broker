@@ -1,3 +1,4 @@
+import { resolveAuditJournalBudget } from '@package-broker/core/audit/effective';
 import { createFailureEvents } from '@package-broker/core/audit/failure-events';
 import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
@@ -313,6 +314,7 @@ export interface NodeServerOptions {
   readonly observability?: KernelObservability;
   readonly platformServices?: PlatformServices;
   readonly authorization?: AuthorizationEngine;
+  readonly audit?: BrokerConfig['audit'];
   /** Token lifetime maxima; an invalid value fails server creation. */
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
@@ -964,6 +966,12 @@ export function createNodeServer(
   const shutdownMs = seams.shutdownDeadlineMs ?? SHUTDOWN_IDLE_MS;
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
+  const maxJournalBytes = resolveAuditJournalBudget(
+    options.audit,
+    'node',
+    options.auth?.env.PB_AUDIT_POLICY ?? process.env.PB_AUDIT_POLICY,
+  );
+  const auditCapacity = maxJournalBytes === null ? {} : { maxJournalBytes };
   const lifetime = resolveTokenLifetime(options.tokens);
   const remoteAddress = new AsyncLocalStorage<string | null>();
   const clientIp = (request: Request): string | null =>
@@ -1150,7 +1158,7 @@ export function createNodeServer(
                 }),
               ),
               ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
-              registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
+              registerAuditJob(auditSealJob(createAuditSealRepository(executor, auditCapacity))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
               ...(registry?.module.coreJobs ?? []).map((job) => registerIngestJob(job.definition)),
               ...(registry?.module.packageSyncJob === undefined

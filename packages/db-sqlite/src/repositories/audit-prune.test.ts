@@ -1,3 +1,5 @@
+import { resolveAuditJournalBudget } from '@package-broker/core/audit/effective';
+import { MIN_AUDIT_JOURNAL_BYTES } from '@package-broker/core/audit/config';
 import { createAuditHealthRepository } from './audit-health.js';
 import { AUDIT_VERIFIED_EXPORT, type AuditLedgerEntry } from '@package-broker/core/audit/ledger';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -1266,4 +1268,55 @@ it('keeps committed capacity loss successful and alerts when health persistence 
     value: 1,
   });
   expect((await createAuditHealthRepository(executor).observe(org, [])).alerts).toEqual([]);
+});
+
+it('uses the resolved seal budget for retention capacity state and eviction thresholds', async () => {
+  await seed();
+  const maxJournalBytes = resolveAuditJournalBudget(
+    {
+      capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES },
+    },
+    'node',
+  )!;
+  const statements: Statement[] = [];
+  const recording: SqlExecutor = {
+    ...executor,
+    all: (statement) => {
+      statements.push(statement);
+      return executor.all(statement);
+    },
+    batch: (batch) => {
+      statements.push(...batch);
+      return executor.batch(batch);
+    },
+  };
+  await createAuditSealRepository(recording, { maxJournalBytes }).seal(org);
+  const repository = createAuditPruneRepository(recording, undefined, { maxJournalBytes });
+  expect(await repository.evict(org, { generation: 1, maxJournalBytes })).toEqual({
+    outcome: 'retained',
+  });
+  const eviction = statements.find((statement) =>
+    statement.sql.startsWith('SELECT 1 FROM audit_chain c'),
+  );
+  expect(eviction?.params).toEqual([
+    org.orgId,
+    maxJournalBytes - Math.ceil(maxJournalBytes / 100),
+    maxJournalBytes - Math.ceil(maxJournalBytes / 20),
+    org.orgId,
+    1,
+  ]);
+  await run(
+    "UPDATE audit_chain SET policy = 'required', capacity_state = 'refusing' WHERE org_id = ?",
+    org.orgId,
+  );
+  expect(await repository.prune(org, options)).toMatchObject({ outcome: 'pruned' });
+  const updates = statements.filter((statement) =>
+    statement.sql.startsWith('UPDATE audit_chain SET capacity_state'),
+  );
+  expect(updates).toHaveLength(2);
+  expect(updates.map((statement) => statement.params)).toEqual([
+    [maxJournalBytes, maxJournalBytes - Math.ceil(maxJournalBytes / 20), org.orgId],
+    [maxJournalBytes, maxJournalBytes - Math.ceil(maxJournalBytes / 20), org.orgId],
+  ]);
+  expect((await chain()).capacity_state).toBe('ok');
 });

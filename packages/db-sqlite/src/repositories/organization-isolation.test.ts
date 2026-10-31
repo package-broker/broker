@@ -1,16 +1,12 @@
-import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Organization } from '@package-broker/core/db/organization';
 import { orgContext } from '@package-broker/core/db/port';
 import { countCalls } from '../contract/count-calls.js';
 import { seedTwoOrganizations } from '../contract/two-organizations.js';
 import { migrate } from '../migrations/runner.js';
-import { loadMigrationSource, type MigrationSource } from '../migrations/source.js';
+import { discoveredMigrations } from '../testing/migrated-database.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
 import { createOrganizationRepository } from './organization.js';
-
-const initUrl = new URL('../../migrations/0001_init.sql', import.meta.url);
-const initText = readFileSync(initUrl, 'utf8');
 
 const UNKNOWN = '01J0UNKNOWN0000000000000000';
 const NOW = '2026-10-15T12:00:00.000Z';
@@ -19,8 +15,7 @@ let opened: OpenedExecutor;
 
 beforeEach(async () => {
   opened = openNodeSqliteExecutor();
-  const init: MigrationSource = await loadMigrationSource('core', '0001_init.sql', initText);
-  await migrate(opened.executor, [init], { holder: 't100' });
+  await migrate(opened.executor, await discoveredMigrations(), { holder: 't100' });
 });
 
 afterEach(async () => {

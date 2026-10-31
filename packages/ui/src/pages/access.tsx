@@ -10,7 +10,10 @@ import { Label } from '../components/ui/label.js';
 import { Select } from '../components/ui/select.js';
 import { DataTable } from '../components/ui/table.js';
 import { IdText } from '../components/ui/id-text.js';
-import { Time } from '../components/ui/time.js';
+import { ListDate } from '../components/ui/list-date.js';
+import { ReadableList } from '../components/ui/readable-list.js';
+import { ListRowActions } from '../components/ui/list-row-actions.js';
+import { permissionDescriptions } from './access/permission-descriptions.js';
 import { Badge } from '../components/ui/badge.js';
 import { ListState } from '../components/ui/list-state.js';
 import { ConfirmAction } from '../components/ui/confirm-action.js';
@@ -38,6 +41,9 @@ interface Grant {
   principalId: string | null;
   principalName: string | null;
   kind: string;
+  provider?: string | undefined;
+  visibility?: string;
+  rolePermissions?: string[] | undefined;
   roleId: string;
   roleName: string;
   revision: number;
@@ -73,9 +79,12 @@ export function accessViewModel(state: AccessState) {
   return {
     roles: state.roles.filter((role) => role.name.toLowerCase().startsWith(prefix)),
     grants: state.grants.filter((grant) =>
-      [grant.principalName, grant.principalId, grant.id].some((value) =>
-        value?.toLowerCase().startsWith(prefix),
-      ),
+      [
+        grant.principalName,
+        grant.roleName,
+        state.providers.find((provider) => provider.id === grant.provider)?.displayName ??
+          (grant.provider ? `Provider: ${grant.provider}` : undefined),
+      ].some((value) => value?.toLowerCase().startsWith(prefix)),
     ),
     writeRoles:
       ready && state.query.project === null && state.organization.includes('org:roles:write'),
@@ -111,24 +120,50 @@ export function createAccessController(services: ShellServices) {
     const current = ++optionsGeneration;
     const scopeGeneration = generation;
     store.set({ catalogue: { roles: [], status: 'loading' }, providerStatus: 'loading' });
-    const [catalogue, providers, organization] = await Promise.all([
-      loadRoleCatalogue(client),
-      client.request('get', '/_pb/auth/providers'),
-      client.request('get', '/_pb/organization'),
+    const isCurrent = () => current === optionsGeneration && scopeGeneration === generation;
+    await Promise.all([
+      loadRoleCatalogue(client).then((catalogue) => {
+        if (!isCurrent()) return;
+        store.set({
+          catalogue,
+          grants: store.snapshot().grants.map((grant) => {
+            if (grant.rolePermissions !== undefined) return grant;
+            const role = catalogue.roles.find((role) => role.id === grant.roleId);
+            return {
+              ...grant,
+              roleName:
+                grant.roleName === 'Role name unavailable'
+                  ? (role?.name ?? grant.roleName)
+                  : grant.roleName,
+              rolePermissions: role?.permissions,
+            };
+          }),
+        });
+      }),
+      client.request('get', '/_pb/auth/providers').then((providers) => {
+        if (!isCurrent()) return;
+        store.set({
+          providers: providers.ok ? providers.data.providers : [],
+          providerStatus: providers.ok ? 'ready' : 'error',
+        });
+      }),
+      client.request('get', '/_pb/organization').then((organization) => {
+        if (!isCurrent()) return;
+        store.set({
+          organizationName: organization.ok ? organization.data.name : 'this organization',
+        });
+      }),
     ]);
-    if (current !== optionsGeneration || scopeGeneration !== generation) return;
-    store.set({
-      catalogue,
-      providers: providers.ok ? providers.data.providers : [],
-      providerStatus: providers.ok ? 'ready' : 'error',
-      organizationName: organization.ok ? organization.data.name : 'this organization',
-    });
   }
   async function load(query: AccessQuery, notice: string | null = null): Promise<void> {
     const current = ++generation;
     store.set({
       query,
       roles: [],
+      catalogue: { roles: [], status: 'loading' },
+      providers: [],
+      providerStatus: 'loading',
+      organizationName: 'this organization',
       grants: [],
       next: null,
       organization: [],
@@ -152,11 +187,7 @@ export function createAccessController(services: ShellServices) {
     const permissions = project?.ok ? project.data.project : [];
     store.set({ organization: orgPermissions, permissions });
     const roles = rolesView(store.snapshot());
-    const canWriteGrants =
-      query.project === null
-        ? orgPermissions.includes('org:grants:write')
-        : permissions.includes('project:grants:write');
-    if (!roles && canWriteGrants) await loadFormOptions();
+    if (!roles) void loadFormOptions();
     if (current !== generation) return;
     const canRead =
       query.project === null
@@ -194,7 +225,20 @@ export function createAccessController(services: ShellServices) {
           ? result.data.items.map((item) => ({
               id: item.id,
               principalId: item.principal.id,
-              principalName: item.principal.displayName,
+              principalName:
+                item.principal.visibility === 'redacted'
+                  ? item.principal.kind === 'group'
+                    ? 'Group value hidden'
+                    : 'Email address hidden'
+                  : item.principal.kind === 'group'
+                    ? 'groupValue' in item.principal
+                      ? item.principal.groupValue
+                      : null
+                    : (('email' in item.principal ? item.principal.email : null) ??
+                      item.principal.displayName),
+              visibility: item.principal.visibility,
+              provider: 'provider' in item.principal ? item.principal.provider : undefined,
+              rolePermissions: item.role.permissions,
               kind: item.principal.kind,
               roleId: item.role.id,
               roleName: item.role.name,
@@ -215,10 +259,26 @@ export function createAccessController(services: ShellServices) {
           ? result.data.items.map((item) => ({
               id: item.id,
               principalId: null,
-              principalName: null,
+              principalName:
+                item.subject.visibility === 'redacted'
+                  ? item.subject.type === 'group'
+                    ? 'Group value hidden'
+                    : 'Email address hidden'
+                  : 'value' in item.subject
+                    ? item.subject.value
+                    : null,
+              visibility: item.subject.visibility,
+              provider: 'provider' in item.subject ? item.subject.provider : undefined,
               kind: item.subject.type,
               roleId: item.roleId,
-              roleName: item.roleId,
+              roleName:
+                item.role?.name ??
+                store.snapshot().catalogue.roles.find((role) => role.id === item.roleId)?.name ??
+                'Role name unavailable',
+              rolePermissions:
+                item.role?.permissions ??
+                store.snapshot().catalogue.roles.find((role) => role.id === item.roleId)
+                  ?.permissions,
               revision: item.revision,
               createdAt: item.createdAt,
             }))
@@ -414,7 +474,17 @@ export function AccessView({
       : state.permissions.includes('project:grants:write'));
   return (
     <>
-      <ManagementNotice {...state} reload={() => void controller.load(state.query)} />
+      <ManagementNotice
+        listLabel={
+          rolesView(state)
+            ? undefined
+            : state.query.project === null
+              ? 'Organization grants'
+              : 'Project grants'
+        }
+        {...state}
+        reload={() => void controller.load(state.query)}
+      />
       {rolesView(state) ? (
         <>
           {!state.loading && !state.listError && model.roles.length ? (
@@ -551,84 +621,132 @@ export function AccessView({
       ) : (
         <>
           <h2 className="my-3 text-lg font-semibold">
-            {state.query.project === null ? 'Organization grants' : 'Members and project grants'}
+            {state.query.project === null ? 'Organization grants' : 'Project grants'}
           </h2>
+          <p className="text-sm text-neutral-600">
+            {state.query.project === null
+              ? state.organizationName
+              : `Project: /${state.query.project}`}{' '}
+            · Grants describe access rules; other grants may also apply.
+          </p>
+          {!state.loading && !state.listError ? (
+            <p className="my-3 text-sm text-neutral-600">
+              {model.grants.length} grants on this page
+            </p>
+          ) : null}
           {!state.loading && !state.listError && model.grants.length ? (
-            <DataTable
-              label={
-                state.query.project === null ? 'Organization grants' : 'Members and project grants'
-              }
+            <ReadableList
+              label={state.query.project === null ? 'Organization grants' : 'Project grants'}
               items={model.grants}
               columns={[
                 {
-                  key: 'principal',
-                  label: 'Principal / grant',
-                  value: (grant) => grant.principalName ?? grant.principalId ?? grant.id,
+                  key: 'subject',
+                  label: 'Person or group',
+                  value: (grant) => grant.principalName ?? 'Name unavailable',
                   render: (grant) => (
                     <div className="grid gap-1">
-                      <strong>{grant.principalName ?? 'Grant'}</strong>
-                      <IdText
-                        value={grant.principalId ?? grant.id}
-                        label={grant.principalId ? 'principal ID' : 'grant ID'}
-                      />
+                      <strong>{grant.principalName ?? 'Name unavailable'}</strong>
+                      <span className="text-xs text-neutral-600">
+                        {grant.kind === 'group' ? 'Group' : 'Person'}
+                        {state.query.project !== null && grant.kind === 'email'
+                          ? ' · No account yet'
+                          : ''}
+                        {grant.provider
+                          ? ` · ${state.providers.find((provider) => provider.id === grant.provider)?.displayName ?? `Provider: ${grant.provider}`}`
+                          : ''}
+                      </span>
                     </div>
                   ),
                 },
                 {
-                  key: 'kind',
-                  label: 'Kind',
-                  value: (grant) => grant.kind,
-                  render: (grant) => <Badge variant="outline">{grant.kind}</Badge>,
+                  key: 'role',
+                  label: 'Role',
+                  value: (grant) => grant.roleName,
+                  render: (grant) => (
+                    <div className="grid gap-1">
+                      <span>{grant.roleName}</span>
+                      {grant.rolePermissions ? (
+                        <details>
+                          <summary
+                            className="min-h-11 cursor-pointer py-2"
+                            aria-label={`View permissions for ${grant.roleName}`}
+                          >
+                            View permissions ({grant.rolePermissions.length})
+                          </summary>
+                          <ul>
+                            {grant.rolePermissions.map((permission) => (
+                              <li key={permission} className="my-2">
+                                {permissionDescriptions[permission] ??
+                                  'Permission description unavailable'}{' '}
+                                <code className="break-all text-xs">{permission}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      ) : (
+                        <span className="text-xs text-neutral-600">Permissions unavailable</span>
+                      )}
+                    </div>
+                  ),
                 },
-                { key: 'role', label: 'Role', value: (grant) => grant.roleName },
                 {
                   key: 'added',
                   label: 'Added',
-                  value: (grant) => grant.createdAt,
-                  priority: 2,
-                  render: (grant) => <Time value={grant.createdAt} />,
-                },
-                {
-                  key: 'id',
-                  label: 'Grant ID',
-                  value: (grant) => grant.id,
-                  priority: 3,
-                  render: (grant) => <IdText value={grant.id} label="grant ID" />,
+                  value: (grant) => Date.parse(grant.createdAt) || 0,
+                  render: (grant) => <ListDate value={grant.createdAt} />,
                 },
                 {
                   key: 'actions',
                   label: 'Actions',
                   value: () => '',
                   sortable: false,
-                  render: (grant) =>
-                    showGrantForms && revisionTag(grant.revision) ? (
-                      <details>
-                        <summary className="cursor-pointer underline">Change role</summary>
-                        <div className="mt-3 grid gap-2">
-                          <ChangeRoleForm
-                            catalogue={state.catalogue}
-                            project={state.query.project}
-                            currentRole={grant.roleId}
-                            busy={state.busy || state.stale}
-                            retry={() => void controller.loadFormOptions()}
-                            submit={(roleId) => controller.changeGrant(grant.id, roleId)}
-                          />
-                          <ConfirmAction
-                            key={`${grant.id}:${grant.revision}`}
-                            action="Revoke grant"
-                            target={`${grant.principalName ?? grant.principalId ?? grant.id} · ${state.catalogue.roles.find((role) => role.id === grant.roleId)?.name ?? grant.roleName}`}
-                            scope={
-                              state.query.project === null
-                                ? 'Organization'
-                                : `Project: ${state.query.project}`
+                  render: (grant) => (
+                    <ListRowActions
+                      id={grant.id}
+                      name={grant.principalName ?? 'Name unavailable'}
+                      scope={`${state.query.project === null ? state.organizationName : `Project: /${state.query.project}`} · ${grant.roleName}${grant.provider ? ` · ${state.providers.find((provider) => provider.id === grant.provider)?.displayName ?? `Provider: ${grant.provider}`}` : ''}`}
+                      primary={
+                        showGrantForms && revisionTag(grant.revision)
+                          ? {
+                              id: 'change',
+                              label: 'Change role',
+                              disabled: state.busy || state.stale,
+                              onSelect: () => {},
                             }
-                            description="This removes the access provided by this grant. Other grants still apply. To restore this access, create a new grant."
-                            disabled={state.busy || state.stale}
-                            onConfirm={() => void controller.revoke(grant.id)}
-                          />
-                        </div>
-                      </details>
-                    ) : null,
+                          : undefined
+                      }
+                      mutation={
+                        showGrantForms && revisionTag(grant.revision)
+                          ? {
+                              label: 'Revoke grant',
+                              description:
+                                'This removes the access provided by this grant. Other grants still apply. To restore this access, create a new grant.',
+                              disabled: state.busy || state.stale,
+                              run: () => void controller.revoke(grant.id),
+                            }
+                          : undefined
+                      }
+                    >
+                      {state.notice ? <p role="alert">{state.notice}</p> : null}
+                      {state.stale ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => void controller.load(state.query)}
+                        >
+                          Reload
+                        </Button>
+                      ) : null}
+                      <ChangeRoleForm
+                        catalogue={state.catalogue}
+                        project={state.query.project}
+                        currentRole={grant.roleId}
+                        busy={state.busy || state.stale}
+                        retry={() => void controller.loadFormOptions()}
+                        submit={(roleId) => controller.changeGrant(grant.id, roleId)}
+                      />
+                    </ListRowActions>
+                  ),
                 },
               ]}
             />
@@ -656,8 +774,34 @@ export function AccessView({
       (rolesView(state) ? model.roles : model.grants).length === 0 ? (
         <ListState
           kind={state.query.q ? 'filtered-empty' : 'empty'}
-          title="No entries found on this page."
-        />
+          title={
+            rolesView(state)
+              ? 'No entries found on this page.'
+              : state.query.q
+                ? 'No grants match these filters on this page.'
+                : state.query.project === null
+                  ? 'No organization grants yet.'
+                  : 'No project grants yet.'
+          }
+        >
+          {state.query.q ? (
+            <a
+              className="underline"
+              href={buildAccessHash({
+                project: state.query.project,
+                ...(state.query.status ? { status: state.query.status } : {}),
+              })}
+            >
+              Clear filters
+            </a>
+          ) : !rolesView(state) ? (
+            <p>
+              {state.query.project === null
+                ? 'Give a person or sign-in group an organization role.'
+                : 'Give a person or sign-in group access to this project.'}
+            </p>
+          ) : null}
+        </ListState>
       ) : null}
       {state.next ? (
         <a
@@ -686,7 +830,7 @@ export function AccessPage() {
         Access
       </h1>
       <p className="mt-1 text-neutral-600">
-        Membership comes from project grants. A role is the bundle of permissions a grant carries.
+        Grants give people and sign-in groups access through roles. Other grants may also apply.
       </p>
       <ManagementFilters
         key={hash}

@@ -244,17 +244,18 @@ describe('grant form in Chromium', () => {
     createStatus = 412;
     const page = await open();
     const { browserExpect } = fixture;
-    await page.getByText('Change role', { exact: true }).click();
-    const role = page.getByRole('combobox', { name: 'Role', exact: true }).first();
+    await page.getByRole('button', { name: /^Change role / }).click();
+    const dialog = page.getByRole('dialog');
+    const role = dialog.getByRole('combobox', { name: 'Role', exact: true });
     await browserExpect(role).toHaveValue(developer.id);
     await role.selectOption(auditor.id);
-    await page.getByText('View permissions (1)', { exact: true }).click();
-    await browserExpect(
-      page.getByText('Read project details', { exact: true }).first(),
-    ).toBeVisible();
+    await dialog.getByText('View permissions (1)', { exact: true }).click();
+    await browserExpect(dialog.getByText('Read project details', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Save role', exact: true }).click();
     await browserExpect(
-      page.getByText('This grant changed. Reload it before saving.', { exact: true }),
+      page
+        .getByRole('dialog')
+        .getByText('This grant changed. Reload it before saving.', { exact: true }),
     ).toBeVisible();
     await browserExpect(role).toHaveValue(auditor.id);
     await browserExpect(
@@ -284,8 +285,10 @@ describe('grant form in Chromium', () => {
         )
         .last(),
     ).toBeVisible();
-    await page.getByText('Change role', { exact: true }).click();
-    const input = page.getByRole('textbox', { name: 'Enter a role ID', exact: true }).first();
+    await page.getByRole('button', { name: /^Change role / }).click();
+    const input = page
+      .getByRole('dialog')
+      .getByRole('textbox', { name: 'Enter a role ID', exact: true });
     await browserExpect(input).toHaveValue(developer.id);
     await input.fill('replacement-role');
     await page.getByRole('button', { name: 'Save role', exact: true }).click();

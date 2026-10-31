@@ -4,7 +4,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { createApiClient } from '../api.js';
 import type { paths } from '../api-types.js';
 import { createReauthFlow } from '../auth.js';
-import { AccessView, buildAccessHash, createAccessController, parseAccessHash } from './access.js';
+import {
+  AccessView,
+  accessViewModel,
+  buildAccessHash,
+  createAccessController,
+  parseAccessHash,
+} from './access.js';
 
 const role = {
   id: 'r_1',
@@ -19,7 +25,7 @@ const role = {
 const grant = {
   id: 'g_1',
   roleId: role.id,
-  subject: { type: 'email', value: 'private-account@example.test' },
+  subject: { type: 'email', visibility: 'visible', value: 'person@acme-company.example' },
   revision: 4,
   createdAt: '2026-10-22',
 };
@@ -28,8 +34,9 @@ const member = {
   principal: {
     id: 'u_1',
     kind: 'user',
-    displayName: 'A user',
-    email: 'private-account@example.test',
+    displayName: 'Acme Company',
+    visibility: 'visible',
+    email: 'person@acme-company.example',
   },
   role: { id: role.id, name: role.name, permissions: [] },
   revision: 9,
@@ -101,7 +108,9 @@ function fixture(
   return { controller, fetch, requireReauth, client };
 }
 const markup = (controller: ReturnType<typeof createAccessController>) =>
-  renderToString(createElement(AccessView, { state: controller.snapshot(), controller }));
+  renderToString(
+    createElement(AccessView, { state: controller.snapshot(), controller }),
+  ).replaceAll('<!-- -->', '');
 
 describe('access', () => {
   it('round trips scope, view, prefix and cursor in the hash', () => {
@@ -112,18 +121,19 @@ describe('access', () => {
   it('drops malformed view keys', () => {
     expect(buildAccessHash(parseAccessHash('#/access?status=<script>&other=bad'))).toBe('#/access');
   });
-  it('lists project principals using grants, without retaining email fields', async () => {
+  it('preserves authorized project subjects from the grant response', async () => {
     const { controller, fetch } = fixture();
     await controller.load({ project: 'web' });
     expect(fetch.mock.calls.some(([url]) => url.startsWith('/_pb/projects/web/grants'))).toBe(true);
-    expect(markup(controller)).toContain('u_1');
-    expect(JSON.stringify(controller.snapshot())).not.toContain('private-account');
+    expect(markup(controller)).not.toContain('u_1');
+    expect(markup(controller)).toContain('person@acme-company.example');
+    expect(controller.snapshot().grants[0]?.principalName).toBe('person@acme-company.example');
   });
-  it('displays principal names and IDs while mutations use grant IDs', async () => {
+  it('displays the authorized subject while mutations use grant IDs', async () => {
     const { controller, fetch } = fixture();
     await controller.load({ project: 'web' });
-    expect(markup(controller)).toContain('A user');
-    expect(markup(controller)).toContain('u_1');
+    expect(markup(controller)).toContain('person@acme-company.example');
+    expect(markup(controller)).not.toContain('u_1');
     await controller.changeGrant('g_1', 'r_2');
     await controller.revoke('g_1');
     const writes = fetch.mock.calls.filter(([, init]) => init.method !== 'GET');
@@ -133,18 +143,19 @@ describe('access', () => {
       '/_pb/projects/web/grants/g_1',
     ]);
     expect(writes[0]![1].body).toBe(JSON.stringify({ roleId: 'r_2' }));
-    expect(JSON.stringify(writes)).not.toContain('A user');
+    expect(JSON.stringify(writes)).not.toContain('person@acme-company.example');
   });
-  it('filters project principals by display name', async () => {
+  it('filters project grants by their visible subject', async () => {
     const { controller } = fixture();
-    await controller.load({ project: 'web', q: 'a u' });
-    expect(markup(controller)).toContain('A user');
+    await controller.load({ project: 'web', q: 'person@' });
+    expect(markup(controller)).toContain('person@acme-company.example');
   });
-  it('falls back to the principal ID when its display name is missing', async () => {
+  it('keeps the authorized email when the display name is missing', async () => {
     const { controller } = fixture({ displayName: null });
     await controller.load({ project: 'web' });
-    expect(markup(controller)).toContain('u_1');
-    expect(markup(controller)).not.toContain('private-account');
+    expect(markup(controller)).not.toContain('u_1');
+    expect(markup(controller)).toContain('person@acme-company.example');
+    expect(controller.snapshot().grants[0]?.principalName).toBe('person@acme-company.example');
   });
   it.each([
     ['last_holder', 'The last holder of this role cannot be removed.'],
@@ -220,7 +231,7 @@ describe('access', () => {
     expect(fetch.mock.calls.filter(([, init]) => init.method === 'DELETE')).toHaveLength(1);
     expect(markup(controller)).toContain('This grant changed. Reload it before saving.');
     expect(markup(controller)).toContain('>Create grant<');
-    expect(markup(controller)).toContain('>Save role<');
+    expect(markup(controller)).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Change role/);
     expect(markup(controller)).toMatch(/<button[^>]*disabled=""[^>]*>Create grant<\/button>/);
   });
   it('does not render response details', async () => {
@@ -319,16 +330,18 @@ describe('access', () => {
 });
 
 describe('access list presentation', () => {
-  it('renders copyable principal and grant IDs and a formatted added time without account e-mail', async () => {
+  it('renders authorized subjects, mobile facts and exact dates with IDs inside More', async () => {
     const { controller } = fixture();
     await controller.load({ project: 'web' });
     const html = markup(controller);
-    expect(html).toContain('responsive-table');
-    expect(html).toContain('data-label="Added"');
+    expect(html).toContain('readable-desktop');
+    expect(html).toContain('readable-mobile');
+    expect(html).toContain('>Added</dt>');
     expect(html).toContain(`dateTime="${grant.createdAt}"`);
-    expect(html).toContain('aria-label="Copy principal ID"');
-    expect(html).toContain('aria-label="Copy grant ID"');
-    expect(html).not.toContain(member.principal.email);
+    expect(html).not.toContain('Copy principal ID');
+    expect(html).toContain('aria-label="More actions for person@acme-company.example"');
+    expect(html).not.toContain('g_1');
+    expect(html).toContain(member.principal.email);
     expect(html).not.toContain('<dialog');
   });
   it('shows denied list access as an error without claiming the list is empty', async () => {
@@ -337,4 +350,231 @@ describe('access list presentation', () => {
     expect(markup(controller)).toContain('data-list-state="error"');
     expect(markup(controller)).not.toContain('data-list-state="empty"');
   });
+});
+
+describe('grant subjects and role summaries', () => {
+  it.each([null, 'web'])(
+    'preserves visible group values and providers in scope %s',
+    async (project) => {
+      const { controller, fetch } = fixture();
+      const original = fetch.getMockImplementation()!;
+      fetch.mockImplementation(async (url, init) => {
+        if (url === '/_pb/auth/providers')
+          return Response.json({
+            providers: [{ id: 'sso', displayName: 'Sample Business SSO', kind: 'oidc' }],
+            local: true,
+          });
+        if (url.includes('/grants'))
+          return Response.json({
+            items: [
+              {
+                ...grant,
+                subject: {
+                  type: 'group',
+                  provider: 'sso',
+                  value: 'dev-all@acme-company.example',
+                  visibility: 'visible',
+                },
+                principal: {
+                  kind: 'group',
+                  id: 'hidden-principal-id',
+                  provider: 'sso',
+                  displayName: 'Group',
+                  groupValue: 'dev-all@acme-company.example',
+                  visibility: 'visible',
+                },
+                role: {
+                  id: 'custom-role-id',
+                  name: 'Sample Business',
+                  permissions: ['project:read'],
+                },
+              },
+            ],
+            next: null,
+          });
+        return original(url, init);
+      });
+      await controller.load({ project });
+      await vi.waitFor(() => expect(controller.snapshot().organizationName).toBe('Acme Company'));
+      const html = markup(controller);
+      expect(html).toContain('dev-all@acme-company.example');
+      expect(html).toMatch(
+        /<span class="text-xs text-neutral-600">Group · Sample Business SSO<\/span>/,
+      );
+      expect(controller.snapshot().organizationName).toBe('Acme Company');
+      expect(
+        accessViewModel({ ...controller.snapshot(), query: { project, q: 'sample business sso' } })
+          .grants,
+      ).toHaveLength(1);
+      expect(html).toContain('Sample Business');
+      expect(html).toContain('View permissions (1)');
+      expect(html).not.toContain('custom-role-id');
+      expect(html).not.toContain('hidden-principal-id');
+    },
+  );
+  it.each([null, 'web'])(
+    'honors redaction even if a response includes an inconsistent value in scope %s',
+    async (project) => {
+      const { controller, fetch } = fixture();
+      const original = fetch.getMockImplementation()!;
+      fetch.mockImplementation(async (url, init) =>
+        url.includes('/grants')
+          ? Response.json({
+              items: [
+                {
+                  ...grant,
+                  subject: {
+                    type: 'group',
+                    provider: 'removed-provider',
+                    visibility: 'redacted',
+                    value: 'hidden@acme-company.example',
+                  },
+                  principal: {
+                    kind: 'group',
+                    id: 'principal-id',
+                    provider: 'removed-provider',
+                    visibility: 'redacted',
+                    groupValue: 'hidden@acme-company.example',
+                    displayName: 'hidden@acme-company.example',
+                  },
+                  role: { id: role.id, name: role.name, permissions: [] },
+                },
+              ],
+              next: null,
+            })
+          : original(url, init),
+      );
+      await controller.load({ project });
+      expect(markup(controller)).toContain('Group value hidden');
+      expect(markup(controller)).toContain('Provider: removed-provider');
+      expect(JSON.stringify(controller.snapshot())).not.toContain('hidden@');
+      expect(markup(controller)).not.toContain('Verified');
+    },
+  );
+  it.each([null, 'web'])(
+    'shows grants while enrichment is stalled in scope %s',
+    async (project) => {
+      const { controller, fetch } = fixture();
+      const original = fetch.getMockImplementation()!;
+      let release!: (response: Response) => void;
+      const stalled = new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+      fetch.mockImplementation(async (url, init) => {
+        if (
+          url.startsWith('/_pb/roles') ||
+          url === '/_pb/auth/providers' ||
+          url === '/_pb/organization'
+        )
+          return stalled;
+        if (url.includes('/grants'))
+          return Response.json({ items: [{ ...grant, ...member }], next: null });
+        return original(url, init);
+      });
+      try {
+        await controller.load({ project });
+        expect(controller.snapshot().loading).toBe(false);
+        expect(controller.snapshot().grants).toHaveLength(1);
+        expect(markup(controller)).toContain('View permissions (0)');
+        expect(controller.snapshot().catalogue.status).toBe('loading');
+      } finally {
+        release(Response.json({ items: [role], next: null, providers: [], name: 'Acme Company' }));
+      }
+      await vi.waitFor(() => expect(controller.snapshot().catalogue.status).toBe('ready'));
+      expect(controller.snapshot().grants[0]?.rolePermissions).toEqual([]);
+      expect(markup(controller)).toContain('View permissions (0)');
+    },
+  );
+  it('applies role fallback before a stalled provider finishes', async () => {
+    const { controller, fetch } = fixture();
+    const original = fetch.getMockImplementation()!;
+    let release!: (response: Response) => void;
+    const stalled = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    fetch.mockImplementation(async (url, init) =>
+      url === '/_pb/auth/providers' ? stalled : original(url, init),
+    );
+    try {
+      await controller.load({ project: null });
+      await vi.waitFor(() => expect(controller.snapshot().grants[0]?.roleName).toBe(role.name));
+      expect(markup(controller)).toContain('View permissions (1)');
+      expect(controller.snapshot().providerStatus).toBe('loading');
+      expect(controller.snapshot().organizationName).toBe('Acme Company');
+    } finally {
+      release(Response.json({ providers: [], local: true }));
+    }
+  });
+  it('resolves organization role names across catalogue pages without using IDs as names', async () => {
+    const { controller, fetch } = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url, init) => {
+      if (url.startsWith('/_pb/roles'))
+        return Response.json(
+          url.includes('after=second')
+            ? { items: [role], next: null }
+            : { items: [], next: 'second' },
+        );
+      return original(url, init);
+    });
+    await controller.load({ project: null });
+    await vi.waitFor(() => expect(controller.snapshot().grants[0]?.roleName).toBe(role.name));
+    expect(markup(controller)).toContain('View permissions (1)');
+    expect(fetch.mock.calls.some(([url]) => url.includes('after=second'))).toBe(true);
+  });
+  it('keeps grants and embedded permissions readable when the role catalogue is forbidden', async () => {
+    const { controller, fetch } = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url, init) =>
+      url.startsWith('/_pb/roles')
+        ? Response.json({ error: { code: 'forbidden' } }, { status: 403 })
+        : original(url, init),
+    );
+    await controller.load({ project: null });
+    expect(markup(controller)).toContain('Role name unavailable');
+    expect(markup(controller)).not.toContain(role.id);
+    expect(controller.snapshot().listError).toBe(false);
+    await controller.load({ project: 'web' });
+    expect(markup(controller)).toContain(role.name);
+    expect(markup(controller)).toContain('View permissions (0)');
+  });
+});
+
+it.each([null, 'web'])('keeps redacted person emails hidden in scope %s', async (project) => {
+  const { controller, fetch } = fixture();
+  const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (url, init) =>
+    url.includes('/grants')
+      ? Response.json({
+          items: [
+            {
+              ...grant,
+              subject: {
+                type: 'email',
+                visibility: 'redacted',
+                value: 'hidden@acme-company.example',
+              },
+              principal: {
+                kind: 'user',
+                id: 'person-id',
+                visibility: 'redacted',
+                email: 'hidden@acme-company.example',
+                displayName: 'hidden@acme-company.example',
+              },
+              role: member.role,
+            },
+          ],
+          next: null,
+        })
+      : original(url, init),
+  );
+  await controller.load({ project });
+  expect(markup(controller)).toContain('Email address hidden');
+  expect(JSON.stringify(controller.snapshot())).not.toContain('hidden@');
+});
+it('does not claim organization email rules have no account', async () => {
+  const { controller } = fixture();
+  await controller.load({ project: null });
+  expect(markup(controller)).toContain('person@acme-company.example');
+  expect(markup(controller)).not.toContain('No account yet');
 });

@@ -4,6 +4,8 @@ import type { BaseUIEvent } from '@base-ui/react/types';
 import {
   createContext,
   useContext,
+  useEffect,
+  useState,
   useMemo,
   useRef,
   type ComponentProps,
@@ -18,27 +20,62 @@ const MenuTriggerContext = createContext<{
   popup: RefObject<HTMLDivElement | null>;
 } | null>(null);
 
+function visibleTrigger(trigger: HTMLButtonElement | null) {
+  if (!trigger) return null;
+  if (trigger.isConnected && trigger.getClientRects().length) return trigger;
+  const label = trigger.getAttribute('aria-label');
+  if (!label) return null;
+  const rowKey = trigger.getAttribute('data-row-key');
+  return (
+    Array.from(
+      (trigger.closest('.readable-list') ?? trigger.ownerDocument).querySelectorAll('button'),
+    ).find(
+      (button) =>
+        button.getAttribute('aria-label') === label &&
+        button.getAttribute('data-row-key') === rowKey &&
+        button.getClientRects().length,
+    ) ?? null
+  );
+}
+
 export function DropdownMenu({
   open,
   children,
+  closeWhenHidden = false,
   ...props
-}: ComponentProps<'div'> & { open?: boolean }) {
+}: ComponentProps<'div'> & { open?: boolean; closeWhenHidden?: boolean }) {
   const trigger = useRef<HTMLButtonElement | null>(null);
   const popup = useRef<HTMLDivElement | null>(null);
   const context = useMemo(() => ({ trigger, popup }), []);
+  const [isOpen, setOpen] = useState(open ?? false);
+  useEffect(() => {
+    if (!isOpen || !closeWhenHidden || !trigger.current) return;
+    const observer = new ResizeObserver(() => {
+      const opener = trigger.current;
+      if (!opener || opener.getClientRects().length) return;
+      setOpen(false);
+      visibleTrigger(opener)?.focus({ preventScroll: true });
+    });
+    observer.observe(trigger.current);
+    return () => observer.disconnect();
+  }, [isOpen, closeWhenHidden]);
   return (
     <CSPProvider disableStyleElements>
       <MenuTriggerContext.Provider value={context}>
         <Menu.Root
-          defaultOpen={open}
+          open={isOpen}
           modal={false}
           onOpenChange={(nextOpen, details) => {
             // A trigger can keep focus while a re-render or resize leaves it outside the viewport.
             if (nextOpen) trigger.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-            if (details.reason !== 'escape-key') return;
-            const target = details.event.target as Node | null;
-            if (!trigger.current?.contains(target) && !popup.current?.contains(target))
-              details.cancel();
+            if (details.reason === 'escape-key') {
+              const target = details.event.target as Node | null;
+              if (!trigger.current?.contains(target) && !popup.current?.contains(target)) {
+                details.cancel();
+                return;
+              }
+            }
+            setOpen(nextOpen);
           }}
         >
           <div {...props}>{children}</div>
@@ -107,7 +144,7 @@ export function DropdownMenuContent({ className, ref, ...props }: ComponentProps
             const active = document?.activeElement;
             if (active && active !== document.body && active !== element && !host.contains(active))
               return false;
-            return element?.isConnected ? element : document.getElementById('page-heading');
+            return visibleTrigger(element ?? null) ?? document.getElementById('page-heading');
           }}
         />
       </Menu.Positioner>

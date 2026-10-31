@@ -385,6 +385,11 @@ export function useAuditCapabilities(client: AuthClient, session: Session, hash:
   }, [capabilities]);
   const refreshAuditCapabilities = useCallback(async () => {
     const expected = generation.current;
+    setAudit((previous) =>
+      previous.features === null || previous.organizationAuditor === null
+        ? { features: undefined, organizationAuditor: null }
+        : previous,
+    );
     const next = await capabilities.load();
     if (expected === generation.current) setAudit(next);
   }, [capabilities]);
@@ -506,7 +511,15 @@ function AppContent(props: { client?: AuthClient }) {
       requireReauth: (request, options) =>
         flow.requireReauth(request, options, window.location.hash),
     }),
-    [client, flow, onProjectsChanged, audit, projects, refreshAuditCapabilities],
+    [
+      client,
+      flow,
+      onProjectsChanged,
+      audit.features,
+      audit.organizationAuditor,
+      projects,
+      refreshAuditCapabilities,
+    ],
   );
 
   const onSignedIn = useCallback(() => {

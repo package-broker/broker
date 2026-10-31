@@ -237,7 +237,7 @@ it('isolates accounts after expiry without sign-out and verifies identity before
   account = 'b';
   fetch.mockClear();
   const names = await loadAuditNames(client, null);
-  expect(names).toEqual({ users: { b: 'b' }, tokens: {} });
+  expect(names).toEqual({ userId: 'b', users: { b: 'b' }, tokens: {} });
   expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/_pb/users');
   account = 'a';
   fetch.mockClear();
@@ -333,7 +333,7 @@ it('discards in-flight names when the session ends', async () => {
   await tick();
   clearAuditNames(client);
   finish(Response.json({ items: [{ id: 'other', displayName: 'Private name' }], next: null }));
-  expect(await pending).toEqual({ users: {}, tokens: {} });
+  expect(await pending).toEqual({ userId: null, users: {}, tokens: {} });
 });
 
 it('evicts previously cached names if identity verification fails', async () => {
@@ -351,9 +351,47 @@ it('evicts previously cached names if identity verification fails', async () => 
   const client = createApiClient<paths>({ fetch, readCookie: () => undefined });
   await loadAuditNames(client, null);
   fail = true;
-  expect(await loadAuditNames(client, null)).toEqual({ users: {}, tokens: {} });
+  expect(await loadAuditNames(client, null)).toEqual({ userId: null, users: {}, tokens: {} });
   fail = false;
   fetch.mockClear();
   await loadAuditNames(client, null);
   expect(fetch.mock.calls.map(([url]) => url)).toContain('/_pb/me/tokens');
 });
+
+it.each(['switch', 'failure', 'missing', 'throws'] as const)(
+  'discards names and evicts the pending cache after identity verification %s',
+  async (outcome) => {
+    let account = 'a';
+    let verification: string | null = null;
+    let finish!: (response: Response) => void;
+    let block = true;
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/_pb/me') {
+        if (verification === 'throws') throw new Error('private-diagnostic');
+        if (verification === 'missing') return Response.json({ user: null });
+        return verification === 'failure'
+          ? Response.json({}, { status: 503 })
+          : Response.json({ user: { id: account, displayName: account } });
+      }
+      if (url === '/_pb/me/permissions') return Response.json({ organization: ['org:users:read'] });
+      if (url === '/_pb/users' && block)
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      return Response.json({ items: [], next: null });
+    });
+    const client = createApiClient<paths>({ fetch, readCookie: () => undefined });
+    const pending = loadAuditNames(client, null);
+    await tick();
+    if (outcome === 'switch') account = 'b';
+    else verification = outcome;
+    finish(Response.json({ items: [{ id: 'other', displayName: 'Private name' }], next: null }));
+    expect(await pending).toEqual({ userId: null, users: {}, tokens: {} });
+    account = 'a';
+    verification = null;
+    block = false;
+    fetch.mockClear();
+    expect((await loadAuditNames(client, null)).userId).toBe('a');
+    expect(fetch.mock.calls.map(([url]) => url)).toContain('/_pb/users');
+  },
+);

@@ -30,6 +30,8 @@ import {
   serverEnv,
 } from './prebuilt-smoke.mjs';
 
+import { prebuiltAuditProblems } from './check-pack-audit.mjs';
+
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const expected = {
   schemaVersion: 1,
@@ -38,6 +40,37 @@ const expected = {
   artifactSha256: 'a'.repeat(64),
   prebuiltJsonSha256: 'b'.repeat(64),
 };
+
+function auditManifest(target) {
+  return {
+    plugins: ['trail', 'otlp', 'webhook'].map((kind) => ({
+      id: kind === 'trail' ? 'audit-trail' : `audit-${kind}-${kind}`,
+      package: `@package-broker/plugin-audit-${kind}`,
+    })),
+    audit: {
+      policy: 'availability',
+      acceptNoDurableAudit: false,
+      maxJournalBytes: target === 'node' ? null : 4 * 1024 ** 3,
+      trail: { plugin: 'audit-trail', toggleEnv: 'PB_AUDIT_TRAIL' },
+      sinks: ['otlp', 'webhook'].map((kind) => ({
+        id: kind,
+        kind,
+        plugin: `audit-${kind}-${kind}`,
+        activation: 'env',
+        custody: 'delivery',
+        envNames: [],
+        destination:
+          kind === 'otlp'
+            ? { protocol: 'otlp-http-json' }
+            : {
+                protocol: 'https-json',
+                urlEnv: 'PB_AUDIT_WEBHOOK_URL',
+                headersEnv: 'PB_AUDIT_WEBHOOK_HEADERS',
+              },
+      })),
+    },
+  };
+}
 
 async function fixture(t) {
   await mkdir(join(ROOT, '.pb'), { recursive: true });
@@ -203,56 +236,76 @@ for (const target of ['node', 'cloudflare']) {
   }
 }
 
-test('runner preserves the installed Node layout and selects prebuilt mode for both smokes', async (t) => {
-  const root = await fixture(t);
-  await mkdir(join(root, 'packages/cli/dist'), { recursive: true });
-  await writeFile(join(root, 'packages/cli/dist/prebuilt-expected.json'), JSON.stringify(expected));
-  const calls = [];
-  const run = (program, args, options, label) => {
-    calls.push({ program, args, options, label });
-    if (program === 'pnpm') writeFileSync(join(args.at(-1), 'fixture.tgz'), 'tarball');
-    if (label === 'smoke:prebuilt Node leg') {
-      assert.equal(existsSync(join(options.env.SMOKE_NODE_DIR, 'package.json')), false);
-      assert.equal(existsSync(join(options.env.SMOKE_NODE_DIR, 'node_modules')), false);
-    }
-  };
-  const materialize = async ({ project }) => {
-    for (const [target, pkg] of [
-      ['node', 'dist'],
-      ['cloudflare', 'dist-cloudflare'],
-    ]) {
-      const packageDir = join(project, 'node_modules/@package-broker', pkg);
-      const out = join(packageDir, target);
-      const built = join(root, '.pb', target);
-      await mkdir(out, { recursive: true });
-      await mkdir(built, { recursive: true });
-      await writeFile(
-        join(packageDir, 'package.json'),
-        JSON.stringify({
-          name: `@package-broker/${pkg}`,
-          exports: { './package.json': './package.json', './prebuilt.json': './prebuilt.json' },
-        }),
-      );
-      await writeFile(join(packageDir, 'prebuilt.json'), JSON.stringify(expected));
-      for (const dir of [out, built])
-        await writeFile(join(dir, target === 'node' ? 'server.js' : 'worker.js'), 'entry');
-      await writeFile(join(built, 'metafile.json'), '{}');
-    }
-    return {
-      artifactSha256: expected.artifactSha256,
-      outDir: join(project, 'node_modules/@package-broker/dist-cloudflare/cloudflare'),
+for (const invalid of [null, 'node', 'cloudflare'])
+  test(`runner preserves installed layout and validates packed audit composition (${invalid ?? 'valid'})`, async (t) => {
+    const root = await fixture(t);
+    await mkdir(join(root, 'packages/cli/dist'), { recursive: true });
+    await writeFile(
+      join(root, 'packages/cli/dist/prebuilt-expected.json'),
+      JSON.stringify(expected),
+    );
+    const calls = [];
+    const run = (program, args, options, label) => {
+      calls.push({ program, args, options, label });
+      if (program === 'pnpm') writeFileSync(join(args.at(-1), 'fixture.tgz'), 'tarball');
+      if (label === 'smoke:prebuilt Node leg') {
+        assert.equal(existsSync(join(options.env.SMOKE_NODE_DIR, 'package.json')), false);
+        assert.equal(existsSync(join(options.env.SMOKE_NODE_DIR, 'node_modules')), false);
+      }
     };
-  };
-  await runPrebuiltSmoke({ root, run, materialize });
-  const smokes = calls.filter(({ label }) => /smoke:prebuilt .* leg/.test(label));
-  assert.equal(smokes.length, 2);
-  for (const { options } of smokes) assert.equal(options.env.SMOKE_PREBUILT, '1');
-  assert.match(
-    smokes[0].options.env.SMOKE_NODE_DIR,
-    /project\/node_modules\/@package-broker\/dist\/node$/,
-  );
-  assert.deepEqual(await readdir(join(root, '.pb')), ['cloudflare', 'node']);
-});
+    const materialize = async ({ project }) => {
+      for (const [target, pkg] of [
+        ['node', 'dist'],
+        ['cloudflare', 'dist-cloudflare'],
+      ]) {
+        const packageDir = join(project, 'node_modules/@package-broker', pkg);
+        const out = join(packageDir, target);
+        const built = join(root, '.pb', target);
+        await mkdir(out, { recursive: true });
+        await mkdir(built, { recursive: true });
+        await writeFile(
+          join(packageDir, 'package.json'),
+          JSON.stringify({
+            name: `@package-broker/${pkg}`,
+            exports: { './package.json': './package.json', './prebuilt.json': './prebuilt.json' },
+          }),
+        );
+        await writeFile(join(packageDir, 'prebuilt.json'), JSON.stringify(expected));
+        const manifest = auditManifest(target);
+        if (target === invalid) manifest.audit.trail.toggleEnv = 'OTHER_SWITCH';
+        for (const dir of [out, built]) {
+          await writeFile(join(dir, target === 'node' ? 'server.js' : 'worker.js'), 'entry');
+          await mkdir(join(dir, 'generated'));
+          await writeFile(join(dir, 'generated/manifest.json'), JSON.stringify(manifest));
+        }
+        await writeFile(join(built, 'metafile.json'), '{}');
+      }
+      return {
+        artifactSha256: expected.artifactSha256,
+        outDir: join(project, 'node_modules/@package-broker/dist-cloudflare/cloudflare'),
+      };
+    };
+    if (invalid !== null) {
+      await assert.rejects(runPrebuiltSmoke({ root, run, materialize }), {
+        message: `Packed ${invalid} audit composition is invalid: prebuilt audit trail must declare its runtime toggle`,
+      });
+      assert.equal(
+        calls.some(({ label }) => /smoke:prebuilt .* leg/.test(label)),
+        false,
+      );
+      assert.deepEqual(await readdir(join(root, '.pb')), ['cloudflare', 'node']);
+      return;
+    }
+    await runPrebuiltSmoke({ root, run, materialize });
+    const smokes = calls.filter(({ label }) => /smoke:prebuilt .* leg/.test(label));
+    assert.equal(smokes.length, 2);
+    for (const { options } of smokes) assert.equal(options.env.SMOKE_PREBUILT, '1');
+    assert.match(
+      smokes[0].options.env.SMOKE_NODE_DIR,
+      /project\/node_modules\/@package-broker\/dist\/node$/,
+    );
+    assert.deepEqual(await readdir(join(root, '.pb')), ['cloudflare', 'node']);
+  });
 
 test('Node prebuilt startup uses the installed entry and hoisted resolution from another cwd', async (t) => {
   const root = await fixture(t);
@@ -342,8 +395,14 @@ test('runner runs the Node runtime SSO stage on the installed Node directory', a
         }),
       );
       await writeFile(join(packageDir, 'prebuilt.json'), JSON.stringify(expected));
-      for (const dir of [out, built])
+      for (const dir of [out, built]) {
         await writeFile(join(dir, target === 'node' ? 'server.js' : 'worker.js'), 'entry');
+        await mkdir(join(dir, 'generated'));
+        await writeFile(
+          join(dir, 'generated/manifest.json'),
+          JSON.stringify(auditManifest(target)),
+        );
+      }
       await writeFile(join(built, 'metafile.json'), '{}');
     }
     return {
@@ -645,5 +704,56 @@ for (const mutate of [false, true]) {
       ),
     );
     assert.ok(lines.some((line) => /bundle sha256 before=[a-f0-9]{64}/.test(line)));
+  });
+}
+
+for (const target of ['node', 'cloudflare']) {
+  test(`packed ${target}: checks the release audit declarations`, async (t) => {
+    const root = await fixture(t);
+    await mkdir(join(root, 'generated'));
+    const path = join(root, 'generated/manifest.json');
+    assert.deepEqual(prebuiltAuditProblems(root, target), [
+      'prebuilt audit manifest is missing or invalid',
+    ]);
+    const valid = auditManifest(target);
+    await writeFile(path, JSON.stringify(valid));
+    assert.deepEqual(prebuiltAuditProblems(root, target), []);
+    for (const mutate of [
+      (manifest) => {
+        manifest.plugins = manifest.plugins.filter((plugin) => plugin.id !== 'audit-trail');
+      },
+      (manifest) => {
+        manifest.audit.trail = null;
+      },
+      (manifest) => {
+        manifest.audit.trail.toggleEnv = 'OTHER_SWITCH';
+      },
+      (manifest) => {
+        manifest.audit.sinks.pop();
+      },
+      (manifest) => {
+        manifest.audit.sinks[0].activation = 'build';
+      },
+      (manifest) => {
+        manifest.audit.sinks[0].destination.endpointEnv = 'OTHER_ENDPOINT';
+      },
+      (manifest) => {
+        manifest.audit.sinks[1].destination.urlEnv = 'OTHER_URL';
+      },
+      (manifest) => {
+        manifest.audit.policy = 'required';
+      },
+      (manifest) => {
+        manifest.audit.acceptNoDurableAudit = true;
+      },
+      (manifest) => {
+        manifest.audit.maxJournalBytes = 67108864;
+      },
+    ]) {
+      const manifest = structuredClone(valid);
+      mutate(manifest);
+      await writeFile(path, JSON.stringify(manifest));
+      assert.ok(prebuiltAuditProblems(root, target).length > 0);
+    }
   });
 }

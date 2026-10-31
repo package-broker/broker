@@ -289,6 +289,15 @@ importers:
       '@package-broker/db-sqlite':
         specifier: workspace:^
         version: link:packages/db-sqlite
+      '@package-broker/plugin-audit-otlp':
+        specifier: workspace:^
+        version: link:packages/plugin-audit-otlp
+      '@package-broker/plugin-audit-trail':
+        specifier: workspace:^
+        version: link:packages/plugin-audit-trail
+      '@package-broker/plugin-audit-webhook':
+        specifier: workspace:^
+        version: link:packages/plugin-audit-webhook
       '@package-broker/plugin-github':
         specifier: workspace:^
         version: link:packages/plugin-github

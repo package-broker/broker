@@ -731,6 +731,15 @@ async function run() {
   await expectStatus(signedIn, 200, 'GET /_pb/session with the minted session');
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
 
+  if (PREBUILT) {
+    const head = await fetch(`${base}/_pb/audit/head`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(head, 200, 'default prebuilt audit trail');
+    console.log('smoke:node prebuilt default audit head 200');
+  }
+
   step = 'checking the public UI mount';
   const assetsDir = join(PREBUILT ? SOURCE : copy, 'assets');
   await checkUiBundle({
@@ -816,7 +825,32 @@ async function run() {
   const code = await waitExit(child, EXIT_TIMEOUT_MS);
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
   step = 'checking audit modes';
-  await checkNodeAuditModes({ root: REPO_ROOT, startBundle, stopChild, mintSession });
+  if (PREBUILT) {
+    const disabled = await startBundle(SOURCE, {
+      PB_AUDIT_TRAIL: 'off',
+      PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
+    });
+    try {
+      const disabledCookie = await mintSession(disabled.base, disabled.env.PB_SQLITE_PATH);
+      const head = await fetch(`${disabled.base}/_pb/audit/head`, {
+        headers: { cookie: disabledCookie },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      await expectStatus(head, 404, 'disabled prebuilt audit trail');
+      assert.equal((await head.json()).error.code, 'audit_trail_unavailable');
+      const me = await fetch(`${disabled.base}/_pb/me`, {
+        headers: { cookie: disabledCookie },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      await expectStatus(me, 200, 'disabled prebuilt features');
+      assert.equal((await me.json()).features.auditTrail, false);
+      console.log('smoke:node prebuilt PB_AUDIT_TRAIL=off: head 404, auditTrail false');
+    } finally {
+      await stopChild();
+    }
+  } else {
+    await checkNodeAuditModes({ root: REPO_ROOT, startBundle, stopChild, mintSession });
+  }
   console.log('smoke:node SIGTERM exit code 0');
 
   if (PREBUILT) {

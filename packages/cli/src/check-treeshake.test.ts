@@ -26,11 +26,26 @@ async function writeBundle(dir: string, name: string, bundle: Bundle): Promise<v
   await mkdir(target, { recursive: true });
   const input = bundle.plugin === true ? 'packages/plugin-x/src/a.js' : 'packages/core/src/a.js';
   const metafile = {
-    inputs: { [input]: {} },
+    inputs: {
+      [input]: {},
+      ...(bundle.plugin === true
+        ? Object.fromEntries(
+            ['trail', 'otlp', 'webhook'].map((name) => [
+              `packages/plugin-audit-${name}/dist/index.js`,
+              {},
+            ]),
+          )
+        : {}),
+    },
     outputs: {
       'bundle.js': { imports: (bundle.external ?? []).map((p) => ({ path: p, external: true })) },
     },
   };
+  await mkdir(path.join(target, 'generated'), { recursive: true });
+  await writeFile(
+    path.join(target, 'generated/manifest.json'),
+    JSON.stringify({ audit: { trail: null, sinks: [] } }),
+  );
   await writeFile(path.join(target, 'metafile.json'), JSON.stringify(metafile));
   await writeFile(path.join(target, 'bundle.js'), bundle.text ?? 'export default 1;\n');
   for (const [name, contents] of Object.entries(bundle.files ?? {})) {
@@ -48,8 +63,10 @@ async function check(
   dirs.push(dir);
   await writeBundle(dir, 'minimal-cloudflare', cloudflare);
   await writeBundle(dir, 'default-cloudflare', { ...cloudflare, plugin: true });
+  await writeBundle(dir, 'automatic-cloudflare', { ...cloudflare, plugin: true });
   await writeBundle(dir, 'minimal-node', node);
   await writeBundle(dir, 'default-node', { ...node, plugin: true });
+  await writeBundle(dir, 'automatic-node', { ...node, plugin: true });
   try {
     await run('node', ['scripts/check-treeshake.mjs'], {
       cwd: root,

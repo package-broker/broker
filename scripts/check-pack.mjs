@@ -5,6 +5,7 @@ import { dirname, join, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { sha256 } from './stage-prebuilt.mjs';
+import { prebuiltAuditProblems } from './check-pack-audit.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_PACKAGES = [
@@ -621,7 +622,10 @@ function checkPackedPackage(pkg, pkgJson, files, dir) {
     !pkgJson.repository.directory.trim()
   )
     problems.push('repository.url and repository.directory are required');
-  if (PREBUILT[pkg]) problems.push(...prebuiltProblems(dir, files, PREBUILT[pkg]));
+  if (PREBUILT[pkg]) {
+    problems.push(...prebuiltProblems(dir, files, PREBUILT[pkg]));
+    problems.push(...prebuiltAuditProblems(join(dir, PREBUILT[pkg]), PREBUILT[pkg]));
+  }
   if (
     pkg === 'cli' &&
     process.env.CHECK_PACK_RELEASE === '1' &&

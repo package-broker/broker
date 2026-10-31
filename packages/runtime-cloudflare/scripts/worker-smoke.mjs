@@ -629,6 +629,12 @@ async function run() {
     await expectStatus('/_pb/session after login', afterLogin, 200);
     console.log('smoke:cloudflare workerd: session after login ok');
 
+    if (PREBUILT) {
+      const head = await send('/_pb/audit/head', limitMs, { cookie: cookiesOf(loggedIn) });
+      await expectStatus('default prebuilt audit trail', head, 200);
+      console.log('smoke:cloudflare prebuilt default audit head 200');
+    }
+
     step = 'uniform 401 for unusable credentials on /_pb/session';
     const anonymous = await envelopeOf(await dispatch('/_pb/session', limitMs));
     if (anonymous.status !== 401) {

@@ -72,6 +72,8 @@ const ALLOWED_KEYS = new Set([
   'hasInstallScript',
   '_hasShrinkwrap',
   '_npmUser',
+  '_npmVersion',
+  '_nodeVersion',
   'gypfile',
   'dist',
 ]);

@@ -22,7 +22,7 @@ import {
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 import { bridgedD1Database, D1_BRIDGE_SCRIPT } from './d1-bridge.test.support.js';
 
-const bindings = Array.from({ length: 256 }, (_, index) => `CDB${index}`);
+const bindings = Array.from({ length: 512 }, (_, index) => `CDB${index}`);
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({

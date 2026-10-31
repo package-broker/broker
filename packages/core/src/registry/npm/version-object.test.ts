@@ -595,6 +595,26 @@ describe('npmVersionInput', () => {
   });
 });
 
+it('retains publisher-reported npm and Node client information through normalization', () => {
+  const metadata = stored(
+    npmVersionInput(
+      'left-pad',
+      manifest({ _npmVersion: '11.17.0', _nodeVersion: '24.0.0' }),
+      TIME,
+      origin,
+    ),
+  );
+  expect(metadata).toMatchObject({ _npmVersion: '11.17.0', _nodeVersion: '24.0.0' });
+});
+it.each(['_npmVersion', '_nodeVersion'])(
+  'refuses credential echoes in %s client information',
+  (field) => {
+    expect(npmVersionInput('left-pad', manifest({ [field]: SECRET }), TIME, origin)).toEqual({
+      ok: false,
+      reason: 'credential_echo',
+    });
+  },
+);
 describe('npm VCS version input', () => {
   it('accepts a dist-less VCS manifest and retains its commit with no integrity', () => {
     const result = npmVersionInput(

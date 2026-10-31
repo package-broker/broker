@@ -1,3 +1,9 @@
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+  createPublishWriteGuard,
+} from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
 import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
 import {
   createNpmVcsBuildReader,
@@ -705,6 +711,8 @@ function buildRegistryModule(input: {
   readonly registry: RegistryConfig;
   readonly publicUrl: string;
   readonly dispatch: (run: () => Promise<void>) => void;
+  readonly anchors: ProviderAnchorReader;
+  readonly hasPublishPolicy: () => boolean;
 }): {
   readonly policy: OutboundPolicy;
   readonly module: RegistryModule;
@@ -753,6 +761,15 @@ function buildRegistryModule(input: {
     });
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
+    npmPublish: {
+      reads: createPublishReads(executor),
+      lookupToken: createAccessRepository(executor).lookupToken,
+      anchors: (ctx) => input.anchors.anchors(ctx),
+      writeGuard: createPublishWriteGuard,
+      admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
+      writer,
+      hasPublishPolicy: input.hasPublishPolicy,
+    },
     handleOf: createNpmHandleOf(
       createUserRepository(executor),
       createServicePrincipalRepository(executor),
@@ -1664,8 +1681,24 @@ export function createWorker(
     if (options.registry !== undefined && (config === null || db === undefined)) {
       throw new KernelConfigError(['registry: requires platformPorts and DB']);
     }
-    const registryConfig =
+    let registryConfig =
       publicUrl === undefined ? undefined : resolveRegistry(options.registry, publicUrl);
+    if (
+      registryConfig !== undefined &&
+      config !== null &&
+      config.blob.maxBytes < registryConfig.caps.publishTarballBytes
+    ) {
+      log({
+        level: 'warn',
+        event: 'registry.publish_cap_clamped',
+        publish_tarball_bytes: registryConfig.caps.publishTarballBytes,
+        blob_max_bytes: config.blob.maxBytes,
+      });
+      registryConfig = {
+        ...registryConfig,
+        caps: { ...registryConfig.caps, publishTarballBytes: config.blob.maxBytes },
+      };
+    }
     const executor: SqlExecutor | ScalarSqlExecutor =
       db === undefined ? unboundExecutor() : createD1Executor(db);
     const bootstrap = createOrganizationBootstrap(executor);
@@ -1921,6 +1954,8 @@ export function createWorker(
             registry: registryConfig,
             publicUrl,
             dispatch,
+            anchors: built.providerAnchors,
+            hasPublishPolicy: () => plugins.some((plugin) => plugin.publishPolicy !== undefined),
           });
     coreJobBindings.registry = registryModule;
 

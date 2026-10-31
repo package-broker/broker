@@ -464,3 +464,119 @@ test('package manager version management override stays in the pnpm workspace', 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('publish uses each native client with provenance disabled and scripts suppressed', () => {
+  for (const client of ['npm', 'pnpm', 'yarn']) {
+    const command = clientCommands(client).publish;
+    assert.equal(command.command, client);
+    assert.ok(command.args.includes('publish'));
+    if (client !== 'yarn') {
+      assert.ok(command.args.includes('--provenance=false'));
+      assert.ok(command.args.includes('--ignore-scripts'));
+    }
+  }
+});
+
+test('publisher prepares Yarn lockfile before publishing', async () => {
+  const { preparePublisher } = await import('./client-matrix.mjs');
+  const { mkdir, mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const scratch = join(process.cwd(), '.pb', 'client-matrix-tests');
+  await mkdir(scratch, { recursive: true });
+  const directory = await mkdtemp(join(scratch, 'publisher-'));
+  try {
+    for (const client of ['npm', 'pnpm', 'yarn']) {
+      const calls = [];
+      const publisher = await preparePublisher(
+        join(directory, client),
+        client,
+        'http://127.0.0.1:12345/alpha/npm/',
+        'pb_fixture',
+        'matrix-publish-active',
+        {
+          debug: true,
+          run: async (command, args, project, env, options) => {
+            const manifest = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'));
+            assert.equal(manifest.name, 'matrix-publish-active');
+            assert.equal(manifest.dependencies, undefined);
+            assert.equal(await readFile(join(project, 'README.md'), 'utf8'), '# Publish fixture\n');
+            assert.equal(env.COREPACK_ENABLE_NETWORK, '0');
+            assert.deepEqual(options, { debug: true });
+            calls.push({ command, args });
+            return { code: 0, output: '' };
+          },
+        },
+      );
+      assert.deepEqual(calls, client === 'yarn' ? [{ command: 'yarn', args: ['install'] }] : []);
+      assert.equal(publisher.project, join(directory, client, 'client'));
+    }
+    await assert.rejects(
+      () =>
+        preparePublisher(
+          join(directory, 'failed'),
+          'yarn',
+          'http://127.0.0.1:12345/alpha/npm/',
+          'pb_fixture',
+          'matrix-publish-active',
+          { run: async () => ({ code: 1, output: '' }) },
+        ),
+      /Client matrix mismatch: publisher install/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('bridge failure reasons preserve harness assertions and withhold arbitrary errors', async () => {
+  const { safeFailureReason, harnessAssert, matrixStep } = await import('./client-matrix.mjs');
+  let reason;
+  try {
+    harnessAssert.equal(503, 201, 'Unexpected publish status');
+  } catch (error) {
+    reason = safeFailureReason(error);
+  }
+  assert.equal(reason, 'Unexpected publish status');
+  assert.equal(
+    safeFailureReason(new Error('credential-bearing exception')),
+    'Harness operation failed',
+  );
+  await assert.rejects(
+    () =>
+      matrixStep('node npm publish matrix-publish-active', async () => {
+        harnessAssert.ok(false, `Registry bridge failed: ${reason}`);
+      }),
+    {
+      message:
+        'node npm publish matrix-publish-active failed: Registry bridge failed: Unexpected publish status',
+    },
+  );
+});
+
+test('Node harness stages an upload using the configured publish cap', async () => {
+  const { openMatrixBlobStore } = await import('./client-matrix-runtime.mjs');
+  const { openMigratedDatabase } =
+    await import('../packages/db-sqlite/dist/testing/migrated-database.js');
+  const { orgContext } = await import('../packages/core/dist/db/port.js');
+  const { resolveRegistryConfig } =
+    await import('../packages/core/dist/registry/registry-config.js');
+  const { mkdtemp, rm, realpath } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'matrix-stage-'));
+  const db = await openMigratedDatabase();
+  try {
+    const store = await openMatrixBlobStore(db.executor, directory, 'https://broker.test');
+    const ctx = orgContext('org');
+    const bytes = new TextEncoder().encode('staged fixture');
+    const staged = await store.stage(ctx, new Blob([bytes]).stream(), {
+      maxBytes: resolveRegistryConfig(undefined, 'node', 'https://broker.test').caps
+        .publishTarballBytes,
+      mediaType: 'application/gzip',
+    });
+    assert.equal(staged.size, bytes.length);
+    await store.discard(ctx, staged);
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

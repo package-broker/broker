@@ -2467,3 +2467,35 @@ it.each(['publication failure', 'concurrent winner'])(
     });
   },
 );
+
+it('admits a 20 MiB on-demand archive while a small publish is staging', async () => {
+  const f = stagingFixture();
+  const admission = createBlobUploadAdmission();
+  const store = createBlobStore(f.byteStore, f.metadata, opts({ admission, admissionWaitMs: 0 }));
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const putStaged = f.byteStore.putStaged;
+  f.byteStore.putStaged = async (...args) => {
+    await pending;
+    return putStaged(...args);
+  };
+  const staging = store.stage(ctx, streamOf([enc.encode('small')]), {
+    maxBytes: 1000,
+    mediaType: 'application/gzip',
+  });
+  try {
+    const bytes = new Uint8Array(20 * 1024 * 1024);
+    const result = await store.put(ctx, sha(bytes), streamOf([bytes]), {
+      size: bytes.length,
+      mediaType: 'application/gzip',
+      refetchable: true,
+    });
+    expect(result.size).toBe(bytes.length);
+    expect(admission.inFlightBytes()).toBe(1000);
+  } finally {
+    finish();
+  }
+  await store.discard(ctx, await staging);
+});

@@ -1,3 +1,9 @@
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+  createPublishWriteGuard,
+} from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
 import {
   createNpmVcsBuildReader,
   createNpmVcsBuildPendingReader,
@@ -714,6 +720,8 @@ function assembleRegistry(input: {
   readonly deploymentId: string;
   readonly findOrganization: () => Promise<OrganizationIdentity | null>;
   readonly ingestScope: AsyncLocalStorage<Observability>;
+  readonly anchors: ProviderAnchorReader;
+  readonly hasPublishPolicy: () => boolean;
 }): RegistryAssembly {
   const { options, seams, executor, auth, platform, observability } = input;
   const { config } = options;
@@ -800,6 +808,15 @@ function assembleRegistry(input: {
 
   const module = createRegistryModule({
     runtime: 'node',
+    npmPublish: {
+      reads: createPublishReads(executor),
+      lookupToken: createAccessRepository(executor).lookupToken,
+      anchors: (ctx) => input.anchors.anchors(ctx),
+      writeGuard: createPublishWriteGuard,
+      admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
+      writer,
+      hasPublishPolicy: input.hasPublishPolicy,
+    },
     handleOf: createNpmHandleOf(
       createUserRepository(executor),
       createServicePrincipalRepository(executor),
@@ -1143,6 +1160,10 @@ export function createNodeServer(
             deploymentId,
             findOrganization: bootstrap.findSingleton,
             ingestScope,
+            anchors: {
+              anchors: (ctx) => access?.providerAnchors.anchors(ctx) ?? Promise.resolve([]),
+            },
+            hasPublishPolicy: () => plugins.some((plugin) => plugin.publishPolicy !== undefined),
           });
     const vulnerabilityPolicy = createOutboundPolicy({
       allowPrivateHosts: [],

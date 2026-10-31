@@ -74,6 +74,10 @@ export const API_ERROR_CODES = {
   manifest_too_large: { status: 413, message: 'The package manifest is too large' },
   tarball_too_large: { status: 413, message: 'The package tarball is too large' },
   write_unsupported: { status: 405, message: 'This write operation is not supported' },
+  scan_gate_unavailable: { status: 503, message: 'The publish scan gate is unavailable' },
+  length_required: { status: 411, message: 'Content-Length is required' },
+  staging_failed: { status: 503, message: 'Publish staging failed' },
+  invalid_publish_body: { status: 400, message: 'The publish body is invalid' },
   busy: { status: 503, message: 'Publishing is busy, try again later' },
 } as const;
 

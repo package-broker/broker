@@ -201,8 +201,7 @@ export function RolePicker({
               ) : null}
               {selected.permissions.includes('project:packages:write') ? (
                 <p>
-                  Publishing is not available in this version. This role includes the publish
-                  permission.
+                  This role includes permission to publish npm packages to admitted hosted sources.
                 </p>
               ) : null}
             </>

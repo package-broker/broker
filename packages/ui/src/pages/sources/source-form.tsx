@@ -61,7 +61,7 @@ const TYPE_DESCRIPTIONS: Partial<Record<CreateSource['type'], string>> = {
   vcs: 'Import a Composer or npm package from the root of a GitHub or Git repository.',
   npmjs_proxy: 'Fetch public npm packages on demand.',
   npm_registry: 'Fetch packages in selected scopes from another npm registry.',
-  hosted: 'Reserve private npm package names. Publishing arrives in a later release.',
+  hosted: 'Reserve private npm package names and publish packages to this broker.',
 };
 const FIELD_LABELS: Record<string, string> = {
   name: 'Source name',
@@ -875,10 +875,10 @@ export function SourceForm({
               ) : null}
               {type === 'hosted' ? (
                 <p className="text-sm text-neutral-600">
-                  Publishing arrives in a later release. A claim immediately stops the npmjs proxy
-                  from serving that name, even while this source is paused. Use an exact lowercase
-                  npm name or @scope/*. A scope claim hides public packages in that scope that are
-                  not yet cached.
+                  npm publishing is available. Register package names, then enable this source. A
+                  claim immediately stops the npmjs proxy from serving that name, even while this
+                  source is paused. Use an exact lowercase npm name or @scope/*. A scope claim hides
+                  public packages in that scope that are not yet cached.
                 </p>
               ) : null}
               {!editing && type !== 'hosted' ? (

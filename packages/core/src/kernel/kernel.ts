@@ -305,6 +305,7 @@ function validateCoreRoutes(
     }
     problems.push(
       ...routeBoundaryProblems(route, label, {
+        allowOrganizationAlternative: true,
         ...(ecosystem ? { apiVersion: 3 } : { allowSelf: true, allowAuthenticated: true }),
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
@@ -628,6 +629,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
           : { boundary: route.boundary === 'package' ? 'project' : route.boundary }),
         ...('bearerOnly' in route && route.bearerOnly === true
           ? { bearerOnly: true as const }
+          : {}),
+        ...(route.boundary === 'project' && route.organizationAlternative !== undefined
+          ? { organizationAlternative: route.organizationAlternative }
           : {}),
         ...(route.boundary === 'project' && route.allowArchived === true
           ? { allowArchived: true as const }

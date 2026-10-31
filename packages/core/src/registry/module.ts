@@ -1,3 +1,5 @@
+import { createPublishService, type PublishDependencies } from './npm/publish-service.js';
+export { createPublishService } from './npm/publish-service.js';
 import {
   createNpmVcsBuildJob,
   NPM_VCS_BUILD_JOB_TYPE,
@@ -147,6 +149,7 @@ export function createNpmHandleOf(
 }
 
 export interface RegistryModuleDeps {
+  readonly npmPublish?: PublishDependencies;
   readonly runtime: Platform;
   readonly ports: Partial<
     Omit<PlatformPorts, 'blob' | 'jobs'> & { blob: CoreBlobStore; jobs: CoreJobs }
@@ -753,6 +756,18 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     }),
     ...npmRoutes({
       access: packageAccess,
+      ...(deps.npmPublish === undefined
+        ? {}
+        : {
+            publish: createPublishService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
+          }),
       dist,
       onDemand,
       reresolve,

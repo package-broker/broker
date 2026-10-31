@@ -100,6 +100,7 @@ export interface SessionAccess {
 }
 
 export interface TokenLookupInput {
+  readonly organizationAlternative?: string;
   readonly selector: string;
   readonly boundary: AccessBoundary;
   readonly projectSlug: string | null;
@@ -938,7 +939,12 @@ function boundProjects(stored: string, orgId: string): string[] {
   );
 }
 
-function toTokenAccess(row: TokenRow, boundary: AccessBoundary, orgId: string): TokenAccess {
+function toTokenAccess(
+  row: TokenRow,
+  boundary: AccessBoundary,
+  orgId: string,
+  organizationAlternative?: string,
+): TokenAccess {
   const scope = parsedScope(row);
   const projectMode = tokenProjectMode(row.kind, row.project_mode, row.principal_project_id);
   const isService = row.kind === 'svc';
@@ -1001,6 +1007,15 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary, orgId: string): 
         }),
       ].sort();
     } else if (project !== null) {
+      if (
+        organizationAlternative?.startsWith('org:') &&
+        (scope.level === 'write' || scope.level === 'full') &&
+        !scope.readOnly
+      ) {
+        organizationPermissions = (isService ? service : orgRows).filter(
+          (name) => name === organizationAlternative,
+        );
+      }
       const maxScope = parseScopeLevel(project.tokenMaxScope);
       if (maxScope.ok) {
         projectPermissions = [
@@ -1075,7 +1090,9 @@ export function createAccessRepository(
     async lookupToken(ctx, input) {
       const rows = await executor.all<TokenRow>(lookupTokenStatement(ctx, input));
       const row = rows[0];
-      return row === undefined ? null : toTokenAccess(row, input.boundary, ctx.orgId);
+      return row === undefined
+        ? null
+        : toTokenAccess(row, input.boundary, ctx.orgId, input.organizationAlternative);
     },
 
     async touchSession(ctx, sessionId) {

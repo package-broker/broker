@@ -146,7 +146,7 @@ describe('generateOpenApi', () => {
     );
     expect(responses).toHaveProperty(
       '503.description',
-      'Service unavailable; Publishing is busy, try again later',
+      'Service unavailable; The publish scan gate is unavailable; Publish staging failed; Publishing is busy, try again later',
     );
   });
 
@@ -599,7 +599,10 @@ describe('OpenAPI follow-ups', () => {
       409,
       'The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload',
     ],
-    [503, 'Service unavailable; Publishing is busy, try again later'],
+    [
+      503,
+      'Service unavailable; The publish scan gate is unavailable; Publish staging failed; Publishing is busy, try again later',
+    ],
     [418, 'Error'],
   ] as const)(
     'describes declared error %s from the code table when available',

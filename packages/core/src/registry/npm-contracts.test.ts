@@ -43,6 +43,7 @@ describe('npm shared contract names', () => {
       expect(AUDIT_ACTIONS).toContain(name);
     }
     expect(AUDIT_FIELDS).toHaveProperty('package.publish', [
+      'authority',
       'package',
       'version',
       'hold_approval',

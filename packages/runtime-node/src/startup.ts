@@ -309,6 +309,7 @@ export const NODE_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
   'http.error',
   'shutdown.jobs_abandoned',
   'startup.failed',
+  'registry.publish_cap_clamped',
   'process.uncaught_exception',
   'process.unhandled_rejection',
 ]);
@@ -753,12 +754,24 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     if (options.registry !== undefined && ports === null) {
       throw new StartupConfigError('registry', 'requires platformPorts');
     }
-    const registry = registryConfig(options.registry, origin);
+    let registry = registryConfig(options.registry, origin);
     checkTokens(options.tokens);
     await selfTestPasswordHashing(keyring);
 
     if (ports !== null) {
       telemetry = createTelemetry(ports, options);
+      if (ports.blob.maxBytes < registry.caps.publishTarballBytes) {
+        telemetry.observe().log({
+          level: 'warn',
+          event: 'registry.publish_cap_clamped',
+          publish_tarball_bytes: registry.caps.publishTarballBytes,
+          blob_max_bytes: ports.blob.maxBytes,
+        });
+        registry = {
+          ...registry,
+          caps: { ...registry.caps, publishTarballBytes: ports.blob.maxBytes },
+        };
+      }
       services = await buildServices(
         ports,
         options,

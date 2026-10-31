@@ -8414,7 +8414,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Service unavailable; Publishing is busy, try again later */
+      /** @description Service unavailable; The publish scan gate is unavailable; Publish staging failed; Publishing is busy, try again later */
       503: {
         headers: {
           [name: string]: unknown;

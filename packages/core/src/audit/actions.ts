@@ -90,6 +90,7 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'package.publish': [
+    'authority',
     'package',
     'version',
     'hold_approval',

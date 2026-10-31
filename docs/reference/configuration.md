@@ -102,6 +102,8 @@ export default defineConfig({
 <!-- source: packages/core/src/registry/registry-config.ts:64 -->
 <!-- source: packages/core/src/registry/registry-config.ts:343 -->
 
+Publishing is not available yet; the publish caps take effect with the publish route.
+
 All keys in this table are under `registry`. Publish defaults are identical on Node and Workers. Each byte limit must be a positive safe integer; MB means 1,000,000 bytes and MiB means 1,048,576 bytes. Workers on the Free and Pro plans have a 100 MB request limit; on the `cloudflare` target, `caps.publishBodyBytes` cannot exceed 100,000,000 bytes. The base64 size of `caps.publishTarballBytes` (`4 * ceil(publishTarballBytes / 3)`) and `caps.publishMetadataBytes` must each fit within `caps.publishBodyBytes`. Base64 encoding increases the tarball's wire size by about one third, so allow room for metadata when choosing the body cap.
 
 On Node, `registry` requires a `node` stanza in `platformPorts`; on Workers it requires the ports stanza and the `DB` binding.

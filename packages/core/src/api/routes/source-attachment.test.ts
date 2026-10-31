@@ -9,6 +9,7 @@ import { createKernel } from '../../kernel/kernel.js';
 import { createKeyring } from '../../secrets/keyring.js';
 import { defineApi } from '../route.js';
 import { SOURCE_ATTACHMENT_API_SPECS } from './source-attachment-schemas.js';
+import type { ProxyClaimDeps } from '../../sources/proxy-claims.js';
 import { sourceAttachmentRoutes } from './source-attachment.js';
 
 const ORIGIN = 'https://broker.test';
@@ -26,6 +27,8 @@ async function fixture(
     projectState?: 'absent' | 'archived' | 'invisible';
     sourceState?: 'absent' | 'foreign' | 'own';
     attached?: boolean;
+    proxyClaims?: ProxyClaimDeps;
+    organizationPermissions?: readonly string[];
   } = {},
 ) {
   let sequence = 0;
@@ -70,6 +73,7 @@ async function fixture(
     plugins: [],
     coreRoutes: sourceAttachmentRoutes({
       sources,
+      ...(options.proxyClaims === undefined ? {} : { proxyClaims: options.proxyClaims }),
       visibility,
       projectSources,
       projects,
@@ -89,7 +93,7 @@ async function fixture(
           identity: null,
           protectedHolder: false,
           project: input.boundary === 'project' && visible ? { id: PROJECT } : null,
-          organizationPermissions: [],
+          organizationPermissions: options.organizationPermissions ?? [],
           projectPermissions: options.projectState === 'invisible' ? [] : permissions,
         }),
         lookupToken: async () => null,
@@ -250,4 +254,92 @@ it('maps a store authority refusal to 403', async () => {
   const f = await fixture();
   f.visibility.attachSource.mockResolvedValue({ ok: false, error: 'forbidden' });
   expect((await f.request('PUT', path, {})).status).toBe(403);
+});
+
+it.each(['found', 'unavailable', 'not_found'] as const)(
+  'checks exact hosted claims before proxy attachment: %s',
+  async (answer) => {
+    const probe = vi.fn().mockResolvedValue(answer);
+    const f = await fixture({
+      organizationPermissions: ['org:sources:write'],
+      proxyClaims: {
+        sources: {
+          list: vi.fn().mockResolvedValue([{ id: 'host', type: 'hosted', ecosystem: 'npm' }]),
+        },
+        registeredNames: {
+          list: vi.fn().mockResolvedValue({ items: [{ pattern: 'widget' }], next: null }),
+        },
+        claimProbe: probe,
+      },
+    });
+    f.sources.get.mockResolvedValue({
+      id: SOURCE,
+      projectId: null,
+      ecosystem: 'npm',
+      type: 'npmjs_proxy',
+    } as SourceRecord);
+    const result = await f.request('PUT', path, {});
+    expect(result.status).toBe(answer === 'not_found' ? 204 : 409);
+    if (answer !== 'not_found')
+      expect(await result.json()).toMatchObject({ conflictingClaims: ['widget'] });
+    expect(f.visibility.attachSource).toHaveBeenCalledTimes(answer === 'not_found' ? 1 : 0);
+  },
+);
+
+it.each(['found', 'not_found'] as const)(
+  'allows project writers to preflight an organization proxy: %s',
+  async (answer) => {
+    const probe = vi.fn().mockResolvedValue(answer);
+    const f = await fixture({
+      proxyClaims: {
+        sources: {
+          list: vi.fn().mockResolvedValue([{ id: 'host', type: 'hosted', ecosystem: 'npm' }]),
+        },
+        registeredNames: {
+          list: vi.fn().mockResolvedValue({ items: [{ pattern: 'private-name' }], next: null }),
+        },
+        claimProbe: probe,
+      },
+    });
+    f.sources.get.mockResolvedValue({
+      id: SOURCE,
+      projectId: null,
+      ecosystem: 'npm',
+      type: 'npmjs_proxy',
+    } as SourceRecord);
+    const response = await f.request('PUT', path, {});
+    expect(response.status).toBe(answer === 'found' ? 409 : 204);
+    if (answer === 'found') {
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe('conflict');
+      expect(JSON.stringify(body)).not.toContain('private-name');
+    }
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(f.sources.get).toHaveBeenCalledTimes(1);
+    expect(f.visibility.attachSource).toHaveBeenCalledTimes(answer === 'found' ? 0 : 1);
+  },
+);
+
+it('keeps organization claim names opaque when attaching a project-owned proxy', async () => {
+  const f = await fixture({
+    proxyClaims: {
+      sources: {
+        list: vi.fn().mockResolvedValue([{ id: 'host', type: 'hosted', ecosystem: 'npm' }]),
+      },
+      registeredNames: {
+        list: vi.fn().mockResolvedValue({ items: [{ pattern: 'private-name' }], next: null }),
+      },
+      claimProbe: vi.fn().mockResolvedValue('found'),
+    },
+  });
+  f.sources.get.mockResolvedValue({
+    id: SOURCE,
+    projectId: PROJECT,
+    ecosystem: 'npm',
+    type: 'npmjs_proxy',
+  } as SourceRecord);
+  const response = await f.request('PUT', path, {});
+  expect(response.status).toBe(409);
+  expect(JSON.stringify(await response.json())).not.toContain('private-name');
+  expect(f.visibility.attachSource).not.toHaveBeenCalled();
 });

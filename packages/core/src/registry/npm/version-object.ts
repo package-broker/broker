@@ -10,6 +10,7 @@ import { stripCredentialEcho } from '../../sources/credential-echo.js';
 import type { CredentialEchoProbe } from '../../sources/credentials.js';
 
 export interface NpmVersionOrigin {
+  readonly kind?: 'vcs';
   readonly probe: CredentialEchoProbe;
   readonly importedAt: string;
 }
@@ -367,13 +368,20 @@ export function npmVersionInput(
   if (hasInstallScript(object)) object.hasInstallScript = true;
   else delete object.hasInstallScript;
 
-  const { dist } = object;
-  if (!isRecord(dist) || typeof dist.tarball !== 'string' || dist.tarball === '') {
-    return skip('no_installable_reference');
+  if (origin.kind === 'vcs') {
+    if (typeof object.gitHead !== 'string' || !GIT_SHA.test(object.gitHead)) {
+      return skip('no_installable_reference');
+    }
+    delete object.dist;
+  } else {
+    const { dist } = object;
+    if (!isRecord(dist) || typeof dist.tarball !== 'string' || dist.tarball === '') {
+      return skip('no_installable_reference');
+    }
+    const rebuilt = rebuiltDist(dist as Json & { tarball: string });
+    if (rebuilt.integrity === undefined && rebuilt.shasum === undefined) return skip('no_digest');
+    object.dist = rebuilt;
   }
-  const rebuilt = rebuiltDist(dist as Json & { tarball: string });
-  if (rebuilt.integrity === undefined && rebuilt.shasum === undefined) return skip('no_digest');
-  object.dist = rebuilt;
 
   let metadata;
   try {

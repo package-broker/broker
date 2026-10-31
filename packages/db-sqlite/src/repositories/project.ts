@@ -1,3 +1,4 @@
+import { FORBIDDEN_NAME_CHARACTERS } from '@package-broker/core/catalogue/names';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { expressionBuilder, sql, type Compilable, type SqlBool } from 'kysely';
@@ -150,7 +151,6 @@ interface ProjectRow {
 }
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const FORBIDDEN_NAME_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
 const REAUTH_SECONDS = 600;
 
 /** The stored project_owner role of the organization is missing. */

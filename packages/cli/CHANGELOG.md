@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.3...cli-v2.0.0-rc.4) (2026-10-31)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+
+
+### Bug Fixes
+
+* **cli:** teardown accepts the custom domain delete response ([#966](https://github.com/package-broker/broker/issues/966)) ([f9b19b6](https://github.com/package-broker/broker/commit/f9b19b6715a6a2889e7f6814051e489461287b56))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.4
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.4
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.4
+    * @package-broker/runtime-node bumped to 2.0.0-rc.4
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.4
+
 ## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.2...cli-v2.0.0-rc.3) (2026-10-28)
 
 

@@ -15,7 +15,7 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
  * IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-import { PublishValidationError } from './tarball-walk';
+import { PublishValidationError } from './tarball-walk.js';
 
 export const PACKLIST_VERSION = '10.0.4';
 const fail = (detail: string): never => {
@@ -442,6 +442,22 @@ export function packlist(
   maxRuleBytes = 4 * 1024 * 1024,
   diagnostics?: { work: number },
 ): string[] {
+  const selection = selectPacklist(paths, new Set(metadata.keys()), maxRuleBytes, diagnostics);
+  let step = selection.next();
+  while (!step.done) {
+    const captured = metadata.get(step.value);
+    step = selection.next(typeof captured === 'function' ? captured() : captured);
+  }
+  return step.value;
+}
+
+export function* selectPacklist(
+  paths: ReadonlySet<string>,
+  metadata: ReadonlySet<string>,
+  maxRuleBytes = 4 * 1024 * 1024,
+  diagnostics?: { work: number },
+  spendWork?: (amount: number) => void,
+): Generator<string, string[], string | undefined> {
   let work = 0;
   if (diagnostics) diagnostics.work = 0;
   let compiledBytes = 0;
@@ -450,6 +466,7 @@ export function packlist(
     if (compiledBytes > 4 * 1024 * 1024) fail('compiled_rule_cap');
   };
   const spend = (amount = 1) => {
+    spendWork?.(amount);
     if (amount > 2_000_000_000 - work) fail('packlist_budget');
     work += amount;
     if (diagnostics) diagnostics.work = work;
@@ -457,12 +474,12 @@ export function packlist(
   let lines = 0,
     bytes = 0;
   const read = new Map<string, string>();
-  const readMetadata = (path: string): string | undefined => {
+  function* readMetadata(path: string): Generator<string, string | undefined, string | undefined> {
     const cached = read.get(path);
     if (cached !== undefined) return cached;
-    const captured = metadata.get(path);
-    if (captured === undefined) return undefined;
-    const body = typeof captured === 'function' ? captured() : captured;
+    if (!metadata.has(path)) return undefined;
+    const body = yield path;
+    if (body === undefined) return undefined;
     const size = new TextEncoder().encode(body).length;
     const manifest = path.endsWith('package.json');
     if (manifest && size > 262144) fail('manifest_cap');
@@ -476,7 +493,7 @@ export function packlist(
     }
     read.set(path, body);
     return body;
-  };
+  }
   const compiled = new Map<string, Rule[]>();
   const rules = (input: readonly string[]) =>
     input.flatMap((line) => {
@@ -489,7 +506,7 @@ export function packlist(
       }
       return result;
     });
-  const rootBody = readMetadata('package.json');
+  const rootBody = yield* readMetadata('package.json');
   const rootManifest = parsePackManifest(rootBody ?? '');
   const output = new Set<string>();
   const seenBundles = new Set<string>();
@@ -522,7 +539,11 @@ export function packlist(
   }
   const defaultRules = rules(defaults);
   const isDirectory = (path: string) => directoryPaths.has(path);
-  function gather(prefix: string, manifest: Record<string, unknown>, bundled: boolean) {
+  function* gather(
+    prefix: string,
+    manifest: Record<string, unknown>,
+    bundled: boolean,
+  ): Generator<string, void, string | undefined> {
     const subtree = subtrees.get(prefix) ?? [];
     const required: string[] = [];
     const includes: string[] = [];
@@ -574,11 +595,11 @@ export function packlist(
       string,
       { rules: Rule[]; groups: RuleGroup[]; partialCache: Map<string, Set<Rule>> }
     >();
-    function directory(path: string): Directory {
+    function* directory(path: string): Generator<string, Directory, string | undefined> {
       const cached = directories.get(path);
       if (cached) return cached;
       const parts = path ? parentPaths.get(prefix + path)! : { parent: '', base: '' };
-      const parent = path ? directory(parts.parent.slice(prefix.length)) : undefined;
+      const parent = path ? yield* directory(parts.parent.slice(prefix.length)) : undefined;
       const base = parts.base;
       const exact = parent ? filter(parent, base) || filter(parent, base + '/') : false;
       let localRules: string[] = [];
@@ -589,8 +610,8 @@ export function packlist(
         (!parent || (canReach(parent) && filter(parent, base, true)))
       ) {
         const ignore =
-          readMetadata(prefix + (path ? path + '/' : '') + '.npmignore') ??
-          readMetadata(prefix + (path ? path + '/' : '') + '.gitignore');
+          (yield* readMetadata(prefix + (path ? path + '/' : '') + '.npmignore')) ??
+          (yield* readMetadata(prefix + (path ? path + '/' : '') + '.gitignore'));
         if (ignore !== undefined) localRules = ignore.split(/\r?\n/);
       }
       const handedDown = parent
@@ -776,7 +797,7 @@ export function packlist(
       if (path.split('/').some((part) => part.includes('*'))) continue;
       const index = path.lastIndexOf('/');
       if (directories.size >= 4096) directories.clear();
-      const node = directory(index < 0 ? '' : path.slice(0, index));
+      const node = yield* directory(index < 0 ? '' : path.slice(0, index));
       if (canReach(node) && filter(node, path.slice(index + 1))) output.add(full);
     }
   }
@@ -819,13 +840,13 @@ export function packlist(
       if (!candidate || seenBundles.has(candidate)) continue;
       if (seenBundles.size >= 500) fail('packlist_budget');
       seenBundles.add(candidate);
-      const dependency = parsePackManifest(readMetadata(candidate + 'package.json')!);
+      const dependency = parsePackManifest((yield* readMetadata(candidate + 'package.json'))!);
       bundledPackages.push({ prefix: candidate, manifest: dependency });
       pending.push({ prefix: candidate, manifest: dependency, root: false });
     }
   }
-  gather('', rootManifest, false);
-  for (const { prefix, manifest } of bundledPackages) gather(prefix, manifest, true);
+  yield* gather('', rootManifest, false);
+  for (const { prefix, manifest } of bundledPackages) yield* gather(prefix, manifest, true);
   return [...output].sort();
 }
 function object(value: unknown): Record<string, unknown> {

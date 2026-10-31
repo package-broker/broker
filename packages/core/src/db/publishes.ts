@@ -2,9 +2,23 @@ import type { AuditEvent } from '../audit/actions.js';
 import type { AnyMutationFence } from '../authz/fence.js';
 import type { OrgContext } from './port.js';
 
-export type PublishApprovalState = 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
-export type PublishScanState =
-  'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+export const PUBLISH_APPROVAL_STATES = [
+  'not_required',
+  'pending',
+  'approved',
+  'rejected',
+  'expired',
+] as const;
+export const PUBLISH_SCAN_STATES = [
+  'not_required',
+  'queued',
+  'running',
+  'allowed',
+  'denied',
+  'failed',
+] as const;
+export type PublishApprovalState = (typeof PUBLISH_APPROVAL_STATES)[number];
+export type PublishScanState = (typeof PUBLISH_SCAN_STATES)[number];
 export type PackageAccessRequestState = 'pending' | 'approved' | 'rejected' | 'expired';
 
 export interface PublishReadme {

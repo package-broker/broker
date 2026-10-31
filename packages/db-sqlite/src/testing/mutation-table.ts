@@ -1,3 +1,7 @@
+import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
+import { entries as publishGuardEntries } from './mutation-table/catalogue-publish-guard.js';
+import { entries as publishesEntries } from './mutation-table/publishes.js';
+import { entries as readmeEntries } from './mutation-table/package-readme.js';
 import { entries as sourcePackageRequestEntries } from './mutation-table/source-package-request.js';
 import { entries as npmAuditSnapshotEntries } from './mutation-table/npm-audit-snapshot.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
@@ -116,6 +120,9 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...publishGuardEntries,
+  ...publishesEntries,
+  ...readmeEntries,
   ...sourceAttachmentCountsEntries,
   ...sourceSelectionRevisionEntries,
   ...sourceVisibleEntries,
@@ -134,6 +141,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...localLoginSetupEntries,
   ...visibilitySubsetEntries,
   ...visibilityAttachFactoryEntries,
+  ...registeredNameClaimProxyEntries,
   ...registeredNameFactoryEntries,
   ...importCredentialEntries,
   ...importAuthorityEntries,

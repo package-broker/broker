@@ -34,6 +34,7 @@ export interface VersionListItem {
 }
 
 export interface ManagedVersion {
+  readonly publishGate?: boolean;
   readonly packageId: string;
   readonly versionId: string;
   readonly ecosystem: NameEcosystem;

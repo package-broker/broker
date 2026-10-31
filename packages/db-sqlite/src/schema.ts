@@ -198,7 +198,7 @@ export interface ServicePrincipalTable {
   last_op_id: string | null;
 }
 
-/** Mirrors `token` in `migrations/0001_init.sql`. */
+/** Mirrors `token` in `migrations/0001_init.sql` and `migrations/0003_npm_identity.sql`. */
 export interface TokenTable {
   id: string;
   org_id: string;
@@ -222,6 +222,8 @@ export interface TokenTable {
   validation_kind: string | null;
   validation_identity_id: string | null;
   last_op_id: string | null;
+  trusted_publisher_id: string | null;
+  package_name: string | null;
 }
 
 /** Mirrors `service_principal_permission` in `migrations/0001_init.sql`. */
@@ -663,7 +665,55 @@ export interface ApiIdempotencyTable {
   expires_at: string;
 }
 
+export interface NpmLoginSessionTable {
+  id: string;
+  selector_hash: string;
+  done_hash: string;
+  org_id: string;
+  project_id: string;
+  state: Generated<'pending' | 'approved' | 'consumed'>;
+  cli_hostname: string | null;
+  source_ip: string | null;
+  created_at: Generated<string>;
+  expires_at: string;
+  user_id: string | null;
+  token_id: string | null;
+  token_ciphertext: string | null;
+  token_nonce: string | null;
+  token_key_version: number | null;
+  consumed_at: string | null;
+}
+
+export interface TrustedPublisherTable {
+  id: string;
+  org_id: string;
+  package_name: string;
+  repository_id: string;
+  repository_owner_id: string;
+  repository: string;
+  workflow: string;
+  environment: Generated<string>;
+  ref_pattern: string | null;
+  service_principal_id: string;
+  created_by_user_id: string;
+  created_at: Generated<string>;
+  disabled_at: string | null;
+  last_used_at: string | null;
+  revision: Generated<number>;
+}
+
+export interface OidcReplayTable {
+  issuer: string;
+  jti: string;
+  org_id: string;
+  trusted_publisher_id: string;
+  expires_at: string;
+}
+
 export interface Database {
+  npm_login_session: NpmLoginSessionTable;
+  trusted_publisher: TrustedPublisherTable;
+  oidc_replay: OidcReplayTable;
   publish_approval: PublishApprovalTable;
   package_access_request: PackageAccessRequestTable;
   version_readme: VersionReadmeTable;

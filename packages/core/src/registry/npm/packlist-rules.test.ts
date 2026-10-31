@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { expect, it } from 'vitest';
-import { packlist as select } from './packlist-rules';
+import { packlist as select } from './packlist-rules.js';
 
 let work = 0;
 function packlist(...args: Parameters<typeof select>): string[] {
@@ -700,4 +700,50 @@ it('charges partial include scans even when most rules are skipped', () => {
   ).toEqual(['package.json']);
   expect(work).toBeGreaterThanOrEqual(count * 256);
   expectWorkBudget();
+});
+
+it('deduplicates compiled text across consumed ignores and refuses aggregate expansion', () => {
+  const body = Array.from(
+    { length: 256 },
+    (_, i) => String(i).padStart(4, '0') + 'x'.repeat(4092),
+  ).join('\n');
+  const paths = new Set(['package.json', 'a/file', 'b/file', 'c/file']);
+  const metadata = new Map([
+    ['package.json', '{}'],
+    ['a/.npmignore', body],
+    ['b/.npmignore', body],
+  ]);
+  expect(packlist(paths, metadata)).toHaveLength(4);
+  metadata.set('c/.npmignore', body.replaceAll('x', 'y'));
+  expect(() => packlist(paths, metadata)).toThrowError(
+    expect.objectContaining({ detail: 'compiled_rule_cap' }),
+  );
+});
+
+it('accepts exactly 4 MiB of compiled text, deduplicates it and refuses the next unit', () => {
+  const patterns = Array.from(
+    { length: 512 },
+    (_, i) => String(i).padStart(4, '0') + 'x'.repeat(i === 511 ? 3692 : 4092),
+  );
+  // Defaults and root strict rules reserve the other 400 UTF-16 units.
+  const body = [...patterns, patterns[0]].join('\n');
+  const paths = new Set(['package.json']);
+  expect(
+    packlist(
+      paths,
+      new Map([
+        ['package.json', '{}'],
+        ['.npmignore', body],
+      ]),
+    ),
+  ).toEqual(['package.json']);
+  expect(() =>
+    packlist(
+      paths,
+      new Map([
+        ['package.json', '{}'],
+        ['.npmignore', body + '\nz'],
+      ]),
+    ),
+  ).toThrowError(expect.objectContaining({ detail: 'compiled_rule_cap' }));
 });

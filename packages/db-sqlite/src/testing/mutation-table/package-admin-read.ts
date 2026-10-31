@@ -260,6 +260,11 @@ export const entries: readonly MutationEntry[] = [
     ],
     waivers: [
       {
+        locate: /pa\.org_id = \?/,
+        reason:
+          'The publish-approval lookup repeats the independently scoped version identity; the composite organization/version FK prevents a foreign approval for a scoped version. Publish-reader contracts cover held-version filtering.',
+      },
+      {
         locate: /"?guard_\w+"?\."?org_id"? = /,
         reason:
           'Delegated catalogue-predicates scopes inside the w-aliased winner subquery have independent mutation registrations.',
@@ -274,8 +279,8 @@ export const entries: readonly MutationEntry[] = [
       {
         name: mixedStatus.name,
         pattern:
-          /and not exists \(select 1 from version as vs indexed\s+by version_package_status where vs\.org_id = \?\s+and vs\.package_id = c\.id and vs\.status <> 'tombstoned'\)/,
-        replacement: 'and (? is not null)',
+          /and not exists \(select 1 from version as vs indexed\s+by version_package_status where vs\.org_id = \?\s+and vs\.package_id = c\.id and vs\.status <> 'tombstoned'\s+and not \(vs\.status = 'quarantined' and exists \(select 1 from publish_approval pa where pa\.org_id = \? and pa\.version_id = vs\.id\)\)\)/,
+        replacement: 'and (? is not null and ? is not null)',
         expected: 1,
         case: mixedStatus,
       },

@@ -368,6 +368,24 @@
     },
     {
       "type": "index",
+      "name": "npm_login_session_expiry",
+      "tbl_name": "npm_login_session",
+      "sql": "CREATE INDEX npm_login_session_expiry ON npm_login_session (org_id, expires_at)"
+    },
+    {
+      "type": "index",
+      "name": "npm_login_session_pending",
+      "tbl_name": "npm_login_session",
+      "sql": "CREATE INDEX npm_login_session_pending ON npm_login_session (org_id, project_id, expires_at) WHERE state = 'pending'"
+    },
+    {
+      "type": "index",
+      "name": "oidc_replay_expiry",
+      "tbl_name": "oidc_replay",
+      "sql": "CREATE INDEX oidc_replay_expiry ON oidc_replay (org_id, expires_at)"
+    },
+    {
+      "type": "index",
       "name": "organization_singleton",
       "tbl_name": "organization",
       "sql": "CREATE UNIQUE INDEX organization_singleton ON organization (singleton)"
@@ -608,6 +626,12 @@
     },
     {
       "type": "index",
+      "name": "token_org_id",
+      "tbl_name": "token",
+      "sql": "CREATE UNIQUE INDEX token_org_id ON token (id, org_id)"
+    },
+    {
+      "type": "index",
       "name": "token_pepper_version",
       "tbl_name": "token",
       "sql": "CREATE INDEX token_pepper_version ON token (pepper_version)"
@@ -632,6 +656,12 @@
     },
     {
       "type": "index",
+      "name": "token_trusted_publisher",
+      "tbl_name": "token",
+      "sql": "CREATE INDEX token_trusted_publisher ON token (org_id, trusted_publisher_id) WHERE trusted_publisher_id IS NOT NULL"
+    },
+    {
+      "type": "index",
       "name": "token_user",
       "tbl_name": "token",
       "sql": "CREATE INDEX token_user ON token (user_id)"
@@ -641,6 +671,18 @@
       "name": "token_validation_identity",
       "tbl_name": "token",
       "sql": "CREATE INDEX token_validation_identity ON token (validation_identity_id) WHERE validation_identity_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "trusted_publisher_binding",
+      "tbl_name": "trusted_publisher",
+      "sql": "CREATE UNIQUE INDEX trusted_publisher_binding ON trusted_publisher (org_id, package_name, repository_id, workflow, environment)"
+    },
+    {
+      "type": "index",
+      "name": "trusted_publisher_org_id",
+      "tbl_name": "trusted_publisher",
+      "sql": "CREATE UNIQUE INDEX trusted_publisher_org_id ON trusted_publisher (org_id, id)"
     },
     {
       "type": "index",
@@ -938,6 +980,18 @@
     },
     {
       "type": "table",
+      "name": "npm_login_session",
+      "tbl_name": "npm_login_session",
+      "sql": "CREATE TABLE npm_login_session (\n  id TEXT NOT NULL PRIMARY KEY,\n  selector_hash TEXT NOT NULL UNIQUE CONSTRAINT selector_hash_hex CHECK (length(CAST(selector_hash AS BLOB)) = 64 AND instr(selector_hash, char(0)) = 0 AND selector_hash NOT GLOB '*[^0-9a-f]*'),\n  done_hash TEXT NOT NULL UNIQUE CONSTRAINT done_hash_hex CHECK (length(CAST(done_hash AS BLOB)) = 64 AND instr(done_hash, char(0)) = 0 AND done_hash NOT GLOB '*[^0-9a-f]*'),\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  project_id TEXT NOT NULL,\n  state TEXT NOT NULL DEFAULT 'pending' CONSTRAINT login_state CHECK (state IN ('pending', 'approved', 'consumed')),\n  cli_hostname TEXT CONSTRAINT cli_hostname_bytes CHECK (cli_hostname IS NULL OR length(CAST(cli_hostname AS BLOB)) <= 253) CONSTRAINT cli_hostname_controls CHECK (cli_hostname IS NULL OR (instr(cli_hostname, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), cli_hostname) = 0)),\n  source_ip TEXT CONSTRAINT source_ip_bytes CHECK (source_ip IS NULL OR length(CAST(source_ip AS BLOB)) <= 45) CONSTRAINT source_ip_controls CHECK (source_ip IS NULL OR (instr(source_ip, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), source_ip) = 0)),\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  expires_at TEXT NOT NULL,\n  user_id TEXT,\n  token_id TEXT,\n  token_ciphertext TEXT,\n  token_nonce TEXT,\n  token_key_version INTEGER,\n  consumed_at TEXT,\n  CONSTRAINT login_sealed_token CHECK ((token_ciphertext IS NULL AND token_nonce IS NULL AND token_key_version IS NULL) OR (token_ciphertext IS NOT NULL AND token_nonce IS NOT NULL AND token_key_version IS NOT NULL)),\n  CONSTRAINT login_consumed_time CHECK ((state = 'consumed') = (consumed_at IS NOT NULL)),\n  CONSTRAINT login_consumed_token CHECK (state <> 'consumed' OR token_ciphertext IS NULL),\n  CONSTRAINT login_approved CHECK (state <> 'approved' OR (user_id IS NOT NULL AND token_id IS NOT NULL AND token_ciphertext IS NOT NULL)),\n  CONSTRAINT login_pending CHECK (state <> 'pending' OR (user_id IS NULL AND token_id IS NULL AND token_ciphertext IS NULL)),\n  FOREIGN KEY (org_id, project_id) REFERENCES project (org_id, id),\n  FOREIGN KEY (org_id, user_id) REFERENCES user_account (org_id, id),\n  FOREIGN KEY (org_id, token_id) REFERENCES token (org_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "oidc_replay",
+      "tbl_name": "oidc_replay",
+      "sql": "CREATE TABLE oidc_replay (\n  issuer TEXT NOT NULL,\n  jti TEXT NOT NULL,\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  trusted_publisher_id TEXT NOT NULL,\n  expires_at TEXT NOT NULL,\n  PRIMARY KEY (issuer, jti),\n  FOREIGN KEY (org_id, trusted_publisher_id) REFERENCES trusted_publisher (org_id, id) ON DELETE CASCADE\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
       "name": "organization",
       "tbl_name": "organization",
       "sql": "CREATE TABLE organization (\n  id                              TEXT NOT NULL PRIMARY KEY,\n  singleton                       INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1),\n  slug                            TEXT NOT NULL CHECK (slug = lower(slug) AND length(slug) BETWEEN 1 AND 64),\n  name                            TEXT NOT NULL,\n  retention_removed_upstream_days INTEGER NOT NULL DEFAULT 365 CHECK (retention_removed_upstream_days >= 0),\n  token_default_expiry_days       INTEGER NOT NULL DEFAULT 90 CHECK (token_default_expiry_days > 0),\n  token_ci_readonly_expiry_days   INTEGER NOT NULL DEFAULT 365 CHECK (token_ci_readonly_expiry_days > 0),\n  created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  audit_last_verified_at          TEXT\n) STRICT"
@@ -1048,13 +1102,19 @@
       "type": "table",
       "name": "token",
       "tbl_name": "token",
-      "sql": "CREATE TABLE token (\n  id                     TEXT NOT NULL PRIMARY KEY,\n  org_id                 TEXT NOT NULL REFERENCES organization (id),\n  kind                   TEXT NOT NULL CHECK (kind IN ('pat', 'svc', 'cst')),\n  selector               TEXT NOT NULL CHECK (length(selector) = 12),\n  hash                   TEXT NOT NULL CHECK (length(hash) = 64),\n  pepper_version         INTEGER NOT NULL CHECK (pepper_version >= 1),\n  name                   TEXT NOT NULL,\n  scopes_json            TEXT NOT NULL CHECK (json_valid(scopes_json)),\n  read_only              INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),\n  user_id                TEXT REFERENCES user_account (id),\n  service_principal_id   TEXT REFERENCES service_principal (id),\n  customer_id            TEXT REFERENCES customer (id),\n  project_id             TEXT REFERENCES project (id),\n  created_by_user_id     TEXT REFERENCES user_account (id),\n  expires_at             TEXT,\n  revoked_at             TEXT,\n  last_used_at           TEXT,\n  created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  project_mode           TEXT NOT NULL DEFAULT 'selected' CHECK (project_mode IN ('all', 'selected')),\n  validation_kind        TEXT CHECK (validation_kind IS NULL OR (validation_kind IN ('sso', 'local') AND kind = 'pat')),\n  validation_identity_id TEXT REFERENCES identity (id) ON DELETE SET NULL CHECK (validation_identity_id IS NULL OR (validation_kind IS NOT 'local' AND kind = 'pat')),\n  last_op_id             TEXT,\n  CHECK ( (kind = 'pat' AND user_id IS NOT NULL AND service_principal_id IS NULL AND customer_id IS NULL) OR (kind = 'svc' AND service_principal_id IS NOT NULL AND user_id IS NULL AND customer_id IS NULL) OR (kind = 'cst' AND customer_id IS NOT NULL AND user_id IS NULL AND service_principal_id IS NULL) ),\n  CHECK (kind = 'cst' OR expires_at IS NOT NULL),\n  -- The single-column FK clears only the identity on deletion; this FK enforces ownership.\n  FOREIGN KEY (org_id, validation_identity_id, user_id) REFERENCES identity (org_id, id, user_id)\n) STRICT"
+      "sql": "CREATE TABLE token (\n  id                     TEXT NOT NULL PRIMARY KEY,\n  org_id                 TEXT NOT NULL REFERENCES organization (id),\n  kind                   TEXT NOT NULL CHECK (kind IN ('pat', 'svc', 'cst')),\n  selector               TEXT NOT NULL CHECK (length(selector) = 12),\n  hash                   TEXT NOT NULL CHECK (length(hash) = 64),\n  pepper_version         INTEGER NOT NULL CHECK (pepper_version >= 1),\n  name                   TEXT NOT NULL,\n  scopes_json            TEXT NOT NULL CHECK (json_valid(scopes_json)),\n  read_only              INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),\n  user_id                TEXT REFERENCES user_account (id),\n  service_principal_id   TEXT REFERENCES service_principal (id),\n  customer_id            TEXT REFERENCES customer (id),\n  project_id             TEXT REFERENCES project (id),\n  created_by_user_id     TEXT REFERENCES user_account (id),\n  expires_at             TEXT,\n  revoked_at             TEXT,\n  last_used_at           TEXT,\n  created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  project_mode           TEXT NOT NULL DEFAULT 'selected' CHECK (project_mode IN ('all', 'selected')),\n  validation_kind        TEXT CHECK (validation_kind IS NULL OR (validation_kind IN ('sso', 'local') AND kind = 'pat')),\n  validation_identity_id TEXT REFERENCES identity (id) ON DELETE SET NULL CHECK (validation_identity_id IS NULL OR (validation_kind IS NOT 'local' AND kind = 'pat')),\n  last_op_id             TEXT, trusted_publisher_id TEXT REFERENCES trusted_publisher (id) ON DELETE SET NULL, package_name TEXT CONSTRAINT package_name_bytes CHECK (package_name IS NULL OR length(CAST(package_name AS BLOB)) <= 214) CONSTRAINT package_name_controls CHECK (package_name IS NULL OR (instr(package_name, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), package_name) = 0)),\n  CHECK ( (kind = 'pat' AND user_id IS NOT NULL AND service_principal_id IS NULL AND customer_id IS NULL) OR (kind = 'svc' AND service_principal_id IS NOT NULL AND user_id IS NULL AND customer_id IS NULL) OR (kind = 'cst' AND customer_id IS NOT NULL AND user_id IS NULL AND service_principal_id IS NULL) ),\n  CHECK (kind = 'cst' OR expires_at IS NOT NULL),\n  -- The single-column FK clears only the identity on deletion; this FK enforces ownership.\n  FOREIGN KEY (org_id, validation_identity_id, user_id) REFERENCES identity (org_id, id, user_id)\n) STRICT"
     },
     {
       "type": "table",
       "name": "token_project",
       "tbl_name": "token_project",
       "sql": "CREATE TABLE token_project (\n  org_id     TEXT NOT NULL REFERENCES organization (id),\n  token_id   TEXT NOT NULL REFERENCES token (id) ON DELETE CASCADE,\n  project_id TEXT NOT NULL REFERENCES project (id),\n  PRIMARY KEY (token_id, project_id)\n) STRICT, WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "trusted_publisher",
+      "tbl_name": "trusted_publisher",
+      "sql": "CREATE TABLE trusted_publisher (\n  id TEXT NOT NULL PRIMARY KEY,\n  org_id TEXT NOT NULL REFERENCES organization (id),\n  package_name TEXT NOT NULL CONSTRAINT package_name_bytes CHECK (package_name IS NULL OR length(CAST(package_name AS BLOB)) <= 214) CONSTRAINT package_name_controls CHECK (package_name IS NULL OR (instr(package_name, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), package_name) = 0)),\n  repository_id TEXT NOT NULL CONSTRAINT repository_id_digits CHECK (length(repository_id) > 0 AND instr(repository_id, char(0)) = 0 AND repository_id NOT GLOB '*[^0-9]*'),\n  repository_owner_id TEXT NOT NULL CONSTRAINT repository_owner_id_digits CHECK (length(repository_owner_id) > 0 AND instr(repository_owner_id, char(0)) = 0 AND repository_owner_id NOT GLOB '*[^0-9]*'),\n  repository TEXT NOT NULL CONSTRAINT repository_bytes CHECK (repository IS NULL OR length(CAST(repository AS BLOB)) <= 140) CONSTRAINT repository_controls CHECK (repository IS NULL OR (instr(repository, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), repository) = 0)),\n  workflow TEXT NOT NULL CONSTRAINT workflow_bytes CHECK (workflow IS NULL OR length(CAST(workflow AS BLOB)) <= 255) CONSTRAINT workflow_controls CHECK (workflow IS NULL OR (instr(workflow, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), workflow) = 0)),\n  environment TEXT NOT NULL DEFAULT '' CONSTRAINT environment_bytes CHECK (environment IS NULL OR length(CAST(environment AS BLOB)) <= 255) CONSTRAINT environment_controls CHECK (environment IS NULL OR (instr(environment, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), environment) = 0)),\n  ref_pattern TEXT CONSTRAINT ref_pattern_bytes CHECK (ref_pattern IS NULL OR length(CAST(ref_pattern AS BLOB)) <= 255) CONSTRAINT ref_pattern_controls CHECK (ref_pattern IS NULL OR (instr(ref_pattern, char(0)) = 0 AND glob(char(42,91,1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,127,93,42), ref_pattern) = 0)),\n  service_principal_id TEXT NOT NULL,\n  created_by_user_id TEXT NOT NULL,\n  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n  disabled_at TEXT,\n  last_used_at TEXT,\n  revision INTEGER NOT NULL DEFAULT 1 CONSTRAINT publisher_revision CHECK (revision >= 1),\n  FOREIGN KEY (org_id, service_principal_id) REFERENCES service_principal (org_id, id),\n  FOREIGN KEY (org_id, created_by_user_id) REFERENCES user_account (org_id, id)\n) STRICT"
     },
     {
       "type": "table",
@@ -1163,6 +1223,24 @@
       "name": "source_sync_job_state",
       "tbl_name": "job",
       "sql": "CREATE TRIGGER source_sync_job_state\nAFTER UPDATE OF state, last_error ON job\nBEGIN\n  UPDATE source_sync_package SET state = NEW.state,\n    error = CASE WHEN NEW.state IN ('running', 'succeeded') OR (NEW.state = 'queued' AND EXISTS (SELECT 1 FROM job_attempt WHERE org_id = NEW.org_id AND job_id = NEW.id AND fence = NEW.fence AND outcome = 'released')) THEN NULL\n      ELSE COALESCE(NEW.sync_error, CASE WHEN NEW.last_error = 'timeout' THEN 'timeout'\n        WHEN NEW.last_error IS NOT NULL THEN 'internal' END) END\n    WHERE org_id = NEW.org_id AND job_id = NEW.id;\n  UPDATE source SET sync_counts = json_set(sync_counts, '$.listing', json('false'))\n    WHERE org_id = NEW.org_id AND id = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.sourceId')\n      AND NEW.type = 'core:source-sync:v1' AND NEW.state <> 'running'\n      AND NOT (NEW.state = 'queued' AND NEW.last_error IS 'lease_lost')\n      AND (NEW.state <> 'succeeded' OR NOT EXISTS (\n        SELECT 1 FROM job continuation\n        WHERE continuation.org_id = NEW.org_id AND continuation.resource_key = NEW.resource_key\n          AND continuation.id <> NEW.id AND continuation.type = 'core:source-sync:v1'\n          AND continuation.state IN ('queued', 'running')\n          AND json_extract(CASE WHEN json_valid(continuation.payload_json) THEN continuation.payload_json ELSE '{}' END, '$.syncGeneration') = source.sync_generation))\n      AND (json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration') IS NULL\n        OR sync_generation = json_extract(CASE WHEN json_valid(NEW.payload_json) THEN NEW.payload_json ELSE '{}' END, '$.syncGeneration'));\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "token_trusted_publisher_insert",
+      "tbl_name": "token",
+      "sql": "CREATE TRIGGER token_trusted_publisher_insert BEFORE INSERT ON token\nWHEN NEW.trusted_publisher_id IS NOT NULL AND NOT EXISTS (\n  SELECT 1 FROM trusted_publisher WHERE org_id = NEW.org_id AND id = NEW.trusted_publisher_id\n)\nBEGIN\n  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "token_trusted_publisher_update",
+      "tbl_name": "token",
+      "sql": "CREATE TRIGGER token_trusted_publisher_update BEFORE UPDATE OF org_id, trusted_publisher_id ON token\nWHEN NEW.trusted_publisher_id IS NOT NULL AND NOT EXISTS (\n  SELECT 1 FROM trusted_publisher WHERE org_id = NEW.org_id AND id = NEW.trusted_publisher_id\n)\nBEGIN\n  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "trusted_publisher_token_org_update",
+      "tbl_name": "trusted_publisher",
+      "sql": "CREATE TRIGGER trusted_publisher_token_org_update BEFORE UPDATE OF org_id ON trusted_publisher\nWHEN EXISTS (\n  SELECT 1 FROM token WHERE trusted_publisher_id = OLD.id AND org_id <> NEW.org_id\n)\nBEGIN\n  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed');\nEND"
     }
   ],
   "indexes": [
@@ -1871,6 +1949,62 @@
       "partial": 0
     },
     {
+      "tbl_name": "npm_login_session",
+      "seq": 0,
+      "name": "npm_login_session_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "npm_login_session",
+      "seq": 1,
+      "name": "npm_login_session_pending",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "npm_login_session",
+      "seq": 2,
+      "name": "sqlite_autoindex_npm_login_session_3",
+      "unique": 1,
+      "origin": "u",
+      "partial": 0
+    },
+    {
+      "tbl_name": "npm_login_session",
+      "seq": 3,
+      "name": "sqlite_autoindex_npm_login_session_2",
+      "unique": 1,
+      "origin": "u",
+      "partial": 0
+    },
+    {
+      "tbl_name": "npm_login_session",
+      "seq": 4,
+      "name": "sqlite_autoindex_npm_login_session_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "oidc_replay",
+      "seq": 0,
+      "name": "oidc_replay_expiry",
+      "unique": 0,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "oidc_replay",
+      "seq": 1,
+      "name": "sqlite_autoindex_oidc_replay_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
       "tbl_name": "organization",
       "seq": 0,
       "name": "organization_singleton",
@@ -2329,6 +2463,22 @@
     {
       "tbl_name": "token",
       "seq": 0,
+      "name": "token_trusted_publisher",
+      "unique": 0,
+      "origin": "c",
+      "partial": 1
+    },
+    {
+      "tbl_name": "token",
+      "seq": 1,
+      "name": "token_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "token",
+      "seq": 2,
       "name": "token_pepper_version",
       "unique": 0,
       "origin": "c",
@@ -2336,7 +2486,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 1,
+      "seq": 3,
       "name": "token_validation_identity",
       "unique": 0,
       "origin": "c",
@@ -2344,7 +2494,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 2,
+      "seq": 4,
       "name": "token_creator",
       "unique": 0,
       "origin": "c",
@@ -2352,7 +2502,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 3,
+      "seq": 5,
       "name": "token_binding_project",
       "unique": 0,
       "origin": "c",
@@ -2360,7 +2510,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 4,
+      "seq": 6,
       "name": "token_customer",
       "unique": 0,
       "origin": "c",
@@ -2368,7 +2518,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 5,
+      "seq": 7,
       "name": "token_service_principal",
       "unique": 0,
       "origin": "c",
@@ -2376,7 +2526,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 6,
+      "seq": 8,
       "name": "token_user",
       "unique": 0,
       "origin": "c",
@@ -2384,7 +2534,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 7,
+      "seq": 9,
       "name": "token_selector",
       "unique": 1,
       "origin": "c",
@@ -2392,7 +2542,7 @@
     },
     {
       "tbl_name": "token",
-      "seq": 8,
+      "seq": 10,
       "name": "sqlite_autoindex_token_1",
       "unique": 1,
       "origin": "pk",
@@ -2410,6 +2560,30 @@
       "tbl_name": "token_project",
       "seq": 1,
       "name": "sqlite_autoindex_token_project_1",
+      "unique": 1,
+      "origin": "pk",
+      "partial": 0
+    },
+    {
+      "tbl_name": "trusted_publisher",
+      "seq": 0,
+      "name": "trusted_publisher_binding",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "trusted_publisher",
+      "seq": 1,
+      "name": "trusted_publisher_org_id",
+      "unique": 1,
+      "origin": "c",
+      "partial": 0
+    },
+    {
+      "tbl_name": "trusted_publisher",
+      "seq": 2,
+      "name": "sqlite_autoindex_trusted_publisher_1",
       "unique": 1,
       "origin": "pk",
       "partial": 0

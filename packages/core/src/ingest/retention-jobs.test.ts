@@ -410,7 +410,7 @@ describe('blob purge with the lifecycle service', () => {
     expect(m.row).toMatchObject({ deleted: true, leased: false });
     m.republish(fresh);
     expect(m.row.bytes).toBe(fresh);
-    expect(m.remove).toHaveBeenCalledTimes(3);
+    expect(m.remove).toHaveBeenCalledTimes(2);
   }, 10_000);
 
   it('keeps the lease after the byte store throws', async () => {
@@ -681,11 +681,42 @@ it.each(['list', 'discard'])(
     expect(f.lifecycle.removeBytes).toHaveBeenCalledOnce();
     expect(job.observability.counter).toHaveBeenCalledWith('pb.blob.staging_sweep', {
       outcome: 'error',
+      stage: failure,
     });
     expect(job.observability.log).toHaveBeenCalledWith({
       level: 'warn',
       event: 'staged_blob_sweep_failed',
+      stage: failure,
     });
-    expect(safeRecord(vi.mocked(job.observability.log).mock.calls[0]![0])).not.toBeNull();
+    const record = vi.mocked(job.observability.log).mock.calls[0]![0];
+    expect(safeRecord(record)).toEqual(record);
   },
 );
+
+it('continues the staged sweep after each failed discard and reports fixed events', async () => {
+  const { job } = context();
+  const handles = [1, 2, 3].map((n) => `staging/6f72672d61/01J0000000000000000000000${n}`);
+  const discardStaged = vi.fn(async (handle: string) => {
+    if (handle !== handles[2]) throw new Error('private request data');
+  });
+  await createBlobPurgeJob({
+    lifecycle: scanFixture().lifecycle,
+    staged: {
+      listStaged: async () =>
+        handles.map((handle) => ({
+          handle: handle as never,
+          createdAt: '2020-01-01T00:00:00.000Z',
+        })),
+      discardStaged,
+    },
+  }).handler({}, job);
+  expect(discardStaged.mock.calls).toEqual(handles.map((handle) => [handle]));
+  expect(vi.mocked(job.observability.counter).mock.calls).toEqual([
+    ['pb.blob.staging_sweep', { outcome: 'error', stage: 'discard' }],
+    ['pb.blob.staging_sweep', { outcome: 'error', stage: 'discard' }],
+  ]);
+  expect(vi.mocked(job.observability.log).mock.calls).toEqual([
+    [{ level: 'warn', event: 'staged_blob_sweep_failed', stage: 'discard' }],
+    [{ level: 'warn', event: 'staged_blob_sweep_failed', stage: 'discard' }],
+  ]);
+});

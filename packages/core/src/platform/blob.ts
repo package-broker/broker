@@ -46,7 +46,7 @@ export interface StagedByteObject {
 
 /**
  * Staged capabilities are isolate-local: staging and promotion run within one publish request
- * on the same isolate and ByteStore instance. They are not resumable across requests or isolates.
+ * on the same CoreBlobStore instance. They are not resumable across requests or isolates.
  */
 export interface CoreBlobStore extends BlobStore {
   stage(
@@ -543,18 +543,8 @@ interface StagedCapability {
   readonly orgId: OrgId;
   readonly staged: StagedBlob;
   readonly createdAt: number;
+  readonly expiryTimer: ReturnType<typeof setTimeout>;
 }
-const stagedCapabilities = new WeakMap<ByteStore, Map<string, StagedCapability>>();
-
-export function expireStagedCapabilities(byteStore: ByteStore): void {
-  const entries = stagedCapabilities.get(byteStore);
-  if (entries === undefined) return;
-  const cutoff = Date.now() - STAGING_RETENTION_MS;
-  for (const [handle, entry] of entries) {
-    if (entry.createdAt < cutoff) entries.delete(handle);
-  }
-}
-
 function publicBlobInfo(info: BlobInfo): BlobInfo {
   return {
     generation: info.generation,
@@ -584,9 +574,18 @@ export function createBlobStore(
   if (!Number.isSafeInteger(idleMs) || idleMs < 1) throw new BlobValidationError();
   if (!Number.isSafeInteger(totalMs) || totalMs < 1) throw new BlobValidationError();
 
-  const stagedObjects = stagedCapabilities.get(byteStore) ?? new Map<string, StagedCapability>();
-  stagedCapabilities.set(byteStore, stagedObjects);
-  const expire = () => expireStagedCapabilities(byteStore);
+  const stagedObjects = new Map<string, StagedCapability>();
+  const forget = (handle: StagedBlobHandle) => {
+    const entry = stagedObjects.get(handle);
+    if (entry !== undefined) clearTimeout(entry.expiryTimer);
+    stagedObjects.delete(handle);
+  };
+  const expire = () => {
+    const cutoff = Date.now() - STAGING_RETENTION_MS;
+    for (const entry of stagedObjects.values()) {
+      if (entry.createdAt < cutoff) forget(entry.staged.handle);
+    }
+  };
   const owned = (ctx: OrgContext, staged: StagedBlob): StagedBlob => {
     expire();
     const entry = stagedObjects.get(staged?.handle);
@@ -637,7 +636,14 @@ export function createBlobStore(
             size: result.size,
             mediaType: input.mediaType,
           });
-          stagedObjects.set(handle, { orgId: ctx.orgId, staged, createdAt: Date.now() });
+          const expiryTimer = setTimeout(() => forget(handle), STAGING_RETENTION_MS + 1);
+          if (typeof expiryTimer === 'object') expiryTimer.unref?.();
+          stagedObjects.set(handle, {
+            orgId: ctx.orgId,
+            staged,
+            createdAt: Date.now(),
+            expiryTimer,
+          });
           return staged;
         } catch (error) {
           await bounded?.cancel();
@@ -669,7 +675,11 @@ export function createBlobStore(
           (await store.head(ctx, value.sha256)) !== null
         ) {
           await metadata.reserve(ctx, value.sha256);
-          const reserved = await metadata.find(ctx, value.sha256);
+          const reserved = await metadata.narrowRefetchable(ctx, {
+            key: value.sha256,
+            size: value.size,
+            mediaType: value.mediaType,
+          });
           if (reserved === null || reserved.purgeAfter !== null) throw new BlobBusyError();
           await byteStore.discardStaged(value.handle);
           return publicBlobInfo(reserved);
@@ -727,7 +737,7 @@ export function createBlobStore(
             options.observability?.log({ level: 'warn', event: 'promoted_blob_cleanup_failed' });
           }
         }
-        stagedObjects.delete(value.handle);
+        forget(value.handle);
       }
     },
     async discard(ctx, staged) {
@@ -735,7 +745,7 @@ export function createBlobStore(
       try {
         await byteStore.discardStaged(value.handle);
       } finally {
-        stagedObjects.delete(value.handle);
+        forget(value.handle);
       }
     },
     async put(ctx, key, body, input) {

@@ -394,7 +394,7 @@ describe('s3-fake lifecycle wiring', () => {
       const retry = (await f.lifecycle.claimPurge(org, key))!;
       expect(retry).not.toBeNull();
       expect(await f.lifecycle.recheckAndRemove(org, key, retry)).toBe(true);
-      expect(f.removeCalls()).toBe(3);
+      expect(f.removeCalls()).toBe(2);
       expect(await f.lifecycle.markDeleted(org, key, retry)).toBe(true);
     },
   );
@@ -409,7 +409,7 @@ describe('s3-fake lifecycle wiring', () => {
     expect(recovered).not.toBeNull();
     expect(recovered).not.toBe(first);
     expect(await f.lifecycle.recheckAndRemove(org, key, recovered)).toBe(true);
-    expect(f.removeCalls()).toBe(2);
+    expect(f.removeCalls()).toBe(1);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(true);
     expect(await f.lifecycle.markDeleted(org, key, recovered)).toBe(false);
     expect(await f.store.head(org, key)).toBeNull();

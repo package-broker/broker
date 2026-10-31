@@ -2977,3 +2977,30 @@ describe('npm scope registration suggestions', () => {
     );
   });
 });
+
+it.each([
+  ['claim_overlap', 'Another source already claims this package name or scope.'],
+  ['name_public', 'This name is already available from a public registry.'],
+  [
+    'name_public_unverified',
+    'The public registry could not be checked. Try registering the name again later.',
+  ],
+])('explains %s without echoing request data', async (code, message) => {
+  const fetch = vi.fn().mockResolvedValue(json({ error: { code } }, 409));
+  const { model } = setup(fetch);
+  await model.addName(SOURCE, '@scope/widget');
+  expect(model.snapshot().error).toBe(message);
+});
+
+it('offers no upstream sync action for hosted packages', () => {
+  const { model } = setup();
+  vi.spyOn(model, 'snapshot').mockReturnValue({ ...model.snapshot(), canWriteSources: true });
+  const html = renderToString(
+    createElement(SourceActions, {
+      source: { ...source, type: 'hosted', ecosystem: 'npm' },
+      model,
+      busy: false,
+    }),
+  );
+  expect(html).not.toContain('Sync now');
+});

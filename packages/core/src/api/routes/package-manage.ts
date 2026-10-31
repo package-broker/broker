@@ -69,6 +69,7 @@ const ERRORS = {
   forbidden: 'forbidden',
   not_found: 'not_found',
   conflict: 'conflict',
+  publish_gate: 'publish_gate',
   indeterminate: 'unavailable',
 } as const satisfies Record<PackageManageError, ApiErrorCode>;
 const STATUSES = { quarantine: 'quarantined', tombstone: 'tombstoned', release: 'active' } as const;

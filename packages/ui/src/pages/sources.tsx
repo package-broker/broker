@@ -39,6 +39,8 @@ import {
   type VcsProvider,
 } from './sources/source-form.js';
 
+const MAX_NPM_NAME_LENGTH = 214;
+
 type ResponseBody<K extends keyof operations> = operations[K] extends {
   responses: { 200: { content: { 'application/json': infer T } } };
 }
@@ -264,6 +266,14 @@ export function createSourcesModel(
         error: credential
           ? 'Reauthenticate, then enter the credential again.'
           : 'Reauthentication is required.',
+      });
+    } else if (result.code === 'claim_overlap') {
+      set({ error: 'Another source already claims this package name or scope.' });
+    } else if (result.code === 'name_public') {
+      set({ error: 'This name is already available from a public registry.' });
+    } else if (result.code === 'name_public_unverified') {
+      set({
+        error: 'The public registry could not be checked. Try registering the name again later.',
       });
     } else {
       set({ error: 'The request could not be saved or loaded. Refresh and try again.' });
@@ -920,8 +930,14 @@ export function createSourcesModel(
       );
     },
     addName(source: string, pattern: string) {
-      if (pattern.length === 0 || pattern.length > 50 || !/^[a-z0-9._~@!/*-]+$/.test(pattern)) {
-        set({ error: 'Enter a registered pattern of 1 to 50 supported characters.' });
+      const maxLength =
+        state.items.find((item) => item.id === source)?.ecosystem === 'npm' ? 214 : 50;
+      if (
+        pattern.length === 0 ||
+        pattern.length > maxLength ||
+        !/^[a-z0-9._~@!/*-]+$/.test(pattern)
+      ) {
+        set({ error: `Enter a registered pattern of 1 to ${maxLength} supported characters.` });
         return Promise.resolve();
       }
       return mutate(
@@ -1147,7 +1163,7 @@ export function SourceActions({
   const actions: RowAction[] = owned
     ? [
         { id: 'edit', label: 'Edit', disabled: busy, onSelect: () => model.openEditor(source) },
-        ...(model.snapshot().canWriteSources
+        ...(model.snapshot().canWriteSources && source.type !== 'hosted'
           ? [
               {
                 id: 'sync',
@@ -1300,6 +1316,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       </div>
       {state.editor !== null ? (
         <SourceForm
+          organization={model.project === null}
           source={state.editor === 'create' ? null : state.editor}
           busy={state.busy}
           errors={state.fieldErrors}
@@ -1697,7 +1714,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             <DialogHeader className="shrink-0 p-6 pr-16">
               <DialogTitle>Registered names</DialogTitle>
               <DialogDescription>
-                Manage the package patterns registered for this source.
+                Manage the package patterns registered for this source. For npm, use an exact
+                lowercase name or @scope/*. A scope claim hides public packages in that scope that
+                are not yet cached.
               </DialogDescription>
             </DialogHeader>
             <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
@@ -1736,7 +1755,6 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   if (state.busy) return;
                   const form = event.currentTarget;
                   const pattern = formValue(form, 'pattern');
-                  form.reset();
                   void model.addName(state.names!.source, pattern);
                 }}
               >
@@ -1745,7 +1763,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   key={`${state.names.source}:${state.names.items.map((item) => item.pattern).join(',')}`}
                   id="registered-pattern"
                   name="pattern"
-                  maxLength={50}
+                  maxLength={MAX_NPM_NAME_LENGTH}
                   required
                   defaultValue={scopePatterns[0] ?? ''}
                 />
@@ -1801,7 +1819,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               }}
             >
               <Label htmlFor="resolve-name">Package name</Label>
-              <Input id="resolve-name" name="name" maxLength={214} required />
+              <Input id="resolve-name" name="name" maxLength={MAX_NPM_NAME_LENGTH} required />
               <Button type="submit" className="w-fit" disabled={state.busy}>
                 Preview
               </Button>

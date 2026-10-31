@@ -1,3 +1,4 @@
+import { describeNpmClaimsContract } from './npm-claims-contract.js';
 import { createRequire } from 'node:module';
 import type { SqlExecutor } from '@package-broker/core/db/port';
 import { describeSourceSelectionContract } from './source-selection-contract.js';
@@ -32,3 +33,5 @@ async function open() {
 
 describeSourceSelectionContract('D1', open);
 describeSourceSelectionRacesContract('D1', open);
+
+describeNpmClaimsContract('D1', open);

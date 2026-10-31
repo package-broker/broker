@@ -417,11 +417,11 @@ export function parseSourceConfig(
   const fail = (): SourceConfigResult => ({ ok: false, problems: c.problems });
   const { policy } = options;
 
-  if (type === 'hosted') {
-    c.add('type', 'hosted sources are not supported');
+  if (type === 'hosted' && ecosystem !== 'npm') {
+    c.add('type', 'hosted Composer sources are not supported');
     return fail();
   }
-  if (!Object.hasOwn(ECOSYSTEM_OF, type)) {
+  if (type !== 'hosted' && !Object.hasOwn(ECOSYSTEM_OF, type)) {
     c.add('type', 'unknown source type');
     return fail();
   }
@@ -429,7 +429,7 @@ export function parseSourceConfig(
     c.add('ecosystem', 'must be composer or npm');
     return fail();
   }
-  if (ECOSYSTEM_OF[type] !== ecosystem)
+  if (type !== 'hosted' && ECOSYSTEM_OF[type] !== ecosystem)
     c.add('ecosystem', `must be ${ECOSYSTEM_OF[type]} for ${type}`);
 
   if (configJson.length > MAX_CONFIG_LENGTH) {
@@ -450,6 +450,12 @@ export function parseSourceConfig(
 
   const hasUrl = url !== null && url !== undefined;
   switch (type) {
+    case 'hosted': {
+      if (hasUrl) c.add('url', 'must be empty for hosted');
+      if (options.hasCredential) c.add('credential', 'hosted takes no credential');
+      rejectUnknown(c, parsed, []);
+      return c.problems.length > 0 ? fail() : { ok: true, config: {} };
+    }
     case 'vcs': {
       if (hasUrl) c.add('url', 'must be empty for vcs');
       const config = parseVcs(c, parsed, options.runtime, policy);

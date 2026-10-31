@@ -7,11 +7,12 @@ import {
 } from './harness.js';
 import { expect } from 'vitest';
 import { compile, db } from '../../kysely.js';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import {
   holdsPermission,
   lookupSessionStatement,
   lookupTokenStatement,
+  tokenAccessCondition,
   permissionRows,
 } from '../../repositories/access.js';
 import {
@@ -283,6 +284,57 @@ const lookupTokenEntry: MutationEntry = {
   ],
 };
 
+const tokenConditionIsolation: ContractCase = {
+  name: 'the typed token condition excludes foreign tokens',
+  async run(context) {
+    const { own, foreign } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seedUser(seed, 'CONDITION-FOREIGN', foreign.orgId);
+    await seed(
+      `INSERT INTO token (id,org_id,kind,selector,hash,pepper_version,name,scopes_json,user_id,expires_at)
+      VALUES ('CONDITION-TOKEN',?,'pat','abcdefabcdef',?,1,'ci','["read"]','CONDITION-FOREIGN',?)`,
+      foreign.orgId,
+      HASH,
+      FUTURE,
+    );
+    const condition = tokenAccessCondition(
+      own,
+      {
+        selector: 'abcdefabcdef',
+        boundary: 'organization',
+        projectSlug: null,
+        providerAnchors: [],
+      },
+      sql<boolean>`1`,
+    );
+    const rows = await context.executor.all(
+      context.mutate(compile(db.selectNoFrom(sql<number>`${condition}`.as('allowed')))),
+    );
+    expect(rows).toEqual([{ allowed: 0 }]);
+  },
+};
+const tokenConditionEntry: MutationEntry = {
+  ...lookupTokenEntry,
+  builder: 'tokenAccessCondition',
+  cases: [tokenConditionIsolation],
+  waivers: [
+    ...(lookupTokenEntry.waivers ?? []),
+    {
+      locate: ref('u', 'org_id', '"t"\\."org_id"'),
+      reason:
+        'The same tokenLookupQuery user join is independently mutation-tested by lookupTokenStatement.',
+    },
+  ],
+  predicates: [
+    {
+      name: 'typed token condition is organization-scoped',
+      locate: ref('t', 'org_id', '\\?'),
+      neutral: NOT_NULL,
+      caseName: tokenConditionIsolation.name,
+    },
+  ],
+};
+
 const SELECT_ORG = '\\(select "guard_values"\\."org_id" from "guard_values"\\)';
 
 const permissionRowsEntry: MutationEntry = {
@@ -363,6 +415,7 @@ const holdsPermissionEntry: MutationEntry = {
 export const entries: readonly MutationEntry[] = [
   lookupSessionEntry,
   lookupTokenEntry,
+  tokenConditionEntry,
   permissionRowsEntry,
   holdsPermissionEntry,
 ];

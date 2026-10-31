@@ -1,11 +1,11 @@
-import type { Codecs } from '../../platform/codec';
-import { gzipFrame } from './gzip-frame';
-import { packlist } from './packlist-rules';
+import type { Codecs } from '../../platform/codec.js';
+import { gzipFrame } from './gzip-frame.js';
+import { selectPacklist } from './packlist-rules.js';
 import {
   PublishValidationError,
   walkRepositoryTarball,
   type RepositoryTarEntry,
-} from './tarball-walk';
+} from './tarball-walk.js';
 
 export interface TarballPackOptions {
   /** Reopens the same immutable, uncompressed repository tar stream. */
@@ -70,19 +70,17 @@ function paxPath(path: string): Uint8Array {
 export async function packTarball(options: TarballPackOptions): Promise<TarballPackResult> {
   const ruleCap = limit(options.maxRuleBytes, 4 * 1024 * 1024);
   const outputCap = limit(options.maxOutputBytes, 50_000_000);
+  let retainedRuleBytes = 0;
   const entries: RepositoryTarEntry[] = [];
   const paths = new Set<string>();
-  const metadata = new Map<string, () => string>();
-  let pathBytes = 0,
-    readmeBytes = 0;
+  const metadata = new Map<string, { entry: RepositoryTarEntry; bytes?: Uint8Array }>();
+  let readmeBytes = 0;
   const readmes = new Map<string, { bytes: Uint8Array; truncated: boolean }>();
   let readme: string | null = null,
     readmeTruncated = false;
   await walkRepositoryTarball(
     await options.open(),
     async (entry) => {
-      pathBytes += encoder.encode(entry.path).length;
-      if (pathBytes > 16 * 1024 * 1024) fail('packlist_budget');
       entries.push(entry);
       if (entry.type !== '0') return;
       paths.add(entry.path);
@@ -98,12 +96,14 @@ export async function packTarball(options: TarballPackOptions): Promise<TarballP
         readmeBytes += Math.min(entry.size, 524288);
         if (readmeBytes > 16 * 1024 * 1024) fail('packlist_budget');
       }
-      const bytes = new Uint8Array(
-        Math.min(
-          entry.size,
-          ruleFile ? (base === 'package.json' ? 262144 : 4 * 1024 * 1024) : 524288,
-        ),
-      );
+      if (ruleFile) {
+        metadata.set(entry.path, { entry });
+        const cap = base === 'package.json' ? 262144 : 4 * 1024 * 1024 - 1;
+        // Speculative captures are bounded; selection can reopen uncaptured metadata.
+        if (entry.size > cap || retainedRuleBytes + entry.size > ruleCap) return;
+        retainedRuleBytes += entry.size;
+      }
+      const bytes = new Uint8Array(ruleFile ? entry.size : Math.min(entry.size, 524288));
       let at = 0;
       return {
         async write(chunk) {
@@ -111,19 +111,108 @@ export async function packTarball(options: TarballPackOptions): Promise<TarballP
           at += chunk.length;
         },
         async close() {
-          if (ruleFile)
-            metadata.set(entry.path, () => {
-              if (base === 'package.json' && entry.size > 262144) fail('manifest_cap');
-              if (base !== 'package.json' && entry.size >= 4 * 1024 * 1024) fail('packlist_budget');
-              return text(bytes);
-            });
+          if (ruleFile) metadata.get(entry.path)!.bytes = bytes;
           if (readmeFile) readmes.set(entry.path, { bytes, truncated: entry.size > bytes.length });
         },
       };
     },
     options,
   );
-  const files = packlist(paths, metadata, ruleCap);
+  let work = 0;
+  const spendWork = (amount: number) => {
+    if (amount > 2_000_000_000 - work) fail('packlist_budget');
+    work += amount;
+  };
+  const select = () =>
+    selectPacklist(paths, new Set(metadata.keys()), ruleCap, undefined, spendWork);
+  let selection = select();
+  let replayed = false;
+  let consumedRuleBytes = 0;
+  let step = selection.next();
+  while (!step.done) {
+    const captured = metadata.get(step.value)!;
+    const manifest = captured.entry.path.endsWith('package.json');
+    if (manifest && captured.entry.size > 262144) fail('manifest_cap');
+    if (!manifest && captured.entry.size >= 4 * 1024 * 1024) fail('packlist_budget');
+    consumedRuleBytes += captured.entry.size;
+    if (consumedRuleBytes > ruleCap) fail('rule_cap');
+    if (!captured.bytes) {
+      if (replayed) fail('packlist_budget');
+      replayed = true;
+      const needed = new Set<string>();
+      const discovery = select();
+      let pending = discovery.next();
+      let unknownManifest = false;
+      while (!pending.done) {
+        const path = pending.value;
+        needed.add(path);
+        const candidate = metadata.get(path)!;
+        const manifest = path.endsWith('package.json');
+        if (!candidate.bytes && manifest) unknownManifest = true;
+        // Missing ignores cannot prune directories; missing manifests may reveal bundles.
+        pending = discovery.next(candidate.bytes ? text(candidate.bytes) : manifest ? '{}' : '');
+      }
+      if (unknownManifest)
+        for (const path of metadata.keys()) {
+          spendWork(path.length);
+          if (path.includes('node_modules/') && !metadata.get(path)!.bytes) needed.add(path);
+        }
+      retainedRuleBytes = 0;
+      for (const [path, candidate] of metadata) {
+        spendWork(path.length);
+        if (!needed.has(path)) delete candidate.bytes;
+        else retainedRuleBytes += candidate.bytes?.length ?? 0;
+      }
+      const missing = new Set([...needed].filter((path) => !metadata.get(path)!.bytes));
+      let index = 0;
+      await walkRepositoryTarball(
+        (await options.open()).pipeThrough(
+          new TransformStream<Uint8Array, Uint8Array>({
+            transform(chunk, controller) {
+              spendWork(chunk.length);
+              controller.enqueue(chunk);
+            },
+          }),
+        ),
+        async (entry) => {
+          const expected = entries[index++];
+          if (
+            !expected ||
+            entry.path !== expected.path ||
+            entry.size !== expected.size ||
+            entry.mode !== expected.mode ||
+            entry.type !== expected.type
+          )
+            fail('archive_changed', 'archive_changed');
+          if (!missing.has(entry.path)) return;
+          const cap = entry.path.endsWith('package.json') ? 262144 : 4 * 1024 * 1024 - 1;
+          if (entry.size > cap) return;
+          if (retainedRuleBytes + entry.size > ruleCap) fail('packlist_budget');
+          retainedRuleBytes += entry.size;
+          const bytes = new Uint8Array(entry.size);
+          let at = 0;
+          return {
+            async write(chunk) {
+              bytes.set(chunk, at);
+              at += chunk.length;
+            },
+            async close() {
+              metadata.get(entry.path)!.bytes = bytes;
+            },
+          };
+        },
+        options,
+      );
+      if (index !== entries.length) fail('archive_changed', 'archive_changed');
+      selection = select();
+      consumedRuleBytes = 0;
+      step = selection.next();
+      continue;
+    }
+    step = selection.next(text(captured.bytes));
+  }
+  metadata.clear();
+  const files = step.value;
   const selected = new Set(files);
   for (const [path, captured] of readmes) {
     if (!selected.has(path)) continue;

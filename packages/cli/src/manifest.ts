@@ -17,10 +17,29 @@ export function validatePluginShape(
   plugins: readonly PluginDefinition[],
   target: Platform,
   onProblem?: (
-    key: 'plugins.id' | 'plugins.apiVersion' | 'plugins.platforms' | 'plugins.dependsOn',
+    key:
+      | 'plugins.id'
+      | 'plugins.apiVersion'
+      | 'plugins.platforms'
+      | 'plugins.dependsOn'
+      | 'plugins.publishPolicy',
   ) => void,
 ): string[] {
   const errors: string[] = [];
+  if (plugins.filter((plugin) => plugin.publishPolicy !== undefined).length > 3) {
+    errors.push('at most three publishPolicy plugins are supported');
+    onProblem?.('plugins.publishPolicy');
+  }
+  const scannerIds = new Set<string>();
+  for (const plugin of plugins) {
+    if (!plugin.publishPolicy) continue;
+    const id = plugin.publishPolicy.id;
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(id) || scannerIds.has(id)) {
+      errors.push('publishPolicy ids must be valid and unique');
+      onProblem?.('plugins.publishPolicy');
+    }
+    scannerIds.add(id);
+  }
   const ids = new Set<string>();
   const [minApi, maxApi] = SUPPORTED_PLUGIN_API;
 

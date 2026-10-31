@@ -94,7 +94,8 @@ function authorized(
       packageBinding: vi.fn(async () => ({ packageName: null as string | null })),
     },
     admitted: vi.fn(async () => true),
-    hasPublishPolicy: () => false,
+    requiredScanners: (): readonly string[] => [],
+    scanJobs: { enqueueStatements: async () => ({ id: 'job', statements: [] }) },
     blob: {
       stage: vi.fn(async () => {
         throw new Error('unexpected stage');
@@ -237,14 +238,6 @@ describe('publish checks run before the body and staging', () => {
       403,
       'package_binding',
     ],
-    [
-      'scan policy',
-      (h: ReturnType<typeof authorized>) => {
-        h.deps.hasPublishPolicy = () => true;
-      },
-      503,
-      'scan_gate_unavailable',
-    ],
   ] as const)('refuses %s without staging', async (_name, change, status, code) => {
     const h = authorized();
     change(h);
@@ -299,7 +292,6 @@ it('refuses an absent body before staging', async () => {
 });
 
 it.each([
-  [503, 'scan_gate_unavailable', 'The publish scan gate is unavailable'],
   [400, 'invalid_publish_body', 'The publish body is invalid'],
   [503, 'unavailable', 'Service unavailable'],
   [503, 'staging_failed', 'Publish staging failed'],

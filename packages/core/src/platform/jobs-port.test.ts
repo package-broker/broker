@@ -570,3 +570,44 @@ describe('createRepositoryJobs notify', () => {
     expect(woken).toEqual([]);
   });
 });
+
+it('builds validated organization-scoped enqueue statements without writing', async () => {
+  const { factory, store } = setup({
+    ...fakeStore(),
+    enqueueStatements: (ctx, row) => [
+      { sql: 'INSERT INTO job', params: [ctx.orgId, row.idempotencyKey] },
+    ],
+  });
+  const result = await factory('core', { projectId: null, tokenId: null }).enqueueStatements(
+    ctx,
+    'core:x:v1',
+    { id: 'publish' },
+    { idempotencyKey: 'publish:version' },
+  );
+  expect(result.statements[0]?.sql).toContain('INSERT INTO job');
+  expect(result.statements[0]?.params).toContain(ctx.orgId);
+  expect(result.statements[0]?.params).toContain('core:x:v1:publish:version');
+  expect(store.enqueued).toEqual([]);
+  await expectJobError(
+    factory('a', { projectId: null, tokenId: null }).enqueueStatements(
+      ctx,
+      'core:x:v1',
+      {},
+      { idempotencyKey: 'key' },
+    ),
+    'invalid_name',
+  );
+});
+
+it('fails closed if the runtime store cannot build atomic job statements', async () => {
+  const { factory } = setup();
+  await expectJobError(
+    factory('core', { projectId: null, tokenId: null }).enqueueStatements(
+      ctx,
+      'core:x:v1',
+      {},
+      { idempotencyKey: 'publish:version' },
+    ),
+    'handler_error',
+  );
+});

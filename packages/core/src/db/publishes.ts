@@ -111,6 +111,20 @@ export interface PublishInspection extends PublishApproval {
 }
 
 export interface PublishesRepository {
+  listScanQueued(
+    ctx: OrgContext,
+    before: string,
+    runningBefore?: string,
+  ): Promise<readonly PublishInspection[]>;
+  scanInput(
+    ctx: OrgContext,
+    id: string,
+  ): Promise<{
+    readonly sha256: import('../platform/blob.js').Sha256;
+    readonly manifest: Readonly<Record<string, unknown>>;
+    readonly integrity: string;
+    readonly sizeBytes: number;
+  } | null>;
   listExpired(ctx: OrgContext, now: string): Promise<readonly PublishInspection[]>;
   get(ctx: OrgContext, id: string): Promise<PublishInspection | null>;
   list(

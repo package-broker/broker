@@ -7,6 +7,7 @@ import type { RouteDefinition } from '../../plugin.js';
 import { apiRoute } from '../route.js';
 import { auditCall, type ApiRouteDeps } from './context.js';
 import {
+  publishRescanSpec,
   publishApproveBody,
   publishRejectBody,
   publishListSpec,
@@ -16,7 +17,7 @@ import {
 } from './publishes-schemas.js';
 
 export interface PublishRouteDeps extends ApiRouteDeps {
-  readonly publishes: Pick<PublishesRepository, 'get' | 'list' | 'decide'>;
+  readonly publishes: Pick<PublishesRepository, 'get' | 'list' | 'decide' | 'rescan'>;
 }
 
 export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[] {
@@ -50,7 +51,12 @@ export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[
         if (!ctx.org || !actor) return { error: 'unauthorized' };
         const item = await deps.publishes.get(ctx.org, params.id);
         if (!item) return { error: 'not_found' };
-        if (item.approvalState !== 'pending') return { error: 'already_decided' };
+        if (
+          item.scanState === 'denied' ||
+          (item.approvalState !== 'pending' &&
+            !(spec === publishRejectSpec && item.approvalState === 'not_required' && item.holdScan))
+        )
+          return { error: 'already_decided' };
         if (
           spec === publishApproveSpec &&
           item.requestedByType === 'user' &&
@@ -89,7 +95,10 @@ export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[
         if (!result.changed) {
           const current = await deps.publishes.get(ctx.org, item.id);
           return {
-            error: current && current.approvalState !== 'pending' ? 'already_decided' : 'conflict',
+            error:
+              current && (current.approvalState !== 'pending' || current.scanState === 'denied')
+                ? 'already_decided'
+                : 'conflict',
           };
         }
         const updated = await deps.publishes.get(ctx.org, item.id);
@@ -98,5 +107,36 @@ export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[
           : { error: 'not_found' };
       }),
     ),
+    apiRoute(publishRescanSpec, async ({ ctx, params, expectedRevision }) => {
+      const actor = authenticatedActorOf(ctx);
+      if (!ctx.org || !actor) return { error: 'unauthorized' };
+      const item = await deps.publishes.get(ctx.org, params.id);
+      if (!item) return { error: 'not_found' };
+      if (item.scanState !== 'failed') return { error: 'conflict' };
+      const now = deps.clock.now().toISOString();
+      const prepared = auditEvent({
+        id: deps.ids.ulid(),
+        now,
+        action: 'publish.scan',
+        actor: { type: 'user', id: actor.userId },
+        target: { type: 'publish', id: item.id },
+        context: auditCall(ctx, deps).audit,
+        changes: { verdict: { new: 'queued' } },
+      });
+      if (!prepared.ok) return { error: 'invalid_request' };
+      const result = await deps.publishes.rescan(ctx.org, mutationFence(actor, {}), {
+        id: item.id,
+        expectedRevision: expectedRevision!,
+        expectedApprovalState: item.approvalState,
+        expectedScanState: item.scanState,
+        now,
+        event: prepared.event,
+      });
+      if (!result.changed) return { error: 'conflict' };
+      const updated = await deps.publishes.get(ctx.org, item.id);
+      return updated
+        ? { status: 200, body: updated, etag: updated.revision }
+        : { error: 'not_found' };
+    }),
   ];
 }

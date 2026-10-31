@@ -4,6 +4,10 @@ import {
   createPublishReads,
   createPublishWriteGuard,
 } from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
+import {
+  createPublishScanJob,
+  createPublishScanSweepJob,
+} from '@package-broker/core/ingest/publish-scan-job';
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
 import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
 import { createPackageAccessExpiryJob } from '@package-broker/core/api/routes/package-access-requests-expiry';
@@ -706,7 +710,7 @@ function buildRegistryModule(input: {
   readonly publicUrl: string;
   readonly dispatch: (run: () => Promise<void>) => void;
   readonly anchors: ProviderAnchorReader;
-  readonly hasPublishPolicy: () => boolean;
+  readonly requiredScanners: () => readonly string[];
 }): {
   readonly policy: OutboundPolicy;
   readonly module: RegistryModule;
@@ -762,7 +766,13 @@ function buildRegistryModule(input: {
       writeGuard: createPublishWriteGuard,
       admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
       writer,
-      hasPublishPolicy: input.hasPublishPolicy,
+      requiredScanners: input.requiredScanners,
+      scanJobs: createRepositoryJobs({
+        store: platformServices.jobStore,
+        jobs: input.registration.jobs,
+        clock: systemClock,
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null }),
     },
     handleOf: createNpmHandleOf(
       createUserRepository(executor),
@@ -1540,6 +1550,7 @@ export function createWorker(
         { metrics: observability, waitUntil: (promise) => track('cache.put_untracked', promise) },
       ),
       jobStore: Object.freeze({
+        enqueueStatements: repository.enqueueStatements,
         enqueue: enqueueAndNotify({
           repository,
           send: createJobSender(bound.queue),
@@ -1811,6 +1822,26 @@ export function createWorker(
                       ),
                     ]),
                 registerObservedJob(
+                  createPublishScanJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor),
+                    scanners: plugins.flatMap((plugin) =>
+                      plugin.publishPolicy ? [plugin.publishPolicy] : [],
+                    ),
+                    blob: {
+                      get: (...args) => {
+                        const blob = coreJobBindings.services?.platformServices.blob;
+                        if (!blob) throw new PlatformUnavailableError();
+                        return blob.get(...args);
+                      },
+                    },
+                  }),
+                ),
+                registerObservedJob(
+                  createPublishScanSweepJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor),
+                  }),
+                ),
+                registerObservedJob(
                   createPublishApprovalExpireJob({
                     publishes: createPublishesRepository(executor as SqlExecutor),
                   }),
@@ -1944,7 +1975,8 @@ export function createWorker(
             publicUrl,
             dispatch,
             anchors: built.providerAnchors,
-            hasPublishPolicy: () => plugins.some((plugin) => plugin.publishPolicy !== undefined),
+            requiredScanners: () =>
+              plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
           });
     coreJobBindings.registry = registryModule;
 

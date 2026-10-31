@@ -1242,6 +1242,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/publishes/{id}/rescan': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Retry a failed publish scan */
+    post: operations['rescanPublish'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/roles': {
     parameters: {
       query?: never;
@@ -8330,7 +8347,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Service unavailable; The publish scan gate is unavailable; Publish staging failed; Publishing is busy, try again later */
+      /** @description Service unavailable; Publish staging failed; Publishing is busy, try again later */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9391,6 +9408,157 @@ export interface operations {
           /** @description At most 1000 UTF-8 bytes */
           reason: string;
         };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            distTags: {
+              [key: string]: string;
+            };
+            expiresAt: string;
+            holdApproval: boolean;
+            holdScan: boolean;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            } | null;
+            readmePending: boolean;
+            requestedBy: {
+              name: string;
+              /** @enum {string} */
+              type: 'user' | 'service';
+            };
+            requestedById: string;
+            /** @enum {string} */
+            requestedByType: 'user' | 'service';
+            requiredScanners: string[];
+            revision: number;
+            routeProjectId: string | null;
+            scanAttempts: number;
+            /** @enum {string} */
+            scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+            scanVerdicts: {
+              plugin: string;
+              reason?: string;
+              /** @enum {string} */
+              verdict: 'allow' | 'deny';
+            }[];
+            sourceId: string;
+            sourceName: string;
+            tokenId: string;
+            updatedAt: string;
+            version: string;
+            versionId: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  rescanPublish: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': Record<string, never>;
       };
     };
     responses: {

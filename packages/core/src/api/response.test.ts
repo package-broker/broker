@@ -47,7 +47,6 @@ const statuses = {
   tarball_too_large: 413,
   write_unsupported: 405,
   busy: 503,
-  scan_gate_unavailable: 503,
   length_required: 411,
   staging_failed: 503,
   invalid_publish_body: 400,

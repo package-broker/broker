@@ -105,6 +105,7 @@ const EXPECTED_ROUTES = [
   'GET /_pb/publishes/:id',
   'POST /_pb/publishes/:id/approve',
   'POST /_pb/publishes/:id/reject',
+  'POST /_pb/publishes/:id/rescan',
   'GET /_pb/packages',
   'GET /_pb/packages/:package/versions',
   'GET /_pb/projects/:project/packages',
@@ -273,6 +274,7 @@ function dependencies(): ApiModuleDeps {
         get: async () => null,
         list: async () => ({ items: [], next: null }),
         decide: async () => ({ changed: false, active: false, revision: 1 }),
+        rescan: async () => ({ changed: false, active: false, revision: 1 }),
       },
     },
     packageManage: {

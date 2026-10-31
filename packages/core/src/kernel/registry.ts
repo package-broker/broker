@@ -155,6 +155,7 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'identityProviders',
   'identityDescriptor',
   'sourceProviders',
+  'publishPolicy',
   'migrations',
   'register',
   'init',
@@ -209,6 +210,22 @@ export function collectRegistrations(
   options: RegistrationOptions = {},
 ): Registration {
   const problems: string[] = [];
+  const scannerIds = new Set<string>();
+  if (plugins.filter((plugin) => plugin.publishPolicy !== undefined).length > 3)
+    problems.push('at most three publishPolicy plugins are supported');
+  for (const plugin of plugins) {
+    if (plugin.publishPolicy === undefined) continue;
+    const policy = fields(plugin.publishPolicy, ['id', 'inspect']);
+    if (
+      !policy ||
+      typeof policy.id !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(policy.id) ||
+      typeof policy.inspect !== 'function' ||
+      scannerIds.has(policy.id)
+    ) {
+      problems.push('publishPolicy must have a valid unique id and an inspect function');
+    } else scannerIds.add(policy.id);
+  }
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
     'access.check': [],

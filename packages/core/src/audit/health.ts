@@ -33,6 +33,7 @@ export interface AuditHealthSnapshot {
     readonly id: string;
     readonly state: 'active' | 'inactive' | 'blocked' | 'disabled' | 'retired';
     readonly blockedReason: string | null;
+    readonly activationSource: string;
   }[];
   readonly incidents: readonly AuditHealthObservation[];
 }
@@ -71,6 +72,7 @@ export class AuditHealthConflictError extends Error {
 
 export function createAuditHealthService(deps: {
   readonly port: AuditHealthPort;
+  readonly buildActivatedSinkIds?: readonly string[];
   readonly clock: Clock;
   readonly observability: Observability;
 }) {
@@ -140,7 +142,11 @@ export function createAuditHealthService(deps: {
           .join('|'),
         true,
       );
-    const inactive = snapshot.sinks.filter((sink) => sink.state === 'inactive');
+    const inactive = snapshot.sinks.filter(
+      (sink) =>
+        sink.state === 'inactive' &&
+        (sink.activationSource !== 'none' || deps.buildActivatedSinkIds?.includes(sink.id)),
+    );
     if (inactive.length > 0)
       add(
         'audit.sink_inactive',

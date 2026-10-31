@@ -910,6 +910,7 @@ describe('Node package-sync wiring', () => {
       [
         ...AUDIT,
         ...AUTH_JOBS,
+        'core:publish-approval-expire:v1',
         SYNC,
         'core:source-sync:v1',
         'core:source-poll:v1',
@@ -921,7 +922,12 @@ describe('Node package-sync wiring', () => {
   it('omits package-sync without registry options', async () => {
     const kernel = await boot(remote('npm', 1).transport, false);
     expect(kernel.registration.jobs.map((job) => job.qualifiedName).sort()).toEqual(
-      [...AUDIT, ...AUTH_JOBS, 'core:vulnerability-sync:v1'].sort(),
+      [
+        ...AUDIT,
+        ...AUTH_JOBS,
+        'core:publish-approval-expire:v1',
+        'core:vulnerability-sync:v1',
+      ].sort(),
     );
     const bare = createNodeServer([]);
     try {

@@ -1555,3 +1555,50 @@ describe('hasUnusedLocalSetupToken', () => {
     expect(record.calls).toEqual({ all: 0, batch: 0 });
   });
 });
+
+describe('publisher role upgrade', () => {
+  it('audits missing publisher creation once and preserves an existing role', async () => {
+    await bootstrapAdmin(executor, a, input());
+    expect(
+      await rows(
+        "SELECT action FROM audit_pending WHERE org_id=? AND action='role.create'",
+        a.orgId,
+      ),
+    ).toHaveLength(0);
+    await rows("DELETE FROM role WHERE org_id=? AND key='organization_publisher'", a.orgId);
+    await bootstrapAdmin(executor, a, input());
+    const audit = await rows(
+      "SELECT action FROM audit_pending WHERE org_id=? AND action='role.create'",
+      a.orgId,
+    );
+    expect(audit).toHaveLength(1);
+    await rows(
+      "UPDATE role SET name='Retained publisher' WHERE org_id=? AND key='organization_publisher'",
+      a.orgId,
+    );
+    await bootstrapAdmin(executor, a, input());
+    expect(
+      await rows("SELECT name FROM role WHERE org_id=? AND key='organization_publisher'", a.orgId),
+    ).toEqual([{ name: 'Retained publisher' }]);
+    expect(
+      await rows(
+        "SELECT action FROM audit_pending WHERE org_id=? AND action='role.create'",
+        a.orgId,
+      ),
+    ).toHaveLength(1);
+  });
+});
+
+describe('publisher permissions are insert-only', () => {
+  it('does not top up an existing publisher role', async () => {
+    await bootstrapAdmin(executor, a, input());
+    await rows('DELETE FROM role_permission WHERE role_id=?', ROLE_IDS.organization_publisher);
+    await bootstrapAdmin(executor, a, input());
+    expect(
+      await rows(
+        'SELECT permission FROM role_permission WHERE role_id=?',
+        ROLE_IDS.organization_publisher,
+      ),
+    ).toEqual([]);
+  });
+});

@@ -1,16 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createPublishesRepository, createPackageAccessRequestRepository } from './publishes.js';
-import { orgContext } from './port.js';
+import * as contracts from './publishes.js';
 
 describe('npm repository contracts', () => {
-  it('leaves publish reads unavailable until implemented', async () => {
-    await expect(createPublishesRepository().get(orgContext('org'), 'publish')).rejects.toThrow(
-      'not_implemented',
-    );
+  it('keeps publish repository implementation outside core', () => {
+    expect(contracts).not.toHaveProperty('createPublishesRepository');
   });
-  it('leaves access-request reads unavailable until implemented', async () => {
-    await expect(
-      createPackageAccessRequestRepository().get(orgContext('org'), 'request'),
-    ).rejects.toThrow('not_implemented');
+  it('keeps access-request repository implementation outside core', () => {
+    expect(contracts).not.toHaveProperty('createPackageAccessRequestRepository');
   });
 });

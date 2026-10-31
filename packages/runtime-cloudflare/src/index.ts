@@ -1,3 +1,5 @@
+import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
+import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
 import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
 import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
@@ -1764,6 +1766,11 @@ export function createWorker(
                       if (services === undefined) throw new JobError('handler_error');
                       return services.retention;
                     })),
+                registerObservedJob(
+                  createPublishApprovalExpireJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor),
+                  }),
+                ),
                 registerObservedJob(
                   auditSealJob(createAuditSealRepository(executor as SqlExecutor)),
                 ),

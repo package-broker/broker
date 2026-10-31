@@ -456,7 +456,7 @@ export function createVisibilityStore(
       where target_version.id = ${versionId} and target_version.org_id = ${ctx.orgId}
         and target_package.id = ${packageId} and ${ownership})`;
     const publishGateClear = sql<boolean>`not exists (
-      select 1 from publish_approval where org_id = ${ctx.orgId} and version_id = ${versionId})`;
+      select 1 from publish_approval where org_id = ${ctx.orgId} and version_id = ${versionId} and (approval_state = 'pending' or scan_state in ('queued', 'running', 'failed')))`;
     const statusMatches = sql<boolean>`exists (select 1 from version
       where id = ${versionId} and org_id = ${ctx.orgId} and status = ${expectedStatus})
       and ${versionTransition(expectedStatus, to, reason) ? sql`1` : sql`0`}`;

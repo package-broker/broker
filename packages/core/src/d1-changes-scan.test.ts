@@ -680,6 +680,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'The contract dispatches three named status writers and asserts their typed outcomes; the imported purge constant is a numeric retention interval. Neither site reads executor change counts.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:computed builder call: store[method](ctx, h.fence, {\n              ...base,\n              audit: { ...h.input.event, id: ulid() },\n              expectedStatus,\n              reason: method === 'quarantineVersion' ? 'admin_quarantine' : 'admin_tombstone',\n            } as never) #1",
+        "db-sqlite/src/repositories/blob-references.ts:opaque dependency: import { PUBLISH_PURGE_WINDOW_DAYS } from '@package-broker/core/db/publishes'; #1",
+      ],
+    },
+    {
+      reason:
         'Token lookup composes a typed read condition; blob publication uses returned rows and a transactional before-image for cleanup; tag lookup selects active patch targets. None reads executor change counts.',
       sites: [
         "db-sqlite/src/repositories/access.ts:SQL template: sql<SqlBool>`exists ${loose.selectFrom(tokenLookupQuery(ctx, input).as('pa')).select(sql.lit(1).as('one')).where(condition)}` #1",
@@ -1504,8 +1512,8 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'SQL in blob-references; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${orphanSql(blobRef)}\n    AND (${blobRef}.refetchable = 1 OR (${blobRef}.refetchable = 0 AND ${blobRef}.storage_key LIKE 'npm-publish/%'))\n    AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')\n    AND NOT EXISTS (\n      SELECT 1 FROM ingest_session bref_ing\n      WHERE bref_ing.org_id = ${blobRef}.org_id AND bref_ing.snapshot_blob_sha256 = ${blobRef}.sha256)\n    AND NOT EXISTS (\n      SELECT 1 FROM upstream_state bref_up\n      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256))` #1",
-        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `EXISTS (SELECT 1 FROM (${references(blobRef, columns, () => '')}) bref_rel\n    WHERE bref_rel.rel <> ''\n    AND ${blobRef}.purge_after < COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', bref_rel.rel, '+' || max((SELECT o.retention_removed_upstream_days FROM organization o WHERE o.id = ${blobRef}.org_id), bref_rel.ov) || ' days'), '${NEVER}'))` #1",
-        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${blobRef}.org_id = ?\n  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted'`)}))\n  OR ${orphan.sql})\n  AND NOT EXISTS (\n    SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external\n      ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id\n    WHERE bref_ru.org_id = ${blobRef}.org_id\n      AND (bref_ru.before_image_expires_at IS NULL OR bref_ru.before_image_expires_at > ${NOW})\n      AND bref_ir.entity_type = 'version'\n      AND json_extract(bref_ir.before_image_json, '$.blob_id') = ${blobRef}.id))` #1",
+        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `EXISTS (SELECT 1 FROM (${references(blobRef, columns, () => '')}) bref_rel\n    WHERE bref_rel.rel <> ''\n    AND ${blobRef}.purge_after < COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', bref_rel.rel, '+' || CASE WHEN bref_rel.rejected_hosted THEN ${PUBLISH_PURGE_WINDOW_DAYS} ELSE max((SELECT o.retention_removed_upstream_days FROM organization o WHERE o.id = ${blobRef}.org_id), bref_rel.ov) END || ' days'), '${NEVER}'))` #1",
+        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${blobRef}.org_id = ?\n  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted' AND NOT (${REJECTED_HOSTED})`)}))\n  OR ${orphan.sql})\n  AND NOT EXISTS (\n    SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external\n      ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id\n    WHERE bref_ru.org_id = ${blobRef}.org_id\n      AND (bref_ru.before_image_expires_at IS NULL OR bref_ru.before_image_expires_at > ${NOW})\n      AND bref_ir.entity_type = 'version'\n      AND json_extract(bref_ir.before_image_json, '$.blob_id') = ${blobRef}.id))` #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: '' #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: 'AND (b.created_at, b.id) > (?, ?)' #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `SELECT b.id, b.sha256, b.created_at, ${overrideSql('b')} AS override_days, ${orphanSql('b')} AS orphan\nFROM blob b\nWHERE ${eligible.sql} AND NOT ${missingReleaseStampSql('b')} AND b.purge_after IS NULL AND b.deleted_at IS NULL ${cursor.sql}\nORDER BY b.created_at, b.id\nLIMIT ?` #1",
@@ -3075,6 +3083,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[role.key] #1',
         'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[role.key] #2',
         'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[key] #1',
+        'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[DEFAULT_ROLES[index]!.key] #1',
       ],
     },
     {

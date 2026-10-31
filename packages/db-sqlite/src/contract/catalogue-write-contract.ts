@@ -406,7 +406,7 @@ export const catalogueWriteContractCases = {
 export function describeCatalogueWriteContract(name: string, open: Open): void {
   describe(`catalogue write contract: ${name}`, () => {
     for (const action of ['releaseQuarantine', 'quarantineVersion', 'tombstoneVersion'] as const) {
-      it(`${action} refuses a version with a publish approval row atomically`, () =>
+      it(`${action} respects unresolved versus completed publish approvals atomically`, () =>
         withWorld(open, async (w) => {
           const { packageId } = await w.sync();
           const [row] = await w.rows('SELECT id FROM version WHERE org_id = ?');
@@ -445,7 +445,8 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
                     reason: 'admin_quarantine',
                   })
                 : await w.store.releaseQuarantine(w.org, fence(), input);
-          expect(result).toEqual({ ok: false, reason: 'publish_gate' });
+          if (action === 'quarantineVersion') expect(result).toMatchObject({ ok: true });
+          else expect(result).toEqual({ ok: false, reason: 'publish_gate' });
           if (action === 'releaseQuarantine') {
             const status = createCatalogueStatusRepository(w.executor, {
               providerAnchors: [
@@ -463,8 +464,13 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
             });
           }
 
-          expect(await w.rows('SELECT rev FROM package WHERE org_id = ?')).toEqual(before);
-          expect(await w.rows('SELECT id FROM audit_pending WHERE org_id = ?')).toEqual([]);
+          if (action === 'quarantineVersion') {
+            expect(await w.rows('SELECT rev FROM package WHERE org_id = ?')).not.toEqual(before);
+            expect(await w.rows('SELECT id FROM audit_pending WHERE org_id = ?')).toHaveLength(1);
+          } else {
+            expect(await w.rows('SELECT rev FROM package WHERE org_id = ?')).toEqual(before);
+            expect(await w.rows('SELECT id FROM audit_pending WHERE org_id = ?')).toEqual([]);
+          }
         }));
     }
 

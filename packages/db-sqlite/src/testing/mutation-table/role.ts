@@ -28,7 +28,17 @@ function foreignRole(key: DefaultRoleKey): ContractCase {
         now: '2020-01-01T00:00:00.000Z',
         ids,
       }).filter((_, index) => index % 2 === 1);
-      await context.executor.batch(context.mutateBatch(permissions));
+      await context.executor.batch(
+        context.mutateBatch(
+          permissions.flatMap((statement, index) => [
+            {
+              sql: 'UPDATE role SET name=name WHERE id=?',
+              params: [ids[DEFAULT_ROLES[index]!.key]],
+            },
+            statement,
+          ]),
+        ),
+      );
       const rows = await context.executor.all({
         sql: 'SELECT permission FROM role_permission WHERE role_id = ?',
         params: [ids[key]],

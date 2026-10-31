@@ -17,6 +17,7 @@ import auditWebhook, { type AuditWebhookOptions } from './index.js';
 const record = auditCanonicalVectors[0]!.record;
 const batch: AuditBatchV1 = {
   v: 1,
+  frozenAt: Date.parse('2026-10-30T12:34:56.789Z'),
   chainId: record.chainId,
   epoch: record.epoch,
   orgId: record.orgId,

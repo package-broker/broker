@@ -226,6 +226,9 @@ function frozenBatch(body: string, org: OrgContext, snapshot: AuditExportSnapsho
     const batch = JSON.parse(body) as AuditBatchV1;
     if (
       batch.v !== 1 ||
+      !Number.isSafeInteger(batch.frozenAt) ||
+      batch.frozenAt < 0 ||
+      batch.frozenAt > 18446744073709 ||
       batch.orgId !== org.orgId ||
       batch.chainId !== snapshot.chainId ||
       batch.epoch !== snapshot.epoch ||
@@ -394,6 +397,7 @@ export async function exportAuditBatch(
       repr.registryMarkerBody ??
       JSON.stringify({
         v: 1,
+        frozenAt: options.now().getTime(),
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: org.orgId,
@@ -425,6 +429,7 @@ export async function exportAuditBatch(
         throw new Error('Audit delivery range unavailable');
       body = JSON.stringify({
         v: 1,
+        frozenAt: options.now().getTime(),
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: org.orgId,
@@ -456,6 +461,7 @@ export async function exportAuditBatch(
       };
     } else {
       const rows = await port.page(org, sink.progressSeq, limit);
+      const frozenAt = options.now().getTime();
       const records: AuditBatchV1['records'][number][] = [];
       let throughSeq = sink.progressSeq;
       let throughHash = sink.progressHash;
@@ -469,6 +475,7 @@ export async function exportAuditBatch(
         );
         const candidate: AuditBatchV1 = {
           v: 1,
+          frozenAt,
           chainId: snapshot.chainId,
           epoch: snapshot.epoch,
           orgId: org.orgId,
@@ -491,6 +498,7 @@ export async function exportAuditBatch(
       }
       body = JSON.stringify({
         v: 1,
+        frozenAt,
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: org.orgId,

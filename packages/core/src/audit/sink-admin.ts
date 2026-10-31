@@ -282,7 +282,11 @@ export async function administerAuditSink(
         nextAttemptAt: null,
         lastErrorCode: null,
         custodySeq: auditCustodySeq(sink, { from, to: through, kind: 'disposed' }),
-        inflightBody: JSON.stringify({ ...batch, records: [marker] }),
+        inflightBody: JSON.stringify({
+          ...batch,
+          frozenAt: options.now.getTime(),
+          records: [marker],
+        }),
         inflightRepr: JSON.stringify({
           ...repr,
           purpose: 'disposition',

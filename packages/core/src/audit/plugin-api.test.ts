@@ -68,6 +68,7 @@ const withheld = {
 
 const batch: AuditBatchV1 = {
   v: 1,
+  frozenAt: 0,
   chainId: record.chainId,
   epoch: record.epoch,
   orgId: record.orgId,

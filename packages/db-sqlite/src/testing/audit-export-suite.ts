@@ -1343,6 +1343,7 @@ export function auditExportRepositorySuite(open: () => Promise<MigratedDatabase>
         const before = await port().read(org(), 'archive');
         const body = JSON.stringify({
           v: 1,
+          frozenAt: 0,
           orgId: org().orgId,
           chainId: before.chainId,
           epoch: before.epoch,

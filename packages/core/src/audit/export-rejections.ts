@@ -149,7 +149,7 @@ export async function resolveAuditRejection(
     const last = left.at(-1)!;
     if (!('seq' in last) || !('hash' in last)) throw new Error('Audit rejection range unavailable');
     const tail = [
-      { ...batch, records: records.slice(middle) },
+      { ...batch, frozenAt: now.getTime(), records: records.slice(middle) },
       ...((repr.rejectionTail ?? []) as readonly AuditBatchV1[]),
     ];
     return port.save(
@@ -165,6 +165,7 @@ export async function resolveAuditRejection(
         inflightTo: last.seq,
         inflightBody: JSON.stringify({
           ...batch,
+          frozenAt: now.getTime(),
           records: left,
           throughSeq: last.seq,
           throughHash: last.hash,
@@ -253,7 +254,7 @@ export async function resolveAuditRejection(
         to: batch.throughSeq,
         kind: 'disposed',
       }),
-      inflightBody: JSON.stringify({ ...batch, records: [marker] }),
+      inflightBody: JSON.stringify({ ...batch, frozenAt: now.getTime(), records: [marker] }),
       inflightRepr: JSON.stringify({
         ...repr,
         purpose: 'disposition',

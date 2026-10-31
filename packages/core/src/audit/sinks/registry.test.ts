@@ -408,7 +408,10 @@ describe('audit sink registry', () => {
     const retry = fixture();
     await reconcileAuditSinks(f.port, ctx, 1, [registration], now);
     await reconcileAuditSinks(retry.port, ctx, 1, [registration], new Date(now.getTime() + 1000));
-    expect(f.next().inflightBody).toBe(retry.next().inflightBody);
+    const original = JSON.parse(f.next().inflightBody!);
+    const fresh = JSON.parse(retry.next().inflightBody!);
+    expect(original.frozenAt).toBe(now.getTime());
+    expect(fresh).toEqual({ ...original, frozenAt: now.getTime() + 1000 });
   });
 
   it.each([null, 'retained_suffix', 'secret@example.com'])(

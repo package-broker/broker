@@ -1,3 +1,5 @@
+import { isWorkflowFilename } from './claim-values.js';
+export { isWorkflowFilename } from './claim-values.js';
 import type { PolicyFetch } from '../../../sources/policy-fetch.js';
 import { base64url, decodeJson, invalid, OidcError, record } from './input.js';
 import { OIDC_ISSUER, oidcKey } from './jwks.js';
@@ -21,21 +23,6 @@ export interface OidcVerifyInput {
   readonly publicUrl: string;
   readonly policyFetch: PolicyFetch;
   readonly now: number;
-}
-
-export function isWorkflowFilename(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    !/\p{Cs}/u.test(value) &&
-    value.length >= 1 &&
-    value.length <= 255 &&
-    new TextEncoder().encode(value).length <= 255 &&
-    /\.ya?ml$/.test(value) &&
-    /^[\x20-\x7e\u0080-\u{10ffff}]+$/u.test(value) &&
-    !/[/@]/.test(value) &&
-    value !== '.' &&
-    value !== '..'
-  );
 }
 
 export function createOidcVerifier(

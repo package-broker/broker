@@ -876,6 +876,7 @@ function tokenLookupQuery(ctx: OrgContext, input: TokenLookupInput) {
       't.user_id as user_id',
       't.service_principal_id as service_principal_id',
       't.project_id as token_project_id',
+      't.package_name as token_package_name',
       sql<string>`(select json_group_array(json_object('org', tpb.org_id, 'project', tpb.project_id))
         from token_project tpb where tpb.token_id = t.id)`.as('bound_project_ids'),
       't.project_mode as project_mode',

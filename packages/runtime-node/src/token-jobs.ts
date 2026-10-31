@@ -1,3 +1,6 @@
+import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
+import { createOidcReplayExpiryJob } from '@package-broker/core/registry/npm/oidc/expiry';
+import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
 import { createNpmLoginExpiryJob } from '@package-broker/db-sqlite/repositories/npm-login-expire';
 import {
   enqueuePatOffboarding,
@@ -46,7 +49,12 @@ export function tokenJobRegistrations(
   log: KernelLog,
 ): readonly RegisteredCoreJob[] {
   const store = createPatOffboardingRepository(executor);
+  const replayExpiry = createOidcReplayExpiryJob(createOidcRepository(executor));
   return [
+    registerCoreJob({
+      ...replayExpiry,
+      handler: (payload, context) => replayExpiry.handler(replayExpiry.validate(payload), context),
+    }),
     createNpmLoginExpiryJob(executor, lazyJobs(holder)),
     createPatOffboardingJob({ store, clock: systemClock, ids: { ulid }, log }),
     createPatOffboardingSweepJob({ store, jobs: lazyJobs(holder), clock: systemClock, log }),

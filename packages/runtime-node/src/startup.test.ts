@@ -441,7 +441,9 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: await (
+        await import('@package-broker/db-sqlite/testing/migrated-database')
+      ).discoveredMigrations(),
       mcp: { enabled: true },
       env: {
         PB_SQLITE_PATH: path,

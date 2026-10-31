@@ -1,5 +1,5 @@
 import { createHash, randomBytes, type webcrypto } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -54,13 +54,12 @@ const migrationsDirectory = join(
 );
 
 async function migrationSources(): Promise<MigrationSource[]> {
-  return [
-    await loadMigrationSource(
-      'core',
-      '0001_init.sql',
-      await readFile(join(migrationsDirectory, '0001_init.sql'), 'utf8'),
+  const names = (await readdir(migrationsDirectory)).filter((name) => name.endsWith('.sql')).sort();
+  return Promise.all(
+    names.map(async (name) =>
+      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
     ),
-  ];
+  );
 }
 
 interface KeyPair {

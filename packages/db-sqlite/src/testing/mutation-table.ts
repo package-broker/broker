@@ -1,3 +1,4 @@
+import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
 import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
 import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
 import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
@@ -246,6 +247,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sourceSelectionEntries,
   ...selectedKeysEntries,
   ...oidcEntries,
+  ...workloadTokenEntries,
 ];
 
 export function checkCompleteness(

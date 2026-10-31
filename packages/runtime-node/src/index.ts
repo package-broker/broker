@@ -1,3 +1,6 @@
+import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
+import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
+import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import {
   checkPublishAdmission,
@@ -812,6 +815,19 @@ function assembleRegistry(input: {
 
   const module = createRegistryModule({
     runtime: 'node',
+    npmOidc: {
+      repository: createOidcRepository(executor),
+      tokens: createWorkloadTokenService({
+        tokens: createWorkloadTokenStore(executor),
+        keyring: auth.keyring,
+        clock: systemClock,
+        ids: { ulid },
+      }),
+      organization: async () => {
+        const org = await input.findOrganization();
+        return org === null ? null : orgContext(org.id);
+      },
+    },
     npmPublish: {
       reads: createPublishReads(executor),
       lookupToken: createAccessRepository(executor).lookupToken,

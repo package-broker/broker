@@ -2661,6 +2661,98 @@ it('audits a replacement with old and new patterns', async () => {
 });
 
 it.each(['found', 'unavailable', 'not_found'] as const)(
+  'rechecks existing exact hosted claims before proxy creation: %s',
+  async (answer) => {
+    const f = setup();
+    f.sources.list.mockResolvedValue([{ ...input, id: 'host', type: 'hosted', ecosystem: 'npm' }]);
+    f.registeredNames.list.mockResolvedValue({ items: [{ pattern: 'widget' }], next: null });
+    f.claimProbe.mockResolvedValue(answer);
+    const result = await f.service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        name: 'public',
+        type: 'npmjs_proxy',
+        ecosystem: 'npm',
+        url: 'https://registry.npmjs.org',
+      },
+      call,
+    );
+    expect(result).toEqual(
+      answer === 'not_found'
+        ? { ok: true, value: { id: 'source' } }
+        : { ok: false, error: 'conflict', conflictingClaims: ['widget'] },
+    );
+    expect(f.sources.create).toHaveBeenCalledTimes(answer === 'not_found' ? 1 : 0);
+    if (answer === 'not_found')
+      expect(f.sources.create).toHaveBeenCalledWith(
+        ctx,
+        fence,
+        expect.objectContaining({ verifiedClaims: ['widget'] }),
+      );
+  },
+);
+
+it('keeps organization claim names opaque to a project-only proxy creator', async () => {
+  const f = setup();
+  f.sources.list.mockResolvedValue([{ ...input, id: 'host', type: 'hosted', ecosystem: 'npm' }]);
+  f.registeredNames.list.mockResolvedValue({ items: [{ pattern: 'private-name' }], next: null });
+  f.claimProbe.mockResolvedValue('found');
+  const result = await f.service.create(
+    ctx,
+    project,
+    fence,
+    {
+      ...input,
+      projectId: 'project-a',
+      type: 'npmjs_proxy',
+      ecosystem: 'npm',
+      url: 'https://registry.npmjs.org',
+    },
+    call,
+  );
+  expect(result).toEqual({ ok: false, error: 'conflict' });
+  expect(f.sources.create).not.toHaveBeenCalled();
+});
+
+it('refuses proxy creation with the stable conflict code beyond the proof cap', async () => {
+  const f = setup();
+  f.sources.list.mockResolvedValue([{ ...input, id: 'host', type: 'hosted', ecosystem: 'npm' }]);
+  f.registeredNames.list.mockResolvedValue({
+    items: Array.from({ length: 230 }, (_, index) => ({
+      pattern: `${String(index).padStart(3, '0')}${'a'.repeat(211)}`,
+    })),
+    next: null,
+  });
+  f.claimProbe.mockResolvedValue('not_found');
+  const result = await f.service.create(
+    ctx,
+    org,
+    fence,
+    {
+      ...input,
+      name: 'public',
+      type: 'npmjs_proxy',
+      ecosystem: 'npm',
+      url: 'https://registry.npmjs.org',
+      userAgent: 'creation-agent',
+    },
+    call,
+  );
+  expect(result).toMatchObject({ ok: false, error: 'conflict' });
+  expect(f.sources.create).not.toHaveBeenCalled();
+  expect(f.claimProbe).toHaveBeenCalledWith(
+    ctx,
+    { type: 'new_npmjs_proxy', userAgent: 'creation-agent' },
+    expect.any(String),
+    expect.any(AbortSignal),
+    'claim',
+  );
+});
+
+it.each(['found', 'unavailable', 'not_found'] as const)(
   'probes VCS npm claims: %s',
   async (answer) => {
     const f = setup();

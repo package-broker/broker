@@ -1,8 +1,10 @@
 import { entries as trustedPublisherEntries } from './mutation-table/trusted-publishers.js';
 import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
+import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
 import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
 import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
 import { entries as oidcEntries } from './mutation-table/oidc.js';
+import { entries as proxyClaimsEntries } from './mutation-table/proxy-claims.js';
 import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
 import { entries as publishGuardEntries } from './mutation-table/catalogue-publish-guard.js';
 import { entries as publishesEntries } from './mutation-table/publishes.js';
@@ -129,6 +131,7 @@ export { builderAllowlist, exportedBuilders, builderNames } from './mutation-tab
 export const mutationTable: readonly MutationEntry[] = [
   ...trustedPublisherEntries,
   ...npmLoginEntries,
+  ...npmVcsBuildEntries,
   ...publishGuardEntries,
   ...publishesEntries,
   ...readmeEntries,
@@ -153,6 +156,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...localLoginSetupEntries,
   ...visibilitySubsetEntries,
   ...visibilityAttachFactoryEntries,
+  ...proxyClaimsEntries,
   ...registeredNameClaimProxyEntries,
   ...registeredNameFactoryEntries,
   ...importCredentialEntries,

@@ -1629,14 +1629,14 @@ describe('round 5 regressions', () => {
   });
 });
 
-it('places the trusted publishers disclosure after the token filters and list', () => {
+it('places the lazy trusted publishers section after the token filters and list', () => {
   const { controller } = setup();
   const state = {
     ...controller.snapshot(),
     organizationPermissions: ['org:service-principals:write', 'org:packages:publish'],
   };
   const html = renderToString(createElement(TokensView, { controller, state }));
-  const publishers = html.indexOf('id="trusted-publishers"');
+  const publishers = html.indexOf('aria-label="Trusted publishers"');
   expect(publishers).toBeGreaterThan(html.indexOf('Reload tokens'));
   expect(publishers).toBeGreaterThan(html.indexOf('No tokens on this page.'));
   expect(publishers).toBeLessThan(html.indexOf('>Service principals</summary>'));

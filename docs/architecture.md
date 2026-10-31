@@ -105,7 +105,7 @@ A source describes a vendor repository: Packagist, npm, a Composer repository su
 <!-- source: packages/core/src/ingest/vcs/git-provider.ts:300 -->
 <!-- source: packages/core/src/api/routes/sources-schemas.ts:18 -->
 
-The `hosted` source type is accepted by the API schema, but has no provider yet and is skipped by source synchronization.
+Organization hosted npm sources reserve exact package names or scopes and are skipped by source synchronization. A claim immediately stops every npmjs proxy in the organization from serving that name, even while the hosted source is paused. Publishing arrives in a later release.
 
 <!-- source: packages/core/src/api/routes/sources-schemas.ts:9 -->
 <!-- source: packages/core/src/sources/config.ts:6 -->

@@ -1,9 +1,7 @@
 import * as z from 'zod';
-const npmName = z
-  .string()
-  .min(1)
-  .max(214)
-  .regex(/^(?!node_modules$|favicon\.ico$)(?:@[a-z0-9-][a-z0-9._-]*\/)?[a-z0-9-][a-z0-9._-]*$/);
+import { NPM_HOSTNAME_CHECK, NPM_PACKAGE_NAME_CHECK } from '../npm-identity-checks.js';
+import { MAX_NPM_NAME_LENGTH } from '../../catalogue/names.js';
+const npmName = z.string().min(1).max(MAX_NPM_NAME_LENGTH).check(NPM_PACKAGE_NAME_CHECK);
 const id = z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
 export const trustedPublisher = z.strictObject({
   id,
@@ -27,14 +25,7 @@ export const NPM_IDENTITY_SCHEMAS = {
   NpmLoginStartBody: z
     .strictObject({
       create: z.boolean().optional(),
-      hostname: z
-        .string()
-        .max(253)
-        .refine(
-          (value) => new TextEncoder().encode(value).length <= 253,
-          'Hostname exceeds 253 bytes',
-        )
-        .optional(),
+      hostname: z.string().max(253).check(NPM_HOSTNAME_CHECK).optional(),
     })
     .default({}),
   NpmLoginConfirmation: z.strictObject({

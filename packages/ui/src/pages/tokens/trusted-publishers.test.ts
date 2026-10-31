@@ -2,7 +2,8 @@ import { expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
 import type { ShellServices } from '../../auth.js';
-import { createTrustedPublishersController, TrustedPublishers } from './trusted-publishers.js';
+import { createTrustedPublishersController } from './trusted-publishers-controller.js';
+import { TrustedPublishers } from './trusted-publishers.js';
 function fixture() {
   const request = vi.fn().mockResolvedValue({ ok: true, status: 200, data: { items: [] } });
   const services = { client: { request }, requireReauth: vi.fn() } as unknown as ShellServices;

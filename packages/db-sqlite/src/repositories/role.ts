@@ -1,3 +1,4 @@
+import { FORBIDDEN_NAME_CHARACTERS } from '@package-broker/core/catalogue/names';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { sql, type Compilable, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
 import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
@@ -52,7 +53,6 @@ function run<R>(executor: ScalarSqlExecutor, query: Compilable): Promise<R[]> {
   return executor.all<R>(scalar(query));
 }
 
-const FORBIDDEN_NAME_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
 const DEFAULT_KEYS: ReadonlySet<string> = new Set(DEFAULT_ROLES.map(({ key }) => key));
 
 function requireName(name: string): void {

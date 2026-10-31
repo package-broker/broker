@@ -1,3 +1,4 @@
+import type { NpmPackSkipCode } from '../sources/source-error-codes.js';
 import type { SOURCE_ERROR_CODES } from '../sources/source-error-codes.js';
 import type { IdempotencyRecord } from '../api/idempotency.js';
 import type { AuditEvent } from '../audit/actions.js';
@@ -73,6 +74,7 @@ export interface SourceRecord {
 }
 
 export interface NewSource {
+  readonly verifiedClaims?: readonly string[];
   readonly id: string;
   /** Null for an organization-level source. */
   readonly projectId: string | null;
@@ -299,6 +301,15 @@ export interface SourceRepository {
    * poll timers alone.
    */
   markCredentialUnavailable(ctx: OrgContext, id: string): Promise<void>;
+  /** Sets `last_error` only, never counts as a poll failure, and requires the live lease of a package-sync or build job for this source. */
+  reportCandidateSkipped?(
+    ctx: OrgContext,
+    guard: JobGuard,
+    input: {
+      readonly id: string;
+      readonly error: 'name_mismatch' | 'version_mismatch' | 'invalid_manifest' | NpmPackSkipCode;
+    },
+  ): Promise<void>;
   /** `stale` when the job guard no longer holds; nothing is written then. */
   pollState(
     ctx: OrgContext,

@@ -108,7 +108,7 @@ export interface VersionCandidate {
   /** Strictly increasing position in the upstream document order of one snapshot. */
   readonly ordinal: number;
   readonly version: string;
-  readonly form: CatalogueDocKind;
+  readonly form: CatalogueDocKind | 'npm-vcs';
   readonly upstreamTime?: string;
   /** The raw JSON text of the version object. */
   readonly raw: string;
@@ -124,7 +124,7 @@ export interface FormEvidence {
 /** A selected member the description left out of `members`. */
 export interface SkippedMember {
   readonly version: string;
-  readonly reason: 'member_too_large';
+  readonly reason: 'member_too_large' | 'name_mismatch' | 'version_mismatch' | 'invalid_manifest';
 }
 
 declare const descriptionBrand: unique symbol;
@@ -317,7 +317,17 @@ export function createPackageDescription(input: PackageDescriptionInput): Packag
         typeof input.documentsComplete === 'function'
           ? input.documentsComplete()
           : input.documentsComplete;
-      return documents && exhausted && !failed && skippedMembers().length === 0;
+      return (
+        documents &&
+        exhausted &&
+        !failed &&
+        skippedMembers().every(
+          (skip) =>
+            skip.reason === 'name_mismatch' ||
+            skip.reason === 'version_mismatch' ||
+            skip.reason === 'invalid_manifest',
+        )
+      );
     },
     get skippedMembers() {
       return skippedMembers();

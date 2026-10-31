@@ -29,6 +29,8 @@ import * as packageManage from './routes/package-manage.js';
 import * as importRuns from './routes/import.js';
 
 const EXPECTED_ROUTES = [
+  'GET /_pb/me/npm-login/:selector',
+  'POST /_pb/me/npm-login/:selector',
   'PATCH /_pb/sources/:source/names/:name',
   'GET /_pb/organization',
   'GET /_pb/users',
@@ -148,6 +150,16 @@ function dependencies(): ApiModuleDeps {
   });
   const lifetime = { personal: { maxDays: 365 }, service: { maxDays: 365 } };
   return {
+    npmLogin: {
+      ...common(),
+      publicUrl: 'https://broker.test',
+      store: unused('start', 'confirmation', 'poll'),
+      projects: unused('getBySlug'),
+      sessions: unused('authenticate', 'isReauthFresh'),
+      personal: () => {
+        throw new Error('unused');
+      },
+    },
     organization: {
       ...common(),
       organizations: unused('get'),

@@ -1,3 +1,4 @@
+import { npmLoginRoutes } from '@package-broker/core/api/routes/npm-login';
 import { createSourcePackageStore } from './source-package-request.js';
 import type { SourcePackageProbe } from '@package-broker/core/ingest/source-package';
 import { createProjectGrantReader } from './project-grant-read.js';
@@ -115,7 +116,8 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
   }
   try {
-    return createApiModule({
+    const module = createApiModule({
+      npmLogin: access.npmLogin,
       organization: {
         ...common,
         organizations,
@@ -244,7 +246,11 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
               tokenFence: importWriteTokenFence,
             },
           }),
-    }).routes;
+    });
+    return [
+      ...npmLoginRoutes(access.npmLogin).filter((route) => !route.path.startsWith('/_pb/')),
+      ...module.routes,
+    ];
   } catch (error) {
     if (error instanceof ApiModuleDependencyError) {
       throw new KernelConfigError([error.message]);

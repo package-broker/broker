@@ -1,3 +1,4 @@
+import { createNpmLoginExpiryJob } from '@package-broker/db-sqlite/repositories/npm-login-expire';
 import {
   enqueuePatOffboarding,
   enqueueProjectRemovedPatOffboarding,
@@ -39,13 +40,14 @@ function lazyJobs(holder: PatJobHolder): Pick<Jobs, 'enqueue' | 'enqueueStatemen
   };
 }
 
-export function patOffboardingRegistrations(
+export function tokenJobRegistrations(
   executor: SqlExecutor,
   holder: PatJobHolder,
   log: KernelLog,
 ): readonly RegisteredCoreJob[] {
   const store = createPatOffboardingRepository(executor);
   return [
+    createNpmLoginExpiryJob(executor, lazyJobs(holder)),
     createPatOffboardingJob({ store, clock: systemClock, ids: { ulid }, log }),
     createPatOffboardingSweepJob({ store, jobs: lazyJobs(holder), clock: systemClock, log }),
   ];

@@ -1,3 +1,4 @@
+import { npmLoginRoutes } from './routes/npm-login.js';
 import { routesConflict } from '../kernel/routes.js';
 import type { RouteDefinition } from '../plugin.js';
 import { accessRoutes } from './routes/access.js';
@@ -20,6 +21,7 @@ import { tokenRoutes } from './routes/tokens.js';
 export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
+  readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
   readonly projects: Parameters<typeof projectRoutes>[0];
   readonly access: Parameters<typeof accessRoutes>[0];
@@ -57,6 +59,14 @@ type DependencyRequirements<T> = {
 };
 const CONTEXT_METHODS = { ids: { ulid: true }, clock: { now: true }, clientIp: true } as const;
 const REQUIRED_DEPENDENCIES = {
+  npmLogin: {
+    ...CONTEXT_METHODS,
+    store: { start: true, confirmation: true, poll: true },
+    publicUrl: null,
+    projects: { getBySlug: true },
+    sessions: { authenticate: true, isReauthFresh: true },
+    personal: true,
+  },
   organization: {
     ...CONTEXT_METHODS,
     organizations: { get: true },
@@ -251,6 +261,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...accessRoutes(deps.access),
     ...projectAccessRoutes(deps.projectAccess),
     ...tokenRoutes(deps.tokens),
+    ...npmLoginRoutes(deps.npmLogin).filter((route) => route.path.startsWith('/_pb/')),
     ...servicePrincipalRoutes({
       ...deps.servicePrincipals,
       sessions: deps.tokens.sessions,

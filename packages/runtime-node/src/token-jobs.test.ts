@@ -21,7 +21,7 @@ import {
 } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createNodeServer, type NodeBroker } from './index.js';
 import { createJobLoop } from './jobs/loop.js';
-import { createPatJobHolder, patOffboardingRegistrations } from './token-jobs.js';
+import { createPatJobHolder, tokenJobRegistrations } from './token-jobs.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const ANCHOR = 'oidc:https://idp.example.test';
@@ -411,7 +411,7 @@ describe('personal-token job holder', () => {
     };
     const loop = createJobLoop({
       executor,
-      jobs: patOffboardingRegistrations(executor, createPatJobHolder(), () => undefined),
+      jobs: tokenJobRegistrations(executor, createPatJobHolder(), () => undefined),
       scope: () => ({
         ports: {
           organizations: { get: async () => null },

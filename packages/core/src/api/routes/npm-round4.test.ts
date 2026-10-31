@@ -22,9 +22,10 @@ describe('npm reviewed schemas', () => {
       expect(reject?.safeParse({ reason: '' }).success).toBe(false);
     }
   });
-  it('accepts empty login input and ignores client extensions', () => {
+  it('accepts empty login input and refuses client extensions', () => {
     expect(identity.NpmLoginStartBody.parse(undefined)).toEqual({});
-    expect(identity.NpmLoginStartBody.parse({ hostname: 'cli', create: true, extra: 1 })).toEqual({
+    expect(identity.NpmLoginStartBody.safeParse({ extra: 1 }).success).toBe(false);
+    expect(identity.NpmLoginStartBody.parse({ hostname: 'cli', create: true })).toEqual({
       hostname: 'cli',
       create: true,
     });

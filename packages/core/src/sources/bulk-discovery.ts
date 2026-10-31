@@ -1,3 +1,4 @@
+import { PackageNameError, packageKey } from '../catalogue/names.js';
 import type { ApiCall } from '../api/idempotency.js';
 import type { ActorContext } from '../authz/administration.js';
 import type { MutationFence } from '../authz/fence.js';
@@ -33,6 +34,8 @@ export interface BulkDiscoveryDeps {
       credential: DiscoveryCredential,
       request: {
         readonly pattern: string;
+        readonly includeForks?: boolean;
+        readonly ecosystem?: 'composer' | 'npm';
         readonly cursor: string | null;
         readonly exists: ExistsLookup;
       },
@@ -42,11 +45,16 @@ export interface BulkDiscoveryDeps {
       credential: DiscoveryCredential,
       repository: string,
       exists: ExistsLookup,
-    ): Promise<PlanEntry>;
+      options?: { readonly includeForks?: boolean; readonly ecosystem?: 'composer' | 'npm' },
+    ): Promise<readonly PlanEntry[]>;
   };
   readonly sources: Pick<SourceService, 'create' | 'addRegisteredName' | 'enable' | 'delete'>;
   readonly existingRepository: {
-    has(ctx: OrgContext, repository: string): Promise<boolean>;
+    has(
+      ctx: OrgContext,
+      repository: string,
+      ecosystem: DiscoveryCandidate['ecosystem'],
+    ): Promise<boolean>;
     /** Exact source-name lookup among organization-level sources in ctx's organization. */
     hasSourceName(ctx: OrgContext, name: string): Promise<boolean>;
   };
@@ -79,6 +87,8 @@ export interface BulkDiscovery {
     actor: ActorContext,
     input: {
       readonly credentialId: string;
+      readonly includeForks?: boolean;
+      readonly ecosystem?: 'composer' | 'npm';
       readonly pattern: string;
       readonly cursor: string | null;
     },
@@ -89,6 +99,8 @@ export interface BulkDiscovery {
     fence: MutationFence,
     input: {
       readonly credentialId: string;
+      readonly includeForks?: boolean;
+      readonly ecosystem?: 'composer' | 'npm';
       readonly repositories: readonly string[];
       readonly nextCursor?: string | null;
     },
@@ -129,26 +141,30 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
     credential: DiscoveryCredential,
     repository: string,
     call: ApiCall,
+    entry: PlanEntry,
   ): Promise<ApplyOutcome> {
-    const entry = await deps.discovery.plan(ctx, credential, repository, (candidate) =>
-      deps.existingRepository.has(ctx, candidate.repository),
-    );
     if (entry.repository.toLowerCase() !== repository.toLowerCase()) {
       return { repository, outcome: 'failed', error: 'repository_mismatch' };
     }
     if (entry.action === 'existing') return { repository, outcome: 'existing' };
-    if (entry.action !== 'new' || entry.ecosystem !== 'composer' || entry.packageName === null) {
+    if (
+      entry.action !== 'new' ||
+      (entry.ecosystem !== 'composer' && entry.ecosystem !== 'npm') ||
+      entry.packageName === null
+    ) {
       return {
         repository,
         outcome: 'skipped',
         reason:
-          entry.reason ??
-          (entry.ecosystem === 'npm'
-            ? 'npm_from_vcs_unsupported'
-            : entry.ecosystem !== 'composer'
-              ? 'unsupported_ecosystem'
-              : 'invalid_name'),
+          entry.reason ?? (entry.ecosystem === null ? 'unsupported_ecosystem' : 'invalid_name'),
       };
+    }
+    try {
+      if (packageKey(entry.packageName, { ecosystem: entry.ecosystem }) !== entry.packageName)
+        return { repository, outcome: 'skipped', reason: 'invalid_name' };
+    } catch (error) {
+      if (!(error instanceof PackageNameError)) throw error;
+      return { repository, outcome: 'skipped', reason: 'invalid_name' };
     }
     const who = { kind: 'org', actor } as const;
     const created = await deps.sources.create(
@@ -159,7 +175,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
         projectId: null,
         credentialId: credential.credentialId,
         name: entry.packageName,
-        ecosystem: 'composer',
+        ecosystem: entry.ecosystem,
         type: 'vcs',
         url: null,
         configJson: JSON.stringify({
@@ -195,6 +211,12 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
       if (!deleted.ok) {
         return { repository, outcome: 'failed', error: 'orphaned_paused_source' };
       }
+      if (
+        named.error === 'name_public' ||
+        named.error === 'name_public_unverified' ||
+        named.error === 'claim_overlap'
+      )
+        return { repository, outcome: 'skipped', reason: named.error };
       return named.error === 'pattern_taken' || named.error === 'duplicate'
         ? { repository, outcome: 'existing' }
         : { repository, outcome: 'failed', error: named.error };
@@ -213,8 +235,11 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
         if (credential === null) return { ok: false, error: 'credential_not_found' };
         const page = await deps.discovery.discover(ctx, credential, {
           pattern: input.pattern,
+          includeForks: input.includeForks === true,
+          ...(input.ecosystem === undefined ? {} : { ecosystem: input.ecosystem }),
           cursor: input.cursor,
-          exists: (candidate) => deps.existingRepository.has(ctx, candidate.repository),
+          exists: (candidate) =>
+            deps.existingRepository.has(ctx, candidate.repository, candidate.ecosystem),
         });
         return { ok: true, value: page };
       } catch (error) {
@@ -238,15 +263,28 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
       if (credential === null) return { ok: false, error: 'credential_not_found' };
       const results: ApplyOutcome[] = [];
       let remainingRepositories: readonly string[] = [];
-      for (const repository of input.repositories) {
+      for (const [index, repository] of input.repositories.entries()) {
         try {
-          results.push(await applyOne(ctx, actor, fence, credential, repository, call));
+          const entries = await deps.discovery.plan(
+            ctx,
+            credential,
+            repository,
+            (candidate) =>
+              deps.existingRepository.has(ctx, candidate.repository, candidate.ecosystem),
+            {
+              includeForks: input.includeForks === true,
+              ...(input.ecosystem === undefined ? {} : { ecosystem: input.ecosystem }),
+            },
+          );
+          for (const entry of entries) {
+            results.push(await applyOne(ctx, actor, fence, credential, repository, call, entry));
+          }
         } catch (error) {
           const code = error instanceof DbError ? error.kind : discoveryErrorCode(error);
           if (code === undefined) throw error;
           results.push({ repository, outcome: 'failed', error: code });
           if (code === 'rate_limited') {
-            remainingRepositories = input.repositories.slice(results.length - 1);
+            remainingRepositories = input.repositories.slice(index);
             break;
           }
         }

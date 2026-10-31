@@ -1103,7 +1103,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       if (input.id !== undefined && (source.type !== 'hosted' || source.ecosystem !== 'npm'))
         return invalid('type', 'only hosted npm claims can be replaced');
       if (
-        source.type === 'hosted' && source.ecosystem === 'npm'
+        (source.type === 'hosted' || source.type === 'vcs') && source.ecosystem === 'npm'
           ? !isNpmClaim(input.pattern)
           : !isValidPattern(input.pattern)
       )
@@ -1115,7 +1115,11 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         oldPattern = oldClaim.pattern;
       }
       let claimProbe: { proxyId: string } | undefined;
-      if (source.type === 'hosted' && source.ecosystem === 'npm' && !input.pattern.includes('*')) {
+      if (
+        (source.type === 'hosted' || source.type === 'vcs') &&
+        source.ecosystem === 'npm' &&
+        !input.pattern.includes('*')
+      ) {
         const proxyId = await deps.registeredNames.claimProxy(ctx);
         if (proxyId !== null) {
           let answer;
@@ -1158,7 +1162,9 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'added'
         ? success(
             { id },
-            source.type === 'hosted' && source.ecosystem === 'npm' && input.pattern.endsWith('/*')
+            (source.type === 'hosted' || source.type === 'vcs') &&
+              source.ecosystem === 'npm' &&
+              input.pattern.endsWith('/*')
               ? [
                   {
                     field: 'pattern',

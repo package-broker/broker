@@ -228,6 +228,7 @@ type Refusal =
   | 'shadowed_existing'
   | 'scope_mismatch'
   | 'ecosystem_mismatch'
+  | 'unsupported_source'
   | 'invalid_url'
   | 'config_mismatch'
   | 'credential_mismatch'
@@ -293,7 +294,7 @@ function consistencyIssues(manifest: Shape): ManifestDetail[] {
     ) {
       refuse(field(i, 'url'), 'invalid_url');
     }
-    if (!isConfigOf(type, source.config)) {
+    if (!isConfigOf(type, source.config, source.ecosystem)) {
       refuse(field(i, 'config'), 'config_mismatch');
       return;
     }
@@ -452,6 +453,14 @@ function consistencyIssues(manifest: Shape): ManifestDetail[] {
         const source = checkSourceRef(i, entry.source);
         if (source !== null && source !== 'existing' && source.ecosystem !== entry.ecosystem) {
           refuse(field(i, 'ecosystem'), 'ecosystem_mismatch');
+        }
+        if (
+          source !== null &&
+          source !== 'existing' &&
+          source.source_type === 'vcs' &&
+          entry.ecosystem === 'npm'
+        ) {
+          refuse(field(i, 'ecosystem'), 'unsupported_source');
         }
         const { pattern } = entry;
         const wildcard = pattern.includes('*');

@@ -852,3 +852,49 @@ it('omits hosted source creation in a project form', () => {
   );
   expect(html).not.toContain('value="hosted"');
 });
+
+it('offers npm VCS and explains root manifest naming', () => {
+  const html = renderToString(
+    createElement(SourceForm, {
+      source: null,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      initialType: 'vcs',
+    }),
+  );
+  expect(html).toContain('value="vcs"');
+  const help = /<p id="source-config\/packageName-help"[^>]*>(.*?)<\/p>/.exec(html)?.[1];
+  expect(help).toBe(
+    'Leave blank to use the root manifest name (composer.json or package.json). For npm, this must match the name in package.json.',
+  );
+});
+
+it.each(['npm', 'composer'] as const)(
+  'shows an ecosystem-aware VCS placeholder for %s',
+  (ecosystem) => {
+    const source = {
+      ...savedSource('vcs', {
+        provider: 'github',
+        repository: 'acme/lib',
+        refs: { tags: true, branches: [] },
+      }),
+      ecosystem,
+    };
+    const html = renderToString(
+      createElement(SourceForm, {
+        source,
+        busy: false,
+        errors: {},
+        alert: null,
+        onSubmit: vi.fn(),
+        onClose: vi.fn(),
+      }),
+    );
+    expect(html).toContain(
+      `placeholder="${ecosystem === 'npm' ? '@acme/payments' : 'acme/payments'}"`,
+    );
+  },
+);

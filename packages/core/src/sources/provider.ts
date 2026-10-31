@@ -201,7 +201,18 @@ export interface WebhookVerifier {
   verify(secret: BearerMaterial, headers: Headers, rawBody: Uint8Array): Promise<boolean>;
 }
 
+export interface RepositoryIdentity {
+  readonly repository: string;
+  readonly repositoryId: string;
+  readonly repositoryOwnerId: string;
+}
+
 export interface SourceProvider {
+  lookupRepository?(
+    ctx: ProviderContext,
+    source: ProviderSource,
+    repository: string,
+  ): Promise<RepositoryIdentity | null>;
   readonly id: string;
   readonly sourceTypes: readonly SourceType[];
   readonly ecosystems: readonly SourceEcosystem[];
@@ -456,7 +467,7 @@ export interface ProviderRegistry {
 
 /** Returned providers check their own answers so a consumer cannot skip the contract. */
 function guardProvider(provider: SourceProvider): SourceProvider {
-  const { listPackages, discoverRepositories } = provider;
+  const { listPackages, discoverRepositories, lookupRepository } = provider;
   return {
     id: provider.id,
     sourceTypes: provider.sourceTypes,
@@ -478,6 +489,12 @@ function guardProvider(provider: SourceProvider): SourceProvider {
       : {
           discoverRepositories: (ctx, credential, cursor) =>
             discoverRepositories.call(provider, ctx, credential, cursor),
+        }),
+    ...(lookupRepository === undefined
+      ? {}
+      : {
+          lookupRepository: (ctx, source, repository) =>
+            lookupRepository.call(provider, ctx, source, repository),
         }),
     openDist: (ctx, source, target) => provider.openDist(ctx, source, target),
     async describe(ctx, source, name, options) {

@@ -230,6 +230,12 @@ export interface RegistryModuleDeps {
 }
 
 export interface RegistryModule extends Partial<RegistryJobs> {
+  readonly lookupTrustedPublisherRepository: (
+    ctx: OrgContext,
+    sourceId: string,
+    repository: string,
+    signal: AbortSignal,
+  ) => Promise<import('../sources/provider.js').RepositoryIdentity | null>;
   readonly probePackage: SourcePackageProbe;
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
@@ -825,6 +831,27 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
 
   return Object.freeze({
     ecosystemRoutes,
+    async lookupTrustedPublisherRepository(
+      ctx: OrgContext,
+      sourceId: string,
+      repository: string,
+      signal: AbortSignal,
+    ) {
+      const record = await catalogue.sources.get(ctx, sourceId);
+      if (record === null || record.projectId !== null || record.type !== 'vcs') return null;
+      const bound = await bind(ctx, record);
+      if (
+        bound === null ||
+        typeof bound === 'string' ||
+        bound.provider.lookupRepository === undefined
+      )
+        return null;
+      return bound.provider.lookupRepository(
+        providerContext(ctx, bound, signal),
+        bound.source,
+        repository,
+      );
+    },
     async probePackage(
       ctx: OrgContext,
       sourceId: ClaimProbeTarget,

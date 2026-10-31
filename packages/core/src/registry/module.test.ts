@@ -175,6 +175,7 @@ describe('registry job attachment', () => {
     const built = createRegistryModule({ ...h.deps, registryJobs });
     expect(Object.keys(built).sort()).toEqual([
       'ecosystemRoutes',
+      'lookupTrustedPublisherRepository',
       'probePackage',
       'visibilityPort',
     ]);
@@ -418,6 +419,7 @@ describe('createRegistryModule assembly', () => {
     const built = h.module();
     expect(Object.keys(built).sort()).toEqual([
       'ecosystemRoutes',
+      'lookupTrustedPublisherRepository',
       'probePackage',
       'visibilityPort',
     ]);

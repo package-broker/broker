@@ -78,6 +78,11 @@ export const API_ERROR_CODES = {
   staging_failed: { status: 503, message: 'Publish staging failed' },
   invalid_publish_body: { status: 400, message: 'The publish body is invalid' },
   busy: { status: 503, message: 'Publishing is busy, try again later' },
+  github_credentials_required: {
+    status: 409,
+    message:
+      'Configure a GitHub App installation or GitHub token before creating a trusted publisher',
+  },
 } as const;
 
 export type ApiErrorCode = keyof typeof API_ERROR_CODES;

@@ -2033,6 +2033,11 @@ export function createWorker(
       built === undefined || packages === null
         ? []
         : createApiRoutes({
+            ...(registryModule?.module.lookupTrustedPublisherRepository === undefined
+              ? {}
+              : {
+                  trustedPublisherLookup: registryModule?.module.lookupTrustedPublisherRepository,
+                }),
             clientIp: clientIpOf,
             executor: executor as SqlExecutor,
             ...(registryModule?.module.probePackage === undefined

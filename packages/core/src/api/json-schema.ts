@@ -1,3 +1,4 @@
+import { NPM_HOSTNAME_CHECK, NPM_PACKAGE_NAME_CHECK } from './npm-identity-checks.js';
 import { UTF8_REASON_CHECK } from './utf8-reason.js';
 import {
   globalRegistry,
@@ -37,11 +38,19 @@ const EXPORT_OPTIONS = {
     jsonSchema,
   }: {
     zodSchema: $ZodType;
-    jsonSchema: { default?: unknown; 'x-pb-max-utf8-bytes'?: number };
+    jsonSchema: {
+      default?: unknown;
+      'x-pb-max-utf8-bytes'?: number;
+      'x-pb-npm-package-name'?: boolean;
+    };
   }) => {
     delete jsonSchema.default;
     if (zodSchema._zod.def.checks?.some((check) => check === UTF8_REASON_CHECK))
       jsonSchema['x-pb-max-utf8-bytes'] = 1000;
+    if (zodSchema._zod.def.checks?.some((check) => check === NPM_HOSTNAME_CHECK))
+      jsonSchema['x-pb-max-utf8-bytes'] = 253;
+    if (zodSchema._zod.def.checks?.some((check) => check === NPM_PACKAGE_NAME_CHECK))
+      jsonSchema['x-pb-npm-package-name'] = true;
   },
 } as const;
 
@@ -101,7 +110,13 @@ function validateRepresentable(schema: $ZodType, label: string) {
       if ('pattern' in checkDef && checkDef.pattern instanceof RegExp && checkDef.pattern.flags) {
         refuse('unrepresentable_type');
       }
-      if (check._zod.def.check === 'custom' && check !== UTF8_REASON_CHECK) refuse('custom_check');
+      if (
+        check._zod.def.check === 'custom' &&
+        check !== UTF8_REASON_CHECK &&
+        check !== NPM_HOSTNAME_CHECK &&
+        check !== NPM_PACKAGE_NAME_CHECK
+      )
+        refuse('custom_check');
       if (check._zod.def.check === 'overwrite') refuse('transform');
     }
     switch (def.type) {

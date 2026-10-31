@@ -1537,6 +1537,8 @@ describe('round 5 regressions', () => {
     const f = setup();
     const handlers = new Map<string, (event: Event) => void>();
     const reload = vi.fn();
+    const publishers = vi.spyOn(f.controller.trustedPublishers, 'load');
+    f.controller.snapshot().organizationPermissions = ['org:service-principals:write'];
     bindTokensLifecycle(
       f.controller,
       {
@@ -1548,8 +1550,10 @@ describe('round 5 regressions', () => {
     );
     handlers.get('pageshow')!(new Event('pageshow'));
     expect(reload).not.toHaveBeenCalled();
+    expect(publishers).not.toHaveBeenCalled();
     handlers.get('pageshow')!(Object.assign(new Event('pageshow'), { persisted: true }));
     expect(reload).toHaveBeenCalledOnce();
+    expect(publishers).toHaveBeenCalledOnce();
   });
 
   it('marks requested projects loading in a single state update', async () => {
@@ -1623,4 +1627,17 @@ describe('round 5 regressions', () => {
     f.controller.choosePrincipal('p3', null, true);
     expect(f.controller.snapshot().issuanceProject).toBe('__organization');
   });
+});
+
+it('places the trusted publishers disclosure after the token filters and list', () => {
+  const { controller } = setup();
+  const state = {
+    ...controller.snapshot(),
+    organizationPermissions: ['org:service-principals:write', 'org:packages:publish'],
+  };
+  const html = renderToString(createElement(TokensView, { controller, state }));
+  const publishers = html.indexOf('>Trusted publishers</summary>');
+  expect(publishers).toBeGreaterThan(html.indexOf('Reload tokens'));
+  expect(publishers).toBeGreaterThan(html.indexOf('No tokens on this page.'));
+  expect(publishers).toBeLessThan(html.indexOf('>Service principals</summary>'));
 });

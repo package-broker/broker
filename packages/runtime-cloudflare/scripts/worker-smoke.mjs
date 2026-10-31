@@ -633,6 +633,9 @@ async function run() {
       const head = await send('/_pb/audit/head', limitMs, { cookie: cookiesOf(loggedIn) });
       await expectStatus('default prebuilt audit trail', head, 200);
       console.log('smoke:cloudflare prebuilt default audit head 200');
+      const health = await send('/_pb/audit/health', limitMs, { cookie: cookiesOf(loggedIn) });
+      await expectStatus('default prebuilt audit health', health, 200);
+      assert.equal((await health.json()).codes.includes('audit.sink_inactive'), false);
     }
 
     step = 'uniform 401 for unusable credentials on /_pb/session';
@@ -690,6 +693,8 @@ async function run() {
     assert.deepEqual(
       schedules.map((row) => [row.name, row.every_seconds]),
       [
+        ['core:audit-export-otlp:v1', 60],
+        ['core:audit-export-webhook:v1', 60],
         ['core:audit-frontier:v1', 86400],
         ['core:audit-health-observe:v1', 60],
         ['core:audit-maintain:v1', 60],

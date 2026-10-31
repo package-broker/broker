@@ -134,6 +134,10 @@ export async function createWorkerAudit(input: {
   };
   const health = createAuditHealthService({
     port: createAuditHealthRepository(executor),
+    buildActivatedSinkIds: input
+      .registration()
+      .audit.sinks.filter((sink) => sink.definition.activation === 'build')
+      .map((sink) => sink.definition.id),
     clock: systemClock,
     observability: healthObservability,
   });

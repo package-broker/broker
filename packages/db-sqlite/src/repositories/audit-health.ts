@@ -80,7 +80,7 @@ export function createAuditHealthRepository(executor: ScalarSqlExecutor): AuditH
           params: [ctx.orgId],
         },
         {
-          sql: 'SELECT sink_id AS id, state, blocked_reason AS blockedReason FROM audit_sink WHERE org_id = ?',
+          sql: 'SELECT sink_id AS id, state, blocked_reason AS blockedReason, activation_source AS activationSource FROM audit_sink WHERE org_id = ?',
           params: [ctx.orgId],
         },
         {

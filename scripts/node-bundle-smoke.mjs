@@ -238,6 +238,8 @@ async function checkAuditJobs(database) {
     assert.deepEqual(
       schedules().map((row) => [row.name, row.every_seconds]),
       [
+        ['core:audit-export-otlp:v1', 60],
+        ['core:audit-export-webhook:v1', 60],
         ['core:audit-frontier:v1', 86400],
         ['core:audit-health-observe:v1', 60],
         ['core:audit-maintain:v1', 60],
@@ -738,6 +740,19 @@ async function run() {
     });
     await expectStatus(head, 200, 'default prebuilt audit trail');
     console.log('smoke:node prebuilt default audit head 200');
+    const health = await fetch(`${base}/_pb/audit/health`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(health, 200, 'default prebuilt audit health');
+    assert.equal((await health.json()).codes.includes('audit.sink_inactive'), false);
+    assert.equal(
+      auditLogs().some(
+        (record) => record.event === 'audit.alert' && record.reason_code === 'audit.sink_inactive',
+      ),
+      false,
+      'never-configured prebuilt sinks must not alert',
+    );
   }
 
   step = 'checking the public UI mount';

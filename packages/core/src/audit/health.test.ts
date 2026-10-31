@@ -15,7 +15,7 @@ const base: AuditHealthSnapshot = {
   sinks: [],
   incidents: [],
 };
-async function read(snapshot: AuditHealthSnapshot) {
+async function read(snapshot: AuditHealthSnapshot, buildActivatedSinkIds: readonly string[] = []) {
   const observe = vi.fn<AuditHealthPort['observe']>(async (_ctx, observations) => ({
     raised: observations.map((o) => o.code),
     alerts: observations.map((o) => ({
@@ -28,6 +28,7 @@ async function read(snapshot: AuditHealthSnapshot) {
   }));
   const observability = { log: vi.fn(), counter: vi.fn(), histogram: vi.fn() };
   const service = createAuditHealthService({
+    buildActivatedSinkIds,
     port: {
       raise: async () => {},
       snapshot: async () => snapshot,
@@ -54,12 +55,24 @@ it.each([
 );
 it('uses sink state for blocks even when inactive sinks retain a fork reason', async () => {
   expect(
-    (await read({ ...base, sinks: [{ id: 'sink', state: 'inactive', blockedReason: 'fork' }] }))
-      .health,
+    (
+      await read({
+        ...base,
+        sinks: [
+          { id: 'sink', state: 'inactive', blockedReason: 'fork', activationSource: 'SINK_URL' },
+        ],
+      })
+    ).health,
   ).toEqual({ status: 'degraded', codes: ['audit.sink_inactive'] });
   expect(
-    (await read({ ...base, sinks: [{ id: 'sink', state: 'blocked', blockedReason: 'fork' }] }))
-      .health,
+    (
+      await read({
+        ...base,
+        sinks: [
+          { id: 'sink', state: 'blocked', blockedReason: 'fork', activationSource: 'SINK_URL' },
+        ],
+      })
+    ).health,
   ).toEqual({ status: 'failing', codes: ['audit.blocked', 'audit.fork'] });
 });
 it('alerts on none, restore and persisted incidents with fixed telemetry fields', async () => {
@@ -91,13 +104,15 @@ it('alerts on none, restore and persisted incidents with fixed telemetry fields'
 it('distinguishes a newly blocked sink while another sink is still blocked', async () => {
   const first = await read({
     ...base,
-    sinks: [{ id: 'first', state: 'blocked', blockedReason: 'rejected' }],
+    sinks: [
+      { id: 'first', state: 'blocked', blockedReason: 'rejected', activationSource: 'SINK_URL' },
+    ],
   });
   const next = await read({
     ...base,
     sinks: [
-      { id: 'first', state: 'blocked', blockedReason: 'rejected' },
-      { id: 'second', state: 'blocked', blockedReason: 'rejected' },
+      { id: 'first', state: 'blocked', blockedReason: 'rejected', activationSource: 'SINK_URL' },
+      { id: 'second', state: 'blocked', blockedReason: 'rejected', activationSource: 'SINK_URL' },
     ],
   });
   expect(next.observe.mock.calls[0]?.[1][0]?.fingerprint).not.toBe(
@@ -112,7 +127,9 @@ it('does not alert for deliberately disabled sinks', async () => {
     (
       await read({
         ...base,
-        sinks: [{ id: 'disabled', state: 'disabled', blockedReason: null }],
+        sinks: [
+          { id: 'disabled', state: 'disabled', blockedReason: null, activationSource: 'none' },
+        ],
       })
     ).health,
   ).toEqual({ status: 'ok', codes: [] });
@@ -158,3 +175,23 @@ it('emits registered alert counters through production observability before a fa
     value: 1,
   });
 });
+
+it.each([
+  ['none', false, []],
+  ['SINK_URL', false, ['audit.sink_inactive']],
+  ['none', true, ['audit.sink_inactive']],
+] as const)(
+  'checks inactive sink activation history (%s, build: %s)',
+  async (activationSource, build, codes) => {
+    const result = await read(
+      {
+        ...base,
+        sinks: [{ id: 'sink', state: 'inactive', blockedReason: null, activationSource }],
+      },
+      build ? ['sink'] : [],
+    );
+    expect(result.health.codes).toEqual(codes);
+    expect(result.observability.log).toHaveBeenCalledTimes(codes.length);
+    expect(result.observability.counter).toHaveBeenCalledTimes(codes.length);
+  },
+);

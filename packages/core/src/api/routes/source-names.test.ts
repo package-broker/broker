@@ -15,6 +15,8 @@ import { formatToken } from '../../secrets/token-format.js';
 import { hashToken } from '../../secrets/token-hash.js';
 import { createSourceService } from '../../sources/source-service.js';
 import { defineApi } from '../route.js';
+import { generateOpenApi } from '../openapi.js';
+import type { JsonObject } from '../json-schema.js';
 import { SOURCE_NAMES_API_SPECS } from './source-names-schemas.js';
 import { sourceNameRoutes } from './source-names.js';
 
@@ -32,6 +34,7 @@ const bearer = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
 
 async function fixture(
   options: {
+    hosted?: boolean;
     organizationPermissions?: readonly string[];
     projectPermissions?: readonly string[];
     projectState?: 'absent' | 'archived' | 'foreign' | 'invisible';
@@ -62,8 +65,8 @@ async function fixture(
     id: SOURCE,
     projectId: options.sourceProject ?? null,
     name: 'shared',
-    ecosystem: 'composer',
-    type: 'vcs',
+    ecosystem: options.hosted ? 'npm' : 'composer',
+    type: options.hosted ? 'hosted' : 'vcs',
     credentialId: null,
     configJson: '{}',
     status: 'paused',
@@ -88,6 +91,13 @@ async function fixture(
     list: vi.fn(),
   };
   const registeredNames = {
+    get: async () => ({
+      id: NAME,
+      sourceId: options.nameSource ?? SOURCE,
+      ecosystem: 'npm' as const,
+      pattern: 'vendor/*',
+    }),
+    claimProxy: vi.fn().mockResolvedValue(null),
     list: vi.fn(async () => ({
       items: [{ id: NAME, sourceId: SOURCE, ecosystem: 'composer' as const, pattern: 'vendor/*' }],
       next: null,
@@ -583,8 +593,8 @@ for (const method of ['POST', 'DELETE'] as const) {
   });
 }
 
-it('exports six independently representable strict API specs', () => {
-  expect(SOURCE_NAMES_API_SPECS).toHaveLength(6);
+it('exports seven independently representable strict API specs', () => {
+  expect(SOURCE_NAMES_API_SPECS).toHaveLength(7);
   for (const spec of SOURCE_NAMES_API_SPECS) expect(() => defineApi(spec)).not.toThrow();
 });
 
@@ -971,3 +981,66 @@ it.each(['absent', 'foreign', 'invisible'] as const)(
     expect(f.registeredNames.list).not.toHaveBeenCalled();
   },
 );
+
+it('replaces a registered claim through the same admission service', async () => {
+  const f = await fixture({ hosted: true });
+  const response = await f.request('PATCH', `${namesPath}/${NAME}`, { pattern: '@scope/package' });
+  expect(response.status).toBe(200);
+  expect(f.registeredNames.add).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.anything(),
+    expect.objectContaining({
+      id: NAME,
+      sourceId: SOURCE,
+      pattern: '@scope/package',
+      replace: true,
+    }),
+  );
+});
+it.each(['claim_overlap', 'name_public', 'name_public_unverified'] as const)(
+  'returns a static %s refusal on claim replacement',
+  async (code) => {
+    const f = await fixture({ hosted: true });
+    f.registeredNames.add.mockResolvedValue(code);
+    const response = await f.request('PATCH', `${namesPath}/${NAME}`, {
+      pattern: '@scope/package',
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code } });
+  },
+);
+
+it.each([1, 6] as const)(
+  'bounds registered-name requests to 214 characters in spec %s',
+  (index) => {
+    const body = SOURCE_NAMES_API_SPECS[index].api.body;
+    expect(body.safeParse({ pattern: 'a'.repeat(214) }).success).toBe(true);
+    expect(body.safeParse({ pattern: 'a'.repeat(215) }).success).toBe(false);
+  },
+);
+
+it('keeps replacement limited to hosted npm claims', async () => {
+  const f = await fixture();
+  const response = await f.request('PATCH', `${namesPath}/${NAME}`, { pattern: 'vendor/package' });
+  expect(response.status).toBe(400);
+  expect(f.registeredNames.add).not.toHaveBeenCalled();
+});
+
+it.each(['POST', 'PATCH'])('declares %s claim admission conflicts in OpenAPI', (method) => {
+  const spec = SOURCE_NAMES_API_SPECS.find(
+    (entry) => entry.method === method && entry.api.operationId.endsWith('RegisteredName'),
+  )!;
+  expect(spec.api.responses).toHaveProperty('409', null);
+  const document = generateOpenApi([spec], { title: 'test', version: '1' });
+  const path =
+    method === 'POST' ? '/_pb/sources/{source}/names' : '/_pb/sources/{source}/names/{name}';
+  const responses = document.paths[path]![method.toLowerCase()]!.responses as JsonObject;
+  const response = responses['409'] as JsonObject;
+  for (const message of [
+    'This package name is already published or proxied',
+    'This package name is already published publicly',
+    'The public package name could not be verified',
+    ...(method === 'PATCH' ? ['This claim still covers hosted packages'] : []),
+  ])
+    expect(response.description).toContain(message);
+});

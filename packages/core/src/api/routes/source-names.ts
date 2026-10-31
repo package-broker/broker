@@ -84,7 +84,7 @@ function failure(result: Extract<SourceServiceResult<unknown>, { ok: false }>) {
 }
 
 export function sourceNameRoutes(deps: SourceNameRouteDeps): readonly RouteDefinition[] {
-  const [list, add, remove, enable, order, resolve] = SOURCE_NAMES_API_SPECS;
+  const [list, add, remove, enable, order, resolve, update] = SOURCE_NAMES_API_SPECS;
   const org = (ctx: RequestContext) => {
     if (ctx.org === null) throw new TypeError('route requires an organization context');
     return ctx.org;
@@ -120,6 +120,19 @@ export function sourceNameRoutes(deps: SourceNameRouteDeps): readonly RouteDefin
     return { ok: true as const, value: actor };
   };
   const routes = [
+    apiRoute(update, async ({ ctx, params, body }) => {
+      const c = callContext(ctx, deps);
+      const source = await sourceForWrite(c, params.source);
+      if (!source.ok) return failure(source);
+      const result = await deps.service.addRegisteredName(
+        c.org,
+        { kind: 'org', actor: c.actor },
+        c.fence,
+        { sourceId: params.source, id: params.name, pattern: body.pattern },
+        c.call,
+      );
+      return result.ok ? { status: 200, body: result.value } : failure(result);
+    }),
     apiRoute(list, async ({ ctx, params, query }) => {
       const result = await deps.service.listRegisteredNames(org(ctx), reader(ctx), {
         sourceId: params.source,

@@ -44,3 +44,20 @@ it('npm_publish fits D1 migration statement and parameter limits', async () => {
     ),
   ).toBe(true);
 });
+it('npm_identity fits D1 migration statement and parameter limits', async () => {
+  const source = (await discoveredMigrations())[2]!;
+  expect(source.id).toBe('core:0003_npm_identity');
+  expect(source.phase).toBe('expand');
+  const statements = splitStatements(source.sql);
+  expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(3);
+  expect(statements.filter((sql) => sql.startsWith('ALTER TABLE '))).toHaveLength(2);
+  expect(statements.length + 3).toBeLessThanOrEqual(200);
+  expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
+  expect(
+    statements.every((sql) =>
+      scanSql(sql)
+        .filter((s) => s.kind === 'code')
+        .every((s) => !/[?:@$]/.test(s.text)),
+    ),
+  ).toBe(true);
+});

@@ -31,6 +31,7 @@ import {
   completeSourceListing,
   completeVersionListing,
 } from '@package-broker/core/catalogue/version-rules';
+import { createCatalogueStatusRepository } from '../repositories/catalogue-status.js';
 import { createCatalogueWriter, createVisibilityStore } from '../repositories/catalogue-writer.js';
 import { createCatalogueWriteGuard } from '../repositories/catalogue-write-package.js';
 import { createCatalogueReader } from '../repositories/catalogue.js';
@@ -404,6 +405,69 @@ export const catalogueWriteContractCases = {
 
 export function describeCatalogueWriteContract(name: string, open: Open): void {
   describe(`catalogue write contract: ${name}`, () => {
+    for (const action of ['releaseQuarantine', 'quarantineVersion', 'tombstoneVersion'] as const) {
+      it(`${action} refuses a version with a publish approval row atomically`, () =>
+        withWorld(open, async (w) => {
+          const { packageId } = await w.sync();
+          const [row] = await w.rows('SELECT id FROM version WHERE org_id = ?');
+          const versionId = String(row!.id);
+          await w.rows("UPDATE version SET status = 'quarantined' WHERE org_id = ?");
+          await w.rows(
+            `INSERT INTO publish_approval (id,org_id,package_id,version_id,source_id,hold_approval,hold_scan,approval_state,scan_state,requested_by_type,requested_by_id,token_id,expires_at)
+            VALUES ('approval',?,?,?,'source',1,0,'pending','not_required','user','admin','token','2999-01-01T00:00:00.000Z')`,
+            packageId,
+            versionId,
+          );
+          if (action === 'quarantineVersion') {
+            await w.rows("UPDATE version SET status='active' WHERE org_id = ?");
+            await w.rows(
+              "UPDATE publish_approval SET approval_state='approved',decided_by_user_id='admin',decided_at='2026-10-30T00:00:00.000Z' WHERE org_id = ?",
+            );
+          }
+          const before = await w.rows('SELECT rev FROM package WHERE org_id = ?');
+          const input = {
+            packageId,
+            versionId,
+            expectedStatus:
+              action === 'quarantineVersion' ? ('active' as const) : ('quarantined' as const),
+            manage: { kind: 'organization' as const },
+            audit: visibilityAudit('version.state_change'),
+          };
+          const result =
+            action === 'tombstoneVersion'
+              ? await w.store.tombstoneVersion(w.org, fence(), {
+                  ...input,
+                  reason: 'admin_tombstone',
+                })
+              : action === 'quarantineVersion'
+                ? await w.store.quarantineVersion(w.org, fence(), {
+                    ...input,
+                    reason: 'admin_quarantine',
+                  })
+                : await w.store.releaseQuarantine(w.org, fence(), input);
+          expect(result).toEqual({ ok: false, reason: 'publish_gate' });
+          if (action === 'releaseQuarantine') {
+            const status = createCatalogueStatusRepository(w.executor, {
+              providerAnchors: [
+                {
+                  provider: 'oidc',
+                  anchor: 'oidc:https://idp.example.test',
+                  emailAuthoritative: true,
+                  emailAuthoritativeDomains: ['example.test'],
+                },
+              ],
+            });
+            expect(await status.releaseQuarantine(w.org, fence(), { versionId })).toEqual({
+              ok: false,
+              reason: 'publish_gate',
+            });
+          }
+
+          expect(await w.rows('SELECT rev FROM package WHERE org_id = ?')).toEqual(before);
+          expect(await w.rows('SELECT id FROM audit_pending WHERE org_id = ?')).toEqual([]);
+        }));
+    }
+
     describeWriterBatchContract(async () => {
       const opened = await open();
       const { a: ctx } = await seedTwoOrganizations(opened.executor);
@@ -947,3 +1011,7 @@ export function describeCatalogueWriteContract(name: string, open: Open): void {
     });
   });
 }
+
+export { describeNpmPublishWriterContract } from './npm-publish-writer-contract.js';
+
+export { describeBlobSupersededContract } from './blob-superseded-contract.js';

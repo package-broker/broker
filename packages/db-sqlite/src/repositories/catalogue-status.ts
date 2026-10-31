@@ -68,7 +68,7 @@ export type ReleaseResult =
   | { readonly ok: true; readonly opId: string }
   | {
       readonly ok: false;
-      readonly reason: FailureReason | 'indeterminate' | 'not_found' | 'blob_busy';
+      readonly reason: FailureReason | 'indeterminate' | 'not_found' | 'blob_busy' | 'publish_gate';
     };
 
 export interface CatalogueStatusRepository {
@@ -106,6 +106,7 @@ function releasable(ctx: OrgContext, versionId: string): Guard {
   return sql<SqlBool>`exists (select 1 from version as target_version
     where target_version.id = ${versionId} and target_version.org_id = ${ctx.orgId}
       and target_version.status = 'quarantined'
+      and not exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = target_version.id)
       and ${leaseNotLive(ctx, 'target_version')})`;
 }
 
@@ -118,16 +119,22 @@ export function createCatalogueStatusRepository(
   options: CatalogueStatusOptions,
 ): CatalogueStatusRepository {
   async function refusal(ctx: OrgContext, versionId: string): Promise<ReleaseResult> {
-    const [row] = await executor.all<{ status: string }>(
+    const [row] = await executor.all<{ status: string; publish_gate: number }>(
       compile(
         db
           .selectFrom('version as target_version')
-          .select('target_version.status as status')
+          .select([
+            'target_version.status as status',
+            sql<number>`exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = target_version.id)`.as(
+              'publish_gate',
+            ),
+          ])
           .where('target_version.id', '=', versionId)
           .where('target_version.org_id', '=', ctx.orgId),
       ),
     );
     if (row === undefined) return { ok: false, reason: 'not_found' };
+    if (row.publish_gate === 1) return { ok: false, reason: 'publish_gate' };
     if (row.status !== 'quarantined') return { ok: false, reason: 'conflict' };
     return { ok: false, reason: 'blob_busy' };
   }

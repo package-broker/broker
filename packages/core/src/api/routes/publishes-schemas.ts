@@ -1,20 +1,9 @@
 import * as z from 'zod';
 
-export const publishApprovalState = z.enum([
-  'not_required',
-  'pending',
-  'approved',
-  'rejected',
-  'expired',
-]);
-export const publishScanState = z.enum([
-  'not_required',
-  'queued',
-  'running',
-  'allowed',
-  'denied',
-  'failed',
-]);
+import { PUBLISH_APPROVAL_STATES, PUBLISH_SCAN_STATES } from '../../db/publishes.js';
+
+export const publishApprovalState = z.enum(PUBLISH_APPROVAL_STATES);
+export const publishScanState = z.enum(PUBLISH_SCAN_STATES);
 const id = z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
 const revision = z.number().int().positive();
 export const decisionReason = z

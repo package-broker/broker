@@ -80,7 +80,7 @@ jobs:
       - run: pnpm lint
 
   unit:
-    name: unit
+    name: unit (${{ matrix.node }}, shard ${{ matrix.shard }}/2)
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -88,6 +88,7 @@ jobs:
       fail-fast: false
       matrix:
         node: [24, 26]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -98,8 +99,9 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
-      - run: pnpm test:scripts
+      - run: pnpm test --shard=${{ matrix.shard }}/2
+      - if: matrix.shard == 1
+        run: pnpm test:scripts
 
   build:
     name: build

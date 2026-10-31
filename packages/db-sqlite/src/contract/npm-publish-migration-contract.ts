@@ -104,7 +104,7 @@ export function describeNpmPublishMigrationContract(
     it('upgrades the published rc.2 database without changing existing rows and skips on rerun', async () => {
       const opened = await open();
       try {
-        const sources = await discoveredMigrations();
+        const sources = (await discoveredMigrations()).slice(0, 2);
         expect(sources.map((s) => s.id)).toEqual(['core:0001_init', 'core:0002_npm_publish']);
         await migrate(opened.executor, sources.slice(0, 1), { holder: 'rc2' });
         await seed(opened.executor);

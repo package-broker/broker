@@ -482,7 +482,8 @@ export type VisibilityWriteResult =
         | 'invalid_pattern'
         | 'too_many_patterns'
         | 'not_attached'
-        | 'not_eligible';
+        | 'not_eligible'
+        | 'publish_gate';
     };
 
 export interface VisibilityAudit {

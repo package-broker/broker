@@ -554,7 +554,7 @@ async function buildServices(
   options: StartOptions,
   executor: SqlExecutor,
   admissionWaitMs: number,
-  observability: Observability,
+  telemetry: Telemetry,
 ): Promise<PlatformServices> {
   blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
   const byteStore = await openByteStore(ports.blob, options.env, options.fetch);
@@ -562,9 +562,18 @@ async function buildServices(
   try {
     blob = createBlobStore(
       byteStore,
-      createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+      createBlobRepository(executor, {
+        purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS,
+        supersededObjects: {
+          remove: (key) => byteStore.remove(key),
+          counter: (outcome) =>
+            telemetry
+              .observe()
+              .counter('pb.blob.operations', { kind: 'superseded_remove', outcome }),
+        },
+      }),
       {
-        observability,
+        observability: telemetry.observe(),
         admission: createBlobUploadAdmission(),
         maxBytes: ports.blob.maxBytes,
         admissionWaitMs,
@@ -755,7 +764,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
         options,
         opened.executor,
         registry.timers.waitBudgetMs,
-        telemetry.observe(),
+        telemetry,
       );
     }
 

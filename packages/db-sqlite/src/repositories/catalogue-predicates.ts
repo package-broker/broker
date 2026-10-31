@@ -1,3 +1,4 @@
+import { MAX_NPM_NAME_LENGTH } from '@package-broker/core/catalogue/names';
 import { sql, type Expression, type SqlBool } from 'kysely';
 import {
   MAX_PATTERN_BYTES,
@@ -33,6 +34,21 @@ function invalidPattern(pattern: Expression<unknown>): Expression<SqlBool> {
     or ${pattern} glob '*[^a-z0-9._~@!/*-]*'
     or length(${pattern}) - length(replace(${pattern}, '*', '')) > ${sql.lit(MAX_PATTERN_WILDCARDS)}
   )`;
+}
+
+export function npmClaimCover(
+  ecosystem: Expression<unknown>,
+  pattern: Expression<unknown>,
+  key: Expression<unknown>,
+): Expression<SqlBool> {
+  return sql<SqlBool>`(${ecosystem} = 'npm'
+    and length(${pattern}) between 1 and ${sql.lit(MAX_NPM_NAME_LENGTH)}
+    and length(cast(${pattern} as blob)) = length(${pattern})
+    and ${pattern} not glob '*[^a-z0-9._~@!/*-]*'
+    and (instr(${pattern}, '*') = 0 or
+      (substr(${pattern}, 1, 1) = '@' and substr(${pattern}, -2) = '/*' and instr(${pattern}, '*') = length(${pattern})))
+    and (${key} = ${pattern} or (substr(${pattern}, -2) = '/*'
+      and substr(${key}, 1, length(${pattern}) - 1) = substr(${pattern}, 1, length(${pattern}) - 1))))`;
 }
 
 function referencedTables(node: unknown, found: string[] = []): string[] {
@@ -126,7 +142,9 @@ export function proxyEligibleCondition(pkg: PackageRefs): Expression<SqlBool> {
         select 1 from registered_name as ${sql.id(a.r)}
         where ${at(a.r, 'org_id')} = ${p('org_id')}
           and ${at(a.r, 'ecosystem')} = ${p('ecosystem')}
-          and (case when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)
+          and (case when ${at(a.r, 'ecosystem')} = 'npm' and length(${at(a.r, 'pattern')}) > ${sql.lit(MAX_PATTERN_BYTES)} and ${npmClaimCover(at(a.r, 'ecosystem'), at(a.r, 'pattern'), at(a.r, 'pattern'))}
+            then ${npmClaimCover(at(a.r, 'ecosystem'), at(a.r, 'pattern'), p('name'))}
+            when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)
       )
     )
   )`;
@@ -140,6 +158,7 @@ export function readTimeCondition(
   const a = aliasesFor(['p'], [projectRef], [pkg.package, pkg.source]);
   const status = at(pkg.package, 'status');
   return sql<SqlBool>`(
+    ${at(pkg.package, 'held_until_active')} = 0 and
     exists (
       select 1 from project as ${sql.id(a.p)}
       where ${at(a.p, 'id')} = ${projectRef} and ${at(a.p, 'org_id')} = ${ctx.orgId} and ${at(a.p, 'status')} = 'active'

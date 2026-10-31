@@ -991,3 +991,18 @@ describe('reported VCS providers', () => {
     expect(reportedVcsProviders('cloudflare', [])).toEqual([]);
   });
 });
+
+describe('hosted npm config', () => {
+  it.each(['node', 'cloudflare'] as const)(
+    'accepts an empty hosted npm config on %s',
+    (runtime) => {
+      expect(parse('hosted', 'npm', null, {}, { runtime })).toEqual({ ok: true, config: {} });
+    },
+  );
+  it('refuses credentials, URLs, claim lists and hosted Composer', () => {
+    expect(parse('hosted', 'npm', null, {}, { hasCredential: true }).ok).toBe(false);
+    expect(parse('hosted', 'npm', 'https://registry.example.test', {}).ok).toBe(false);
+    expect(parse('hosted', 'npm', null, { claims: ['widget'] }).ok).toBe(false);
+    expect(parse('hosted', 'composer', null, {}).ok).toBe(false);
+  });
+});

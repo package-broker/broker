@@ -1,3 +1,5 @@
+import type { SourcePackageProbe } from '../ingest/source-package.js';
+import { isNpmClaim } from './claim-admission.js';
 import { SOURCE_ERROR_CODES } from './source-error-codes.js';
 import type { ApiCall } from '../api/idempotency.js';
 import { redactValue } from '../audit/redact.js';
@@ -72,7 +74,11 @@ export type SourceError =
   | 'source_paused'
   | 'proxy_source'
   | 'pattern_taken'
-  | 'invalid_name';
+  | 'invalid_name'
+  | 'claim_overlap'
+  | 'claim_in_use'
+  | 'name_public'
+  | 'name_public_unverified';
 
 export type SourceServiceResult<T> =
   | { readonly ok: true; readonly value: T; readonly warnings?: readonly SourceConfigProblem[] }
@@ -159,7 +165,7 @@ export interface SourceService {
   addRegisteredName(
     ...args: [
       ...WriteArgs,
-      input: { readonly sourceId: string; readonly pattern: string },
+      input: { readonly sourceId: string; readonly pattern: string; readonly id?: string },
       call: ApiCall,
     ]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
@@ -183,6 +189,7 @@ export interface SourceService {
 }
 
 export interface SourceServiceDeps {
+  readonly claimProbe?: SourcePackageProbe;
   readonly sources: Pick<
     SourceRepository,
     | 'create'
@@ -485,6 +492,8 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     linkedKind?: string,
     existingKind?: string,
   ) {
+    if (input.type === 'hosted' && input.projectId !== null)
+      return invalid('type', 'hosted sources must belong to the organization');
     if (input.configJson.length > 65536)
       return invalid('config', 'is longer than 65536 characters');
     let config: unknown;
@@ -750,6 +759,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       requireFence(who, fence);
       const source = await owned(ctx, who, id);
       if (source === null) return fail('not_found');
+      if (source.type === 'hosted') return invalid('type', 'hosted sources have no upstream');
       const answer = await deps.sources.syncNow(ctx, fence, {
         id,
         providerAnchors: deps.providerAnchors,
@@ -1085,15 +1095,80 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     async addRegisteredName(ctx, who, fence, input, call) {
       if (!orgOnly(who)) return fail('forbidden');
       requireFence(who, fence);
-      if (!isValidPattern(input.pattern)) return fail('invalid_pattern');
-      const id = deps.ids.ulid();
+      const source = await deps.sources.get(ctx, input.sourceId);
+      if (source === null) return fail('not_found');
+      if (source.type === 'npmjs_proxy' || source.type === 'packagist_proxy')
+        return fail('proxy_source');
+      if (source.type === 'hosted' && source.projectId !== null) return fail('conflict');
+      if (input.id !== undefined && (source.type !== 'hosted' || source.ecosystem !== 'npm'))
+        return invalid('type', 'only hosted npm claims can be replaced');
+      if (
+        source.type === 'hosted' && source.ecosystem === 'npm'
+          ? !isNpmClaim(input.pattern)
+          : !isValidPattern(input.pattern)
+      )
+        return fail('invalid_pattern');
+      let oldPattern: string | undefined;
+      if (input.id !== undefined) {
+        const oldClaim = await deps.registeredNames.get(ctx, input.id);
+        if (oldClaim?.sourceId !== input.sourceId) return fail('not_found');
+        oldPattern = oldClaim.pattern;
+      }
+      let claimProbe: { proxyId: string } | undefined;
+      if (source.type === 'hosted' && source.ecosystem === 'npm' && !input.pattern.includes('*')) {
+        const proxyId = await deps.registeredNames.claimProxy(ctx);
+        if (proxyId !== null) {
+          let answer;
+          try {
+            answer = await deps.claimProbe?.(
+              ctx,
+              proxyId,
+              input.pattern,
+              AbortSignal.timeout(5000),
+              'claim',
+            );
+          } catch {
+            return fail('name_public_unverified');
+          }
+          if (answer === 'found') return fail('name_public');
+          if (answer !== 'not_found') return fail('name_public_unverified');
+          claimProbe = { proxyId };
+        }
+      }
+      const id = input.id ?? deps.ids.ulid();
       const answer = await deps.registeredNames.add(ctx, fence, {
         ...input,
+        ...(input.id === undefined ? {} : { replace: true }),
+        ...(claimProbe === undefined ? {} : { claimProbe }),
         id,
-        ...mutationAudit(call, who, 'registered_name.add', 'registered_name', id),
+        ...mutationAudit(
+          call,
+          who,
+          input.id === undefined ? 'registered_name.add' : 'registered_name.update',
+          'registered_name',
+          id,
+          null,
+          input.id === undefined
+            ? undefined
+            : { pattern: { old: oldPattern!, new: input.pattern } },
+        ),
+        ...(oldPattern === undefined ? {} : { previousPattern: oldPattern }),
         providerAnchors: deps.providerAnchors,
       });
-      return answer === 'added' ? success({ id }) : fail(answer);
+      return answer === 'added'
+        ? success(
+            { id },
+            source.type === 'hosted' && source.ecosystem === 'npm' && input.pattern.endsWith('/*')
+              ? [
+                  {
+                    field: 'pattern',
+                    message:
+                      'This scope claim hides public packages in the scope that are not yet cached.',
+                  },
+                ]
+              : undefined,
+          )
+        : fail(answer);
     },
     async removeRegisteredName(ctx, who, fence, id, call) {
       if (!orgOnly(who)) return fail('forbidden');

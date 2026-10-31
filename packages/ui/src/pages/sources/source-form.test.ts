@@ -812,3 +812,43 @@ it.each(['composer_repository', 'npm_registry'] as const)(
     expect(validateSourceForm(fields, type, true, displayed)).toHaveProperty('url');
   },
 );
+
+it('offers hosted npm for the organization with claims kept outside configuration', () => {
+  const html = renderToString(
+    createElement(SourceForm, {
+      source: null,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      initialType: 'hosted',
+    }),
+  );
+  expect(html).toContain('value="hosted"');
+  expect(html).not.toContain('name="url"');
+  expect(html).toContain('Register package names');
+  expect(html).toContain('not yet cached');
+  expect(sourceSubmission(data(), 'npm', 'hosted', null)).toMatchObject({
+    type: 'hosted',
+    ecosystem: 'npm',
+    config: {},
+    url: null,
+  });
+});
+
+it('omits hosted source creation in a project form', () => {
+  const html = renderToString(
+    createElement(SourceForm, {
+      source: null,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      initialType: 'hosted',
+      organization: false,
+    }),
+  );
+  expect(html).not.toContain('value="hosted"');
+});

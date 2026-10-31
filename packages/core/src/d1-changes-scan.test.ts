@@ -397,7 +397,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     "deleteFrom('identity'); deleteFrom('session'); deleteFrom('user_group'); insertInto('identity_block') [onConflict:doNothing]; updateTable('identity_provider_binding'); updateTable('token')",
   'db-sqlite/src/repositories/proxy-admission.ts': '',
   'db-sqlite/src/repositories/registered-name.ts':
-    "deleteFrom('registered_name'); insertInto('registered_name'); updateTable('source') x2",
+    "deleteFrom('registered_name'); insertInto('registered_name'); updateTable('registered_name'); updateTable('source') x2",
   'db-sqlite/src/repositories/session-liveness.ts': '',
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
@@ -680,6 +680,28 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Token lookup composes a typed read condition; blob publication uses returned rows and a transactional before-image for cleanup; tag lookup selects active patch targets. None reads executor change counts.',
+      sites: [
+        "db-sqlite/src/repositories/access.ts:SQL template: sql<SqlBool>`exists ${loose.selectFrom(tokenLookupQuery(ctx, input).as('pa')).select(sql.lit(1).as('one')).where(condition)}` #1",
+        'db-sqlite/src/repositories/blob.ts:builder variable: const [before, written, current] = await executor.batch([\n        statement(previous),\n        statement(upsert),\n        statement(existing),\n      ]); #1',
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`(SELECT version.id FROM version\n    WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n      AND version.version_normalized = ${target} AND ${request.mode === 'patch' ? sql<boolean>`version.status = 'active'` : sql<boolean>`version.status != 'tombstoned'`})` #1",
+      ],
+    },
+    {
+      reason:
+        'Publish authorization and batch assembly use prepared statement parameters and metadata records; these sites neither inspect executor changes nor infer success from change counts. Held-package filtering and tag patching preserve the existing returned-row decisions.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:opaque object access: Object.assign(input.version, {\n              metadata: {\n                ...input.version.metadata,\n                json: JSON.stringify({ name: 'widget', description: 'x'.repeat(262144) }),\n              },\n            }) #1",
+        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    ${at(pkg.package, 'held_until_active')} = 0 and\n    exists (\n      select 1 from project as ${sql.id(a.p)}\n      where ${at(a.p, 'id')} = ${projectRef} and ${at(a.p, 'org_id')} = ${ctx.orgId} and ${at(a.p, 'status')} = 'active'\n    )\n    and (\n      ${status} = 'active'\n      or (${status} = 'removed_upstream' and ${at(pkg.source, 'removal_policy')} = 'flag')\n    )\n  )` #1",
+        'db-sqlite/src/repositories/catalogue-publish.ts:opaque object access: Object.entries(input.distTags) #1',
+        'db-sqlite/src/repositories/catalogue-publish.ts:opaque object access: Object.entries(a.distTags) #1',
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL text: 'replace' #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const groups = [\n    head,\n    ...probes.map((probe) => [probe]),\n    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),\n    ...(request.mode === 'patch' ? [] : [[removeHistory, remove]]),\n    [advance],\n  ]; #1",
+        'db-sqlite/src/repositories/package-admin-read.ts:object rest access: ...version #1',
+      ],
+    },
+    {
+      reason:
         'These fixed source-error lookups read JSON counter values, never executor change metadata.',
       sites: [
         'db-sqlite/src/repositories/source.ts:unresolved computed access: errors[code] #1',
@@ -890,13 +912,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         'db-sqlite/src/testing/mutation-table/project-source-read.ts:unresolved computed access: orgs[sourceOrg] #1',
         'db-sqlite/src/testing/mutation-table/project-source-read.ts:unresolved computed access: orgs[attachmentOrg] #1',
-      ],
-    },
-    {
-      reason:
-        'Add batch prepends an org-scoped visibility check; remaining writes are inserts, and no result count is read.',
-      sites: [
-        'db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, sourceUnchanged]), ctx),\n        [\n          ...assertCheck(visible),\n          insert,\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,\n            false,\n          ),\n          collision: probe(sameSource, false),\n        },\n      ); #1',
       ],
     },
     {
@@ -1535,7 +1550,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/blob.ts:builder variable: const bump = db\n        .updateTable('blob')\n        .set({ purge_generation: FRESH, purge_lease_until: null })\n        .where('org_id', '=', ctx.orgId)\n        .where('sha256', '=', sha256)\n        .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)\n        .returning('purge_generation'); #1",
         'db-sqlite/src/repositories/blob.ts:builder variable: const [bumped, fresh] = await executor.batch([statement(bump), statement(probe)]); #1',
         "db-sqlite/src/repositories/blob.ts:builder variable: const upsert = db\n        .insertInto('blob')\n        .values({\n          id: FRESH,\n          org_id: ctx.orgId,\n          sha256,\n          size_bytes: input.size,\n          storage_key:\n            input.npmPublishHandle === undefined\n              ? blobStorageKey(ctx.orgId, sha256)\n              : stagedStorageKey(input.npmPublishHandle, sha256),\n          media_type: input.mediaType,\n          refetchable: input.refetchable ? 1 : 0,\n          purge_generation: input.generation,\n          published_at: NOW,\n        })\n        .onConflict((conflict) =>\n          conflict\n            .columns(['org_id', 'sha256'])\n            .doUpdateSet({\n              published_at: NOW,\n              refetchable: sql<number>`case when blob.deleted_at is not null then excluded.refetchable else min(blob.refetchable, excluded.refetchable) end`,\n              upstream_url: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.upstream_url else blob.upstream_url end`,\n              last_fetched_at: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.last_fetched_at else blob.last_fetched_at end`,\n              last_accessed_at: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.last_accessed_at else blob.last_accessed_at end`,\n              purge_lease_until: null,\n              size_bytes: sql<number>`excluded.size_bytes`,\n              media_type: sql<string>`excluded.media_type`,\n              storage_key: sql<string>`excluded.storage_key`,\n              purge_after: null,\n              deleted_at: null,\n            })\n            .where(\n              sql<SqlBool>`blob.purge_generation = excluded.purge_generation and not ${leaseLive('blob.purge_lease_until')} and (blob.deleted_at is not null or (blob.size_bytes = excluded.size_bytes and blob.media_type = excluded.media_type))`,\n            ),\n        )\n        .returning(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation']); #1",
-        'db-sqlite/src/repositories/blob.ts:builder variable: const [written, current] = await executor.batch([statement(upsert), statement(existing)]); #1',
+        'db-sqlite/src/repositories/blob.ts:builder variable: const [before, written, current] = await executor.batch([\n        statement(previous),\n        statement(upsert),\n        statement(existing),\n      ]); #1',
       ],
     },
     {
@@ -1604,8 +1619,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`('packagist_proxy', 'npmjs_proxy')` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    length(cast(${pattern} as blob)) <> length(${pattern})\n    or length(${pattern}) not between 1 and ${sql.lit(MAX_PATTERN_BYTES)}\n    or ${pattern} glob '*[^a-z0-9._~@!/*-]*'\n    or length(${pattern}) - length(replace(${pattern}, '*', '')) > ${sql.lit(MAX_PATTERN_WILDCARDS)}\n  )` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`exists (\n    select 1 from project_source as ${sql.id(a.ps)}\n    join source as ${sql.id(a.s)} on ${at(a.s, 'id')} = ${at(a.ps, 'source_id')}\n    join project as ${sql.id(a.p)} on ${at(a.p, 'id')} = ${at(a.ps, 'project_id')}\n    where ${at(a.ps, 'project_id')} = ${projectRef}\n      and ${at(a.ps, 'source_id')} = ${sourceRef}\n      and ${at(a.ps, 'org_id')} = ${ctx.orgId}\n      and ${at(a.s, 'org_id')} = ${ctx.orgId}\n      and ${at(a.p, 'org_id')} = ${ctx.orgId}\n      and ${at(a.s, 'ecosystem')} = ${ecosystemRef}\n      and (${at(a.s, 'project_id')} is null or ${at(a.s, 'project_id')} = ${at(a.ps, 'project_id')})\n  )` #1",
-        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    ${at(pkg.source, 'type')} not in ${PROXY_TYPES}\n    or (\n      not exists (\n        select 1 from package as ${sql.id(a.q)} indexed by package_by_name\n        join source as ${sql.id(a.qs)} on ${at(a.qs, 'id')} = ${at(a.q, 'source_id')}\n          and ${at(a.qs, 'org_id')} = ${p('org_id')}\n        where ${at(a.q, 'org_id')} = ${p('org_id')}\n          and ${at(a.q, 'ecosystem')} = ${p('ecosystem')}\n          and ${at(a.q, 'name')} = ${p('name')}\n          and ${at(a.qs, 'type')} not in ${PROXY_TYPES}\n      )\n      and not exists (\n        select 1 from registered_name as ${sql.id(a.r)}\n        where ${at(a.r, 'org_id')} = ${p('org_id')}\n          and ${at(a.r, 'ecosystem')} = ${p('ecosystem')}\n          and (case when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)\n      )\n    )\n  )` #1",
-        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    exists (\n      select 1 from project as ${sql.id(a.p)}\n      where ${at(a.p, 'id')} = ${projectRef} and ${at(a.p, 'org_id')} = ${ctx.orgId} and ${at(a.p, 'status')} = 'active'\n    )\n    and (\n      ${status} = 'active'\n      or (${status} = 'removed_upstream' and ${at(pkg.source, 'removal_policy')} = 'flag')\n    )\n  )` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`${at(alias, 'org_id')} = ${ctx.orgId} and ${at(alias, 'project_id')} = ${projectRef} and ${at(alias, 'source_id')} = ${sourceRef}` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`${at(alias, 'effect')} = ${sql.lit(value)}` #1",
         'db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`project_package_pattern as ${sql.id(alias)}` #1',
@@ -1785,7 +1798,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM package\n      WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}\n        AND package.ecosystem = 'npm')` #1",
-        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`(SELECT version.id FROM version\n    WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n      AND version.version_normalized = ${target} AND version.status != 'tombstoned')` #1",
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`${targetOf(target)} IS NOT NULL` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`${tag}` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`${targetOf(target)} IS NULL` #1',
@@ -1822,7 +1834,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const removeHistory = compile(\n    db\n      .insertInto('dist_tag_history')\n      .columns([\n        'id',\n        'org_id',\n        'package_id',\n        'tag',\n        'version_id',\n        'previous_version_id',\n        'action',\n        'actor_type',\n        'actor_id',\n        'op_id',\n      ])\n      .expression(\n        db\n          .selectFrom('dist_tag')\n          .select([\n            // One statement removes many rows: share the ULID time prefix, generate 64 random bits per row.\n            sql<string>`${newOpId().slice(0, 10)} || upper(hex(randomblob(8)))`.as('id'),\n            'dist_tag.org_id',\n            'dist_tag.package_id',\n            'dist_tag.tag',\n            sql<string | null>`NULL`.as('version_id'),\n            'dist_tag.version_id',\n            sql<string>`'remove'`.as('action'),\n            sql<string>`${actorType}`.as('actor_type'),\n            sql<string | null>`${actorId}`.as('actor_id'),\n            sql<string>`${opId}`.as('op_id'),\n          ])\n          .where(absent),\n      ),\n  ); #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const remove = compile(db.deleteFrom('dist_tag').where(absent)); #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const advance = compile(\n    db\n      .updateTable('package')\n      .set({\n        rev: sql<number>`package.rev + 1`,\n        modified_at: monotonicNow,\n      })\n      .where('package.id', '=', packageId)\n      .where('package.org_id', '=', ctx.orgId)\n      .where(\n        sql<boolean>`EXISTS (SELECT 1 FROM dist_tag_history\n          WHERE dist_tag_history.package_id = package.id AND dist_tag_history.op_id = ${opId})`,\n      ),\n  ); #1",
-        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const groups = [\n    head,\n    ...probes.map((probe) => [probe]),\n    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),\n    [removeHistory, remove],\n    [advance],\n  ]; #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const statementCount = groups.reduce((sum, group) => sum + group.length, 0); #1',
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
         'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: return {\n        packageId,\n        inserted: 0,\n        updated: setChanges + removed,\n        unchanged: valid.length - (skipped.length - badGrammar.length) - setChanges,\n        conflicts: [],\n        refused: [],\n        skippedTags: skipped,\n        statements: statementCount,\n      }; #1',
@@ -2387,13 +2398,11 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'SQL in registered-name; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as rn_act_s\n    where rn_act_s.id = ${sourceId} and rn_act_s.org_id = ${ctx.orgId}\n      and (rn_act_s.type in (${sql.join(PROXY_TYPES)})\n        or (exists (select 1 from registered_name as rn_act_r\n              where rn_act_r.source_id = rn_act_s.id and rn_act_r.org_id = rn_act_s.org_id)\n          and (rn_act_s.type <> 'npm_registry' or not exists (\n            select 1 from json_each(rn_act_s.config_json, '$.scopes') as rn_act_j\n            where not exists (select 1 from registered_name as rn_act_c\n              where rn_act_c.source_id = rn_act_s.id and rn_act_c.org_id = rn_act_s.org_id\n                and rn_act_c.pattern = rn_act_j.value || '/*'))))))` #1",
-        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as rn_cov\n    where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}\n      and rn_cov.ecosystem = ${ecosystem}\n      and (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'\n      and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)\n      and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}\n      and length(rn_cov.pattern) - length(replace(rn_cov.pattern, '*', ''))\n        <= ${sql.lit(MAX_PATTERN_WILDCARDS)}\n        then ${key} glob rn_cov.pattern else 0 end))` #1",
+
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<number>`(${condition}) is not 1` #1',
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<number>`(${condition})` #1',
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`(${sql.join(conditions, sql` and `)})` #1',
-        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId}\n          and (existing.id = ${input.id}\n            or (existing.source_id = ${input.sourceId} and existing.ecosystem = ${source.ecosystem}\n              and existing.pattern = ${input.pattern})))` #1',
-        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId} and existing.ecosystem = ${source.ecosystem}\n          and existing.pattern = ${input.pattern} and existing.source_id <> ${input.sourceId})` #1',
-        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as owner\n        where owner.id = ${input.sourceId} and owner.org_id = ${ctx.orgId}\n          and owner.ecosystem = ${source.ecosystem}\n          and owner.type not in (${sql.join(PROXY_TYPES)}))` #1',
+
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as target\n        where target.id = ${input.id} and target.org_id = ${ctx.orgId}\n          and target.source_id = ${sourceId})` #1',
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as target\n        where target.id = ${input.id} and target.org_id = ${ctx.orgId}\n          and target.project_id is ${source.project_id})` #1',
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as target\n        where target.id = ${input.id} and target.org_id = ${ctx.orgId} and target.status = 'paused')` #1",
@@ -2403,7 +2412,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'Local builder in registered-name; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
-        "db-sqlite/src/repositories/registered-name.ts:builder variable: const insert = compile(\n        db.insertInto('registered_name').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          source_id: input.sourceId,\n          ecosystem: source.ecosystem,\n          pattern: input.pattern,\n        }),\n      ); #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) return 'added'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (\n        outcome.reason === 'conflict' &&\n        input.idempotency !== undefined &&\n        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))\n      )\n        return 'conflict'; #1",
@@ -3413,6 +3421,99 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Audit condition embeds only the compiled organization-scoped operation marker and session effect guards with bound parameters; no D1 changes() read.',
       sites: [
         'db-sqlite/src/repositories/local-login-success.ts:SQL input: sql: `(${when.sql}) = 1` #1',
+      ],
+    },
+
+    {
+      reason:
+        'Claim builders import the npm name limit and Kysely expression types; these dependencies add no result-count reads or writes.',
+      sites: [
+        "db-sqlite/src/repositories/catalogue-predicates.ts:opaque dependency: import { MAX_NPM_NAME_LENGTH } from '@package-broker/core/catalogue/names'; #1",
+      ],
+    },
+    {
+      reason:
+        'Claim coverage uses bounded ASCII equality and scope prefixes; legacy GLOB stays behind its pattern validator, with no writes or count reads.',
+      sites: [
+        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(${ecosystem} = 'npm'\n    and length(${pattern}) between 1 and ${sql.lit(MAX_NPM_NAME_LENGTH)}\n    and length(cast(${pattern} as blob)) = length(${pattern})\n    and ${pattern} not glob '*[^a-z0-9._~@!/*-]*'\n    and (instr(${pattern}, '*') = 0 or\n      (substr(${pattern}, 1, 1) = '@' and substr(${pattern}, -2) = '/*' and instr(${pattern}, '*') = length(${pattern})))\n    and (${key} = ${pattern} or (substr(${pattern}, -2) = '/*'\n      and substr(${key}, 1, length(${pattern}) - 1) = substr(${pattern}, 1, length(${pattern}) - 1))))` #1",
+        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    ${at(pkg.source, 'type')} not in ${PROXY_TYPES}\n    or (\n      not exists (\n        select 1 from package as ${sql.id(a.q)} indexed by package_by_name\n        join source as ${sql.id(a.qs)} on ${at(a.qs, 'id')} = ${at(a.q, 'source_id')}\n          and ${at(a.qs, 'org_id')} = ${p('org_id')}\n        where ${at(a.q, 'org_id')} = ${p('org_id')}\n          and ${at(a.q, 'ecosystem')} = ${p('ecosystem')}\n          and ${at(a.q, 'name')} = ${p('name')}\n          and ${at(a.qs, 'type')} not in ${PROXY_TYPES}\n      )\n      and not exists (\n        select 1 from registered_name as ${sql.id(a.r)}\n        where ${at(a.r, 'org_id')} = ${p('org_id')}\n          and ${at(a.r, 'ecosystem')} = ${p('ecosystem')}\n          and (case when ${at(a.r, 'ecosystem')} = 'npm' and length(${at(a.r, 'pattern')}) > ${sql.lit(MAX_PATTERN_BYTES)} and ${npmClaimCover(at(a.r, 'ecosystem'), at(a.r, 'pattern'), at(a.r, 'pattern'))}\n            then ${npmClaimCover(at(a.r, 'ecosystem'), at(a.r, 'pattern'), p('name'))}\n            when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)\n      )\n    )\n  )` #1",
+      ],
+    },
+    {
+      reason:
+        'Registered-name coverage delegates npm exact/scope claims to the shared helper and keeps legacy glob validation bounded before matching.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as rn_cov\n    where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}\n      and rn_cov.ecosystem = ${ecosystem}\n      and (${npmClaimCover(sql.ref('rn_cov.ecosystem'), sql.ref('rn_cov.pattern'), sql`${key}`)}\n      or (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'\n      and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)\n      and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}\n      and length(rn_cov.pattern) - length(replace(rn_cov.pattern, '*', ''))\n        <= ${sql.lit(MAX_PATTERN_WILDCARDS)}\n        then ${key} glob rn_cov.pattern else 0 end)))` #1",
+      ],
+    },
+    {
+      reason:
+        'Upstream verification reads any organization npmjs_proxy, independently of attachments; the source organization fence remains required.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as claim_proxy\n      where claim_proxy.org_id = ${ctx.orgId} and claim_proxy.type = 'npmjs_proxy'\n        ${id === undefined ? sql`` : sql`and claim_proxy.id = ${id}`})` #1",
+      ],
+    },
+    {
+      reason:
+        'Hosted admission checks cached public packages only on other sources in the same organization; this read neither mutates rows nor reads counts.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (\n        select 1 from package as claim_package join source as claim_source\n          on claim_source.id = claim_package.source_id and claim_source.org_id = ${ctx.orgId}\n        where claim_package.org_id = ${ctx.orgId} and claim_package.ecosystem = 'npm'\n          and claim_package.source_id <> ${input.sourceId}\n          and claim_source.type in ('npmjs_proxy', 'npm_registry')\n          and (claim_package.name = ${input.pattern}\n            ${input.pattern.endsWith('/*') ? sql`or substr(claim_package.name, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))` #1",
+      ],
+    },
+    {
+      reason:
+        'Claim verification composes organization-scoped read predicates only; no mutation, D1 changes read or FK effect is introduced.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`not ${organizationProxy(ctx)}` #1',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`1` #2',
+      ],
+    },
+    {
+      reason:
+        'Replacement refuses to uncover any destination package covered by the old claim; both package and claim are scoped by organization and source inside the write batch.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`not exists (\n        select 1 from package as owned_package join registered_name as old_claim\n          on old_claim.org_id = ${ctx.orgId} and old_claim.id = ${input.id} and old_claim.source_id = ${input.sourceId}\n        where owned_package.org_id = ${ctx.orgId} and owned_package.source_id = ${input.sourceId}\n          and ${npmClaimCover(sql.lit('npm'), sql.ref('old_claim.pattern'), sql.ref('owned_package.name'))}\n          and not ${npmClaimCover(sql.lit('npm'), sql`${input.pattern}`, sql.ref('owned_package.name'))}\n      )` #1",
+      ],
+    },
+    {
+      reason:
+        'Registered-name batch rechecks organization, authority, stored-package overlap, public-name verification, replacement coverage and audit snapshot before one fenced insert/update; it never reads a D1 result count.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, sourceUnchanged]), ctx),\n        [\n          ...assertCheck(visible),\n          ...assertCheck(sql<SqlBool>`not ${otherSource}`),\n          ...assertCheck(sql<SqlBool>`not ${storedOverlap}`),\n          ...assertCheck(sql<SqlBool>`not ${cachedPublic}`),\n          ...assertCheck(verified),\n          ...assertCheck(retainsPackages),\n          ...(input.previousPattern === undefined\n            ? []\n            : assertCheck(\n                sql<SqlBool>`exists (select 1 from registered_name where org_id = ${ctx.orgId} and id = ${input.id} and source_id = ${input.sourceId} and pattern = ${input.previousPattern})`,\n              )),\n          ...(input.replace\n            ? assertCheck(\n                sql<SqlBool>`exists (select 1 from registered_name where org_id = ${ctx.orgId} and id = ${input.id} and source_id = ${input.sourceId})`,\n              )\n            : []),\n          insert,\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,\n            false,\n          ),\n          collision: probe(sameSource, false),\n        },\n      ); #1',
+      ],
+    },
+    {
+      reason:
+        'Claim validation imports a pure npm grammar helper without SQL mutations or result-count reads.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:opaque dependency: import { isNpmClaim } from '@package-broker/core/sources/claim-admission'; #1",
+      ],
+    },
+    {
+      reason:
+        'Claim admission composes organization-scoped read predicates; source identity and ownership are rechecked without reading mutation counts.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId}\n          and ${input.replace ? sql`existing.id <> ${input.id} and` : sql``} (existing.id = ${input.id}\n            or (existing.source_id = ${input.sourceId} and existing.ecosystem = ${source.ecosystem}\n              and existing.pattern = ${input.pattern})))` #1',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name\n        where org_id = ${ctx.orgId} and ecosystem = ${source.ecosystem}\n          and source_id <> ${input.sourceId} and pattern = ${input.pattern})` #1',
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from package as stored_package\n          join source as stored_source on stored_source.id = stored_package.source_id\n            and stored_source.org_id = ${ctx.orgId}\n          where stored_package.org_id = ${ctx.orgId} and stored_package.ecosystem = 'npm'\n            and stored_package.source_id <> ${input.sourceId}\n            and stored_source.type not in (${sql.join(PROXY_TYPES)})\n            and ${npmClaimCover(sql.lit('npm'), sql`${input.pattern}`, sql.ref('stored_package.name'))})` #1",
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`0` #2',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`0` #1',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`1` #1',
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as owner\n        where owner.id = ${input.sourceId} and owner.org_id = ${ctx.orgId}\n          and owner.ecosystem = ${source.ecosystem}\n          and owner.type = ${source.type}\n          and (owner.type <> 'hosted' or owner.project_id is null))` #1",
+      ],
+    },
+    {
+      reason:
+        'Registered-name insertion or replacement changes only the claim row under organization and source fences; no referenced key or D1 result-count dependency changes.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:builder variable: const insert = input.replace\n        ? compile(\n            db\n              .updateTable('registered_name')\n              .set({ pattern: input.pattern })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('source_id', '=', input.sourceId),\n          )\n        : compile(\n            db.insertInto('registered_name').values({\n              id: input.id,\n              org_id: ctx.orgId,\n              source_id: input.sourceId,\n              ecosystem: source.ecosystem,\n              pattern: input.pattern,\n            }),\n          ); #1",
+      ],
+    },
+    {
+      reason:
+        'Overlap checks organization-scoped registrations, comparing bounded legacy globs and compatible literal prefixes conservatively; destination registrations are excluded.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId} and existing.ecosystem = ${source.ecosystem}\n          and existing.source_id <> ${input.sourceId}\n          and (existing.pattern = ${input.pattern}\n            ${\n              source.ecosystem !== 'npm'\n                ? sql``\n                : sql`or\n              ((${source.type} = 'hosted' or exists (select 1 from source as overlap_participant where overlap_participant.org_id = ${ctx.orgId} and overlap_participant.id = existing.source_id and overlap_participant.type = 'hosted')) and (\n              (${input.pattern.includes('*') ? 1 : 0} = 1\n                and substr(existing.pattern, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})) = substr(${input.pattern}, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})))\n              or\n              (case when length(existing.pattern) <= ${sql.lit(MAX_PATTERN_BYTES)} then ${input.pattern} glob existing.pattern else 0 end)\n              or (substr(existing.pattern, -2) = '/*' and instr(existing.pattern, '*') = length(existing.pattern)\n                and substr(${input.pattern}, 1, length(existing.pattern) - 1) = substr(existing.pattern, 1, length(existing.pattern) - 1))\n              ${input.pattern.endsWith('/*') ? sql`or substr(existing.pattern, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))`\n            }))` #1",
       ],
     },
   ].flatMap(({ reason, sites }) => sites.map((site) => [site, reason])),

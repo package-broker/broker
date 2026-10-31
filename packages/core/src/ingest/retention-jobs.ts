@@ -257,12 +257,28 @@ export function createBlobPurgeJob(deps: {
               item.handle.startsWith(`staging/${org}/`) &&
               Date.parse(item.createdAt) < Date.parse(cutoff)
             ) {
-              await deps.staged.discardStaged(item.handle);
+              try {
+                await deps.staged.discardStaged(item.handle);
+              } catch {
+                job.observability.counter('pb.blob.staging_sweep', {
+                  outcome: 'error',
+                  stage: 'discard',
+                });
+                job.observability.log({
+                  level: 'warn',
+                  event: 'staged_blob_sweep_failed',
+                  stage: 'discard',
+                });
+              }
             }
           }
         } catch {
-          job.observability.counter('pb.blob.staging_sweep', { outcome: 'error' });
-          job.observability.log({ level: 'warn', event: 'staged_blob_sweep_failed' });
+          job.observability.counter('pb.blob.staging_sweep', { outcome: 'error', stage: 'list' });
+          job.observability.log({
+            level: 'warn',
+            event: 'staged_blob_sweep_failed',
+            stage: 'list',
+          });
         }
       }
       const last = keys[PAGE - 1];

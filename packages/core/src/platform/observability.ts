@@ -56,6 +56,7 @@ export interface SafeLogRecord {
   readonly redirects?: number;
   readonly cross_origin?: boolean;
   readonly outcome?: string;
+  readonly stage?: 'list' | 'discard';
   readonly requested_names?: number;
   readonly forwarded_names?: number;
   readonly advisories?: number;
@@ -101,6 +102,7 @@ export const LOG_FIELDS = [
   'redirects',
   'cross_origin',
   'outcome',
+  'stage',
   'requested_names',
   'forwarded_names',
   'advisories',
@@ -315,6 +317,7 @@ const LABEL_KEYS = new Set([
   'runtime',
   'signal',
   'outcome',
+  'stage',
   'kind',
   'adapter',
   'provider',
@@ -387,6 +390,7 @@ const FIELD_CHECKS: Readonly<
   redirects: (v) => isInt(v, 0, 5),
   cross_origin: (v) => typeof v === 'boolean',
   outcome: matches(CODE),
+  stage: (v) => v === 'list' || v === 'discard',
   requested_names: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   forwarded_names: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   advisories: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
@@ -493,6 +497,8 @@ export function metricLabelValueAllowed(
   routeTemplates: ReadonlySet<string>,
 ): boolean {
   switch (key) {
+    case 'stage':
+      return value === 'list' || value === 'discard';
     case 'detail':
       return Object.hasOwn(FINISH_FAILURE_DETAIL_LABELS, value);
     case 'method':

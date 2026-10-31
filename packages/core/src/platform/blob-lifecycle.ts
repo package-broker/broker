@@ -116,11 +116,11 @@ export function createBlobLifecycle({
       outcome = await Promise.race([
         (async () => {
           const row = await metadata.inspect(ctx, key);
-          const npmKey =
+          const physicalKeys =
             row?.storageKey?.startsWith('npm-publish/') === true
-              ? row.storageKey
-              : `npm-publish/${storageKey}`;
-          for (const physicalKey of [npmKey, storageKey]) {
+              ? [row.storageKey, storageKey]
+              : [storageKey];
+          for (const physicalKey of physicalKeys) {
             if (performance.now() - startedAt >= deleteTimeoutMs) return 'timeout' as const;
             if (!(await recheck(ctx, key, generation))) return 'stale' as const;
             if (performance.now() - startedAt >= deleteTimeoutMs) return 'timeout' as const;

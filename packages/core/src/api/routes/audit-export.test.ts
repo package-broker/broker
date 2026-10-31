@@ -21,6 +21,7 @@ function fixture(
     token?: boolean;
     anonymous?: boolean;
     head?: number;
+    boundary?: number;
     items?: AuditJournalItemV1[];
   } = {},
 ) {
@@ -31,7 +32,7 @@ function fixture(
     epoch: 2,
     headSeq: options.head ?? 1,
     headHash: '1'.repeat(64),
-    boundarySeq: 1,
+    boundarySeq: options.boundary ?? 1,
     boundaryPrevHash: '0'.repeat(64),
     pendingCount: 0,
     verification: null,
@@ -196,6 +197,7 @@ it.each(['conflict', 'forbidden', 'rate_limited', 'payload_too_large', 'unavaila
         unavailable: 503,
       }[result],
     );
+    if (result === 'rate_limited') expect(response.headers.get('retry-after')).toBe('60');
     expect(await response.text()).not.toContain('snapshot');
   },
 );
@@ -291,7 +293,9 @@ it('records an empty journal export without inventing an event', async () => {
 it('refuses a limited request before any journal or disposition read', async () => {
   const f = fixture();
   vi.mocked(f.deps.store.rateAvailable).mockResolvedValue(false);
-  expect((await f.call()).status).toBe(429);
+  const response = await f.call();
+  expect(response.status).toBe(429);
+  expect(response.headers.get('retry-after')).toBe('60');
   expect(f.deps.store.snapshot).not.toHaveBeenCalled();
   expect(f.list).not.toHaveBeenCalled();
   expect(f.deps.store.dispositions).not.toHaveBeenCalled();
@@ -326,4 +330,22 @@ it('repeated withheld exports write only one export row each and preserve source
     expect(call[3].sourceIp).toBe('192.0.2.10');
     expect(JSON.parse(call[3].payloadJson).changes.withheld).toEqual({ new: 1 });
   }
+});
+
+it('returns an empty artifact range when every sealed row has been pruned', async () => {
+  const f = fixture({ head: 3, boundary: 4 });
+  const response = await f.call();
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    snapshot: { headSeq: 3, boundarySeq: 4 },
+    fromSeq: 4,
+    toSeq: 4,
+    next_from_seq: null,
+    items: [],
+    dispositions: [],
+  });
+  expect(f.list).not.toHaveBeenCalled();
+  expect(f.deps.store.dispositions).not.toHaveBeenCalled();
+  expect(f.record).toHaveBeenCalledOnce();
+  expect(f.record.mock.calls[0]![4][0]).toMatchObject({ count: 0, fromSeq: 4, toSeq: 4 });
 });

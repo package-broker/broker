@@ -196,9 +196,11 @@ export function auditExportRoutes(deps?: AuditExportDeps): readonly RouteDefinit
         )
           return { error: 'unauthorized' };
         if (!deps.sessions.isReauthFresh(session)) return { error: 'reauth_required' };
-        if (!(await deps.store.rateAvailable(org, actor.userId))) return { error: 'rate_limited' };
+        if (!(await deps.store.rateAvailable(org, actor.userId)))
+          return { error: 'rate_limited', retryAfterSeconds: 60 };
         const snapshot = await deps.store.snapshot(org);
         const { head } = snapshot;
+        const empty = head.boundarySeq > head.headSeq;
         const from = Number(query.from_seq ?? (head.headSeq === 0 ? 0 : head.boundarySeq));
         const to = Number(query.to_seq ?? Math.max(from, Math.min(head.headSeq, from + 1999)));
         if (
@@ -211,15 +213,13 @@ export function auditExportRoutes(deps?: AuditExportDeps): readonly RouteDefinit
           return { error: 'invalid_request' };
         if (
           (head.headSeq !== 0 && from < head.boundarySeq) ||
-          (head.headSeq === 0
-            ? query.from_seq !== undefined || query.to_seq !== undefined
-            : to > head.headSeq)
+          (empty ? query.from_seq !== undefined || query.to_seq !== undefined : to > head.headSeq)
         )
           return { error: 'conflict' };
         const reader = deps.store.journal(org);
         const items: AuditJournalItemV1[] = [];
         let after = from - 1;
-        while (head.headSeq > 0 && after < to) {
+        while (!empty && after < to) {
           const page = await reader.list({
             projectId: null,
             afterSeq: after,
@@ -239,8 +239,7 @@ export function auditExportRoutes(deps?: AuditExportDeps): readonly RouteDefinit
           if (last <= after) return { error: 'unavailable' };
           after = last;
         }
-        const dispositions =
-          head.headSeq === 0 ? [] : await deps.store.dispositions(org, snapshot, from, to);
+        const dispositions = empty ? [] : await deps.store.dispositions(org, snapshot, from, to);
         if (dispositions.length > 2000) return { error: 'payload_too_large' };
         const now = deps.clock.now().toISOString();
         const withheld = items.filter((item) => item.kind === 'withheld').length;
@@ -285,7 +284,8 @@ export function auditExportRoutes(deps?: AuditExportDeps): readonly RouteDefinit
           event.event,
           entries,
         );
-        if (result !== 'recorded') return { error: result };
+        if (result !== 'recorded')
+          return { error: result, ...(result === 'rate_limited' ? { retryAfterSeconds: 60 } : {}) };
         if (withheld > 0) deps.alert(org);
         const { chainId, epoch, headSeq, headHash, boundarySeq, boundaryPrevHash } = head;
         return {

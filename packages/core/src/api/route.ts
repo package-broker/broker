@@ -28,7 +28,11 @@ export interface ApiRouteSpec {
 
 export type ApiOutcome =
   | { readonly status: number; readonly body?: unknown; readonly etag?: number }
-  | { readonly error: ApiErrorCode; readonly details?: readonly ValidationDetail[] };
+  | {
+      readonly error: ApiErrorCode;
+      readonly details?: readonly ValidationDetail[];
+      readonly retryAfterSeconds?: number;
+    };
 
 type ServiceFamily = keyof typeof SERVICE_ERROR_TABLE;
 
@@ -225,12 +229,18 @@ export function apiRoute<const S extends ApiRouteSpec>(
         if (outcome.error === 'conflict' && concurrency !== undefined) {
           return fail('precondition_failed');
         }
-        return fail(
+        const response = fail(
           outcome.error,
           outcome.error === 'invalid_request' && outcome.details !== undefined
             ? handlerDetails(outcome.details)
             : undefined,
         );
+        if (outcome.error === 'rate_limited' && outcome.retryAfterSeconds !== undefined) {
+          const seconds = outcome.retryAfterSeconds;
+          if (Number.isSafeInteger(seconds) && seconds > 0)
+            response.headers.set('Retry-After', String(seconds));
+        }
+        return response;
       }
       if (!Number.isInteger(outcome.status) || outcome.status < 200 || outcome.status > 299) {
         throw new TypeError('API handler returned a non-success status');

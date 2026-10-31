@@ -34,7 +34,7 @@ export const AUDIT_LEDGER_KINDS = [
   'epoch_bump',
 ] as const;
 
-/** G37 registers this shape only after verifying the artifact's final chain, epoch, seq and hash. */
+/** Registration follows verification of the artifact's final chain, epoch, seq and hash. */
 export const AUDIT_VERIFIED_EXPORT = {
   kind: 'export',
   sinkId: null,

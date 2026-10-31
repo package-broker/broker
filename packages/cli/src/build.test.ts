@@ -7,7 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { build, BuildDiagnosticsError, declarationOnlyPackageResolver } from './build.js';
+import {
+  build,
+  BuildConfigError,
+  BuildDiagnosticsError,
+  declarationOnlyPackageResolver,
+} from './build.js';
 
 const metadataOverrides = vi.hoisted(() => new Map<string, unknown>());
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -216,4 +221,15 @@ describe('local-auth runtime capability', () => {
     const result = await build(options);
     expect(JSON.parse(await readFile(result.manifestJson, 'utf8'))).not.toHaveProperty('localAuth');
   });
+});
+
+it('pb build refuses four scanners before bundling', async () => {
+  const options = await fixture(routeSource(''));
+  await writeFile(
+    options.configPath,
+    `export default { platform: 'node', plugins: ['a','b','c','d'].map(id => ({ id, package: '@package-broker/core', apiVersion: 3, platforms: ['node'], publishPolicy: { id, inspect: async () => ({ verdict: 'allow' }) } })) };`,
+  );
+  const error = await build(options).catch((error: unknown) => error);
+  expect(error).toBeInstanceOf(BuildConfigError);
+  expect((error as BuildConfigError).configKeys).toContain('plugins.publishPolicy');
 });

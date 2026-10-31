@@ -11,6 +11,7 @@ describe('publish approval routes', () => {
       ['GET', '/_pb/publishes/:id', 'org:packages:read', 'organization'],
       ['POST', '/_pb/publishes/:id/approve', 'org:packages:approve', 'organization'],
       ['POST', '/_pb/publishes/:id/reject', 'org:packages:approve', 'organization'],
+      ['POST', '/_pb/publishes/:id/rescan', 'org:packages:approve', 'organization'],
     ]);
     const doc = generateOpenApi(publishSpecs, { title: 'test', version: 'test' });
     expect(doc.paths['/_pb/publishes/{id}/approve']).toBeDefined();
@@ -47,7 +48,7 @@ function fixture(self = false) {
   const decide = vi.fn(async () => ({ changed: true, active: true, revision: 4 }));
   const list = vi.fn(async () => ({ items: [], next: null }));
   const routes = publishRoutes({
-    publishes: { get, decide, list },
+    publishes: { get, decide, list, rescan: decide },
     ids: { ulid },
     clock: fixedClock('2026-10-30T00:00:00.000Z'),
     clientIp: () => null,
@@ -225,4 +226,35 @@ it('returns already_decided when a concurrent decision wins', async () => {
   );
   expect(response.status).toBe(409);
   expect(await response.json()).toMatchObject({ error: { code: 'already_decided' } });
+});
+
+it.each([2, 3])(
+  'returns already_decided when a scan denial wins the decision race (%s)',
+  async (index) => {
+    const f = fixture();
+    f.get.mockResolvedValueOnce(f.item).mockResolvedValueOnce({ ...f.item, scanState: 'denied' });
+    f.decide.mockResolvedValue({ changed: false, active: false, revision: 4 });
+    const action = index === 2 ? 'approve' : 'reject';
+    const response = await f.routes[index]!.handler(
+      f.context(
+        'POST',
+        `/_pb/publishes/${f.id}/${action}`,
+        index === 2 ? {} : { reason: 'Policy' },
+      ),
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'already_decided' } });
+  },
+);
+
+it.each([2, 3])('refuses a scan-denied publish before any decision write (%s)', async (index) => {
+  const f = fixture();
+  f.get.mockResolvedValue({ ...f.item, scanState: 'denied' });
+  const action = index === 2 ? 'approve' : 'reject';
+  const response = await f.routes[index]!.handler(
+    f.context('POST', `/_pb/publishes/${f.id}/${action}`, index === 2 ? {} : { reason: 'Policy' }),
+  );
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ error: { code: 'already_decided' } });
+  expect(f.decide).not.toHaveBeenCalled();
 });

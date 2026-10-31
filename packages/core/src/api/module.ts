@@ -76,7 +76,10 @@ const REQUIRED_DEPENDENCIES = {
     sessions: { authenticate: true, isReauthFresh: true },
     personal: true,
   },
-  publishes: { ...CONTEXT_METHODS, publishes: { get: true, list: true, decide: true } },
+  publishes: {
+    ...CONTEXT_METHODS,
+    publishes: { get: true, list: true, decide: true, rescan: true },
+  },
   organization: {
     ...CONTEXT_METHODS,
     organizations: { get: true },

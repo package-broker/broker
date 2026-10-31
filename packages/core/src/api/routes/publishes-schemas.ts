@@ -139,9 +139,20 @@ export const publishRejectSpec = {
     responses: { 200: publishApproval },
   },
 } as const;
+export const publishRescanSpec = {
+  ...publishApproveSpec,
+  path: '/_pb/publishes/:id/rescan',
+  api: {
+    ...publishApproveSpec.api,
+    operationId: 'rescanPublish',
+    summary: 'Retry a failed publish scan',
+    body: z.strictObject({}),
+  },
+} as const;
 export const publishSpecs = [
   publishListSpec,
   publishGetSpec,
   publishApproveSpec,
   publishRejectSpec,
+  publishRescanSpec,
 ];

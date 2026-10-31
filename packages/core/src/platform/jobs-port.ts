@@ -1,3 +1,4 @@
+import type { Statement } from '../db/port.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import type { JobEnqueue } from './job-repository.js';
@@ -21,6 +22,7 @@ export const MAX_RUN_AT_AHEAD_SECONDS = 30 * 24 * 60 * 60;
 const CORE_OWNER = 'core';
 
 export interface JobStore {
+  enqueueStatements?(ctx: OrgContext, row: JobEnqueue): readonly Statement[];
   enqueue(
     ctx: OrgContext,
     row: JobEnqueue,
@@ -37,7 +39,11 @@ export interface JobInitiator {
 
 export interface RepositoryJobsInput {
   readonly store: JobStore;
-  readonly jobs: readonly { readonly qualifiedName: string; readonly definition: JobDefinition }[];
+  readonly jobs: readonly {
+    readonly qualifiedName: string;
+    readonly definition:
+      JobDefinition | Pick<JobDefinition, 'name' | 'version' | 'validate' | 'maxAttempts'>;
+  }[];
   readonly clock: Clock;
   readonly ids: { ulid(): string };
 }
@@ -69,7 +75,7 @@ function isThenable(value: unknown): value is { then: unknown; catch?: unknown }
   );
 }
 
-function validatePayload(definition: JobDefinition, payloadJson: string): void {
+function validatePayload(definition: Pick<JobDefinition, 'validate'>, payloadJson: string): void {
   let thenable: boolean;
   try {
     const result = definition.validate(JSON.parse(payloadJson) as unknown);
@@ -102,7 +108,7 @@ function resolveRunAt(runAt: string | undefined, clock: Clock): string | null {
 
 export function createRepositoryJobs(input: RepositoryJobsInput): JobsFactory {
   const { store, clock, ids } = input;
-  const definitions = new Map<string, JobDefinition>();
+  const definitions = new Map<string, Pick<JobDefinition, 'validate' | 'maxAttempts'>>();
   for (const job of input.jobs) {
     if (definitions.has(job.qualifiedName)) throw new JobError('invalid_definition');
     definitions.set(job.qualifiedName, job.definition);
@@ -113,8 +119,31 @@ export function createRepositoryJobs(input: RepositoryJobsInput): JobsFactory {
     const { projectId, tokenId } = initiator;
 
     return Object.freeze({
-      async enqueueStatements() {
-        throw new Error('not_implemented');
+      async enqueueStatements(ctx, type, payload, rawInput) {
+        assertOwner(pluginId, type);
+        const definition = definitions.get(type);
+        if (!definition) throw new JobError('unknown_job_type');
+        const payloadJson = canonicalPayload(payload);
+        validatePayload(definition, payloadJson);
+        const enqueueInput = readEnqueueInput(rawInput);
+        const key = storedIdempotencyKey(type, enqueueInput.idempotencyKey);
+        const runAt = resolveRunAt(enqueueInput.runAt, clock);
+        const id = ids.ulid();
+        if (!store.enqueueStatements) throw new JobError('handler_error');
+        return {
+          id,
+          statements: store.enqueueStatements(ctx, {
+            id,
+            type,
+            payloadJson,
+            idempotencyKey: key,
+            runAt,
+            resourceKey: enqueueInput.resourceKey ?? null,
+            maxAttempts: definition.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+            projectId,
+            initiatorTokenId: tokenId,
+          }),
+        };
       },
       async enqueue(ctx, type, payload, rawInput) {
         assertOwner(pluginId, type);

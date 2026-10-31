@@ -490,6 +490,8 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
 
 const BASE_JOBS = [
   'core:publish-approval-expire:v1',
+  'core:publish-scan:v1',
+  'core:publish-scan-sweep:v1',
   'core:vulnerability-sync:v1',
   'core:source-sync:v1',
   'core:npm-vcs-build:v1',

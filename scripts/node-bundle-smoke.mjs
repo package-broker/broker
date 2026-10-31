@@ -244,6 +244,7 @@ async function checkAuditJobs(database) {
         ['core:package-access-expire:v1', 3600],
         ['core:pat-offboarding-sweep:v1', 86400],
         ['core:publish-approval-expire:v1', 3600],
+        ['core:publish-scan-sweep:v1', 300],
         ['core:retention-scan:v1', 86400],
         ['core:source-poll:v1', 60],
         ['core:vulnerability-sync:v1', 300],

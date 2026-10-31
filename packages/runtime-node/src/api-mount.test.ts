@@ -268,6 +268,7 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/publishes/:id',
       'POST /_pb/publishes/:id/approve',
       'POST /_pb/publishes/:id/reject',
+      'POST /_pb/publishes/:id/rescan',
     ],
     jobs: [],
     ownerPacket: 'NPM10',

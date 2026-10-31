@@ -5,6 +5,10 @@ import {
   createPublishWriteGuard,
 } from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
 import {
+  createPublishScanJob,
+  createPublishScanSweepJob,
+} from '@package-broker/core/ingest/publish-scan-job';
+import {
   createNpmVcsBuildReader,
   createNpmVcsBuildPendingReader,
 } from '@package-broker/db-sqlite/repositories/npm-vcs-build';
@@ -721,7 +725,7 @@ function assembleRegistry(input: {
   readonly findOrganization: () => Promise<OrganizationIdentity | null>;
   readonly ingestScope: AsyncLocalStorage<Observability>;
   readonly anchors: ProviderAnchorReader;
-  readonly hasPublishPolicy: () => boolean;
+  readonly requiredScanners: () => readonly string[];
 }): RegistryAssembly {
   const { options, seams, executor, auth, platform, observability } = input;
   const { config } = options;
@@ -815,7 +819,8 @@ function assembleRegistry(input: {
       writeGuard: createPublishWriteGuard,
       admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
       writer,
-      hasPublishPolicy: input.hasPublishPolicy,
+      requiredScanners: input.requiredScanners,
+      scanJobs: jobs,
     },
     handleOf: createNpmHandleOf(
       createUserRepository(executor),
@@ -1163,7 +1168,8 @@ export function createNodeServer(
             anchors: {
               anchors: (ctx) => access?.providerAnchors.anchors(ctx) ?? Promise.resolve([]),
             },
-            hasPublishPolicy: () => plugins.some((plugin) => plugin.publishPolicy !== undefined),
+            requiredScanners: () =>
+              plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
           });
     const vulnerabilityPolicy = createOutboundPolicy({
       allowPrivateHosts: [],
@@ -1205,6 +1211,18 @@ export function createNodeServer(
                 }),
               ),
               ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
+              registerIngestJob(
+                createPublishScanJob({
+                  publishes: createPublishesRepository(executor),
+                  scanners: plugins.flatMap((plugin) =>
+                    plugin.publishPolicy ? [plugin.publishPolicy] : [],
+                  ),
+                  blob: options.platformServices!.blob,
+                }),
+              ),
+              registerIngestJob(
+                createPublishScanSweepJob({ publishes: createPublishesRepository(executor) }),
+              ),
               registerIngestJob(
                 createPublishApprovalExpireJob({ publishes: createPublishesRepository(executor) }),
               ),

@@ -18,6 +18,7 @@ import {
 } from '../../platform/blob.js';
 import type { Codecs } from '../../platform/codec.js';
 import { formatIntegrity } from '../../platform/codec.js';
+import type { CoreJobs } from '../../platform/jobs.js';
 import type { RequestContext } from '../../plugin.js';
 import type { RegistryConfig } from '../registry-config.js';
 import { validatePublishBody } from './publish-body.js';
@@ -52,7 +53,8 @@ export interface PublishDependencies {
   ) => CatalogueWriteGuard;
   readonly admitted: (ctx: OrgContext, input: PublishGuardInput) => Promise<boolean>;
   readonly writer: Pick<CatalogueWriter, 'publishVersion'>;
-  readonly hasPublishPolicy: () => boolean;
+  readonly requiredScanners: () => readonly string[];
+  readonly scanJobs: Pick<CoreJobs, 'enqueueStatements'>;
 }
 export interface PublishServiceDeps extends PublishDependencies {
   readonly blob: CoreBlobStore;
@@ -143,7 +145,8 @@ export function createPublishService(deps: PublishServiceDeps) {
       const binding = await deps.reads.packageBinding(org, token.id);
       if (binding === null || (binding.packageName !== null && binding.packageName !== key))
         return publishError(ctx, 403, 'package_binding');
-      if (deps.hasPublishPolicy()) return publishError(ctx, 503, 'scan_gate_unavailable');
+      const requiredScanners = [...deps.requiredScanners()];
+      const holdScan = requiredScanners.length > 0;
       if (
         ctx.request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !==
         'application/json'
@@ -226,7 +229,7 @@ export function createPublishService(deps: PublishServiceDeps) {
       const blobId = await deps.reads.blobId(org, blob.sha256);
       if (blobId === null) return publishError(ctx, 503, 'unavailable');
       const versionId = ulid();
-      const approvalId = source.requirePublishApproval ? ulid() : null;
+      const approvalId = source.requirePublishApproval || holdScan ? ulid() : null;
       const integrity = formatIntegrity('sha512', validated.digests.sha512);
       const event = auditEvent({
         id: ulid(),
@@ -248,8 +251,8 @@ export function createPublishService(deps: PublishServiceDeps) {
           Object.entries({
             package: name,
             version: validated.version,
-            hold_approval: approvalId !== null,
-            hold_scan: false,
+            hold_approval: source.requirePublishApproval,
+            hold_scan: holdScan,
             integrity,
             size_bytes: blob.size,
             source: source.id,
@@ -286,11 +289,11 @@ export function createPublishService(deps: PublishServiceDeps) {
                 packageId: '',
                 versionId,
                 sourceId: source.id,
-                holdApproval: true,
-                holdScan: false,
-                approvalState: 'pending',
-                scanState: 'not_required',
-                requiredScanners: [],
+                holdApproval: source.requirePublishApproval,
+                holdScan,
+                approvalState: source.requirePublishApproval ? 'pending' : 'not_required',
+                scanState: holdScan ? 'queued' : 'not_required',
+                requiredScanners,
                 requestedByType: ctx.principal.kind === 'service' ? 'service' : 'user',
                 requestedById: ctx.principal.id,
                 tokenId: token.id,
@@ -300,8 +303,17 @@ export function createPublishService(deps: PublishServiceDeps) {
                 scanVerdicts: [],
                 expiresAt: new Date(Date.parse(now) + PUBLISH_APPROVAL_WINDOW_MS).toISOString(),
               },
-        scanJobStatements: [],
-        requirePublishApproval: approvalId !== null,
+        scanJobStatements: holdScan
+          ? (
+              await deps.scanJobs.enqueueStatements(
+                org,
+                'core:publish-scan:v1',
+                { id: approvalId! },
+                { idempotencyKey: `publish:${versionId}`, resourceKey: `publish:${versionId}` },
+              )
+            ).statements
+          : [],
+        requirePublishApproval: source.requirePublishApproval,
         routeProjectId: ctx.projectId,
         tokenId: token.id,
         now,

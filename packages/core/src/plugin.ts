@@ -137,6 +137,7 @@ export interface PluginDefinition extends PluginApi {
 }
 
 export interface PublishInspection {
+  readonly signal: AbortSignal;
   readonly name: string;
   readonly version: string;
   readonly manifest: Readonly<Record<string, unknown>>;
@@ -152,6 +153,9 @@ export interface PublishPolicyVerdict {
 
 export interface PublishPolicyDefinition {
   readonly id: string;
+  /** Honour input.signal by stopping inspection and cancelling outstanding I/O when aborted.
+   * Workers start persisted scans on the next cron tick.
+   */
   inspect(ctx: OrgContext, input: PublishInspection): Promise<PublishPolicyVerdict>;
 }
 

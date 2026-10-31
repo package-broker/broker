@@ -1,4 +1,5 @@
 import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
+import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
 import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
 import { entries as oidcEntries } from './mutation-table/oidc.js';
 import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
@@ -130,6 +131,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...publishGuardEntries,
   ...publishesEntries,
   ...readmeEntries,
+  ...packageDetailEntries,
   ...accessRequestsEntries,
   ...explicitPackageEntries,
   ...sourceAttachmentCountsEntries,

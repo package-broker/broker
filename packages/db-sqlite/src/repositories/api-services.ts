@@ -1,3 +1,4 @@
+import { createPackageDetailRepository } from './package-detail.js';
 import { npmLoginRoutes } from '@package-broker/core/api/routes/npm-login';
 import { createPublishesRepository } from './publishes.js';
 import { createPackageAccessRequestRepository } from './package-access-requests.js';
@@ -206,6 +207,11 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         visibility: packages.visibility,
         projectSources: createProjectSourceReader(executor),
         projects,
+      },
+      packageDetail: {
+        ...common,
+        repository: createPackageDetailRepository(executor, anchors),
+        idempotency,
       },
       packages: {
         ...createPackageAdminReader(executor),

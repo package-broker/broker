@@ -74,7 +74,7 @@ const servesProject = (source: VisibilitySource, project: VisibilityProject): bo
 
 const compare = (a: string | number, b: string | number): number => (a < b ? -1 : a > b ? 1 : 0);
 
-function patternHits(pattern: string, key: string, ecosystem: NameEcosystem): boolean {
+export function patternHits(pattern: string, key: string, ecosystem: NameEcosystem): boolean {
   if (
     ecosystem === 'npm' &&
     pattern.length > MAX_PATTERN_BYTES &&

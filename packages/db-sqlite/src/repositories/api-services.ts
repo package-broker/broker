@@ -203,6 +203,13 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
       },
       sourceAttachments: {
         ...common,
+        proxyClaims: {
+          sources,
+          registeredNames,
+          ...(input.sourcePackageProbe === undefined
+            ? {}
+            : { claimProbe: input.sourcePackageProbe }),
+        },
         sources,
         visibility: packages.visibility,
         projectSources: createProjectSourceReader(executor),

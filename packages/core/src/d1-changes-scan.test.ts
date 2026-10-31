@@ -299,6 +299,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/ingest-session.ts',
   'db-sqlite/src/repositories/job-lease-guard.ts',
   'db-sqlite/src/repositories/proxy-admission.ts',
+  'db-sqlite/src/repositories/proxy-claims.ts',
   'db-sqlite/src/repositories/registered-name.ts',
   'db-sqlite/src/repositories/session-liveness.ts',
   'db-sqlite/src/repositories/session.ts',
@@ -396,6 +397,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/provider-binding.ts':
     "deleteFrom('identity'); deleteFrom('session'); deleteFrom('user_group'); insertInto('identity_block') [onConflict:doNothing]; updateTable('identity_provider_binding'); updateTable('token')",
   'db-sqlite/src/repositories/proxy-admission.ts': '',
+  'db-sqlite/src/repositories/proxy-claims.ts': '',
   'db-sqlite/src/repositories/registered-name.ts':
     "deleteFrom('registered_name'); insertInto('registered_name'); updateTable('registered_name'); updateTable('source') x2",
   'db-sqlite/src/repositories/session-liveness.ts': '',
@@ -713,6 +715,18 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL text: 'replace' #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const groups = [\n    head,\n    ...probes.map((probe) => [probe]),\n    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),\n    ...(request.mode === 'patch' ? [] : [[removeHistory, remove]]),\n    [advance],\n  ]; #1",
         'db-sqlite/src/repositories/package-admin-read.ts:object rest access: ...version #1',
+      ],
+    },
+    {
+      reason:
+        'Hosted-claim preflight adds only scoped SELECT predicates and a constant guard; no changes() reads or mutation targets. The names import is a Unicode character filter and Kysely builds the reviewed predicate.',
+      sites: [
+        "db-sqlite/src/repositories/project.ts:opaque dependency: import { FORBIDDEN_NAME_CHARACTERS } from '@package-broker/core/catalogue/names'; #1",
+        "db-sqlite/src/repositories/proxy-claims.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/repositories/proxy-claims.ts:opaque dependency: import { MAX_VERIFIED_CLAIMS_BYTES } from '@package-broker/core/sources/proxy-claims'; #1",
+        'db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`0` #1',
+        "db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`not exists (\n    select 1 from registered_name as proxy_claim\n    join source as claim_owner on claim_owner.id = proxy_claim.source_id\n      and claim_owner.org_id = ${ctx.orgId}\n    where proxy_claim.org_id = ${ctx.orgId}\n      and claim_owner.type = 'hosted' and claim_owner.ecosystem = 'npm'\n      and proxy_claim.ecosystem = 'npm' and instr(proxy_claim.pattern, '*') = 0\n      and proxy_claim.pattern not in (select value from json_each(${proof})))` #1",
+        'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`1` #1',
       ],
     },
     {
@@ -2556,7 +2570,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Local builder in source; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
         "db-sqlite/src/repositories/source.ts:builder variable: const insert = compile(\n        db.insertInto('source').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          project_id: input.projectId,\n          name: input.name,\n          ecosystem: input.ecosystem,\n          type: input.type,\n          url: input.url,\n          credential_id: input.credential?.id ?? null,\n          config_json: jsonConfig,\n          user_agent: input.userAgent ?? null,\n          status: isProxy(input.type) ? 'active' : 'paused',\n          ...(interval === undefined ? {} : { poll_interval_seconds: interval }),\n          ...(policy === undefined ? {} : { removal_policy: policy }),\n          ...(retention === undefined ? {} : { retention_days_override: retention }),\n          ...(input.defaultVisibleToNewProjects === undefined\n            ? {}\n            : { default_visible_to_new_projects: input.defaultVisibleToNewProjects ? 1 : 0 }),\n          next_poll_at: DB_NOW,\n        }),\n      ); #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.credential !== null && 'statement' in input.credential\n            ? [input.credential.statement]\n            : []),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          insert,\n          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),\n        ],\n        probes,\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.credential !== null && 'statement' in input.credential\n            ? [input.credential.statement]\n            : []),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          ...assertCheck(claimsVerified),\n          insert,\n          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),\n        ],\n        probes,\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'created'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'conflict') return 'credential_scope_mismatch'; #1",
@@ -2650,7 +2664,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const insert = db\n    .insertInto('project_source')\n    .columns(['org_id', 'project_id', 'source_id', 'precedence'])\n    .expression(\n      db\n        .selectFrom('source')\n        .select([\n          'org_id',\n          sql<string>`${projectId}`.as('project_id'),\n          'id',\n          DEFAULT_PRECEDENCE.as('precedence'),\n        ])\n        .where('org_id', '=', ctx.orgId)\n        .where('project_id', 'is', null)\n        .where(\n          sql<SqlBool>`exists (select 1 from project as new_project\n            where new_project.id = ${projectId} and new_project.org_id = ${ctx.orgId})`,\n        ),\n    )\n    .onConflict((conflict) => conflict.columns(['project_id', 'source_id']).doNothing()); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: return [compile(insert), ...rederiveStatements(ctx, { kind: 'project', projectId })]; #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const insert = db\n        .insertInto('project_source')\n        .columns(['org_id', 'project_id', 'source_id', 'precedence'])\n        .expression(\n          db\n            .selectFrom('source')\n            .select([\n              'org_id',\n              sql<string>`${input.projectId}`.as('project_id'),\n              'id',\n              (precedence === undefined ? DEFAULT_PRECEDENCE : sql<number>`${precedence}`).as(\n                'precedence',\n              ),\n            ])\n            .where('org_id', '=', ctx.orgId)\n            .where('id', '=', input.sourceId),\n        )\n        .onConflict((conflict) =>\n          precedence === undefined\n            ? conflict.columns(['project_id', 'source_id']).doNothing()\n            : conflict\n                .columns(['project_id', 'source_id'])\n                .doUpdateSet({ precedence: (eb) => eb.ref('excluded.precedence') })\n                .where(sql<SqlBool>`project_source.precedence is not excluded.precedence`),\n        ); #1",
-        "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const result = await run(\n        ctx,\n        fence,\n        authority,\n        sourceServes(ctx, input.sourceId, found.owner, input.projectId),\n        [\n          projectRevision(ctx, input.projectId, changed),\n          compile(insert),\n          ...visibilityAuditStatements(ctx, input),\n          ...rederiveStatements(ctx, {\n            kind: 'projectSource',\n            projectId: input.projectId,\n            sourceId: input.sourceId,\n          }),\n        ],\n        changed,\n      ); #1",
+        "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const result = await run(\n        ctx,\n        fence,\n        authority,\n        allOf(\n          sourceServes(ctx, input.sourceId, found.owner, input.projectId),\n          sql<SqlBool>`(not exists (select 1 from source as attaching_proxy where attaching_proxy.org_id = ${ctx.orgId} and attaching_proxy.id = ${input.sourceId} and attaching_proxy.type = 'npmjs_proxy') or ${proxyClaimsVerified(ctx, input.verifiedClaims)})`,\n        ),\n        [\n          projectRevision(ctx, input.projectId, changed),\n          compile(insert),\n          ...visibilityAuditStatements(ctx, input),\n          ...rederiveStatements(ctx, {\n            kind: 'projectSource',\n            projectId: input.projectId,\n            sourceId: input.sourceId,\n          }),\n        ],\n        changed,\n      ); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: return found.owner === null && !result.ok && result.reason === 'authority'\n        ? notFound\n        : result; #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const rows = db\n        .deleteFrom('project_package')\n        .where('org_id', '=', ctx.orgId)\n        .where('project_id', '=', projectId)\n        .where('package_id', 'in', (qb) =>\n          qb\n            .selectFrom('package')\n            .select('id')\n            .where('org_id', '=', ctx.orgId)\n            .where('source_id', '=', sourceId),\n        ); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const patterns = db\n        .deleteFrom('project_package_pattern')\n        .where('org_id', '=', ctx.orgId)\n        .where('project_id', '=', projectId)\n        .where('source_id', '=', sourceId); #1",

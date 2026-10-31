@@ -74,6 +74,7 @@ export interface SourceRecord {
 }
 
 export interface NewSource {
+  readonly verifiedClaims?: readonly string[];
   readonly id: string;
   /** Null for an organization-level source. */
   readonly projectId: string | null;

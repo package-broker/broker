@@ -7,11 +7,11 @@ import {
 } from '../ingest/npm-vcs-build-job.js';
 import { registerCoreJob } from '../runtime/core-jobs.js';
 import { probeNpmClaim } from '../sources/claim-admission.js';
-import type { SourcePackageProbe } from '../ingest/source-package.js';
+import type { ClaimProbeTarget, SourcePackageProbe } from '../ingest/source-package.js';
 import { isUpstreamRefusal } from '../ingest/fill-shared.js';
 import { createComposerRepositoryProvider } from '../ingest/composer/composer-repository.js';
 import { isSelected } from '../ingest/composer/v1-index.js';
-import { displayName } from '../catalogue/names.js';
+import { FORBIDDEN_NAME_CHARACTERS, MAX_NPM_NAME_LENGTH, displayName } from '../catalogue/names.js';
 import { createPackageAccess } from '../catalogue/package-access.js';
 import type {
   CatalogueReader,
@@ -115,8 +115,6 @@ export interface SourceCredential {
   readonly probe: CredentialEchoProbe;
 }
 
-const FORBIDDEN_NAME_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
-
 export function createNpmHandleOf(
   users: {
     get(ctx: OrgContext, id: string): Promise<{ readonly displayName: string | null } | null>;
@@ -140,7 +138,7 @@ export function createNpmHandleOf(
     }
     return name !== null &&
       name !== '' &&
-      name.length <= 214 &&
+      name.length <= MAX_NPM_NAME_LENGTH &&
       !/[@\s]/u.test(name) &&
       !FORBIDDEN_NAME_CHARACTERS.test(name)
       ? name
@@ -799,23 +797,31 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     ecosystemRoutes,
     async probePackage(
       ctx: OrgContext,
-      sourceId: string,
+      sourceId: ClaimProbeTarget,
       key: string,
       signal: AbortSignal,
       mode?: 'claim',
     ) {
       try {
         if (mode === 'claim') {
-          const source = await catalogue.sources.get(ctx, sourceId);
-          if (source === null || source.type !== 'npmjs_proxy' || source.ecosystem !== 'npm')
+          const source =
+            typeof sourceId === 'string' ? await catalogue.sources.get(ctx, sourceId) : null;
+          if (typeof sourceId === 'string' && source === null) return 'unavailable';
+          if (source !== null && (source.type !== 'npmjs_proxy' || source.ecosystem !== 'npm'))
             return 'unavailable';
           const answer = await probeNpmClaim(
-            deps.policyFetch(userAgentOf(source), { sourceId }),
+            deps.policyFetch(
+              typeof sourceId === 'string'
+                ? userAgentOf(source!)
+                : (sourceId.userAgent ?? registry.userAgent.default),
+              typeof sourceId === 'string' ? { sourceId } : {},
+            ),
             key,
             signal,
           );
           return answer === null ? 'not_found' : answer === 'name_public' ? 'found' : 'unavailable';
         }
+        if (typeof sourceId !== 'string') return 'unavailable';
         const plan = await planPackage(ctx, sourceId, key);
         if (plan === 'unsupported_package') return plan;
         if (plan === null) return 'unavailable';

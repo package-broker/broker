@@ -191,7 +191,7 @@ export function createVisibilityService(deps: {
       removePattern: 'source.update',
     } as const;
     const extraFields = {
-      attachSource: ['precedence'],
+      attachSource: ['precedence', 'verifiedClaims'],
       detachSource: [],
       setPrecedence: ['precedence'],
       setOrder: ['sourceIds'],

@@ -836,6 +836,16 @@ export const entries: readonly MutationEntry[] = [
         reason:
           'The publish gate repeats the independently scoped version identity. Its composite organization/version FK prevents an approval in another organization from referring to the target; publish-gate behavioral contracts verify the refusal.',
       },
+      {
+        locate: /(?:claim_owner|proxy_claim)\.org_id = \?/,
+        reason:
+          'proxyClaimsVerified has independent source and registration organization mutations in proxy-claims.ts.',
+      },
+      {
+        locate: /attaching_proxy\.org_id = \?/,
+        reason:
+          'The sourceServes guard and scoped source lookup independently require the attaching source to belong to this organization.',
+      },
       ...(reconcileEntry.waivers ?? []),
       derivationScopes,
       {
@@ -948,6 +958,16 @@ export const entries: readonly MutationEntry[] = [
         locate: /(?:pa\.)?org_id = \?(?= and (?:pa\.)?version_id = )/,
         reason:
           'The publish gate repeats the independently scoped version identity. Its composite organization/version FK prevents an approval in another organization from referring to the target; publish-gate behavioral contracts verify the refusal.',
+      },
+      {
+        locate: /(?:claim_owner|proxy_claim)\.org_id = \?/,
+        reason:
+          'proxyClaimsVerified has independent source and registration organization mutations in proxy-claims.ts.',
+      },
+      {
+        locate: /attaching_proxy\.org_id = \?/,
+        reason:
+          'The sourceServes guard and scoped source lookup independently require the attaching source to belong to this organization.',
       },
       {
         locate: /(?<=WHERE )org_id = \?(?= AND principal_key = \? AND key = \? AND expires_at)/,

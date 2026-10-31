@@ -1,4 +1,5 @@
 import { NPM_PACK_SKIP_CODES } from '@package-broker/core/sources/source-error-codes';
+import { proxyClaimsVerified } from './proxy-claims.js';
 import type { VcsConfig } from '@package-broker/core/sources/config';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
@@ -696,6 +697,10 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           ? undefined
           : retentionDays(input.retentionDaysOverride);
       const allowed = authority(ctx, fence, input.projectId, input.providerAnchors);
+      const claimsVerified =
+        input.type === 'npmjs_proxy'
+          ? proxyClaimsVerified(ctx, input.verifiedClaims)
+          : sql<SqlBool>`1`;
       if (
         input.credential !== null &&
         'statement' in input.credential &&
@@ -755,6 +760,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
             ? [input.credential.statement]
             : []),
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
+          ...assertCheck(claimsVerified),
           insert,
           auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),
         ],

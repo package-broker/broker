@@ -1,3 +1,4 @@
+import { checkProxyClaims } from './proxy-claims.js';
 import type { SourcePackageProbe } from '../ingest/source-package.js';
 import { isNpmClaim } from './claim-admission.js';
 import { SOURCE_ERROR_CODES } from './source-error-codes.js';
@@ -50,7 +51,7 @@ export interface SourceCredentialInput {
 
 export type SourceCreateInput = Omit<
   NewSource,
-  'id' | 'credential' | 'providerAnchors' | 'audit'
+  'id' | 'credential' | 'providerAnchors' | 'audit' | 'verifiedClaims'
 > & {
   readonly credential?: SourceCredentialInput | null;
   readonly credentialId?: string | null;
@@ -86,6 +87,7 @@ export type SourceServiceResult<T> =
       readonly ok: false;
       readonly error: SourceError;
       readonly problems?: readonly SourceConfigProblem[];
+      readonly conflictingClaims?: readonly string[];
     };
 
 type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: MutationFence];
@@ -951,6 +953,20 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       );
       if (!validated.ok) return validated;
       const id = deps.ids.ulid();
+      const verifiedClaims: string[] = [];
+      if (input.type === 'npmjs_proxy') {
+        const conflictingClaims = await checkProxyClaims(
+          deps,
+          ctx,
+          { type: 'new_npmjs_proxy', userAgent: input.userAgent ?? null },
+          verifiedClaims,
+        );
+        if (conflictingClaims === null) return fail('conflict');
+        if (conflictingClaims.length > 0)
+          return who.kind === 'org'
+            ? { ok: false, error: 'conflict', conflictingClaims }
+            : fail('conflict');
+      }
       let credential: NewSource['credential'] = null;
       if (credentialId != null) {
         credential = { id: credentialId };
@@ -975,6 +991,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       const audit = createAudit(call, who, id, input);
       const answer = await deps.sources.create(ctx, fence, {
         ...rest,
+        ...(input.type === 'npmjs_proxy' ? { verifiedClaims } : {}),
         ...validated.value,
         id,
         credential,

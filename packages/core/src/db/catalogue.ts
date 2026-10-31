@@ -514,6 +514,7 @@ export interface VisibilityStore {
     ctx: OrgContext,
     fence: MutationFence,
     input: VisibilityAudit & {
+      readonly verifiedClaims?: readonly string[];
       readonly projectId: string;
       readonly sourceId: string;
       readonly precedence?: number;

@@ -1150,3 +1150,26 @@ it.each(['project', 'all'])(
     expect(f.sources.list).not.toHaveBeenCalled();
   },
 );
+
+it('returns proxy conflicts as structured claims with a stable error envelope', async () => {
+  const f = await fixture();
+  f.createSource.mockResolvedValue({
+    ok: false,
+    error: 'conflict',
+    conflictingClaims: ['widget', '@scope/name'],
+  });
+  const response = await f.request('POST', '/_pb/sources', {
+    name: 'Public registry',
+    ecosystem: 'npm',
+    type: 'npmjs_proxy',
+    url: 'https://registry.npmjs.org',
+  });
+  expect(response.status).toBe(409);
+  const body = (await response.json()) as { error: unknown };
+  expect(body).toMatchObject({
+    error: { code: 'conflict', requestId: expect.any(String) },
+    conflictingClaims: ['widget', '@scope/name'],
+  });
+  expect(JSON.stringify(body.error)).not.toContain('widget');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+});

@@ -91,6 +91,8 @@ const problemPaths: Readonly<Record<string, string>> = {
 };
 
 function failure(result: Extract<SourceServiceResult<unknown>, { ok: false }>) {
+  if (result.conflictingClaims !== undefined)
+    return { error: 'conflict' as const, conflictingClaims: result.conflictingClaims };
   if (result.error !== 'invalid_config') return { serviceError: result.error };
   return {
     error: 'invalid_request' as const,

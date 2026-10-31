@@ -180,6 +180,7 @@ describe.each([
         ['core:vulnerability-sync:v1', { everySeconds: 300 }],
         ['core:retention-scan:v1', { everySeconds: 86400 }],
         ['core:blob-purge:v1', { everySeconds: 3600 }],
+        ['core:publish-approval-expire:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400 }],
         ['core:import-verify:v1', undefined],

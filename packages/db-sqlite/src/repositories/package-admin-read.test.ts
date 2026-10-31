@@ -329,7 +329,7 @@ describe('package admin reader', () => {
         CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0);
         CREATE INDEX package_by_name ON package (org_id, ecosystem, name);
         CREATE TABLE source (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, type TEXT, project_id TEXT);
-        CREATE TABLE publish_approval (org_id TEXT, version_id TEXT);
+        CREATE TABLE publish_approval (org_id TEXT, version_id TEXT, approval_state TEXT, scan_state TEXT);
         CREATE TABLE version (id TEXT, org_id TEXT, package_id TEXT, status TEXT, version TEXT, published_at TEXT);
         CREATE INDEX version_package_status ON version (package_id, status);
         INSERT INTO source VALUES ('S', 'O', 'source', 'npm_registry', NULL);
@@ -388,7 +388,7 @@ describe('package admin reader', () => {
           CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0);
           CREATE INDEX package_by_name ON package (org_id, ecosystem, name);
           CREATE TABLE source (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, type TEXT, project_id TEXT);
-          CREATE TABLE publish_approval (org_id TEXT, version_id TEXT);
+          CREATE TABLE publish_approval (org_id TEXT, version_id TEXT, approval_state TEXT, scan_state TEXT);
         CREATE TABLE version (id TEXT, org_id TEXT, package_id TEXT, status TEXT, version TEXT, published_at TEXT);
           CREATE INDEX version_package_status ON version (package_id, status);
           INSERT INTO source VALUES ('S', 'O', 'source', 'npm_registry', NULL);

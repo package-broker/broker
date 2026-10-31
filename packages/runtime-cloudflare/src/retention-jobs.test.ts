@@ -262,10 +262,7 @@ describe('Worker retention jobs', () => {
       await h.publish();
       if (name === 'blob-purge') await h.due();
       await h.consume(name);
-      expect(h.remove.mock.calls).toEqual([
-        [`npm-publish/${blobStorageKey(h.a.orgId, SHA)}`],
-        [blobStorageKey(h.a.orgId, SHA)],
-      ]);
+      expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
       expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
     },
   );
@@ -294,10 +291,7 @@ describe('Worker retention jobs', () => {
     await h.publish(h.b);
     const foreign = await h.rows(h.b);
     await (await h.claim('retention-scan')).run();
-    expect(h.remove.mock.calls).toEqual([
-      [`npm-publish/${blobStorageKey(h.a.orgId, SHA)}`],
-      [blobStorageKey(h.a.orgId, SHA)],
-    ]);
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
     expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
     expect((await h.rows())[1]).toMatchObject({ deleted_at: null, purge_after: null });
     expect(await h.rows(h.b)).toEqual(foreign);
@@ -318,10 +312,7 @@ describe('Worker retention jobs', () => {
     await h.released();
     await h.due();
     await (await h.claim('blob-purge')).run();
-    expect(h.remove.mock.calls).toEqual([
-      [`npm-publish/${blobStorageKey(h.a.orgId, SHA)}`],
-      [blobStorageKey(h.a.orgId, SHA)],
-    ]);
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
     expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
   });
 

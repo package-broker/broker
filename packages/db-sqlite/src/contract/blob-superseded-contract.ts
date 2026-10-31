@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { orgContext, type Statement } from '@package-broker/core/db/port';
-import { blobStorageKey, type Sha256 } from '@package-broker/core/platform/blob';
+import {
+  blobStorageKey,
+  stagedStorageKey,
+  type StagedBlobHandle,
+  type Sha256,
+} from '@package-broker/core/platform/blob';
 import { createBlobRepository } from '../repositories/blob.js';
 import type { OpenedCatalogueWriteDatabase } from './catalogue-write-contract.js';
 
@@ -9,6 +14,54 @@ export function describeBlobSupersededContract(
   open: () => Promise<OpenedCatalogueWriteDatabase>,
 ) {
   describe(`superseded blob keys on ${name}`, () => {
+    it('Round 2 keeps the physical npm key when publication retries the same handle', async () => {
+      const opened = await open();
+      try {
+        const ctx = orgContext('retry');
+        const key = 'd'.repeat(64) as Sha256;
+        const npmPublishHandle =
+          'staging/7265747279/01J00000000000000000000001' as StagedBlobHandle;
+        const storageKey = stagedStorageKey(npmPublishHandle, key);
+        const objects = new Set([storageKey]);
+        const removals: string[] = [];
+        const outcomes: string[] = [];
+        await opened.executor.batch([
+          {
+            sql: "INSERT INTO organization (id,slug,name) VALUES ('retry','retry','Retry')",
+            params: [],
+          },
+        ]);
+        const repo = createBlobRepository(opened.executor, {
+          supersededObjects: {
+            async remove(key) {
+              removals.push(key);
+              objects.delete(key);
+            },
+            counter(outcome) {
+              outcomes.push(outcome);
+            },
+          },
+        });
+        const generation = await repo.reserve(ctx, key);
+        const input = {
+          sha256: key,
+          size: 10,
+          mediaType: 'application/gzip',
+          refetchable: false,
+          generation,
+          npmPublishHandle,
+        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(await repo.publish(ctx, input)).not.toBeNull();
+          expect((await repo.find(ctx, key))?.storageKey).toBe(storageKey);
+          expect(objects.has(storageKey)).toBe(true);
+        }
+        expect(removals).toEqual([]);
+        expect(outcomes).toEqual([]);
+      } finally {
+        await opened.close();
+      }
+    });
     for (const refetchable of [true, false])
       for (const fails of [false, true]) {
         it(`removes superseded npm keys after ${refetchable ? 'refetchable put' : 'publish or promotion'} (remove fails: ${fails})`, async () => {

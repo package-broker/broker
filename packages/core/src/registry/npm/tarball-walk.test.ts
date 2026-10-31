@@ -1,8 +1,11 @@
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
+import { fixtureStream, publishPathFlood } from '../../test-support/npm-publish-bounds.js';
 import { createRequire } from 'node:module';
 import { realpathSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { walkTarball } from './tarball-walk';
+import { walkTarball } from './tarball-walk.js';
 
 import {
   entry,
@@ -13,7 +16,7 @@ import {
   pax,
   archive,
   walk,
-} from '../../test-support/npm-publish';
+} from '../../test-support/npm-publish.js';
 const enc = new TextEncoder();
 
 describe('publish tar walker', () => {
@@ -527,4 +530,51 @@ describe(`tar interpretation against npm node-tar ${tarVersion}`, () => {
     expect(Object.getPrototypeOf(result.manifest)).toBeNull();
     expect(Object.getPrototypeOf(result.manifest.nested)).toBeNull();
   });
+});
+
+it('bounds retained distinct UTF-8 paths before the archive entry and byte caps', async () => {
+  setFlagsFromString('--expose_gc');
+  const gc = runInNewContext('gc') as () => void;
+  gc();
+  const before = process.memoryUsage().heapUsed;
+  let retained = Number.NaN;
+  let samples = 0;
+  const signals = {
+    pulls: 0,
+    bytes: 0,
+    pull() {
+      if (signals.pulls % 128 !== 0) return;
+      gc();
+      const delta = process.memoryUsage().heapUsed - before;
+      retained = samples++ ? Math.max(retained, delta) : delta;
+    },
+  };
+  await expect(
+    walkTarball(fixtureStream(publishPathFlood(), signals), {
+      name: 'test-package',
+      version: '1.0.0',
+    }),
+  ).rejects.toMatchObject({ code: 'invalid_tarball', detail: 'path_bytes' });
+  expect(signals.pulls).toBeLessThan(10000);
+  expect(signals.bytes).toBeLessThan(256 * 1024 * 1024);
+  expect(samples).toBeGreaterThan(10);
+  expect(retained).toBeLessThan(32 * 1024 * 1024);
+});
+
+it('accepts exactly 16 MiB of retained path bytes', async () => {
+  function* parts() {
+    yield entry('package/package.json', manifest);
+    let remaining = 16 * 1024 * 1024 - 'package/package.json'.length;
+    for (let i = 0; remaining; i++) {
+      const size = Math.min(4096, remaining);
+      const path = ('package/' + String(i).padStart(5, '0')).padEnd(size, 'x');
+      yield entry('extension', pax('path', path), 'x');
+      yield entry('placeholder');
+      remaining -= size;
+    }
+    yield new Uint8Array(1024);
+  }
+  await expect(
+    walkTarball(fixtureStream(parts()), { name: 'test-package', version: '1.0.0' }),
+  ).resolves.toMatchObject({ fileCount: 4097 });
 });

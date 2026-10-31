@@ -1,3 +1,4 @@
+import { ulid } from '../ids.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixedClock } from '../ids.js';
 import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
@@ -98,6 +99,10 @@ const EXPECTED_ROUTES = [
   'PUT /_pb/projects/:project/sources/:source/attachment',
   'DELETE /_pb/projects/:project/sources/:source/attachment',
   'GET /_pb/projects/:project/resolve',
+  'GET /_pb/publishes',
+  'GET /_pb/publishes/:id',
+  'POST /_pb/publishes/:id/approve',
+  'POST /_pb/publishes/:id/reject',
   'GET /_pb/packages',
   'GET /_pb/packages/:package/versions',
   'GET /_pb/projects/:project/packages',
@@ -248,6 +253,16 @@ function dependencies(): ApiModuleDeps {
     },
     packages: unused('listProject', 'listOrganization', 'listVersions'),
     audit: unused('list', 'head'),
+    publishes: {
+      ids: { ulid },
+      clock: { now: () => new Date() },
+      clientIp: () => null,
+      publishes: {
+        get: async () => null,
+        list: async () => ({ items: [], next: null }),
+        decide: async () => ({ changed: false, active: false, revision: 1 }),
+      },
+    },
     packageManage: {
       ...common(),
       service: unused('manage'),

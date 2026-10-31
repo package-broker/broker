@@ -184,7 +184,7 @@ import {
 } from '@package-broker/core/authz/token-lifetime';
 import {
   createPatJobHolder,
-  patOffboardingRegistrations,
+  tokenJobRegistrations,
   tokenWiring,
   type TokenWiring,
 } from './token-jobs.js';
@@ -1791,7 +1791,7 @@ export function createWorker(
                 ...(db === undefined ? [] : importJobRegistrations(importJobs)),
                 ...(db === undefined
                   ? []
-                  : patOffboardingRegistrations(executor as SqlExecutor, patJobs, log)),
+                  : tokenJobRegistrations(executor as SqlExecutor, patJobs, log)),
                 ...(db === undefined || registryConfig === undefined
                   ? []
                   : [
@@ -1991,7 +1991,7 @@ export function createWorker(
     try {
       const coreRoutes = [
         ...(auth?.coreRoutes ?? []),
-        ...apiRoutes,
+        ...apiRoutes.filter((route) => route.path.startsWith('/_pb/')),
         openApiRoute(openApiDocument),
         ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
           ...route,
@@ -2038,10 +2038,11 @@ export function createWorker(
           ? reads === undefined
             ? {}
             : { packageResolver: reads.resolver }
-          : {
-              packageResolver: registryModule.module.visibilityPort,
-              ecosystemRoutes: registryModule.module.ecosystemRoutes,
-            }),
+          : { packageResolver: registryModule.module.visibilityPort }),
+        ecosystemRoutes: [
+          ...(registryModule?.module.ecosystemRoutes ?? []),
+          ...apiRoutes.filter((route) => !route.path.startsWith('/_pb/')),
+        ],
         ...(services === undefined
           ? { log }
           : {

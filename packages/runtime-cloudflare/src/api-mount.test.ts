@@ -152,6 +152,13 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ownerPacket: 'T531',
   },
   {
+    dependency: 'npmLogin',
+    constructed: 'npm login repository and personal token service',
+    routes: ['GET /_pb/me/npm-login/:selector', 'POST /_pb/me/npm-login/:selector'],
+    jobs: ['npm-login-expire'],
+    ownerPacket: 'NPM16',
+  },
+  {
     dependency: 'access',
     constructed: 'access administration and grant repository; kernel authorization engine',
     routes: [
@@ -361,9 +368,11 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
         ? 'NPM10'
         : entry.dependency === 'sourcePackages'
           ? 'T1041'
-          : entry.dependency === 'packageAccessRequests'
-            ? 'NPM12'
-            : 'T531',
+          : entry.dependency === 'npmLogin'
+            ? 'NPM16'
+            : entry.dependency === 'packageAccessRequests'
+              ? 'NPM12'
+              : 'T531',
     );
     for (const key of entry.routes) {
       expect(
@@ -431,6 +440,18 @@ describe('Workers management API mount', () => {
     await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
     return (built.kernels.at(-1)?.coreRoutes ?? []).map((route) => `${route.method} ${route.path}`);
   };
+
+  it('mounts public npm login routes without registry services', async () => {
+    await mountedAfter(createWorker([], { log: () => undefined }), await environment());
+    expect(
+      built.kernels.at(-1)?.ecosystemRoutes?.map((route) => `${route.method} ${route.path}`),
+    ).toEqual(
+      expect.arrayContaining([
+        'POST /:project/npm/-/v1/login',
+        'GET /:project/npm/-/v1/done/:session',
+      ]),
+    );
+  });
 
   it('mounts the package manage routes without a rebuild route', async () => {
     const mounted = await mountedAfter(

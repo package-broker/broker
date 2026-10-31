@@ -1,3 +1,4 @@
+import { npmLoginRoutes } from './routes/npm-login.js';
 import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
 import { routesConflict } from '../kernel/routes.js';
 import type { RouteDefinition } from '../plugin.js';
@@ -22,6 +23,7 @@ import { tokenRoutes } from './routes/tokens.js';
 export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
+  readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
   readonly publishes: Parameters<typeof publishRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
   readonly projects: Parameters<typeof projectRoutes>[0];
@@ -61,6 +63,14 @@ type DependencyRequirements<T> = {
 };
 const CONTEXT_METHODS = { ids: { ulid: true }, clock: { now: true }, clientIp: true } as const;
 const REQUIRED_DEPENDENCIES = {
+  npmLogin: {
+    ...CONTEXT_METHODS,
+    store: { start: true, confirmation: true, poll: true },
+    publicUrl: null,
+    projects: { getBySlug: true },
+    sessions: { authenticate: true, isReauthFresh: true },
+    personal: true,
+  },
   publishes: { ...CONTEXT_METHODS, publishes: { get: true, list: true, decide: true } },
   organization: {
     ...CONTEXT_METHODS,
@@ -265,6 +275,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...accessRoutes(deps.access),
     ...projectAccessRoutes(deps.projectAccess),
     ...tokenRoutes(deps.tokens),
+    ...npmLoginRoutes(deps.npmLogin).filter((route) => route.path.startsWith('/_pb/')),
     ...servicePrincipalRoutes({
       ...deps.servicePrincipals,
       sessions: deps.tokens.sessions,

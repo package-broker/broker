@@ -31,7 +31,11 @@ export const CREDENTIAL_KIND_PATTERN: RegExp = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const MAX_PLAINTEXT_BYTES = 65_536;
-const AES_PURPOSES: ReadonlySet<string> = new Set(['credential-encryption', 'login-state']);
+const AES_PURPOSES: ReadonlySet<string> = new Set([
+  'credential-encryption',
+  'login-state',
+  'npm-login',
+]);
 const LONE_SURROGATE = /\p{Surrogate}/u;
 const encoder = new TextEncoder();
 
@@ -44,7 +48,7 @@ function requireAad(aad: string): Uint8Array {
 
 export function createSecretCipher(
   keyring: Keyring,
-  purpose: 'credential-encryption' | 'login-state',
+  purpose: 'credential-encryption' | 'login-state' | 'npm-login',
 ): SecretCipher {
   if (!AES_PURPOSES.has(purpose)) throw new TypeError('Purpose is not an AES key purpose');
   const currentVersion = keyring.currentVersion;

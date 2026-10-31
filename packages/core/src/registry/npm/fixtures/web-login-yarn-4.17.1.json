@@ -1,0 +1,7 @@
+{
+  "client": "yarn",
+  "version": "4.17.1",
+  "provenance": "Installed client source supports --web-login; path-prefixed registry behavior requires a transport capture",
+  "captureStatus": "not_run",
+  "unsupported": null
+}

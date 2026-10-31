@@ -115,7 +115,7 @@ import {
 } from '@package-broker/core/authz/token-lifetime';
 import {
   createPatJobHolder,
-  patOffboardingRegistrations,
+  tokenJobRegistrations,
   tokenWiring,
   type TokenWiring,
 } from './token-jobs.js';
@@ -1187,7 +1187,7 @@ export function createNodeServer(
                 ? []
                 : [registerIngestJob(registry.module.packageSyncJob)]),
               ...(auth === undefined ? [] : importJobRegistrations(importJobs)),
-              ...(auth === undefined ? [] : patOffboardingRegistrations(executor, patJobs, log)),
+              ...(auth === undefined ? [] : tokenJobRegistrations(executor, patJobs, log)),
             ],
     });
     if (registry !== undefined && options.platformServices !== undefined) {
@@ -1288,7 +1288,7 @@ export function createNodeServer(
     );
     const coreRoutes = [
       ...(access?.module.coreRoutes ?? []),
-      ...apiRoutes,
+      ...apiRoutes.filter((route) => route.path.startsWith('/_pb/')),
       openApiRoute(openApiDocument),
       ...(registry?.module.coreRoutes ?? []).map((route) => ({
         ...route,
@@ -1320,7 +1320,10 @@ export function createNodeServer(
     const kernel = await createKernel({
       platform: 'node',
       ...(packageResolver === undefined ? {} : { packageResolver }),
-      ...(registry === undefined ? {} : { ecosystemRoutes: registry.module.ecosystemRoutes }),
+      ecosystemRoutes: [
+        ...(registry?.module.ecosystemRoutes ?? []),
+        ...apiRoutes.filter((route) => !route.path.startsWith('/_pb/')),
+      ],
       plugins,
       publicOrigin: auth?.publicOrigin,
       registration,

@@ -25,6 +25,7 @@ describe('Node retention startup assembly', () => {
       try {
         const path = join(directory, 'broker.sqlite');
         broker = await startNode({
+          audit: { acceptNoDurableAudit: true },
           plugins: [],
           migrations: await discoveredMigrations(),
           env: {

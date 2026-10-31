@@ -59,7 +59,10 @@ async function probe(
   overrides: Record<string, string | undefined> = {},
 ): Promise<{ status: number; text: string; logs: string }> {
   const entries: string[] = [];
-  const worker = createWorker([], { log: (entry) => void entries.push(JSON.stringify(entry)) });
+  const worker = createWorker([], {
+    audit: { acceptNoDurableAudit: true },
+    log: (entry) => void entries.push(JSON.stringify(entry)),
+  });
   const response = await worker.fetch(
     new Request(`${PUBLIC_URL}/_pb/auth/providers`),
     env(db, overrides),

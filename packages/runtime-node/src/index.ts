@@ -1,3 +1,4 @@
+import { bindJobAdmission } from './job-admission.js';
 import { createNodeAudit } from './audit.js';
 import { createAuditStatusReader } from '@package-broker/db-sqlite/repositories/audit-status';
 import {
@@ -1218,7 +1219,8 @@ export function createNodeServer(
               },
               async handler(payload, context) {
                 const job = audit?.jobs.find((job) => job.name === name);
-                if (job !== undefined) await job.handler(job.validate(payload), context);
+                if (job === undefined) throw new PlatformUnavailableError();
+                await job.handler(job.validate(payload), context);
               },
             }),
           ),
@@ -1456,6 +1458,7 @@ export function createNodeServer(
         registration: () => kernel.registration,
       });
     }
+    if (audit !== undefined) bindJobAdmission(kernel.registration.jobs, audit.admitJob);
     if (
       audit !== undefined &&
       options.executor !== undefined &&

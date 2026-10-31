@@ -569,6 +569,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
       PB_PUBLIC_URL: PUBLIC_URL,
     } as unknown as Env;
     const worker = createWorker([plugin], {
+      audit: { acceptNoDurableAudit: true },
       log: () => undefined,
       ...(tokens === undefined ? {} : { tokens }),
     });
@@ -672,7 +673,10 @@ describe('cloudflare access wiring on Miniflare D1', () => {
 
   it('assembles the catalogue resolver over the D1 database', async () => {
     const { raw, orgId } = await database();
-    const worker = createWorker([plugin], { log: () => undefined });
+    const worker = createWorker([plugin], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     const { catalogue } = await worker.services({
       DB: raw,
       PB_MASTER_KEY: KEY,
@@ -835,6 +839,7 @@ describe('cloudflare access wiring on Miniflare D1', () => {
     it('refuses to start with a personal maximum above the ceiling and names the key', async () => {
       const { raw } = await database();
       const worker = createWorker([plugin], {
+        audit: { acceptNoDurableAudit: true },
         log: () => undefined,
         tokens: { maxLifetimeDays: { personal: 400 } },
       });
@@ -920,7 +925,10 @@ describe('cloudflare access wiring on Miniflare D1', () => {
   describe('start-up refusals', () => {
     async function broken(): Promise<unknown> {
       const { raw } = await database();
-      const worker = createWorker([plugin], { log: () => undefined });
+      const worker = createWorker([plugin], {
+        audit: { acceptNoDurableAudit: true },
+        log: () => undefined,
+      });
       const environment = {
         DB: raw,
         PB_MASTER_KEY: KEY,

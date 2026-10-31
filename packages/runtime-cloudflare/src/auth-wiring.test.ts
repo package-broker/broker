@@ -108,6 +108,7 @@ function env(db: D1DatabaseLike, overrides: Record<string, string | undefined> =
     DB: db,
     PB_MASTER_KEY: KEY_V1,
     PB_PUBLIC_URL: PUBLIC_URL,
+    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
   };
   for (const [name, value] of Object.entries(overrides)) {
     if (value === undefined) delete base[name];
@@ -213,10 +214,10 @@ describe('auth wiring on Miniflare D1', () => {
     };
     const sink = collectLog();
 
-    const response = await createWorker([failing], { log: sink.log }).fetch(
-      get('/_pb/auth/providers'),
-      env(db),
-    );
+    const response = await createWorker([failing], {
+      audit: { acceptNoDurableAudit: true },
+      log: sink.log,
+    }).fetch(get('/_pb/auth/providers'), env(db));
 
     expect(response.status).toBe(503);
     const text = await response.text();
@@ -246,10 +247,10 @@ describe('auth wiring on Miniflare D1', () => {
     };
     const sink = collectLog();
 
-    const response = await createWorker([failing], { log: sink.log }).fetch(
-      get('/_pb/auth/providers'),
-      env(db, { PB_MASTER_KEY: undefined }),
-    );
+    const response = await createWorker([failing], {
+      audit: { acceptNoDurableAudit: true },
+      log: sink.log,
+    }).fetch(get('/_pb/auth/providers'), env(db, { PB_MASTER_KEY: undefined }));
 
     expect(response.status).toBe(503);
     expect(calls).toBe(0);
@@ -383,7 +384,10 @@ describe('auth wiring on Miniflare D1', () => {
       },
     });
     const logged: unknown[] = [];
-    const worker = createWorker([plugin], { log: (entry) => void logged.push(entry) });
+    const worker = createWorker([plugin], {
+      audit: { acceptNoDurableAudit: true },
+      log: (entry) => void logged.push(entry),
+    });
     expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
     expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
     expect(builds).toBe(1);
@@ -471,7 +475,10 @@ describe('misconfigured environment', () => {
   it.each(cases)('answers 503 misconfigured for $name until the env is fixed', async (item) => {
     const db = await sharedDatabase();
     const sink = collectLog();
-    const worker = createWorker(item.plugins(), { log: sink.log });
+    const worker = createWorker(item.plugins(), {
+      audit: { acceptNoDurableAudit: true },
+      log: sink.log,
+    });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const response = await worker.fetch(get('/_pb/auth/providers'), env(db, item.bad));
@@ -489,7 +496,10 @@ describe('misconfigured environment', () => {
 
   it.each(cases)('answers HEAD for $name with 503 and no body', async (item) => {
     const db = await sharedDatabase();
-    const worker = createWorker(item.plugins(), { log: () => undefined });
+    const worker = createWorker(item.plugins(), {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     const response = await worker.fetch(get('/_pb/auth/providers', {}, 'HEAD'), env(db, item.bad));
     expect(response.status).toBe(503);
     expect(response.headers.get('x-request-id')).not.toBeNull();
@@ -507,10 +517,10 @@ describe('misconfigured environment', () => {
         throw new Error('init failed');
       },
     });
-    const response = await createWorker([failing], { log: () => undefined }).fetch(
-      get('/health/live', {}, 'HEAD'),
-      env(db),
-    );
+    const response = await createWorker([failing], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    }).fetch(get('/health/live', {}, 'HEAD'), env(db));
     expect(response.status).toBe(500);
     expect(await response.text()).toBe('');
   });
@@ -543,7 +553,10 @@ describe('password hashing self-test', () => {
     const spy = vi
       .spyOn(crypto.subtle, 'deriveBits')
       .mockRejectedValue(new Error('runtime rejected the derivation'));
-    const worker = createWorker([], { log: sink.log });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: sink.log,
+    });
 
     const response = await worker.fetch(get('/_pb/auth/providers'), env(db));
     expect(spy).toHaveBeenCalled();
@@ -619,10 +632,10 @@ describe('start-up order', () => {
   it('rejects a bad PB_PUBLIC_URL before the PBKDF2 self-test runs', async () => {
     const db = await sharedDatabase();
     const spy = vi.spyOn(crypto.subtle, 'deriveBits');
-    const response = await createWorker([], { log: () => undefined }).fetch(
-      get('/_pb/auth/providers'),
-      env(db, { PB_PUBLIC_URL: 'http://broker.test' }),
-    );
+    const response = await createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    }).fetch(get('/_pb/auth/providers'), env(db, { PB_PUBLIC_URL: 'http://broker.test' }));
     expect(response.status).toBe(503);
     expect(spy).not.toHaveBeenCalled();
   });
@@ -719,17 +732,20 @@ describe('plugin hooks and identity fetch', () => {
 
   it('logs in through a direct provider when no hook objects', async () => {
     const { db } = await bootstrappedDatabase();
-    const response = await createWorker([identityPlugin()], { log: () => undefined }).fetch(
-      startLogin(),
-      env(db),
-    );
+    const response = await createWorker([identityPlugin()], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    }).fetch(startLogin(), env(db));
     expect(response.status).toBe(303);
     expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
   });
 
   it('gives the assembled services the anchors of the providers the auth module uses', async () => {
     const { db } = await bootstrappedDatabase();
-    const worker = createWorker([identityPlugin()], { log: () => undefined });
+    const worker = createWorker([identityPlugin()], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     const services = await worker.services(env(db));
     expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([
       {
@@ -746,6 +762,7 @@ describe('plugin hooks and identity fetch', () => {
   it('hands the registered hooks to the auth module: a deny hook refuses the login', async () => {
     const { db } = await bootstrappedDatabase();
     const response = await createWorker([identityPlugin(), denyPlugin()], {
+      audit: { acceptNoDurableAudit: true },
       log: () => undefined,
     }).fetch(startLogin(), env(db));
     expect(response.status).toBe(401);
@@ -778,7 +795,10 @@ describe('plugin hooks and identity fetch', () => {
         });
       },
     });
-    const worker = createWorker([shared], { log: () => undefined });
+    const worker = createWorker([shared], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
 
     const before = await worker.fetch(get('/hook-runs'), env(db));
     expect(await before.json()).toEqual({ runs: 0 });

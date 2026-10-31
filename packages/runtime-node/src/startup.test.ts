@@ -755,6 +755,7 @@ describe('startNode', () => {
         PB_MASTER_KEY: MASTER,
         PB_PUBLIC_URL: 'http://127.0.0.1',
         PB_BLOB_ROOT: blobRoot,
+        PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
         DEPLOYMENT_ID: 'test-deployment',
         ...extra,
       };
@@ -1592,6 +1593,7 @@ it.each([undefined, true, false])(
     try {
       const path = join(directory, 'broker.sqlite');
       broker = await startNode({
+        audit: { acceptNoDurableAudit: true },
         plugins: [],
         migrations: await discoveredMigrations(),
         ...(enabled === undefined ? {} : { vulnerability: { enabled } }),

@@ -144,7 +144,10 @@ describe.each([
       const { a, b } = await seedTwoOrganizations(executor);
       const records: unknown[] = [];
       const worker = createWorker([], {
-        audit: { capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES } },
+        audit: {
+          capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES },
+          acceptNoDurableAudit: true,
+        },
         platformPorts,
         console: {
           log: (record) => void records.push(record),
@@ -197,6 +200,9 @@ describe.each([
         ['core:source-sync:v1', undefined],
         ['core:source-poll:v1', { everySeconds: 60 }],
         ['core:package-sync:v1', undefined],
+        ['core:audit-maintain:v1', { everySeconds: 60, resourceKey: 'audit-maintain' }],
+        ['core:audit-health-observe:v1', { everySeconds: 60, resourceKey: 'audit-health-observe' }],
+        ['core:audit-frontier:v1', { everySeconds: 86400, resourceKey: 'audit-frontier' }],
       ]);
       await worker.scheduled({}, env);
       await executor.batch([

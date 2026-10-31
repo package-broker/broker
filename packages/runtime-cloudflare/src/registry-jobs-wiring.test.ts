@@ -163,6 +163,7 @@ describe.each([
         DEPLOYMENT_ID: 'registry-jobs',
       };
       const worker = createWorker([plugin], {
+        audit: { acceptNoDurableAudit: true },
         platformPorts: {
           blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
           cache: { adapter: 'cache-api', namespace: 'registry-jobs' },

@@ -369,7 +369,10 @@ describe('Workers management API mount', () => {
 
   it('refuses anonymous requests to every route in the API module table', async () => {
     const env = await environment();
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     await worker.services(env);
     expect(built.modules).toHaveLength(1);
     const routes = built.modules[0]!;
@@ -390,7 +393,10 @@ describe('Workers management API mount', () => {
 
   it('mounts every management route exactly once', async () => {
     const env = await environment();
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
     expect(built.modules).toHaveLength(1);
     const expected = built.modules[0]!.map((route) => `${route.method} ${route.path}`);
@@ -413,7 +419,10 @@ describe('Workers management API mount', () => {
 
   it('mounts the package manage routes without a rebuild route', async () => {
     const mounted = await mountedAfter(
-      createWorker([], { log: () => undefined }),
+      createWorker([], {
+        audit: { acceptNoDurableAudit: true },
+        log: () => undefined,
+      }),
       await environment(),
     );
     for (const action of ['quarantine', 'tombstone', 'release']) {
@@ -427,7 +436,10 @@ describe('Workers management API mount', () => {
 
   it('omits the import routes and logs the reason without a blob store', async () => {
     const records: unknown[] = [];
-    const worker = createWorker([], { log: (record) => records.push({ ...record }) });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: (record) => records.push({ ...record }),
+    });
     const mounted = await mountedAfter(worker, await environment());
     expect(mounted.filter((key) => key.includes('/_pb/import-runs'))).toEqual([]);
     expect(records).toContainEqual({
@@ -455,6 +467,7 @@ describe('Workers management API mount', () => {
     } as unknown as Env;
     const records: unknown[] = [];
     const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
       platformPorts,
       cacheStorage: {
         open: async () => ({
@@ -482,7 +495,10 @@ describe('Workers management API mount', () => {
     const env = await environment();
     built.drop = 'tokenList';
     const logged: Array<Record<string, unknown>> = [];
-    const worker = createWorker([], { log: (entry) => logged.push({ ...entry }) });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: (entry) => logged.push({ ...entry }),
+    });
     const failure = await worker.services(env).then(
       () => null,
       (caught: unknown) => caught as Error,

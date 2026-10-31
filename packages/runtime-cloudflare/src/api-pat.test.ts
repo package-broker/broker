@@ -105,7 +105,10 @@ async function boot(binding: string) {
     now: now.toISOString(),
   });
   const env = { DB: raw, PB_MASTER_KEY: KEY, PB_PUBLIC_URL: PUBLIC_URL } as unknown as Env;
-  const worker = createWorker([], { log: () => undefined });
+  const worker = createWorker([], {
+    audit: { acceptNoDurableAudit: true },
+    log: () => undefined,
+  });
   const call = (input: Request) => worker.fetch(input, env);
 
   const started = await call(

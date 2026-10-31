@@ -3349,7 +3349,16 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         'runtime-cloudflare/src/index.ts:opaque object access: Object.getOwnPropertyDescriptor(env, name) #1',
         'runtime-cloudflare/src/index.ts:opaque object access: Object.entries(parsed) #1',
+        'runtime-cloudflare/src/index.ts:opaque object access: Object.entries(sink.destination) #1',
         "runtime-cloudflare/src/index.ts:opaque object access: Object.getOwnPropertyDescriptor(body, 'org') #1",
+      ],
+    },
+    {
+      reason:
+        'Destructures audit build configuration and job schedules, never executor results or change counts.',
+      sites: [
+        'runtime-cloudflare/src/entry.ts:object rest access: ...auditConfig #1',
+        'runtime-cloudflare/src/index.ts:object rest access: ...schedule #1',
       ],
     },
     {

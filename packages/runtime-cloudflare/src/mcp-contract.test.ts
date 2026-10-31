@@ -96,7 +96,11 @@ runMcpContract(
         PB_PUBLIC_URL: ORIGIN,
         ...(binding === undefined ? {} : { MCP_RATE_LIMIT: binding }),
       };
-      const worker = createWorker([], { mcp: { enabled: true }, log: () => undefined });
+      const worker = createWorker([], {
+        audit: { acceptNoDurableAudit: true },
+        mcp: { enabled: true },
+        log: () => undefined,
+      });
       let stub: Parameters<McpContractBroker['stubRest']>[0] = null;
       const createTools = mcpTools.createMcpTools;
       const toolsSpy = vitest.vi

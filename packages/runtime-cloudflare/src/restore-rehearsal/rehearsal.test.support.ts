@@ -193,6 +193,7 @@ export async function startDeployment(deployment: Deployment) {
     JOBS: { send: async () => undefined, sendBatch: async () => undefined },
     DEPLOYMENT_ID: 'restore-rehearsal',
     PB_PUBLIC_URL: ORIGIN,
+    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
     ...Object.fromEntries(deployment.secrets),
   };
   return {

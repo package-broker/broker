@@ -367,6 +367,7 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
   };
   const newWorker = () =>
     createWorker([], {
+      audit: { acceptNoDurableAudit: true },
       platformPorts,
       cacheStorage,
       registry: { timers: { metadataTtlSeconds: TTL, waitBudgetMs: 1 } },
@@ -494,6 +495,9 @@ const BASE_JOBS = [
   'core:source-poll:v1',
   'core:retention-scan:v1',
   'core:blob-purge:v1',
+  'core:audit-frontier:v1',
+  'core:audit-health-observe:v1',
+  'core:audit-maintain:v1',
   'core:audit-seal:v1',
   'core:audit-verify:v1',
   'core:import-verify:v1',
@@ -505,7 +509,10 @@ const BASE_JOBS = [
 
 it('leaves job registration empty when the registry cannot be built', async () => {
   const kernel = vi.spyOn(kernelModule, 'createKernel');
-  const worker = createWorker([], { log: () => undefined });
+  const worker = createWorker([], {
+    audit: { acceptNoDurableAudit: true },
+    log: () => undefined,
+  });
   const response = await worker.fetch(new Request(`${PUBLIC_URL}/health/live`));
   expect(response.status).toBe(200);
   expect(kernel.mock.calls.at(-1)![0].registration!.jobs).toEqual([]);

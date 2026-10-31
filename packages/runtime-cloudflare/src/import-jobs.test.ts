@@ -277,6 +277,7 @@ describe('import jobs in the Worker assembly', () => {
       await migrate(executor, await discoveredMigrations(), { holder: 'import-jobs-test' });
       const { a } = await seedTwoOrganizations(executor);
       const worker = createWorker([], {
+        audit: { acceptNoDurableAudit: true },
         platformPorts,
         console: { log: () => undefined, error: () => undefined },
         cacheStorage: {

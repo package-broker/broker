@@ -21,7 +21,10 @@ describe('Worker failed build cache', () => {
     const verify = vi
       .spyOn(verifier, 'verifyKeyring')
       .mockRejectedValue(new verifier.KeyringMismatchError(1));
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     const request = () => new Request(`${PUBLIC_URL}/_pb/auth/providers`);
     expect((await worker.fetch(request(), env(db))).status).toBe(503);
     now += 29_999;
@@ -38,7 +41,10 @@ describe('Worker failed build cache', () => {
     const verify = vi
       .spyOn(verifier, 'verifyKeyring')
       .mockRejectedValue(new TypeError('Unavailable'));
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       expect(
         (await worker.fetch(new Request(`${PUBLIC_URL}/_pb/auth/providers`), env(db))).status,

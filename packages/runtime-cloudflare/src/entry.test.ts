@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   manifest: {} as {
     plugins: [];
-    audit?: { capacity: { maxJournalBytes: number } };
+    audit?: { capacity?: { maxJournalBytes: number }; build_generation?: number };
     migrations?: MigrationSource[];
     vulnerability?: { enabled: boolean };
     mcp?: { enabled: boolean };
@@ -63,6 +63,7 @@ describe('Worker entry observability', () => {
       };
       await import('./entry.js');
       expect(state.createWorker).toHaveBeenCalledExactlyOnceWith([], {
+        auditGeneration: 0,
         platformPorts: null,
         migrations: undefined,
         observability,
@@ -159,4 +160,13 @@ it('forwards the audit budget from the manifest', async () => {
   state.manifest = { plugins: [], platformPorts: null, audit };
   await import('./entry.js');
   expect(state.createWorker).toHaveBeenCalledWith([], expect.objectContaining({ audit }));
+});
+
+it('uses the manifest audit build generation without passing it as configuration', async () => {
+  state.manifest = { plugins: [], platformPorts: null, audit: { build_generation: 17 } };
+  await import('./entry.js');
+  expect(state.createWorker).toHaveBeenCalledWith(
+    [],
+    expect.objectContaining({ auditGeneration: 17, audit: {} }),
+  );
 });

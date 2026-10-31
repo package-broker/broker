@@ -37,6 +37,7 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
       };
     }
     if (/from (?:local_login|credential|token)\b/i.test(sql)) return { results: [] };
+    if (/from "organization"/i.test(sql)) return { results: [] };
     throw new Error('unexpected SQL');
   };
   const make = (sql: string, values: unknown[]): Recorded => ({
@@ -53,7 +54,10 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
 }
 
 it('builds unlink holder checks without a host freshness clock', async () => {
-  const worker = createWorker([], { log: () => undefined });
+  const worker = createWorker([], {
+    audit: { acceptNoDurableAudit: true },
+    log: () => undefined,
+  });
   const response = await worker.fetch(
     new Request('https://broker.example.test/_pb/auth/providers'),
     {

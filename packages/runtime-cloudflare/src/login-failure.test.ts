@@ -37,7 +37,7 @@ it('keeps Worker staging alive through waitUntil and shares one recorder across 
     prepare: (sql) => prepare({ sql, params: [] }),
     async batch(batch) {
       const bound = batch.map((statement) => statements.get(statement)!);
-      if (bound.some((statement) => statement.sql.includes('audit_pending'))) {
+      if (bound.some((statement) => /INSERT INTO audit_pending/i.test(statement.sql))) {
         started();
         await hold;
       }
@@ -56,6 +56,7 @@ it('keeps Worker staging alive through waitUntil and shares one recorder across 
   const output = { log: vi.fn(), error: vi.fn() };
   const clock = vi.spyOn(systemClock, 'now').mockReturnValue(new Date('2026-10-30T10:00:12.000Z'));
   const worker = createWorker([], {
+    audit: { acceptNoDurableAudit: true },
     log: () => undefined,
     console: output,
     platformPorts: {

@@ -274,7 +274,10 @@ function harness(compiled: unknown[] = []): Harness {
       return plugin.identityProviders!(ctx);
     },
   };
-  const worker = createWorker([counted], { log: (entry) => void log.push({ ...entry }) });
+  const worker = createWorker([counted], {
+    audit: { acceptNoDurableAudit: true },
+    log: (entry) => void log.push({ ...entry }),
+  });
   return { worker, log, builds: () => builds };
 }
 

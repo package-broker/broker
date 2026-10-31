@@ -115,7 +115,7 @@ export function createAuditBoundFetch(
   const headers = headersOf(options.headers);
   const duration = timeoutMs(options.timeoutMs);
   if (
-    !options.audit?.egress?.allowPrivate?.includes(options.id) &&
+    !(options.runtime === 'docker' && options.audit?.egress?.allowPrivate?.includes(options.id)) &&
     Object.keys(headers).length === 0
   ) {
     throw new AuditSinkConfigError('missing_credential');

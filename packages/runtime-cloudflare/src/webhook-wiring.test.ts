@@ -208,6 +208,7 @@ async function boot(options: { jobs?: boolean; mode?: 'real' | 'missing' | 'thro
     logged.push(record);
   };
   const worker = createWorker([plugin], {
+    audit: { acceptNoDurableAudit: true },
     ...(options.jobs === false
       ? {}
       : {

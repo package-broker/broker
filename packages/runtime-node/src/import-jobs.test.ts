@@ -220,6 +220,7 @@ describe('import jobs in the Node server assembly', () => {
   it('registers all import jobs with real stores and completes a claim for an unknown run', async () => {
     const executor = await database();
     const broker = createNodeServer([], {
+      audit: { acceptNoDurableAudit: true },
       executor,
       log: () => undefined,
       auth: {

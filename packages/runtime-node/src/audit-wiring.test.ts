@@ -1,3 +1,9 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
+import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
+import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
+import * as auditModule from './audit.js';
+import { createJobLoop } from './jobs/loop.js';
 import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { describe, it, expect, vi } from 'vitest';
@@ -181,7 +187,7 @@ describe('Node audit assembly', () => {
     }
   });
 
-  it('keeps sinks gated while the other runtime is unwired', async () => {
+  it('refuses an active sink without a configured deployment id', async () => {
     const sink: PluginDefinition = {
       id: 'sink',
       package: '@test/sink',
@@ -194,14 +200,26 @@ describe('Node audit assembly', () => {
           activation: 'env',
           custody: 'durable',
           sourceIp: 'include',
-          destination: { protocol: 'https-json', urlEnv: 'ARCHIVE_URL' },
+          destination: {
+            protocol: 'https-json',
+            urlEnv: 'ARCHIVE_URL',
+            headersEnv: 'ARCHIVE_HEADERS',
+          },
           create: vi.fn(),
         },
       ],
     };
-    const broker = createNodeServer([sink], { log: () => {} });
+    const broker = createNodeServer([sink], {
+      auditEnv: {
+        ARCHIVE_URL: 'https://archive.example.test',
+        ARCHIVE_HEADERS: 'Authorization=fixture',
+      },
+      log: () => {},
+    });
     try {
-      await expect(broker.ready()).rejects.toThrow('audit plugins are not available in this build');
+      await expect(broker.ready()).rejects.toThrow(
+        'Audit sinks require a configured deployment id',
+      );
     } finally {
       await broker.close();
     }
@@ -279,7 +297,11 @@ describe('Node audit assembly', () => {
           activation: 'env',
           custody: 'durable',
           sourceIp: 'include',
-          destination: { protocol: 'https-json', urlEnv: 'ARCHIVE_URL' },
+          destination: {
+            protocol: 'https-json',
+            urlEnv: 'ARCHIVE_URL',
+            headersEnv: 'ARCHIVE_HEADERS',
+          },
           create: () => ({ deliver: async () => ({ outcome: 'retry', code: 'network' }) }),
         },
       ],
@@ -322,3 +344,291 @@ describe('Node audit assembly', () => {
     }
   });
 });
+
+it('defers ordinary queued and scheduled jobs on a refusal and retries after reconfiguration', async () => {
+  const { database, org } = await fixture();
+  await database.executor.batch([
+    { sql: "UPDATE audit_chain SET policy = 'required' WHERE org_id = ?", params: [org.orgId] },
+  ]);
+  const handler = vi.fn(async () => {});
+  const ordinary: PluginDefinition = {
+    id: 'ordinary',
+    package: '@test/ordinary',
+    apiVersion: 4,
+    platforms: ['node'],
+    register(registry) {
+      for (const name of ['queued', 'scheduled'])
+        registry.job({
+          name,
+          version: 1,
+          validate: () => ({}),
+          handler,
+          ...(name === 'scheduled' ? { schedule: { everySeconds: 60 } } : {}),
+        });
+    },
+  };
+  const records: import('@package-broker/core/platform/observability').ObsRecord[] = [];
+  const options = {
+    executor: database.executor,
+    audit: { capacity },
+    log: () => {},
+    observability: {
+      deploymentId: 'test',
+      sink: {
+        emit: (record: import('@package-broker/core/platform/observability').ObsRecord) => {
+          records.push(record);
+        },
+      },
+    },
+    platformServices: {
+      jobStore: createJobRepository(database.executor),
+      blob: {
+        head: async () => null,
+        get: async () => null,
+        put: async () => {
+          throw new Error('unused');
+        },
+      },
+      cache: { get: async () => null, set: async () => {}, delete: async () => {} },
+    },
+  };
+  const jobs = createJobRepository(database.executor);
+  const queued = await jobs.enqueue(org, {
+    id: ulid(),
+    type: 'ordinary:queued:v1',
+    payloadJson: '{}',
+    idempotencyKey: ulid(),
+    maxAttempts: 1,
+    resourceKey: null,
+    projectId: null,
+    initiatorTokenId: null,
+    runAt: new Date().toISOString(),
+  });
+  await database.executor.batch([
+    {
+      sql: "INSERT INTO job_schedule (org_id, name, every_seconds, next_run_at, enabled) VALUES (?, 'ordinary:scheduled:v1', 60, '2000-01-01T00:00:00.000Z', 1)",
+      params: [org.orgId],
+    },
+  ]);
+  const broker = createNodeServer([ordinary], options);
+  try {
+    const kernel = await broker.ready();
+    const loop = createJobLoop({
+      executor: database.executor,
+      jobs: kernel.registration.jobs,
+      scope: kernel.jobScope,
+      observability: noopObservability,
+    });
+    loop.start();
+    try {
+      await vi.waitFor(async () => {
+        const rows = await database.executor.all<{
+          state: string;
+          attempts: number;
+          run_at: string;
+        }>({
+          sql: "SELECT state, attempts, run_at FROM job WHERE org_id = ? AND type LIKE 'ordinary:%'",
+          params: [org.orgId],
+        });
+        expect(rows).toHaveLength(2);
+        expect(
+          rows.every(
+            (row) =>
+              row.state === 'queued' && row.attempts === 0 && Date.parse(row.run_at) > Date.now(),
+          ),
+        ).toBe(true);
+      });
+      expect(handler).not.toHaveBeenCalled();
+      expect(
+        records.filter(
+          (record) =>
+            record.kind === 'log' && record.record.event === 'audit.effective_unavailable',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await loop.stop();
+    }
+    await broker.close();
+    const recovered = createNodeServer([ordinary, trail], {
+      ...options,
+      audit: { capacity, alerts: { webhookEnv: 'ALERT_URL' } },
+      auditEnv: { ALERT_URL: 'https://alerts.example.test' },
+    });
+    try {
+      const ready = await recovered.ready();
+      await database.executor.batch([
+        {
+          sql: "UPDATE job SET run_at = ? WHERE org_id = ? AND type LIKE 'ordinary:%'",
+          params: [new Date(Date.now() - 1000).toISOString(), org.orgId],
+        },
+      ]);
+      const retry = createJobLoop({
+        executor: database.executor,
+        jobs: ready.registration.jobs,
+        scope: ready.jobScope,
+        observability: noopObservability,
+      });
+      retry.start();
+      try {
+        await vi.waitFor(async () => {
+          expect(await jobs.status(org, queued.id)).toMatchObject({ state: 'succeeded' });
+          expect(handler).toHaveBeenCalledTimes(2);
+        });
+      } finally {
+        await retry.stop();
+      }
+    } finally {
+      await recovered.close();
+    }
+  } finally {
+    await broker.close();
+    await database.close();
+  }
+});
+
+it.each(['service', 'job'] as const)(
+  'fails an audit schedule when its %s is unavailable',
+  async (missing) => {
+    const { database, org } = await fixture();
+    const original = auditModule.createNodeAudit;
+    const spy = vi.spyOn(auditModule, 'createNodeAudit').mockImplementation(async (input) => {
+      if (missing === 'service') return undefined as never;
+      return { ...(await original(input)), jobs: [] };
+    });
+    const broker = createNodeServer([trail], {
+      executor: database.executor,
+      audit: { capacity },
+      log: () => {},
+      platformServices: {
+        jobStore: createJobRepository(database.executor),
+        blob: {
+          head: async () => null,
+          get: async () => null,
+          put: async () => {
+            throw new Error('unused');
+          },
+        },
+        cache: { get: async () => null, set: async () => {}, delete: async () => {} },
+      },
+    });
+    const kernel = await broker.ready();
+    try {
+      const job = kernel.registration.jobs.find(
+        (job) => job.qualifiedName === 'core:audit-frontier:v1',
+      )!;
+      await expect(
+        job.definition.handler(
+          {},
+          {
+            ...kernel.jobScope(job, { jobId: ulid(), attempt: 1 }),
+            org,
+            jobId: ulid(),
+            idempotencyKey: ulid(),
+            attempt: 1,
+            fence: 1,
+            signal: AbortSignal.timeout(1000),
+          },
+        ),
+      ).rejects.toMatchObject({ name: 'PlatformUnavailableError' });
+    } finally {
+      spy.mockRestore();
+      await broker.close();
+      await database.close();
+    }
+  },
+);
+
+it.each(['none_not_accepted', 'durable_path_required'] as const)(
+  'allows first-admin setup while %s fences other writes',
+  async (code) => {
+    const { database, org } = await fixture();
+    const token = randomBytes(32).toString('base64url');
+    const now = new Date();
+    expect(
+      await bootstrapAdmin(database.executor, org, {
+        email: 'setup@example.test',
+        userId: ulid(),
+        setupHash: createHash('sha256').update(token).digest('hex'),
+        setupExpiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+        grantId: ulid(),
+        roleIds: Object.fromEntries(DEFAULT_ROLES.map(({ key }) => [key, ulid()])) as Record<
+          DefaultRoleKey,
+          string
+        >,
+        opId: ulid(),
+        now: now.toISOString(),
+      }),
+    ).toBe('created');
+    if (code === 'durable_path_required')
+      await database.executor.batch([
+        { sql: "UPDATE audit_chain SET policy = 'required' WHERE org_id = ?", params: [org.orgId] },
+      ]);
+    const broker = createNodeServer([], {
+      executor: database.executor,
+      audit: { capacity },
+      auth: {
+        keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
+        publicOrigin: 'https://broker.test',
+        env: {},
+      },
+      log: () => {},
+    });
+    const kernel = await broker.ready();
+    const send = (request: Request) => kernel.fetch(request);
+    const audit = await auditModule.createNodeAudit({
+      config: { platform: 'node', plugins: [], audit: { capacity } },
+      env: () => undefined,
+      executor: database.executor,
+      observability: noopObservability,
+      maxJournalBytes: capacity.maxJournalBytes,
+      generation: 0,
+      telemetryActive: false,
+      registration: () => collectRegistrations([]),
+    });
+    const post = (path: string, body: unknown = {}) =>
+      send(
+        new Request(`https://broker.test/_pb/${path}`, {
+          method: 'POST',
+          headers: { origin: 'https://broker.test', 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
+      );
+    try {
+      const assertFenced = async () => {
+        for (const [method, path] of [
+          ['POST', 'auth/local/setup/other'],
+          ['POST', 'auth/sso/provider/callback'],
+          ['PUT', 'auth/local/setup/start'],
+          ['DELETE', 'auth/local/setup/finish'],
+        ] as const) {
+          await expect(
+            audit.resolveRequest(org, new Request(`https://broker.test/_pb/${path}`, { method })),
+          ).rejects.toMatchObject({ code });
+        }
+        for (const path of ['projects']) {
+          const response = await post(path);
+          expect(response.status, path).toBe(503);
+          expect(response.headers.has('retry-after'), path).toBe(false);
+          expect(await response.json()).toMatchObject({ error: { code } });
+        }
+      };
+      await assertFenced();
+      const started = await post('auth/local/setup/start', { token });
+      expect(started.status).toBe(200);
+      const { secret } = (await started.json()) as { secret: string };
+      const finished = await post('auth/local/setup/finish', {
+        token,
+        password: 'correct horse battery staple 42',
+        code: await totpCode(base32Decode(secret), Math.floor(Date.now() / 30_000)),
+      });
+      expect(finished.status).toBe(204);
+      expect(
+        finished.headers.getSetCookie().some((cookie) => cookie.startsWith('__Host-pb_session=')),
+      ).toBe(true);
+      await assertFenced();
+    } finally {
+      await broker.close();
+      await database.close();
+    }
+  },
+);

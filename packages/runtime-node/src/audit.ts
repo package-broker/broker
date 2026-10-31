@@ -2,6 +2,7 @@ import {
   AuditEffectiveConfigError,
   AuditResolutionError,
   logAuditUnavailable,
+  claimAuditResolutionLog,
   resolveOrgAudit,
   validateAuditBuild,
   type EffectiveAuditConfig,
@@ -317,6 +318,17 @@ export async function createNodeAudit(input: {
     });
     return value;
   };
+  const backgroundTrailActive = async (org: OrgContext): Promise<boolean> => {
+    try {
+      return (await effective(org)).trailActive;
+    } catch (error) {
+      if (!(error instanceof AuditResolutionError) || error.code !== 'audit_cutover_refused')
+        throw error;
+      const snapshot = await none.snapshot(org);
+      if (snapshot.pendingMode === null) throw error;
+      return snapshot.pendingMode === 'trail';
+    }
+  };
   const resolveRequest = async (org: OrgContext, request?: Request): Promise<void> => {
     try {
       await effective(org);
@@ -335,7 +347,13 @@ export async function createNodeAudit(input: {
       const path = new URL(request.url).pathname;
       const security =
         (request.method === 'POST' &&
-          (['/_pb/auth/local/login', '/_pb/auth/local/reauth', '/_pb/auth/logout'].includes(path) ||
+          ([
+            '/_pb/auth/local/login',
+            '/_pb/auth/local/reauth',
+            '/_pb/auth/local/setup/start',
+            '/_pb/auth/local/setup/finish',
+            '/_pb/auth/logout',
+          ].includes(path) ||
             /^\/_pb\/auth\/sso\/[^/]+\/start$/.test(path))) ||
         (request.method === 'DELETE' &&
           (/^\/_pb\/(?:me\/)?tokens\/[^/]+$/.test(path) ||
@@ -362,11 +380,11 @@ export async function createNodeAudit(input: {
       schedule: { everySeconds: 60, resourceKey: 'audit-maintain' },
       validate,
       async handler(_payload, context) {
-        const resolved = await effective(context.org);
+        const trailActive = await backgroundTrailActive(context.org);
         await pruneAudit(prune, context.org, {
           generation,
           configuredSinkIds: input.registration().audit.sinks.map((sink) => sink.definition.id),
-          trailActive: resolved.trailActive,
+          trailActive,
         });
         if (input.maxJournalBytes !== null)
           await evictAudit(prune, context.org, {
@@ -398,7 +416,7 @@ export async function createNodeAudit(input: {
     },
   ];
   async function probe(org: OrgContext, signal: AbortSignal) {
-    await effective(org);
+    await backgroundTrailActive(org);
     await health.read(org);
     const outcome = await detectAuditFork(createAuditForkRepository(executor), org, {
       generation,
@@ -441,7 +459,7 @@ export async function createNodeAudit(input: {
     jobs.push({
       ...job,
       async handler(payload, context) {
-        await effective(context.org);
+        await backgroundTrailActive(context.org);
         await job.handler(job.validate(payload), context);
       },
     });
@@ -449,6 +467,22 @@ export async function createNodeAudit(input: {
   return {
     effective,
     resolveRequest,
+    async admitJob(org: OrgContext): Promise<boolean> {
+      try {
+        await effective(org);
+        return true;
+      } catch (error) {
+        if (!(error instanceof AuditResolutionError)) throw error;
+        if (!error.transient && !error.fenceWrites) return true;
+        if (claimAuditResolutionLog(error))
+          observability.log({
+            level: 'error',
+            event: 'audit.effective_unavailable',
+            reason_code: 'audit.effective_unavailable',
+          });
+        return false;
+      }
+    },
     health,
     jobs,
     probe,

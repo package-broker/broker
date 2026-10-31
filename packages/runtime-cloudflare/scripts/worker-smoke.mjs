@@ -29,6 +29,7 @@ import {
   checkTraceparentCases,
 } from './traceparent-smoke.mjs';
 
+import { checkAuditModes } from './audit-smoke.mjs';
 import { checkUiBundle } from './ui-bundle-regression.mjs';
 import {
   assertDiscovered,
@@ -284,7 +285,12 @@ async function readAssetsDescriptor(script) {
   return { ...descriptor, directory: resolve(outDir, descriptor.directory) };
 }
 
-async function createMiniflare(script, entry = basename(script), extraBindings = {}) {
+async function createMiniflare(
+  script,
+  entry = basename(script),
+  extraBindings = {},
+  extraOptions = {},
+) {
   const assets = await readAssetsDescriptor(script);
   return trackMiniflare(
     new Miniflare(
@@ -299,6 +305,7 @@ async function createMiniflare(script, entry = basename(script), extraBindings =
                 { type: 'ESModule', path: basename(script) },
               ],
             }),
+        ...extraOptions,
         compatibilityDate: '2026-10-01',
         compatibilityFlags: ['nodejs_compat'],
         d1Databases: ['DB'],
@@ -323,6 +330,7 @@ async function createMiniflare(script, entry = basename(script), extraBindings =
           PB_MASTER_KEY: MASTER_KEY,
           PB_PUBLIC_URL: PUBLIC_ORIGIN,
           DEPLOYMENT_ID: 'smoke',
+          PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
           ...extraBindings,
         },
       }),
@@ -677,6 +685,9 @@ async function run() {
     assert.deepEqual(
       schedules.map((row) => [row.name, row.every_seconds]),
       [
+        ['core:audit-frontier:v1', 86400],
+        ['core:audit-health-observe:v1', 60],
+        ['core:audit-maintain:v1', 60],
         ['core:audit-seal:v1', 60],
         ['core:audit-verify:v1', 86400],
         ['core:blob-purge:v1', 3600],
@@ -897,9 +908,17 @@ async function run() {
 
     if (PREBUILT) {
       await checkRuntimeSsoProviders(limitMs);
-      for (const leg of ['package-route', 'traceparent', 'held-batch'])
+      for (const leg of ['audit-modes', 'package-route', 'traceparent', 'held-batch'])
         console.log(`NOT RUN (source-only fixture): Worker ${leg}`);
     } else {
+      step = 'checking audit runtime modes';
+      await checkAuditModes({
+        root: repoRoot,
+        createMiniflare,
+        disposeMiniflare,
+        readMigrations,
+        limitMs,
+      });
       step = 'building the package-route Worker';
       const routeOut = join(repoRoot, '.pb', 'package-route-cloudflare');
       const build = spawn(

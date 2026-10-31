@@ -32,7 +32,7 @@ function position(value: unknown): AuditPositionV1 | null {
     chainId.length === 0 ||
     typeof epoch !== 'number' ||
     !Number.isSafeInteger(epoch) ||
-    epoch < 1 ||
+    epoch < 0 ||
     typeof seq !== 'number' ||
     !Number.isSafeInteger(seq) ||
     seq < 0 ||

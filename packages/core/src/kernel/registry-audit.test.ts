@@ -415,12 +415,12 @@ describe('audit registration', () => {
     const definitions = Object.assign([null], { [Symbol.iterator]: function* () {} });
     reject({ auditSinks: definitions as never }, 'malformed');
   });
-  it.each([{ auditSinks: [sink()] }] as Partial<PluginDefinition>[])(
-    'fails closed until runtime consumers exist (%#)',
-    (overrides) => {
-      reject(overrides, 'audit plugins are not available in this build');
-    },
-  );
+  it('accepts sinks without invoking their factories', () => {
+    const create = vi.fn(sink().create);
+    const registration = collectRegistrations([plugin({ auditSinks: [sink({ create })] })]);
+    expect(registration.audit.sinks).toHaveLength(1);
+    expect(create).not.toHaveBeenCalled();
+  });
 
   it('accepts a trail without invoking its factory', () => {
     const create = vi.fn(() => ({

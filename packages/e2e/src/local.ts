@@ -569,6 +569,7 @@ export async function startLocal(
           bindings: {
             PB_MASTER_KEY: masterKey,
             PB_PUBLIC_URL: origin,
+            PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
             DEPLOYMENT_ID: 'local-release',
           },
           handleStructuredLogs: (entry: { message: string }) => record(entry.message),

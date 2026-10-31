@@ -110,6 +110,7 @@ describe('Node registry jobs wiring', () => {
       try {
         const path = join(directory, 'broker.sqlite');
         broker = await startNode({
+          audit: { acceptNoDurableAudit: true },
           plugins: [plugin],
           migrations: await discoveredMigrations(),
           env: {

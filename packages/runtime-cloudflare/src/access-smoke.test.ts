@@ -321,7 +321,10 @@ describe('cloudflare access smoke on Miniflare D1', () => {
       PB_MASTER_KEY: KEY,
       PB_PUBLIC_URL: PUBLIC_URL,
     } as unknown as Env;
-    const worker = createWorker([plugin], { log: () => undefined });
+    const worker = createWorker([plugin], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     services = (await worker.services(environment)).access;
     return { fetch: (request) => worker.fetch(request, environment), raw, orgId, token };
   }

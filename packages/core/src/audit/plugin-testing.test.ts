@@ -198,7 +198,7 @@ describe('sink fixture runner', () => {
       expect(result.frontier).toBe('passed');
       expect(result.acknowledgement).toBe('receiver');
       expect(result.partialOutcome).toBe(outcome);
-      expect(result.passed).toHaveLength(16);
+      expect(result.passed).toHaveLength(17);
     },
   );
 
@@ -276,7 +276,7 @@ describe('sink fixture runner', () => {
             : response;
         },
       });
-      expect(result.passed).toHaveLength(16);
+      expect(result.passed).toHaveLength(17);
     },
   );
 
@@ -552,7 +552,7 @@ describe('sink fixture runner', () => {
         },
       })),
     );
-    expect(result.passed).toHaveLength(16);
+    expect(result.passed).toHaveLength(17);
   });
 
   it.each([0, 91])('accepts any differing receiver epoch (%s)', async (epoch) => {
@@ -566,7 +566,7 @@ describe('sink fixture runner', () => {
           : response;
       },
     });
-    expect(result.passed).toHaveLength(16);
+    expect(result.passed).toHaveLength(17);
   });
 
   it.each([
@@ -669,7 +669,7 @@ describe('sink fixture runner', () => {
         await expect(runAuditSinkConformance(otlp)).rejects.toMatchObject({
           fixture: 'canonical-vectors',
         });
-      else expect((await runAuditSinkConformance(otlp)).passed).toHaveLength(16);
+      else expect((await runAuditSinkConformance(otlp)).passed).toHaveLength(17);
     },
   );
 
@@ -818,6 +818,32 @@ describe('sink fixture runner', () => {
     });
   });
 
+  it('refuses a sink that rejects a fresh epoch-zero chain', async () => {
+    const broken = adapter((sink) => ({
+      ...sink,
+      deliver: (batch, signal) =>
+        batch.epoch === 0
+          ? Promise.resolve({ outcome: 'retry', code: 'bad_response' })
+          : sink.deliver(batch, signal),
+    }));
+    await expect(runAuditSinkConformance(broken)).rejects.toMatchObject({
+      fixture: 'fresh-chain-epoch-zero',
+    });
+  });
+
+  it('refuses a sink that rejects marker-only epoch-zero batches', async () => {
+    const broken = adapter((sink) => ({
+      ...sink,
+      deliver: (batch, signal) =>
+        batch.epoch === 0 && batch.records.every((record) => record.kind !== 'event')
+          ? Promise.resolve({ outcome: 'retry', code: 'bad_response' })
+          : sink.deliver(batch, signal),
+    }));
+    await expect(runAuditSinkConformance(broken)).rejects.toMatchObject({
+      fixture: 'fresh-chain-epoch-zero',
+    });
+  });
+
   it('supports sinks without a frontier probe', async () => {
     expect(
       (await runAuditSinkConformance(adapter((sink) => ({ deliver: sink.deliver })))).frontier,
@@ -838,7 +864,7 @@ describe('sink fixture runner', () => {
           options,
         ),
     };
-    expect((await runAuditSinkConformance(transport)).passed).toHaveLength(16);
+    expect((await runAuditSinkConformance(transport)).passed).toHaveLength(17);
   });
 
   it('accepts a sink rejecting an incorrect receiver epoch as bad_response', async () => {
@@ -851,7 +877,7 @@ describe('sink fixture runner', () => {
           : result;
       },
     }));
-    expect((await runAuditSinkConformance(strict)).passed).toHaveLength(16);
+    expect((await runAuditSinkConformance(strict)).passed).toHaveLength(17);
   });
 
   it.each(['chainId', 'orgId'] as const)('refuses a probe that ignores %s', async (field) => {

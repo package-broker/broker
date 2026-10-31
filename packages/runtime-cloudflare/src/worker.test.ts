@@ -259,7 +259,12 @@ it('reports schema drift through the Worker with a real Miniflare D1 database', 
   const [source] = sources;
   if (source === undefined) throw new Error('missing core migration');
   const executor = createD1Executor(db);
-  const worker = () => createWorker([], { migrations: sources, log: () => undefined });
+  const worker = () =>
+    createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      migrations: sources,
+      log: () => undefined,
+    });
   const ready = (app: ReturnType<typeof createWorker>) =>
     app.fetch(request('/health/ready'), env(db));
   const healthy = await ready(worker());

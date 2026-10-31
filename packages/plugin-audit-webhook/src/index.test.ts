@@ -279,6 +279,31 @@ describe('webhook audit sink', () => {
     });
   });
 
+  it('accepts an epoch-zero ACK for a fresh chain', async () => {
+    const fresh = { ...batch, epoch: 0, records: [{ ...record, epoch: 0 }] };
+    expect(
+      await sink(async () => response({ acked: { ...ack, epoch: 0 } })).deliver(fresh, signal()),
+    ).toEqual({
+      outcome: 'accepted',
+      chainId: fresh.chainId,
+      epoch: 0,
+      throughSeq: fresh.throughSeq,
+      throughHash: fresh.throughHash,
+    });
+  });
+
+  it.each([-1, 0.5, '0', null, false, Number.MAX_SAFE_INTEGER + 1])(
+    'refuses an invalid ACK epoch %j even when it matches the batch',
+    async (epoch) => {
+      expect(
+        await sink(async () => response({ acked: { ...ack, epoch } })).deliver(
+          { ...batch, epoch: epoch as number },
+          signal(),
+        ),
+      ).toEqual({ outcome: 'retry', code: 'bad_response' });
+    },
+  );
+
   it('accepts JSON media type parameters and additive response fields', async () => {
     expect(
       (
@@ -371,10 +396,21 @@ describe('webhook audit sink', () => {
     ).toBeNull();
   });
 
+  it('returns an epoch-zero receiver frontier', async () => {
+    expect(
+      await sink(async () => response({ frontier: { ...ack, epoch: 0 } })).frontier!(
+        { ...batch, epoch: 0 },
+        signal(),
+      ),
+    ).toEqual({ chainId: ack.chain_id, epoch: 0, seq: ack.seq, hash: ack.hash });
+  });
+
   it.each([
     {},
     { frontier: {} },
-    { frontier: { ...ack, epoch: 0 } },
+    ...[-1, 0.5, '0', null, false, Number.MAX_SAFE_INTEGER + 1].map((epoch) => ({
+      frontier: { ...ack, epoch },
+    })),
     { frontier: { ...ack, seq: -1 } },
     { frontier: { ...ack, hash: 'invalid' } },
     { frontier: { ...ack, seq: Number.MAX_SAFE_INTEGER + 1 } },

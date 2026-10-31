@@ -595,6 +595,19 @@ export const auditSinkConformanceFixtures: readonly AuditConformanceFixture[] = 
       ),
     ],
   },
+  {
+    name: 'fresh-chain-epoch-zero',
+    probeRestore: true,
+    steps: [
+      accepted(
+        freeze({
+          ...batch([{ ...auditMarkerFixtures[0]!.marker, epoch: 0 }], 0, genesis),
+          epoch: 0,
+        }),
+      ),
+      accepted(freeze({ ...eventBatch, epoch: 0, records: [{ ...first, epoch: 0 }] })),
+    ],
+  },
 ]);
 
 export type AuditConformanceResponse = Awaited<ReturnType<AuditBoundFetch>>;

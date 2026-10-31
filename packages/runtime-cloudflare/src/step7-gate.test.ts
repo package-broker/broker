@@ -509,6 +509,7 @@ async function boot(remote: ReturnType<typeof upstream>) {
     DEPLOYMENT_ID: 'step7-gate',
   };
   const worker = createWorker([remote.plugin], {
+    audit: { acceptNoDurableAudit: true },
     platformPorts: {
       blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1048576 },
       cache: { adapter: 'cache-api', namespace: 'step7-gate' },

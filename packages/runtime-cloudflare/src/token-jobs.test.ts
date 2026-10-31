@@ -195,6 +195,7 @@ async function boot() {
     PB_PUBLIC_URL: 'https://broker.test',
   };
   const worker = createWorker([plugin], {
+    audit: { acceptNoDurableAudit: true },
     platformPorts,
     log: (entry) => void logs.push(entry),
     console: { log: () => undefined, error: () => undefined },

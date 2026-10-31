@@ -420,6 +420,7 @@ async function boot(
     PB_PUBLIC_URL: PUBLIC_URL,
   };
   const worker = createWorker([], {
+    audit: { acceptNoDurableAudit: true },
     platformPorts,
     cacheStorage,
     log: (record) => void events.push(record),
@@ -742,6 +743,7 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       throw new Error('unexpected database query');
     });
     const worker = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
       platformPorts,
       cacheStorage,
       log: () => undefined,
@@ -769,8 +771,18 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
 
   it('fails startup when registry config is set without platformPorts or a database', async () => {
     const registry = { timers: { metadataTtlSeconds: 120 } };
-    const bare = createWorker([], { registry, log: () => undefined });
-    const noDb = createWorker([], { platformPorts, cacheStorage, registry, log: () => undefined });
+    const bare = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      registry,
+      log: () => undefined,
+    });
+    const noDb = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      platformPorts,
+      cacheStorage,
+      registry,
+      log: () => undefined,
+    });
     for (const worker of [bare, noDb]) {
       const response = await worker.fetch(request('/health/live'), { PB_MASTER_KEY: KEY });
       expect(response.status).toBe(503);

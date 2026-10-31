@@ -187,7 +187,10 @@ async function boot() {
     'P2',
   ]);
   const environment = { DB: raw, PB_MASTER_KEY: KEY, PB_PUBLIC_URL: PUBLIC_URL } as unknown as Env;
-  const worker = createWorker([plugin], { log: () => undefined });
+  const worker = createWorker([plugin], {
+    audit: { acceptNoDurableAudit: true },
+    log: () => undefined,
+  });
   const fetch = (input: Request) => worker.fetch(input, environment);
 
   const started = await fetch(post('/_pb/auth/local/setup/start', { token }));
@@ -229,7 +232,10 @@ describe('cloudflare catalogue wiring on Miniflare D1', () => {
     expect(Object.keys(packages?.writer.statementBudget ?? {})).toContain('syncPackage');
     expect(Object.keys(packages?.visibility ?? {})).toContain('attachSource');
 
-    const bare = createWorker([], { log: () => undefined });
+    const bare = createWorker([], {
+      audit: { acceptNoDurableAudit: true },
+      log: () => undefined,
+    });
     expect((await bare.services({} as Env)).packages).toBeNull();
   });
 

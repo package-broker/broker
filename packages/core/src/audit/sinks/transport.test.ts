@@ -858,3 +858,17 @@ it('allows opted-in IPv6 loopback in core endpoint validation', () => {
     transport({ endpoint: 'http://[::1]:8080', audit: { egress: { allowPrivate: ['audit'] } } }),
   ).not.toThrow();
 });
+
+it('requires a credential on Workers even when the sink is listed in allowPrivate', () => {
+  expect(() =>
+    createAuditBoundFetch({
+      id: 'audit',
+      runtime: 'cloudflare',
+      audit: { egress: { allowPrivate: ['audit'] } },
+      endpoint: 'https://archive.example.test',
+      headers: {},
+      timeoutMs: 1500,
+      activationSource: 'URL',
+    }),
+  ).toThrow(expect.objectContaining({ code: 'missing_credential' }));
+});

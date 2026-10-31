@@ -1,8 +1,8 @@
 import { createDeflateRaw, gunzipSync } from 'node:zlib';
 import { Duplex } from 'node:stream';
 import { expect, it } from 'vitest';
-import { gzipFrame } from './gzip-frame';
-import { stream } from '../../test-support/npm-publish';
+import { gzipFrame } from './gzip-frame.js';
+import { stream } from '../../test-support/npm-publish.js';
 
 it.each(['', '123456789', 'é'.repeat(100000)])(
   'frames raw deflate with a valid crc32 and size (%#. input)',

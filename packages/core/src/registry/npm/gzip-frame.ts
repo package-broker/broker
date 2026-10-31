@@ -1,4 +1,4 @@
-import type { Codecs } from '../../platform/codec';
+import type { Codecs } from '../../platform/codec.js';
 
 const table = Uint32Array.from({ length: 256 }, (_, n) => {
   for (let i = 0; i < 8; i++) n = (n >>> 1) ^ (n & 1 ? 0xedb88320 : 0);

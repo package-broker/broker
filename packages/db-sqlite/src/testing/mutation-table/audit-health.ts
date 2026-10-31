@@ -1,3 +1,4 @@
+import { ulid } from '@package-broker/core/ids';
 import { expect } from 'vitest';
 import { AuditHealthConflictError } from '@package-broker/core/audit/health';
 import { createAuditHealthRepository } from '../../repositories/audit-health.js';
@@ -128,6 +129,97 @@ const guardRows: ContractCase = {
     expect(await outcome(mutating(context).observe(own, [], stale))).toBe('conflict');
   },
 };
+async function operatorFixture(context: CaseContext, foreignActor = false) {
+  const { own, foreign } = orgOf(context);
+  const id = ulid();
+  await context.executor.all({
+    sql: 'INSERT INTO user_account (org_id, id, email) VALUES (?, ?, ?)',
+    params: [foreignActor ? foreign.orgId : own.orgId, id, 'operator@example.test'],
+  });
+  const port = createAuditHealthRepository(
+    {
+      driver: context.executor.driver,
+      all: (statement) => context.executor.all(context.mutate(statement)),
+      batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
+    },
+    { actor: { type: 'user', id }, generation: 0, now: new Date('2026-10-31T00:00:00.000Z') },
+  );
+  return { own, foreign, port, normal: createAuditHealthRepository(context.executor) };
+}
+const operatorRead: ContractCase = {
+  name: 'alert operator lookup excludes foreign accounts',
+  async run(context) {
+    const { own, port } = await operatorFixture(context, true);
+    expect(await port.operatorStatus(own)).toBe('actor_unavailable');
+  },
+};
+async function foreignGeneration(context: CaseContext, orgId: string) {
+  await context.executor.all({
+    sql: `INSERT INTO audit_sink (org_id, sink_id, plugin_id, kind, generation, receiver_fingerprint, durable_ack, activation_source, state, progress_seq, progress_hash, custody_seq, created_at, updated_at)
+      VALUES (?, 'sink', 'sink', 'webhook', 1, 'fingerprint', 1, 'build', 'active', 0, ?, 0, 'now', 'now')`,
+    params: [orgId, '0'.repeat(64)],
+  });
+}
+const operatorGeneration: ContractCase = {
+  name: 'alert operator generation lookup excludes foreign sinks',
+  async run(context) {
+    const { own, foreign, port } = await operatorFixture(context);
+    await foreignGeneration(context, foreign.orgId);
+    expect(await port.operatorStatus(own)).toBe('ready');
+  },
+};
+const operatorGuard: ContractCase = {
+  name: 'alert acknowledgement guards exclude foreign actors',
+  async run(context) {
+    const { own, port, normal } = await operatorFixture(context, true);
+    await normal.raise(own, observation.code);
+    await expect(port.acknowledge(own, observation.code, 1)).rejects.toThrow(
+      AuditHealthConflictError,
+    );
+  },
+};
+const generationGuard: ContractCase = {
+  name: 'alert acknowledgement generation guard excludes foreign sinks',
+  async run(context) {
+    const { own, foreign, port, normal } = await operatorFixture(context);
+    await foreignGeneration(context, foreign.orgId);
+    await normal.raise(own, observation.code);
+    expect(await outcome(port.acknowledge(own, observation.code, 1))).toBe('written');
+    expect((await normal.snapshot(own)).alerts?.[0]?.acknowledgedRevision).toBe(1);
+  },
+};
+const eventScope: ContractCase = {
+  name: 'alert events require an unacknowledged incident in their organization',
+  async run(context) {
+    const { own, foreign, port, normal } = await operatorFixture(context);
+    await normal.raise(own, observation.code);
+    await normal.acknowledge(own, observation.code, 1);
+    await normal.raise(foreign, observation.code);
+    expect(await port.acknowledge(own, observation.code, 1)).toBe(false);
+    expect(
+      await context.executor.all({
+        sql: 'SELECT id FROM audit_pending WHERE org_id = ?',
+        params: [own.orgId],
+      }),
+    ).toEqual([]);
+  },
+};
+const eventRevision: ContractCase = {
+  name: 'alert event revision excludes foreign incidents',
+  async run(context) {
+    const { own, foreign, port, normal } = await operatorFixture(context);
+    await normal.raise(own, observation.code);
+    await normal.raise(foreign, observation.code);
+    await normal.raise(foreign, observation.code);
+    expect(await port.acknowledge(own, observation.code, 1)).toBe(true);
+    expect(
+      await context.executor.all({
+        sql: 'SELECT id FROM audit_pending WHERE org_id = ?',
+        params: [own.orgId],
+      }),
+    ).toHaveLength(1);
+  },
+};
 export const entries: readonly MutationEntry[] = [
   {
     builder: 'createAuditHealthRepository',
@@ -141,8 +233,52 @@ export const entries: readonly MutationEntry[] = [
       raise,
       guardCount,
       guardRows,
+      operatorRead,
+      operatorGeneration,
+      operatorGuard,
+      generationGuard,
+      eventScope,
+      eventRevision,
     ],
     predicates: [
+      {
+        name: 'alert operator lookup is scoped',
+        locate: /(?<=FROM user_account WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: operatorRead.name,
+      },
+      {
+        name: 'alert generation lookup is scoped',
+        locate: /(?<=FROM audit_sink WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: operatorGeneration.name,
+      },
+      {
+        name: 'alert actor guard is scoped',
+        locate: /(?<=FROM "user_account"\s+WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: operatorGuard.name,
+      },
+      {
+        name: 'alert generation guard is scoped',
+        locate: /(?<=FROM audit_sink WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: generationGuard.name,
+      },
+      {
+        name: 'alert event incident is scoped',
+        locate: /(?<=EXISTS \(SELECT 1 FROM audit_health WHERE )org_id = \?/,
+        neutral: '(? IS NOT NULL)',
+        caseName: eventScope.name,
+      },
+      {
+        name: 'alert event latest revision is scoped',
+        locate: /h\.org_id = \?(?= AND h\.code = \?)/,
+        neutral: '(? IS NOT NULL)',
+        caseName: eventRevision.name,
+        copies: 2,
+      },
+
       ...['audit_chain', 'audit_pending', 'audit_sink', 'audit_ledger'].map((table) => ({
         name: `health snapshot scopes ${table}`,
         locate: new RegExp(String.raw`(?<=FROM ${table}\s+WHERE )org_id = \?`),

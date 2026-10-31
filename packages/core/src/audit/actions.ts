@@ -2,6 +2,7 @@ import { PERMISSIONS } from '../authz/permissions.js';
 import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
 import { isUlid } from '../ids.js';
+import { AUDIT_ALERT_CODES } from '../platform/observability.js';
 import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
@@ -172,6 +173,8 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'epoch',
     'generation',
     'reason_code',
+    'alert_code',
+    'revision',
   ],
 };
 
@@ -285,7 +288,9 @@ const AUDIT_CONTROL_ENUMS: Record<string, readonly string[]> = {
   to_mode: ['trail', 'export', 'none'],
   source: ['build', 'env', 'cli'],
   policy: ['availability', 'required'],
+  alert_code: AUDIT_ALERT_CODES,
   operation: [
+    'alert_ack',
     'resolve',
     'rebind',
     'retire',
@@ -307,6 +312,7 @@ const AUDIT_CONTROL_INTEGERS: ReadonlySet<string> = new Set([
   'cutover_seq',
   'epoch',
   'generation',
+  'revision',
 ]);
 
 function cleanAuditControlValue(value: unknown, field: string): Cleaned {
@@ -489,6 +495,18 @@ function cleanChanges(
     }
     if (Object.keys(cleanedEntry).length === 0) return { ok: false, reason: 'bad_value' };
     out[field] = cleanedEntry;
+  }
+  if (
+    action === 'audit.sink_admin' &&
+    (out.operation?.old === 'alert_ack' || out.operation?.new === 'alert_ack')
+  ) {
+    if (
+      out.operation?.new !== 'alert_ack' ||
+      out.sink_id !== undefined ||
+      out.alert_code?.new === undefined ||
+      out.revision?.new === undefined
+    )
+      return { ok: false, reason: 'bad_value' };
   }
   return { ok: true, value: out };
 }

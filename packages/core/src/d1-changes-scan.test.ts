@@ -675,6 +675,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Loads the shared alert acknowledgement contract for Node and D1 tests; assertions use health state and RETURNING rows, never executor changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-alert-ack.js') #1",
+      ],
+    },
+    {
+      reason:
         'Loads the shared cutover persistence suite; registration counts RETURNING rows and never executor changes metadata.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-cutover-suite.js') #1",
@@ -4087,6 +4094,9 @@ describe('D1 changes read-site scan', () => {
   it('inventories health persistence as RETURNING-counted writes without changes metadata', () => {
     const source = sources['db-sqlite/src/repositories/audit-health.ts']!;
     expect(reads(source)).toEqual([]);
+    expect(source).toContain('auditPendingStatement(ctx, event.event');
+    expect(source).toContain('RETURNING id');
+    expect(source).toContain('results.at(-1)!.rows.length');
     expect(mutationTargets(source)).toEqual([
       'INSERT INTO audit_health',
       'INSERT INTO audit_health',

@@ -38,6 +38,16 @@ interface CoverageEntry {
 
 export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
   {
+    actions: ['audit.sink_admin'],
+    callers: ['db-sqlite/src/repositories/audit-health.ts'],
+    repository: 'audit-health',
+    batchGuard:
+      'executor.batch; active organization operator and exact sink generation guard; organization-scoped unacknowledged latest health revision predicates',
+    cardinality:
+      '1 per acknowledged alert revision; listing, stale revisions, repeated acknowledgements and failed batches stage zero',
+    stagingCalls: 1,
+  },
+  {
     actions: ['audit.export'],
     callers: ['core/src/audit/cutover.ts'],
     repository: 'audit-cutover',

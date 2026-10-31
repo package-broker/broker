@@ -45,6 +45,7 @@ export interface AdminOptions {
 }
 
 type Command =
+  | 'audit alert'
   | 'audit sink'
   | 'audit cutover'
   | 'audit epoch bump'

@@ -652,6 +652,7 @@ describe('audit names and compact controls', () => {
       null,
     );
     expect(names).toEqual({
+      userId: 'self',
       users: { self: 'You', other: 'Sam', last: 'Taylor' },
       tokens: { mine: 'Laptop', shared: 'Deploy', 'last-token': 'CI' },
     });
@@ -673,7 +674,7 @@ describe('audit names and compact controls', () => {
         createApiClient<paths>({ fetch, readCookie: () => undefined }),
         project ? 'store' : null,
       );
-      expect(names).toEqual({ users: { self: 'Alex' }, tokens: {} });
+      expect(names).toEqual({ userId: 'self', users: { self: 'Alex' }, tokens: {} });
       const urls = fetch.mock.calls.map(([url]) => url);
       expect(urls).not.toContain('/_pb/users');
       expect(urls).not.toContain('/_pb/tokens');
@@ -687,7 +688,7 @@ describe('audit names and compact controls', () => {
     });
     expect(
       await loadAuditNames(createApiClient<paths>({ fetch, readCookie: () => undefined }), null),
-    ).toEqual({ users: {}, tokens: {} });
+    ).toEqual({ userId: null, users: {}, tokens: {} });
   });
 });
 

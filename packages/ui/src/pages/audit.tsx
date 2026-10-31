@@ -53,7 +53,13 @@ export interface AuditNames {
   tokens: Record<string, string>;
 }
 
-const nameCache = new WeakMap<AuthClient, Map<string, Promise<AuditNames>>>();
+interface ResolvedAuditNames extends AuditNames {
+  userId: string | null;
+}
+
+const emptyNames = (): ResolvedAuditNames => ({ userId: null, users: {}, tokens: {} });
+
+const nameCache = new WeakMap<AuthClient, Map<string, Promise<ResolvedAuditNames>>>();
 
 export function clearAuditNames(client: AuthClient): void {
   nameCache.delete(client);
@@ -62,7 +68,8 @@ export function clearAuditNames(client: AuthClient): void {
 export async function loadAuditNames(
   client: AuthClient,
   scope: string | null,
-): Promise<AuditNames> {
+  onIdentity?: (userId: string | null) => void,
+): Promise<ResolvedAuditNames> {
   let entries = nameCache.get(client);
   if (!entries) {
     entries = new Map();
@@ -71,25 +78,33 @@ export async function loadAuditNames(
   const me = await client.request('get', '/_pb/me').catch(() => null);
   if (!me?.ok || !me.data.user) {
     if (nameCache.get(client) === entries) clearAuditNames(client);
-    return { users: {}, tokens: {} };
+    onIdentity?.(null);
+    return emptyNames();
   }
-  if (nameCache.get(client) !== entries) return { users: {}, tokens: {} };
-  const key = JSON.stringify([me.data.user.id, scope]);
+  if (nameCache.get(client) !== entries) return emptyNames();
+  const ownUser = me.data.user;
+  onIdentity?.(ownUser.id);
+  const key = JSON.stringify([ownUser.id, scope]);
   let names = entries.get(key);
   if (!names) {
     const cache = entries;
     let failed = false;
-    const pending = fetchAuditNames(client, scope, me.data.user, () => {
+    const pending = fetchAuditNames(client, scope, ownUser, () => {
       failed = true;
-    }).then((result) => {
+    }).then(async (result): Promise<ResolvedAuditNames> => {
+      const current = await client.request('get', '/_pb/me').catch(() => null);
+      if (!current?.ok || current.data.user?.id !== ownUser.id) {
+        if (nameCache.get(client) === cache) clearAuditNames(client);
+        return emptyNames();
+      }
       if (failed && cache.get(key) === pending) cache.delete(key);
-      return result;
+      return { ...result, userId: ownUser.id };
     });
     names = pending;
     entries.set(key, names);
   }
   const result = await names;
-  return nameCache.get(client) === entries ? result : { users: {}, tokens: {} };
+  return nameCache.get(client) === entries ? result : emptyNames();
 }
 
 async function fetchAuditNames(
@@ -844,20 +859,32 @@ export function AuditPage() {
   const [resolvedNames, setNames] = useState<{
     client: AuthClient;
     scope: string | null;
-    names: AuditNames;
+    names: ResolvedAuditNames;
   } | null>(null);
   const { filters, scope } = readAuditHash(hash);
   const hasEvents = result.data?.items.some((item) => !isWithheld(item)) ?? false;
   useEffect(() => {
     if (!hasEvents) return;
     let live = true;
-    void loadAuditNames(client, scope).then((next) => {
-      if (live) setNames({ client, scope, names: next });
+    void loadAuditNames(client, scope, (userId) => {
+      if (live)
+        setNames((previous) =>
+          previous?.client === client &&
+          previous.scope === scope &&
+          userId !== null &&
+          previous.names.userId === userId
+            ? previous
+            : null,
+        );
+    }).then((next) => {
+      if (live) {
+        setNames({ client, scope, names: next });
+      }
     });
     return () => {
       live = false;
     };
-  }, [client, scope, hasEvents]);
+  }, [client, scope, hasEvents, result.data]);
   useEffect(() => {
     const update = () => setHash(window.location.hash);
     window.addEventListener('hashchange', update);

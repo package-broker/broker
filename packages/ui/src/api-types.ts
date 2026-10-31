@@ -1624,6 +1624,42 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/trusted-publishers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List trusted publishers for this organization */
+    get: operations['listTrustedPublishers'];
+    put?: never;
+    /** Register a GitHub trusted publisher */
+    post: operations['createTrustedPublisher'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/trusted-publishers/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** Edit a trusted publisher and invalidate pending exchanges */
+    put: operations['updateTrustedPublisher'];
+    post?: never;
+    /** Disable a trusted publisher and revoke its workload tokens */
+    delete: operations['disableTrustedPublisher'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/users': {
     parameters: {
       query?: never;
@@ -4765,7 +4801,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -6176,7 +6212,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8311,7 +8347,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8545,7 +8581,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8976,7 +9012,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10241,7 +10277,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11165,7 +11201,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11486,7 +11522,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11668,7 +11704,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11890,7 +11926,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12297,7 +12333,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12335,6 +12371,390 @@ export interface operations {
       };
       /** @description Service unavailable */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listTrustedPublishers: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              createdAt: string;
+              createdByName: string;
+              createdByUserId: string;
+              disabledAt: string | null;
+              environment: string;
+              id: string;
+              lastUsedAt: string | null;
+              packageName: string;
+              refPattern: string | null;
+              repository: string;
+              repositoryId: string;
+              repositoryOwnerId: string;
+              revision: number;
+              servicePrincipalId: string;
+              servicePrincipalName: string;
+              workflow: string;
+            }[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createTrustedPublisher: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          environment: string;
+          packageName: string;
+          refPattern?: string;
+          repository: string;
+          workflow: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            createdByName: string;
+            createdByUserId: string;
+            disabledAt: string | null;
+            environment: string;
+            id: string;
+            lastUsedAt: string | null;
+            packageName: string;
+            refPattern: string | null;
+            repository: string;
+            repositoryId: string;
+            repositoryOwnerId: string;
+            revision: number;
+            servicePrincipalId: string;
+            servicePrincipalName: string;
+            workflow: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateTrustedPublisher: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          environment: string;
+          packageName: string;
+          refPattern?: string;
+          repository: string;
+          workflow: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            createdByName: string;
+            createdByUserId: string;
+            disabledAt: string | null;
+            environment: string;
+            id: string;
+            lastUsedAt: string | null;
+            packageName: string;
+            refPattern: string | null;
+            repository: string;
+            repositoryId: string;
+            repositoryOwnerId: string;
+            revision: number;
+            servicePrincipalId: string;
+            servicePrincipalName: string;
+            workflow: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  disableTrustedPublisher: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };

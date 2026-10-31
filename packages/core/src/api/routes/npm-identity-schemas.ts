@@ -1,17 +1,9 @@
 import * as z from 'zod';
-import { packageKey } from '../../catalogue/names.js';
 const npmName = z
   .string()
   .min(1)
   .max(214)
-  .refine((name) => {
-    try {
-      packageKey(name, { ecosystem: 'npm' });
-      return true;
-    } catch {
-      return false;
-    }
-  }, 'Invalid npm package name');
+  .regex(/^(?!node_modules$|favicon\.ico$)(?:@[a-z0-9-][a-z0-9._-]*\/)?[a-z0-9-][a-z0-9._-]*$/);
 const id = z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
 export const trustedPublisher = z.strictObject({
   id,
@@ -63,11 +55,11 @@ export const NPM_IDENTITY_SCHEMAS = {
     repository: z
       .string()
       .max(140)
-      .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9_.-]+$/),
+      .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9_.-]{1,100}$/),
     workflow: z
       .string()
       .max(255)
-      .regex(/^[^/\\\r\n]+\.ya?ml$/),
+      .regex(/^[^/@\r\n]+\.ya?ml$/),
     environment: z.string().max(255),
     refPattern: z.string().max(255).optional(),
   }),

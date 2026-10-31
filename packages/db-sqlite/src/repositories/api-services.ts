@@ -1,3 +1,5 @@
+import { createTrustedPublisherStore, createTrustedPublisherLookup } from './trusted-publishers.js';
+import type { TrustedPublisherRouteDeps } from '@package-broker/core/api/routes/trusted-publishers';
 import { createPackageDetailRepository } from './package-detail.js';
 import { npmLoginRoutes } from '@package-broker/core/api/routes/npm-login';
 import { createPublishesRepository } from './publishes.js';
@@ -81,6 +83,12 @@ export interface ApiRoutesOptions {
   readonly log: KernelLog;
   readonly blob: BlobStore | undefined;
   readonly sourcePackageProbe?: SourcePackageProbe;
+  readonly trustedPublisherLookup?: (
+    ctx: OrgContext,
+    sourceId: string,
+    repository: string,
+    signal: AbortSignal,
+  ) => ReturnType<TrustedPublisherRouteDeps['lookup']>;
   /** The VCS providers the runtime has registered and serves, read per request. */
   readonly vcsProviders?: () => readonly VcsProvider[];
   readonly refuseVcsProvider?: (provider: VcsProvider) => boolean;
@@ -121,6 +129,14 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
   try {
     const module = createApiModule({
       npmLogin: access.npmLogin,
+      trustedPublishers: {
+        ...common,
+        store: createTrustedPublisherStore(executor, anchors),
+        lookup: createTrustedPublisherLookup(
+          executor,
+          input.trustedPublisherLookup ?? (async () => null),
+        ),
+      },
       publishes: { ...common, publishes: createPublishesRepository(executor, anchors) },
       packageAccessRequests: {
         ...common,

@@ -1,3 +1,7 @@
+import {
+  createTrustedPublishersController,
+  TrustedPublishers,
+} from './tokens/trusted-publishers.js';
 import { pendingStorage } from '../token-pending.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { ApiResult } from '../api.js';
@@ -353,6 +357,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
     else failure(result);
   }
   const controller = {
+    trustedPublishers: createTrustedPublishersController(services),
     snapshot: () => state,
     announce(notice: string) {
       set({ notice });
@@ -364,6 +369,7 @@ export function createTokensController(services: ShellServices, deps: Deps) {
       };
     },
     navigate() {
+      controller.trustedPublishers.clear();
       epoch++;
       navigation++;
       listing++;
@@ -1371,6 +1377,12 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
         </p>
       </details>
       <TokenList key={`${s.target}:${s.project}`} state={s} controller={c} />
+      {s.project === null ? (
+        <TrustedPublishers
+          controller={c.trustedPublishers}
+          permissions={s.organizationPermissions}
+        />
+      ) : null}
       <details className="detail-group">
         <summary className="min-h-11 cursor-pointer font-semibold">Service principals</summary>
         <PrincipalForm state={s} controller={c} />
@@ -1459,7 +1471,11 @@ export function bindTokensLifecycle(
   const clear = () => controller.navigate();
   const show = (event: Event) => {
     clear();
-    if ((event as Partial<PageTransitionEvent>).persisted === true) onNavigate();
+    if ((event as Partial<PageTransitionEvent>).persisted === true) {
+      onNavigate();
+      if (controller.snapshot().organizationPermissions.includes('org:service-principals:write'))
+        void controller.trustedPublishers.load();
+    }
   };
   events.addEventListener('hashchange', change);
   events.addEventListener('pagehide', clear);

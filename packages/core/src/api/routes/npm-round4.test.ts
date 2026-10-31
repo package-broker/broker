@@ -73,7 +73,7 @@ describe('npm reviewed schemas', () => {
         ...valid,
         packageName: 'x'.repeat(214),
         workflow: 'x'.repeat(251) + '.yml',
-        repository: 'a/' + 'b'.repeat(138),
+        repository: 'a'.repeat(39) + '/' + 'b'.repeat(100),
         environment: 'x'.repeat(255),
         refPattern: 'x'.repeat(255),
       }).success,

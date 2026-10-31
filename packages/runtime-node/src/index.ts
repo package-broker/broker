@@ -1297,6 +1297,9 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : createApiRoutes({
+            ...(registry?.module.lookupTrustedPublisherRepository === undefined
+              ? {}
+              : { trustedPublisherLookup: registry?.module.lookupTrustedPublisherRepository }),
             clientIp,
             executor,
             runtime: 'node',

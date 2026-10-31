@@ -680,6 +680,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'These typed guards classify a refused publisher write; the result probe reads the selected failed flag, never executor changes.',
+      sites: [
+        'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(checks) #1',
+      ],
+    },
+    {
+      reason:
         'The default enqueue condition is a constant true predicate; it performs no write and cannot affect a changes count.',
       sites: ['db-sqlite/src/repositories/job.ts:SQL template: sql`1` #1'],
     },

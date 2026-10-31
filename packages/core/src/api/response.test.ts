@@ -17,6 +17,7 @@ import {
 } from './response.js';
 
 const statuses = {
+  github_credentials_required: 409,
   source_not_attached: 409,
   invalid_version: 400,
   invalid_attachments: 400,

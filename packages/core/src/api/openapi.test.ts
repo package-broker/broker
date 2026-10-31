@@ -595,7 +595,7 @@ describe('OpenAPI follow-ups', () => {
   it.each([
     [
       409,
-      'The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload',
+      'The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher',
     ],
     [503, 'Service unavailable; Publish staging failed; Publishing is busy, try again later'],
     [418, 'Error'],

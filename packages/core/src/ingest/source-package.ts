@@ -1,8 +1,11 @@
 import type { OrgContext } from '../db/port.js';
 
+export type ClaimProbeTarget =
+  string | { readonly type: 'new_npmjs_proxy'; readonly userAgent: string | null };
+
 export type SourcePackageProbe = (
   org: OrgContext,
-  sourceId: string,
+  sourceId: ClaimProbeTarget,
   key: string,
   signal: AbortSignal,
   mode?: 'claim',

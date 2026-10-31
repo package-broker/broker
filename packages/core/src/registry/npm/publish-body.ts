@@ -1,3 +1,4 @@
+import { REGISTRY_DEFAULTS } from '../registry-config.js';
 import { packageKey } from '../../catalogue/names.js';
 import { validateVersion } from '../../catalogue/versions.js';
 import type { VersionInput } from '../../db/catalogue.js';
@@ -125,11 +126,16 @@ class JsonInput {
   }
   private advance(n: number, attachment = false): void {
     this.wire += n;
-    if (this.wire > (this.options.caps?.publishBodyBytes ?? 80_000_000))
+    if (
+      this.wire > (this.options.caps?.publishBodyBytes ?? REGISTRY_DEFAULTS.caps.publishBodyBytes)
+    )
       fail('publish_body_too_large', 413);
     if (!attachment) {
       this.metadata += n;
-      if (this.metadata > (this.options.caps?.publishMetadataBytes ?? 10_000_000))
+      if (
+        this.metadata >
+        (this.options.caps?.publishMetadataBytes ?? REGISTRY_DEFAULTS.caps.publishMetadataBytes)
+      )
         fail('publish_metadata_too_large', 413);
     }
     this.at += n;
@@ -374,7 +380,10 @@ class JsonInput {
       if (btoa(binary) !== encoded) fail('invalid_attachments');
       ended = encoded.endsWith('=');
       this.tarballBytes += binary.length;
-      if (this.tarballBytes > (this.options.caps?.publishTarballBytes ?? 50_000_000))
+      if (
+        this.tarballBytes >
+        (this.options.caps?.publishTarballBytes ?? REGISTRY_DEFAULTS.caps.publishTarballBytes)
+      )
         fail('tarball_too_large', 413);
       if (binary.length)
         await deliver(

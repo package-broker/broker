@@ -1,3 +1,4 @@
+import { proxyClaimConflict } from './proxy-claims-schema.js';
 import { SOURCE_ERROR_CODES } from '../../sources/source-error-codes.js';
 import * as z from 'zod';
 import { PROJECT_SLUG_PATTERN } from '../../authz/project-path.js';
@@ -178,7 +179,7 @@ function scopeSpecs(boundary: 'organization' | 'project') {
         tags: ['sources'],
         params: collectionParams,
         body: createBody,
-        responses: { 201: created },
+        responses: { 201: created, 409: proxyClaimConflict },
       },
     },
     {

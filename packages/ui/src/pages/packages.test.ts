@@ -502,7 +502,7 @@ describe('package markup', () => {
       'Version count',
       'Last synced',
       'Project source',
-      'vcs',
+      'Git repository',
     ])
       expect(html).toContain(text);
     expect(html).toContain('&lt;script&gt;secret&lt;/script&gt;');

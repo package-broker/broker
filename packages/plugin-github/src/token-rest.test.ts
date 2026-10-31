@@ -18,6 +18,31 @@ const credential: UpstreamCredential = {
 const resetAt = (epochSeconds: number | undefined) => epochSeconds ?? 1234;
 const sha = 'a'.repeat(40);
 describe('token REST reads', () => {
+  it.each([
+    '{"name":"ghp_test-private-token","name":"fixture"}',
+    '{"name":"fixture","x":' + '['.repeat(33) + '0' + ']'.repeat(33) + '}',
+    '{"name":"fixture","x":[' + '0,'.repeat(10000) + '0]}',
+    '{"name":"fixture","x":"' + 'a'.repeat(262144) + '"}',
+  ])('bounds npm manifest parsing before credential and name checks (%#)', async (text) => {
+    const fetch: PolicyFetch = async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: Response.json({ data: { repository: { a0: { byteSize: text.length, text } } } }).body,
+    });
+    const rest = tokenRest(fetch, credential, 'owner/repo', resetAt, undefined, 'package.json');
+    expect((await rest.files([{ name: 'refs/tags/v1.0.0', oid: sha }]))[0]?.text).toBeNull();
+    const rootFetch: PolicyFetch = async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: new Response(text).body,
+    });
+    await expect(
+      tokenRest(rootFetch, credential, 'owner/repo', resetAt, undefined, 'package.json').manifest(),
+    ).rejects.toMatchObject({ code: 'invalid_response' });
+    await expect(
+      tokenRest(rootFetch, credential, 'owner/repo', resetAt).manifest('package.json'),
+    ).rejects.toMatchObject({ code: 'invalid_response' });
+  });
   it('pages tags until the final short page', async () => {
     const fetch = vi.fn<PolicyFetch>(async (request) => ({
       status: 200,

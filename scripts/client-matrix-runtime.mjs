@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
@@ -26,6 +26,7 @@ import { createLruCache } from '../packages/runtime-node/dist/cache/lru.js';
 import { createD1Executor } from '../packages/runtime-cloudflare/dist/db/d1-executor.js';
 import {
   prepareClient,
+  preparePublisher,
   harnessAssert as assert,
   PACKAGES,
   PUBLISH_PACKAGES,
@@ -378,18 +379,14 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
       for (const name of PUBLISH_PACKAGES) {
         await step(`publish ${name}`, async () => {
           const publishRoot = join(directory, 'publish-' + PUBLISH_PACKAGES.indexOf(name));
-          const publisher = await prepareClient(
+          const publisher = await preparePublisher(
             publishRoot,
             client,
             `${front.origin}/alpha/npm/`,
             broker.publishToken,
+            name,
+            { debug },
           );
-          await writeFile(
-            join(publisher.project, 'package.json'),
-            JSON.stringify({ name, version: '1.0.0', main: 'index.js', license: 'MIT' }),
-          );
-          await writeFile(join(publisher.project, 'index.js'), 'module.exports = true;\n');
-          await writeFile(join(publisher.project, 'README.md'), '# Publish fixture\n');
           const command = commands.publish;
           const result = await runCommand(
             command.command,

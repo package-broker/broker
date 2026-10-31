@@ -332,6 +332,31 @@ export function runCommand(command, args, cwd, env, { debug = false, log = conso
   });
 }
 
+export async function preparePublisher(
+  directory,
+  client,
+  registry,
+  token,
+  name,
+  { debug = false, run = runCommand } = {},
+) {
+  const publisher = await prepareClient(directory, client, registry, token);
+  await writeFile(
+    join(publisher.project, 'package.json'),
+    JSON.stringify({ name, version: '1.0.0', main: 'index.js', license: 'MIT' }),
+  );
+  await writeFile(join(publisher.project, 'index.js'), 'module.exports = true;\n');
+  await writeFile(join(publisher.project, 'README.md'), '# Publish fixture\n');
+  if (client === 'yarn') {
+    const command = clientCommands(client).install;
+    const result = await run(command.command, command.args, publisher.project, publisher.env, {
+      debug,
+    });
+    checkResult(result, 'publisher install', client);
+  }
+  return publisher;
+}
+
 export async function prepareClient(directory, client, registry, token) {
   const project = join(directory, 'client');
   await mkdir(project, { recursive: true });

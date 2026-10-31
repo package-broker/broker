@@ -1268,3 +1268,18 @@ it('budgets incoming and stored metadata together when retaining a comparison wi
   expect(attempted).toBe(Math.floor(APPLY_WINDOW_BYTES / perMember));
   expect(outcome.status).toBe('progress');
 });
+
+it('returns skipped candidates in a progress chunk and in its continuation', async () => {
+  const f = fixture();
+  const versions = Array.from({ length: 100 }, (_, i) => `1.0.${i}`);
+  const skipped = [{ version: '0.1.0', reason: 'invalid_manifest' as const }];
+  const first = await applyChunk(ctx, f.deps, input(handle(), description(versions, { skipped })));
+  expect(first.status).toBe('progress');
+  expect(first.skipped).toEqual(skipped);
+  const second = await applyChunk(
+    ctx,
+    f.deps,
+    input(first.session, description(versions, { skipped })),
+  );
+  expect(second.skipped).toEqual(skipped);
+});

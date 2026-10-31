@@ -1,3 +1,6 @@
+import { gitTarball } from './git-tar.js';
+import { npmVcsDescription, parseNpmVcsManifest } from './npm-adapter.js';
+import { npmVersionsFromRefs } from '../../registry/npm/version-rules.js';
 import { packageKey } from '../../catalogue/names.js';
 import { composerVersionInput } from '../../registry/composer/version-object.js';
 import {
@@ -111,11 +114,11 @@ function repository(source: ProviderSource) {
   if (
     source.type !== 'vcs' ||
     source.config.provider !== 'git' ||
-    source.ecosystem !== 'composer'
+    !['composer', 'npm'].includes(source.ecosystem)
   ) {
     throw new GitProviderError('invalid_request');
   }
-  return { config: source.config, url: source.config.repository };
+  return { config: source.config, url: source.config.repository, ecosystem: source.ecosystem };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -287,18 +290,34 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
 
   async function canonicalName(s: Awaited<ReturnType<typeof listRefs>>): Promise<string | null> {
     const configured = s.repo.config.packageName;
-    if (configured !== undefined) return keyOf(configured);
+    if (configured !== undefined)
+      return s.repo.ecosystem === 'npm' ? configured : keyOf(configured);
     if (s.defaultBranch === null) throw new GitProviderError('no_default_branch');
     const branch = s.listing.refs.find((ref) => ref.name === `${HEADS}${s.defaultBranch}`);
     if (branch === undefined) throw new GitProviderError('no_default_branch');
-    const [file] = await readFileAtRefs(s.git, s.url, [branch], 'composer.json');
+    const [file] = await readFileAtRefs(
+      s.git,
+      s.url,
+      [branch],
+      s.repo.ecosystem === 'npm' ? 'package.json' : 'composer.json',
+    );
+    if (s.repo.ecosystem === 'npm') {
+      try {
+        const manifest = parseNpmVcsManifest(file?.text ?? '');
+        return typeof manifest.name === 'string'
+          ? packageKey(manifest.name, { ecosystem: 'npm' })
+          : null;
+      } catch {
+        return null;
+      }
+    }
     return manifestName(file);
   }
 
   return {
     id: 'git',
     sourceTypes: ['vcs'],
-    ecosystems: ['composer'],
+    ecosystems: ['composer', 'npm'],
 
     async listPackages(ctx, source) {
       const s = await listRefs(ctx, source);
@@ -318,12 +337,34 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
       if (describeOptions.snapshot !== undefined && describeOptions.snapshot.id !== s.snapshot.id) {
         throw new GitProviderError('snapshot_changed');
       }
-      const wanted = keyOf(name);
+      const wanted = source.ecosystem === 'npm' ? name : keyOf(name);
       if (wanted === null) return { kind: 'not_found', definitive: true };
       const canonical = await canonicalName(s);
       if (canonical === null) return { kind: 'not_found', definitive: false };
       if (canonical !== wanted) {
         return { kind: 'not_found', definitive: true };
+      }
+      if (source.ecosystem === 'npm') {
+        const tags = s.refs
+          .filter((ref) => ref.name.startsWith(TAGS))
+          .map((ref) => ref.name.slice(TAGS.length));
+        const winning = new Set(npmVersionsFromRefs(tags).versions.map((v) => `${TAGS}${v.ref}`));
+        const files = await readFileAtRefs(
+          s.git,
+          s.url,
+          s.refs.filter((ref) => winning.has(ref.name)),
+          'package.json',
+        );
+        return {
+          kind: 'found',
+          description: await npmVcsDescription(
+            wanted,
+            s.repo.config.packageName,
+            tags,
+            files,
+            s.snapshot,
+          ),
+        };
       }
       const refName = (kind: 'tag' | 'branch', ref: string): string =>
         `${kind === 'tag' ? TAGS : HEADS}${ref}`;
@@ -496,8 +537,28 @@ export function createGitProvider(options: GitProviderOptions): GitProvider {
       };
     },
 
-    async openDist() {
-      throw new GitProviderError('not_refetchable');
+    async openDist(ctx, source, target) {
+      const repo = repository(source);
+      if (source.ecosystem !== 'npm') throw new GitProviderError('not_refetchable');
+      if (
+        target.distType !== 'tgz' ||
+        target.sourceRef === null ||
+        !SHA.test(target.sourceRef) ||
+        target.url !== null
+      )
+        throw new GitProviderError('invalid_request');
+      const { git, url } = fetchContext(ctx, options, repo.url);
+      const tree = await readTreeAtCommit(git, url, target.sourceRef);
+      const { plan, attributes } = await blobPlan(git, url, tree.entries);
+      const reader = createGitBlobReader(
+        git,
+        url,
+        plan.filter((id) => !attributes.has(id)),
+      );
+      return {
+        size: null,
+        body: await gitTarball(tree, withPreloaded(reader, attributes), ctx.codecs, ctx.signal),
+      };
     },
 
     async buildArchive(ctx, source, commit) {

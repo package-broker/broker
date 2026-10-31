@@ -432,7 +432,13 @@ export interface CatalogueWriter {
   attachDist(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
-    input: DistIdentity & { readonly sha256: Sha256 },
+    input: DistIdentity & {
+      readonly sha256: Sha256;
+      readonly expectedGeneration?: string;
+      readonly npmIntegrity?: string;
+      readonly readme?: PublishReadme | null;
+      readonly readmeTruncated?: boolean;
+    },
   ): Promise<WriteEffect>;
   openListing(
     ctx: OrgContext,

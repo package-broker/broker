@@ -1,3 +1,5 @@
+import { createDistService } from './dist-service.js';
+import type { DistTarget } from '../db/catalogue.js';
 import { describe, expect, it, vi } from 'vitest';
 import { setAccessContext } from '../authz/access-context.js';
 import type { CatalogueReader, PackageVisibility, ResolvedPackage } from '../db/catalogue.js';
@@ -21,6 +23,10 @@ import { createRegistryModule, type RegistryModuleDeps } from './module.js';
 import { resolveRegistryConfig } from './registry-config.js';
 import type { RegistryJobsDeps } from './jobs.js';
 
+vi.mock('./dist-service.js', async (original) => {
+  const actual = await original<typeof import('./dist-service.js')>();
+  return { ...actual, createDistService: vi.fn(actual.createDistService) };
+});
 vi.mock('../catalogue/package-access.js', async (original) => {
   const actual = await original<typeof import('../catalogue/package-access.js')>();
   return { ...actual, createPackageAccess: vi.fn(actual.createPackageAccess) };
@@ -1303,4 +1309,64 @@ describe('claim probes', () => {
       expect(h.blob.get).not.toHaveBeenCalled();
     },
   );
+});
+
+it.each(['queued', 'running'])(
+  'does not bind credentials when a %s VCS build already exists',
+  async () => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+      credentialId: 'secret',
+      url: null,
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/repo',
+        refs: { tags: true, branches: [] },
+      }),
+    });
+    const pending = vi.fn(async () => true);
+    createRegistryModule({
+      ...h.deps,
+      npmVcsBuild: { pending, target: vi.fn(), writeGuard: vi.fn() },
+    });
+    const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+    expect(await enqueue(org, { sourceId: 'src-1', versionId: VERSION_ID } as DistTarget)).toBe(
+      true,
+    );
+    expect(pending).toHaveBeenCalledWith(org, VERSION_ID);
+    expect(h.deps.ingest.credential).not.toHaveBeenCalled();
+    expect(h.versionById).not.toHaveBeenCalled();
+    expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  },
+);
+it('skips the eager build lookup for a non-VCS npm source', async () => {
+  const h = harness();
+  const syncPackage = vi.fn(async () => ({ packageId: 'K' }));
+  const existingVersions = vi.fn();
+  const target = vi.fn();
+  createRegistryModule({
+    ...h.deps,
+    ingest: {
+      ...h.deps.ingest,
+      apply: {
+        ...h.deps.ingest.apply,
+        writer: { syncPackage } as never,
+        existing: { existingVersions },
+      },
+    },
+    sync: {} as never,
+    npmVcsBuild: { pending: vi.fn(), target, writeGuard: vi.fn() },
+  });
+  const apply = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0].apply;
+  await apply.writer.syncPackage(
+    org,
+    [] as never,
+    { ecosystem: 'npm', sourceId: 'src-1', versions: [{ versionNormalized: '1.0.0' }] } as never,
+  );
+  expect(syncPackage).toHaveBeenCalledOnce();
+  expect(existingVersions).not.toHaveBeenCalled();
+  expect(target).not.toHaveBeenCalled();
 });

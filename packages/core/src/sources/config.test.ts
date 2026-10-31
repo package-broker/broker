@@ -1027,3 +1027,21 @@ it.each(['a'.repeat(214), '@scope/' + 'a'.repeat(207)])(
     expect(parse('vcs', 'npm', null, { ...github, packageName: packageName + 'a' }).ok).toBe(false);
   },
 );
+
+it.each(['node', 'cloudflare'] as const)(
+  'generic Git npm sources require the Node archive runtime (%s)',
+  (runtime) => {
+    const cfg = {
+      provider: 'git',
+      repository: 'https://git.example.com/repo.git',
+      refs: { tags: true, branches: [] },
+    };
+    const result = parse('vcs', 'npm', null, cfg, { runtime });
+    expect(result.ok).toBe(runtime === 'node');
+    if (!result.ok)
+      expect(result.problems).toContainEqual({
+        field: 'provider',
+        message: 'git is not available on cloudflare: archive building requires node',
+      });
+  },
+);

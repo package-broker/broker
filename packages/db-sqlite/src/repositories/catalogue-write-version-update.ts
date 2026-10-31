@@ -276,7 +276,11 @@ export function versionUpdateStatements(
             .where(slot)
             .where(
               sql<boolean>`(version.metadata_json IS NOT ${metadata.json}
-                OR version.npm_integrity IS NOT ${metadata.npmIntegrity})`,
+                OR (version.npm_integrity IS NOT ${metadata.npmIntegrity}
+                  AND NOT (${metadata.npmIntegrity} IS NULL AND EXISTS (
+                    SELECT 1 FROM source
+                    WHERE source.org_id = version.org_id AND source.type='vcs'
+                      AND source.id = (SELECT package.source_id FROM package WHERE package.id=version.package_id AND package.org_id=version.org_id)))))`,
             ),
         ),
       );

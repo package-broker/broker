@@ -1,3 +1,4 @@
+import { PlatformUnavailableError } from '../platform/errors.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import * as coalesce from '../ingest/coalesce.js';
@@ -102,6 +103,7 @@ interface Options {
   upstream?: boolean;
   busyProvider?: boolean;
   plan?: 'unavailable' | 'none';
+  enqueueError?: Error;
 }
 
 function rig(options: Options = {}) {
@@ -316,6 +318,13 @@ function rig(options: Options = {}) {
           return target(request.revision);
         },
       },
+      ...(options.enqueueError === undefined
+        ? {}
+        : {
+            enqueueNpmVcsBuild: async () => {
+              throw options.enqueueError;
+            },
+          }),
       store,
       leases,
       clock: systemClock,
@@ -389,6 +398,18 @@ const text = async (result: DistServeResult): Promise<string> => {
 const owner = actor('project_a');
 
 describe('createDistService', () => {
+  it.each([
+    [new SourceUnavailableError('credential_unavailable'), 60],
+    [new PlatformUnavailableError(), 5],
+  ])('maps request enqueue failures to busy', async (enqueueError, retryAfterSeconds) => {
+    const r = rig({ initial: null, enqueueError });
+    expect(await r.service.serve(owner, { ...request(1), ecosystem: 'npm' })).toEqual({
+      kind: 'busy',
+      retryAfterSeconds,
+    });
+    expect(r.state.planned).toEqual([]);
+    expect(r.state.opens).toBe(0);
+  });
   it('answers a missing dist of an unbindable source as busy for a minute without fetching', async () => {
     const r = rig({ initial: null, plan: 'unavailable' });
     expect(await r.service.serve(owner, request(1))).toEqual({

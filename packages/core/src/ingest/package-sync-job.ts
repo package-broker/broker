@@ -14,6 +14,7 @@ import {
 import type { JobGuard } from '../platform/job-repository.js';
 import { canonicalPayload, defineJob, JobError } from '../platform/jobs.js';
 import type { EnqueueInput, CoreJobs as Jobs } from '../platform/jobs.js';
+import type { SourceErrorCode } from '../db/source.js';
 import type { SourceType } from '../sources/config.js';
 import { assertDescribeResult } from '../sources/provider.js';
 import { applyChunk, type ApplyDeps } from './apply-description.js';
@@ -67,6 +68,11 @@ export interface PackageSyncDeps {
     job: JobGuard,
   ) => CatalogueWriteGuard;
   readonly clock: Clock;
+  readonly reportSkipped?: (
+    job: import('../platform/jobs.js').JobContext,
+    sourceId: string,
+    code: SourceErrorCode,
+  ) => Promise<void>;
   readonly leaseSeconds?: number;
 }
 
@@ -293,6 +299,14 @@ export function createPackageSyncJob(deps: PackageSyncDeps) {
           }),
         );
         session = applied.session;
+        const candidateSkip = applied.skipped?.find(
+          (skip) =>
+            skip.reason === 'name_mismatch' ||
+            skip.reason === 'version_mismatch' ||
+            skip.reason === 'invalid_manifest',
+        );
+        if (candidateSkip !== undefined)
+          await deps.reportSkipped?.(context, sourceId, candidateSkip.reason as SourceErrorCode);
         if (applied.status === 'abandoned') {
           open = false;
           const fresh: PackageSyncPayload = {

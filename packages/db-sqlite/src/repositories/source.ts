@@ -1,3 +1,4 @@
+import { NPM_PACK_SKIP_CODES } from '@package-broker/core/sources/source-error-codes';
 import type { VcsConfig } from '@package-broker/core/sources/config';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
@@ -978,6 +979,29 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
                 eb('last_error', 'in', [...CREDENTIAL_REPLACEABLE_ERRORS]),
               ]),
             ),
+        ),
+      ]);
+    },
+
+    async reportCandidateSkipped(ctx, guard, input) {
+      const pack = (NPM_PACK_SKIP_CODES as readonly string[]).includes(input.error);
+      if (!pack && !['name_mismatch', 'version_mismatch', 'invalid_manifest'].includes(input.error))
+        throw new TypeError('invalid_candidate_report');
+      await executor.batch([
+        ...jobLeaseGuard(ctx, guard),
+        ...assertCheck(sql<boolean>`EXISTS (SELECT 1 FROM job
+          WHERE id=${guard.id} AND org_id=${ctx.orgId}
+          AND type=${pack ? 'core:npm-vcs-build:v1' : 'core:package-sync:v1'} AND json_extract(payload_json, '$.sourceId')=${input.id})`),
+        compile(
+          db
+            .updateTable('source')
+            .set({
+              last_error: input.error,
+            })
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', input.id)
+            .where('type', '=', 'vcs')
+            .where('ecosystem', '=', 'npm'),
         ),
       ]);
     },

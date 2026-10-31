@@ -1,3 +1,11 @@
+import {
+  createNpmVcsBuildJob,
+  NPM_VCS_BUILD_JOB_TYPE,
+  npmVcsBuildEnqueueInput,
+  type NpmVcsBuildPayload,
+  type NpmVcsBuildTarget,
+} from '../ingest/npm-vcs-build-job.js';
+import { registerCoreJob } from '../runtime/core-jobs.js';
 import { probeNpmClaim } from '../sources/claim-admission.js';
 import type { SourcePackageProbe } from '../ingest/source-package.js';
 import { isUpstreamRefusal } from '../ingest/fill-shared.js';
@@ -198,6 +206,14 @@ export interface RegistryModuleDeps {
       session: IngestSessionHandle,
       job: JobGuard,
     ) => CatalogueWriteGuard;
+  };
+  readonly npmVcsBuild?: {
+    readonly pending: (ctx: OrgContext, versionId: string) => Promise<boolean>;
+    readonly target: (
+      ctx: OrgContext,
+      input: Pick<NpmVcsBuildPayload, 'packageId' | 'versionId' | 'sourceId'>,
+    ) => Promise<NpmVcsBuildTarget | null>;
+    readonly writeGuard: (ctx: OrgContext, job: JobGuard) => CatalogueWriteGuard;
   };
   readonly dist: {
     readonly leases: FetchLeases;
@@ -444,7 +460,13 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
               candidate.upstreamTime === undefined
                 ? {}
                 : { [candidate.version]: candidate.upstreamTime },
-              { probe, importedAt },
+              {
+                probe,
+                importedAt,
+                ...(record.type === 'vcs' && candidate.form === 'npm-vcs'
+                  ? { kind: 'vcs' as const }
+                  : {}),
+              },
             );
       return result.ok ? result.input : null;
     };
@@ -503,6 +525,25 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
         writer: deps.dist.writer,
         blobReplacer: deps.dist.blobReplacer,
         maxBytes: registry.caps.archiveBytes,
+        ...(record.type !== 'vcs' || record.ecosystem !== 'npm'
+          ? {}
+          : {
+              enqueueNpmVcsBuild: async () => {
+                if (jobs === undefined) throw new PlatformUnavailableError();
+                const payload = {
+                  sourceId: record.id,
+                  packageId: target.packageId,
+                  versionId: target.versionId,
+                  version: row.version,
+                };
+                await jobs.enqueue(
+                  ctx,
+                  NPM_VCS_BUILD_JOB_TYPE,
+                  payload,
+                  npmVcsBuildEnqueueInput(payload, deps.clock.now().getTime()),
+                );
+              },
+            }),
       },
     };
   }
@@ -530,12 +571,121 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     return { type: record.type };
   };
 
+  const buildJob =
+    deps.npmVcsBuild === undefined || jobs === undefined
+      ? undefined
+      : createNpmVcsBuildJob({
+          async plan(job, payload, lease) {
+            const row = await deps.npmVcsBuild!.target(job.org, payload);
+            if (row === null || row.version !== payload.version) return null;
+            const record = await catalogue.sources.get(job.org, payload.sourceId);
+            if (
+              record === null ||
+              record.type !== 'vcs' ||
+              record.ecosystem !== 'npm' ||
+              record.status !== 'active'
+            )
+              return null;
+            const bound = await bind(job.org, record);
+            if (bound === null || typeof bound === 'string') return null;
+            return {
+              guard: deps.npmVcsBuild!.writeGuard(job.org, lease),
+              deps: {
+                provider: bound.provider,
+                providerContext: providerContext(job.org, bound, job.signal),
+                source: bound.source,
+                store: blob,
+                writer: deps.dist.writer,
+                blobReplacer: deps.dist.blobReplacer,
+                maxBytes: registry.caps.publishTarballBytes,
+                reportSkipped: async (code) => {
+                  await deps.registryJobs!.sourceSync.sources.reportCandidateSkipped!(
+                    job.org,
+                    lease,
+                    { id: payload.sourceId, error: code },
+                  );
+                },
+              },
+              target: {
+                versionId: payload.versionId,
+                revision: row.revision,
+                packageName: row.packageName,
+                version: row.version,
+                previousBlob: null,
+                fetch: {
+                  distType: 'tgz',
+                  sourceRef: row.sourceRef,
+                  upstreamDistUrl: null,
+                  npmIntegrity: null,
+                  npmShasum: null,
+                  composerShasum: null,
+                },
+              },
+            };
+          },
+        });
+  const npmApply: ApplyDeps = {
+    ...ingest.apply,
+    writer: {
+      ...ingest.apply.writer,
+      get statementBudget() {
+        return ingest.apply.writer.statementBudget;
+      },
+      async syncPackage(ctx, guard, input) {
+        const result = await ingest.apply.writer.syncPackage(ctx, guard, input);
+        if (
+          input.ecosystem === 'npm' &&
+          (await catalogue.sources.get(ctx, input.sourceId))?.type === 'vcs' &&
+          input.versions.length > 0 &&
+          deps.npmVcsBuild !== undefined &&
+          jobs !== undefined
+        ) {
+          const rows = await ingest.apply.existing.existingVersions(ctx, {
+            packageId: result.packageId,
+            after: null,
+            withMetadata: false,
+            limit: input.versions.length,
+            keys: input.versions.map((v) => v.versionNormalized),
+          });
+          for (const version of rows.rows) {
+            const payload = {
+              sourceId: input.sourceId,
+              packageId: result.packageId,
+              versionId: version.id,
+              version: version.versionNormalized,
+            };
+            if ((await deps.npmVcsBuild.target(ctx, payload)) !== null)
+              await jobs.enqueue(
+                ctx,
+                NPM_VCS_BUILD_JOB_TYPE,
+                payload,
+                npmVcsBuildEnqueueInput(payload, deps.clock.now().getTime()),
+              );
+          }
+        }
+        return result;
+      },
+    },
+  };
   const packageSyncJob =
     sync === undefined || jobs === undefined
       ? undefined
       : createPackageSyncJob({
           sessions: ingest.sessions,
-          apply: ingest.apply,
+          reportSkipped: async (job, sourceId, code) => {
+            const sourceSync = deps.registryJobs?.sourceSync;
+            if (
+              sourceSync?.sources.reportCandidateSkipped !== undefined &&
+              (code === 'name_mismatch' ||
+                code === 'version_mismatch' ||
+                code === 'invalid_manifest')
+            )
+              await sourceSync.sources.reportCandidateSkipped(job.org, sourceSync.jobGuard(job), {
+                id: sourceId,
+                error: code,
+              });
+          },
+          apply: npmApply,
           jobs,
           upstreamState: sync.upstreamState,
           executor: sync.executor,
@@ -559,7 +709,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     cache: scopedCache,
     visibility: visibilityPort,
     upstreamState: catalogue.upstreamState,
-    apply: ingest.apply,
+    apply: npmApply,
     sourceMetadata,
     writeGuard: ingest.writeGuard,
     planFill,
@@ -567,6 +717,15 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   });
 
   const dist = createDistService({
+    enqueueNpmVcsBuild: async (ctx, target) => {
+      const record = await catalogue.sources.get(ctx, target.sourceId);
+      if (record?.type !== 'vcs' || record.ecosystem !== 'npm') return false;
+      if (await deps.npmVcsBuild?.pending(ctx, target.versionId)) return true;
+      const plan = await planFetch(ctx, target);
+      if (plan?.deps.enqueueNpmVcsBuild === undefined) return false;
+      await plan.deps.enqueueNpmVcsBuild();
+      return true;
+    },
     access: packageAccess,
     store: blob,
     leases: deps.dist.leases,
@@ -672,6 +831,23 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     ...(packageSyncJob === undefined ? {} : { packageSyncJob }),
     ...(jobs === undefined || deps.registryJobs === undefined
       ? {}
-      : createRegistryJobs(deps.registryJobs, jobs)),
+      : (() => {
+          const registered = createRegistryJobs(deps.registryJobs, jobs);
+          return {
+            ...registered,
+            coreJobs: [
+              ...registered.coreJobs,
+              ...(buildJob === undefined
+                ? []
+                : [
+                    registerCoreJob({
+                      ...buildJob,
+                      handler: (input, context) =>
+                        buildJob.handler(buildJob.validate(input), context),
+                    }),
+                  ]),
+            ],
+          };
+        })()),
   });
 }

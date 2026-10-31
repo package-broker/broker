@@ -51,6 +51,12 @@ Node accepts `PB_MASTER_KEY` or `PB_MASTER_KEY_FILE`, and `PB_MASTER_KEY_PREVIOU
 <!-- source: packages/runtime-cloudflare/src/index.ts:432 -->
 <!-- source: packages/db-sqlite/src/repositories/keyring-verifier.ts:103 -->
 
+## npm archives are part of the recovery set
+
+Published npm tarballs and repository-built npm tarballs are stored as non-refetchable blobs. Back up the filesystem blob root or S3 bucket on Node, or the R2 bucket on Workers, together with the database and matching keys. A database export, upstream registry or Git repository cannot recover those stored archives through the broker's refetch path. Include their object metadata and media types; verify restored package downloads against the saved digests. <!-- source: packages/core/src/registry/npm/publish-service.ts --> <!-- source: packages/core/src/ingest/dist-fetch.ts --> <!-- source: packages/core/src/registry/dist-service.ts --> <!-- source: packages/runtime-node/src/restore-rehearsal/r2-objects.mjs -->
+
+The logical backup scope includes publish approvals, package access requests, version READMEs and trusted publisher bindings. It excludes temporary npm login sessions and OIDC replay records; this classification is separate from an operator's complete physical SQLite or D1 snapshot. <!-- source: packages/db-sqlite/src/backup-scope.ts --> <!-- source: packages/db-sqlite/src/backup-scope.ts -->
+
 ## Back up Docker
 
 This recipe follows the [Docker quickstart](../getting-started/quickstart-docker.md): one container owns the whole `/data` volume, the master key is `/data/master.key`, and `PB_MASTER_KEY_FILE=/data/master.key` selects it. Set `BROKER_CONTAINER` to that container's name and `BACKUP_DIR` to an absolute, unused backup directory outside the mounted data. These are recipe inputs, not broker settings. The volume copy includes the key, so store the entire backup as secret material. Include any retained previous-key files and their runtime settings too.

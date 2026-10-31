@@ -8,6 +8,7 @@ import {
   auditHash,
   readAuditHash,
   loadAudit,
+  loadAuditNames,
   type AuditFilters,
   type AuditStatus,
 } from './audit.js';
@@ -370,7 +371,7 @@ describe('audit', () => {
     async (failure) => {
       const { client, fetch } = auditClient({ organization: false, failure, items: [item] });
       const result = await loadAudit(client, filters, 'web', { auditTrail: true }, false);
-      expect(result.explanation).toBe(
+      expect(result.explanation?.summary).toBe(
         'Reading this project’s events requires project audit access. Verification and capacity details are available to organization auditors.',
       );
       expect(result.data).toEqual({ items: [item], next: null });
@@ -384,7 +385,7 @@ describe('audit', () => {
       expect(html).toContain(
         'Verification and capacity details are available to organization auditors.',
       );
-      expect(html).toContain('Copy actor ID');
+      expect(html).toContain('Copy ID: A user');
       expect(html).not.toContain('Latest event 42');
       expect(html).not.toContain('Organization audit status');
       expect(html).not.toContain('No verified retained range');
@@ -395,7 +396,7 @@ describe('audit', () => {
   it('asks project auditors to select a project at organization scope', async () => {
     const { client, fetch } = auditClient({ organization: false });
     const result = await loadAudit(client, filters, null, { auditTrail: true }, false);
-    expect(result.explanation).toContain(
+    expect(result.explanation?.summary).toContain(
       'Organization audit access is required here. If you have project audit access, select that project.',
     );
     expect(fetch).not.toHaveBeenCalled();
@@ -411,10 +412,10 @@ describe('audit', () => {
     expect(result.error).toBe(
       'Audit events are unavailable for this scope. Audit permission and an active trail are required.',
     );
-    expect(result.explanation).toBe(
+    expect(result.explanation?.summary).toBe(
       'You do not have access to audit events for this scope. Ask an organization administrator for audit access.',
     );
-    expect(result.explanation).not.toContain('You can read');
+    expect(result.explanation?.summary).not.toContain('You can read');
     expect(markup({ ...result, scope: 'web' })).toContain('Try again');
     expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/_pb/audit/head');
     expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/_pb/audit/status');
@@ -424,7 +425,17 @@ describe('audit', () => {
     async (organization) => {
       const { client, fetch } = auditClient({ trail: false, organization });
       const result = await loadAudit(client, filters, 'web', { auditTrail: false }, organization);
-      expect(result.explanation).toContain('trail is inactive');
+      expect(result.trailInactive).toBe(true);
+      expect(result.explanation?.summary).toContain('trail is inactive');
+      const html = markup({ ...result, scope: 'web' });
+      if (organization) {
+        expect(result.explanation?.details).toContain('You can read organization');
+        expect(html).toContain('<details><summary>Audit access details</summary>');
+      } else {
+        expect(result.explanation?.details).toBeNull();
+        expect(html).toContain('requires project audit access.');
+        expect(html).not.toContain('<summary>Audit access details</summary>');
+      }
       expect(result.status).toEqual(organization ? status : null);
       expect(fetch.mock.calls.map(([url]) => url)).not.toContain('/_pb/audit/head');
     },
@@ -462,7 +473,7 @@ describe('audit', () => {
   });
   it('does not render source_ip or payload from a hostile response', () => {
     const html = markup();
-    expect(html).toContain('Copy target ID');
+    expect(html).toContain('Copy ID: A source');
     expect(html).not.toContain('source-1');
     expect(html).not.toContain('source_ip');
     expect(html).not.toContain('private-source-ip');
@@ -482,9 +493,11 @@ describe('audit', () => {
     expect(rows).toHaveLength(3);
     expect(rows[0]).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(rows[0]).toContain('2026-10-22T10:00:00Z');
-    expect(rows[0]).toContain('Copy actor ID');
-    expect(rows[0]).toContain('Copy target ID');
-    expect(rows[0]).toContain('Name unavailable');
+    expect(rows[0]).toContain('Copy ID: A user');
+    expect(rows[0]).toContain('Copy ID: A source');
+    expect(rows[0]).toContain('A user');
+    expect(rows[0]).toContain('A source');
+    expect(rows[0]).not.toContain('Name unavailable');
     expect(rows[0]).toContain('Person');
     expect(rows[0]).not.toContain('user-1');
     expect(rows[0]).not.toContain('source-1');
@@ -546,4 +559,161 @@ describe('audit', () => {
     expect(html).not.toContain('Head 0');
     expect(html).not.toContain('never verified');
   });
+});
+
+describe('audit names and compact controls', () => {
+  it('uses allowed user, token and project names for the matching reference type', () => {
+    const html = markup({
+      names: { users: { 'user-1': 'Alex' }, tokens: { 'token-1': 'Laptop' } },
+      projects: [{ id: 'web', name: 'Storefront' }],
+      data: {
+        items: [
+          { ...item, targetType: 'token', targetId: 'token-1' },
+          { ...item, seq: 43, targetType: 'user', targetId: 'user-1' },
+          { ...item, seq: 44, targetType: 'project', targetId: 'web' },
+          { ...item, seq: 45, targetType: 'token', targetId: 'missing' },
+        ],
+        next: null,
+      },
+    });
+    expect(html).toContain('Alex');
+    expect(html).toContain('Laptop');
+    expect(html).toContain('Storefront');
+    expect(html).toContain('A token');
+    expect(html).not.toContain('Name unavailable');
+    const button = html.match(/<button[^>]*aria-label="Copy ID: Alex"[^>]*>.*?<\/button>/s)![0];
+    expect(button).toContain('data-variant="ghost"');
+    expect(button).toContain('<svg');
+    expect(button).toContain('h-11 min-w-11');
+    expect(button).not.toContain('>Copy ID: Alex<');
+  });
+  it('uses a named project select, preserving an unavailable bookmarked filter without showing its ID', () => {
+    const html = markup({ projects: [{ id: 'web', name: 'Storefront' }] });
+    expect(html).toContain('<select');
+    expect(html).toContain('name="filterProject"');
+    expect(html).toContain('<option value="web" selected="">Storefront</option>');
+    expect(html).not.toContain('<input id="audit-project"');
+    const missing = markup({ filters: { ...filters, project: 'private-project-id' } });
+    expect(missing).toContain(
+      '<option value="private-project-id" selected="">Project unavailable</option>',
+    );
+    expect(missing).not.toContain('>private-project-id<');
+    expect(markup({ scope: 'web' })).not.toContain('name="filterProject"');
+  });
+  it.each(['none', 'export'] as const)(
+    'gives %s mode a short summary and a disclosure beneath real subheadings',
+    (mode) => {
+      const html = markup({
+        status: { ...status, mode },
+        trailInactive: true,
+        data: null,
+        explanation: {
+          summary: 'The audit trail is inactive; local event history is unavailable.',
+          details: 'Your audit access.',
+        },
+      });
+      expect(html).toContain('<h3 class="text-base font-semibold">Delivery destinations</h3>');
+      expect(html).toContain('<h3 class="text-base font-semibold">Recorded incidents');
+      expect(html).toContain(
+        '<details><summary>Audit access details</summary><p>Your audit access.</p></details>',
+      );
+      expect(html).not.toContain('name="filterProject"');
+      expect(html).not.toContain('Clear filters');
+      expect(html).toContain(
+        mode === 'none'
+          ? '<p>No durable audit history is being kept.</p><details>'
+          : '<p>Events are sent to configured destinations.</p><details>',
+      );
+    },
+  );
+  it('loads paginated authorized names and keeps emails out of its result', async () => {
+    const fetch = vi.fn(async (url: string) =>
+      Response.json(
+        url === '/_pb/me'
+          ? { user: { id: 'self', displayName: null, email: 'private-self' } }
+          : url === '/_pb/me/permissions'
+            ? { organization: ['org:users:read', 'org:tokens:read'] }
+            : url === '/_pb/users'
+              ? {
+                  items: [{ id: 'other', displayName: 'Sam', email: 'private-other' }],
+                  next: 'next-user',
+                }
+              : url.includes('/_pb/users?')
+                ? { items: [{ id: 'last', displayName: 'Taylor' }], next: null }
+                : url === '/_pb/tokens'
+                  ? { items: [{ id: 'shared', name: 'Deploy' }], next: 'next-token' }
+                  : url.includes('/_pb/tokens?')
+                    ? { items: [{ id: 'last-token', name: 'CI' }], next: null }
+                    : { items: [{ id: 'mine', name: 'Laptop' }], next: null },
+      ),
+    );
+    const names = await loadAuditNames(
+      createApiClient<paths>({ fetch, readCookie: () => undefined }),
+      null,
+    );
+    expect(names).toEqual({
+      users: { self: 'You', other: 'Sam', last: 'Taylor' },
+      tokens: { mine: 'Laptop', shared: 'Deploy', 'last-token': 'CI' },
+    });
+    expect(JSON.stringify(names)).not.toContain('private-');
+    expect(fetch.mock.calls.map(([url]) => url)).toContain('/_pb/users?after=next-user');
+    expect(fetch.mock.calls.map(([url]) => url)).toContain('/_pb/tokens?after=next-token');
+  });
+  it.each([false, true])(
+    'keeps self names and handles denied optional lists with project scope %s',
+    async (project) => {
+      const fetch = vi.fn(async (url: string) =>
+        url === '/_pb/me'
+          ? Response.json({ user: { id: 'self', displayName: 'Alex' } })
+          : url === '/_pb/me/permissions'
+            ? Response.json({ organization: [] })
+            : Response.json({ error: { code: 'forbidden' } }, { status: 403 }),
+      );
+      const names = await loadAuditNames(
+        createApiClient<paths>({ fetch, readCookie: () => undefined }),
+        project ? 'store' : null,
+      );
+      expect(names).toEqual({ users: { self: 'Alex' }, tokens: {} });
+      const urls = fetch.mock.calls.map(([url]) => url);
+      expect(urls).not.toContain('/_pb/users');
+      expect(urls).not.toContain('/_pb/tokens');
+      expect(urls.includes('/_pb/projects/store/tokens')).toBe(project);
+      expect(urls).toContain('/_pb/me/tokens');
+    },
+  );
+  it('handles unavailable capabilities and network failures without diagnostics', async () => {
+    const fetch = vi.fn(async () => {
+      throw new Error('private-diagnostic');
+    });
+    expect(
+      await loadAuditNames(createApiClient<paths>({ fetch, readCookie: () => undefined }), null),
+    ).toEqual({ users: {}, tokens: {} });
+  });
+});
+
+it('keeps unknown or inherited reference names generic and null references unrecorded', () => {
+  const html = markup({
+    names: { users: {}, tokens: {} },
+    data: {
+      items: [
+        { ...item, actor: { type: 'user', id: 'toString' }, targetType: 'constructor' },
+        {
+          ...item,
+          seq: 43,
+          actor: { type: 'constructor', id: 'unknown' },
+          targetType: 'token',
+          targetId: 'toString',
+        },
+        { ...item, seq: 44, actor: { type: 'user', id: null }, targetId: null, projectId: null },
+      ],
+      next: null,
+    },
+  });
+  expect(html).toContain('A user');
+  expect(html).toContain('A token');
+  expect(html).toContain('An item');
+  expect(html).toContain('Actor type unavailable');
+  expect(html).toContain('Not recorded');
+  expect(html).not.toContain('[object Object]');
+  expect(html).not.toContain('function Object');
 });

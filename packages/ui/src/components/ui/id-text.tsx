@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { cn } from '../../lib/utils.js';
 import { Button } from './button.js';
 
 export function middleTruncate(value: string, length = 18): string {
@@ -6,7 +7,17 @@ export function middleTruncate(value: string, length = 18): string {
   const half = Math.floor((length - 1) / 2);
   return `${value.slice(0, half)}…${value.slice(-half)}`;
 }
-export function CopyButton({ value, label }: { value: string; label: string }) {
+export function CopyButton({
+  value,
+  label,
+  className,
+  manualFallback = false,
+}: {
+  value: string;
+  label: string;
+  className?: string;
+  manualFallback?: boolean;
+}) {
   const [status, setStatus] = useState('');
   return (
     <>
@@ -14,15 +25,19 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
         type="button"
         variant="ghost"
         size="sm"
-        className="h-7 shrink-0 px-1.5"
+        className={cn('h-7 shrink-0 px-1.5', className)}
         aria-label={label}
         title={label}
         onClick={() => {
-          void navigator.clipboard?.writeText(value).then(
-            () => setStatus('Copied.'),
-            () => setStatus('Unable to copy.'),
-          );
-          if (!navigator.clipboard) setStatus('Unable to copy.');
+          void (async () => {
+            try {
+              if (!navigator.clipboard) throw new Error('Clipboard unavailable');
+              await navigator.clipboard.writeText(value);
+              setStatus('Copied.');
+            } catch {
+              setStatus('Unable to copy.');
+            }
+          })();
         }}
       >
         <svg
@@ -38,9 +53,18 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
       </Button>
-      <span className="sr-only" role="status">
-        {status}
+      <span className={manualFallback ? 'basis-full' : 'sr-only'} role="status">
+        {manualFallback
+          ? status === 'Copied.'
+            ? 'ID copied.'
+            : status === 'Unable to copy.'
+              ? 'Could not copy ID. Copy the value below.'
+              : ''
+          : status}
       </span>
+      {manualFallback && status === 'Unable to copy.' ? (
+        <code className="basis-full break-all">{value}</code>
+      ) : null}
     </>
   );
 }

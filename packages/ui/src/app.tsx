@@ -34,7 +34,7 @@ import { Select } from './components/ui/select.js';
 import { cn } from './lib/utils.js';
 import { buildListFilterHash } from './page-hash.js';
 import { AccessPage } from './pages/access.js';
-import { AuditPage } from './pages/audit.js';
+import { AuditPage, clearAuditNames } from './pages/audit.js';
 import { ImportPage } from './pages/import.js';
 import { PackagesPage } from './pages/packages.js';
 import { ProjectsPage } from './pages/projects.js';
@@ -139,6 +139,7 @@ export async function signOut(deps: {
 }): Promise<boolean> {
   const result = await deps.client.request('post', '/_pb/auth/logout');
   if (!result.ok) return false;
+  clearAuditNames(deps.client);
   deps.clearPending();
   if (deps.storage) clearPendingTokenIssue(deps.storage);
   deps.onSignedOut();
@@ -313,6 +314,7 @@ export async function checkSession(
 ): Promise<Session | null> {
   const result = await client.request('get', '/_pb/session');
   if (!isCurrent()) return null;
+  clearAuditNames(client);
   const parsed = parseHash(hash);
   if (
     result.ok &&
@@ -396,6 +398,17 @@ export function useAuditCapabilities(client: AuthClient, session: Session, hash:
   return { audit, refreshAuditCapabilities, resetAuditCapabilities };
 }
 
+export function createSessionClient(source: AuthClient): AuthClient {
+  const client: AuthClient = {
+    request: async (method, path, ...args) => {
+      const result = await source.request(method, path, ...args);
+      if (result.status === 401) clearAuditNames(client);
+      return result;
+    },
+  };
+  return client;
+}
+
 export function App(props: { client?: AuthClient }) {
   return (
     <CSPProvider disableStyleElements>
@@ -407,17 +420,20 @@ export function App(props: { client?: AuthClient }) {
 function AppContent(props: { client?: AuthClient }) {
   const client = useMemo<AuthClient>(
     () =>
-      props.client ??
-      createApiClient<paths>({
-        fetch: (url, init) => fetch(url, init),
-        readCookie: (name) => {
-          for (const part of document.cookie.split('; ')) {
-            const eq = part.indexOf('=');
-            if (eq > 0 && part.slice(0, eq) === name) return decodeURIComponent(part.slice(eq + 1));
-          }
-          return undefined;
-        },
-      }),
+      createSessionClient(
+        props.client ??
+          createApiClient<paths>({
+            fetch: (url, init) => fetch(url, init),
+            readCookie: (name) => {
+              for (const part of document.cookie.split('; ')) {
+                const eq = part.indexOf('=');
+                if (eq > 0 && part.slice(0, eq) === name)
+                  return decodeURIComponent(part.slice(eq + 1));
+              }
+              return undefined;
+            },
+          }),
+      ),
     [props.client],
   );
   const [hash, go] = useHash();
@@ -494,6 +510,7 @@ function AppContent(props: { client?: AuthClient }) {
   );
 
   const onSignedIn = useCallback(() => {
+    clearAuditNames(client);
     initialProbe.current = false;
     void client.request('get', '/_pb/session').then((result) => {
       setSession(result.ok ? 'in' : 'out');

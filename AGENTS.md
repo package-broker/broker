@@ -73,4 +73,5 @@ Focused run for one package: `pnpm vitest run --project <package>`, for example 
 
 - Pull request titles follow Conventional Commits with the package directory as scope, for example `fix(runtime-node): change health route`.
 - Pull requests are squash-merged.
+- Never stack pull requests: target `main`, never another pull request's branch. Ship a feature as atomic pull requests behind a feature flag that is off by default, or as one pull request with commits that together form the complete feature.
 - Write comments only where the code cannot say it.

@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { expect, it } from 'vitest';
 
-it('defers the trusted publishers section and form outside the Tokens dependency graph', async () => {
+it('includes the trusted publishers section and form in the Tokens static dependency graph', async () => {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../tokens.tsx', import.meta.url))],
     bundle: true,
@@ -31,7 +31,7 @@ it('defers the trusted publishers section and form outside the Tokens dependency
     Object.keys(output.inputs).some((key) => key.endsWith('/tokens/trusted-publishers.tsx')),
   );
   expect(publisherOutputs).toHaveLength(1);
-  expect(initial.has(publisherOutputs[0]![0])).toBe(false);
+  expect(initial.has(publisherOutputs[0]![0])).toBe(true);
   expect(
     result.outputFiles.find((file) => file.path.endsWith(publisherOutputs[0]![0]))?.text,
   ).toContain('Save trusted publisher');

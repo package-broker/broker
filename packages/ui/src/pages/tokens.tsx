@@ -1,5 +1,5 @@
 import { createTrustedPublishersController } from './tokens/trusted-publishers-controller.js';
-import { PageLoader } from '../page-loader.js';
+import { TrustedPublishers } from './tokens/trusted-publishers.js';
 import { pendingStorage } from '../token-pending.js';
 import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type { ApiResult } from '../api.js';
@@ -1034,29 +1034,6 @@ function SetupProjectAccess({ state: s, controller: c }: { state: State; control
   );
 }
 
-function LazyTrustedPublishers({
-  controller,
-  permissions,
-}: {
-  controller: Controller['trustedPublishers'];
-  permissions: readonly string[];
-}) {
-  const load = useMemo(
-    () => () =>
-      import('./tokens/trusted-publishers.js').then(({ TrustedPublishers }) => {
-        return function PublishersSection() {
-          return <TrustedPublishers controller={controller} permissions={permissions} />;
-        };
-      }),
-    [controller, permissions],
-  );
-  return (
-    <section aria-label="Trusted publishers">
-      <PageLoader load={load} />
-    </section>
-  );
-}
-
 export function TokensView({ state: s, controller: c }: { state: State; controller: Controller }) {
   const personal = s.renewal !== null ? s.renewal.kind === 'pat' : s.target === 'personal';
   const policy = s.lifetime?.[personal ? 'personal' : 'service'];
@@ -1399,7 +1376,7 @@ export function TokensView({ state: s, controller: c }: { state: State; controll
       </details>
       <TokenList key={`${s.target}:${s.project}`} state={s} controller={c} />
       {s.project === null && s.organizationPermissions.includes('org:service-principals:write') ? (
-        <LazyTrustedPublishers
+        <TrustedPublishers
           controller={c.trustedPublishers}
           permissions={s.organizationPermissions}
         />

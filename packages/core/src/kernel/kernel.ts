@@ -154,7 +154,7 @@ type KernelEnv = {
     readonly waitUntil: (promise: Promise<unknown>) => void;
   };
 };
-type RegisteredRoute = Registration['routes'][number];
+type RegisteredRoute = Registration['routes'][number] & Pick<RouteDefinition, 'corePackageName'>;
 
 const CORE_PLUGIN = 'core';
 /** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated and self boundaries. */
@@ -167,9 +167,9 @@ const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
 const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
 
 function errorFormat(route: string | undefined): ErrorFormat {
-  return route === '/:project/npm' || route?.startsWith('/:project/npm/') === true
-    ? 'npm'
-    : 'nested';
+  if (route === undefined) return 'nested';
+  const reserved = RESERVED_ROOTS.some((root) => route === root || route.startsWith(`${root}/`));
+  return !reserved && /^\/[^/]+\/npm(?:\/|$)/.test(route) ? 'npm' : 'nested';
 }
 
 function authOrSessionPath(path: string): boolean {
@@ -696,7 +696,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       if (binding === undefined || packageActor === null || options.packageResolver === undefined) {
         throw new TypeError('package resolution is not configured');
       }
-      const name = binding.name(authorizationRequest.params);
+      const lookup = route.plugin === CORE_PLUGIN ? route.corePackageName : undefined;
+      const name =
+        lookup === undefined
+          ? binding.name(authorizationRequest.params)
+          : await lookup(org, authorizationRequest.params);
       const absent = (): Response => {
         guard.reason(engineStatusReason(404));
         return routeNotFound(requestId, format);
@@ -791,7 +795,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   const reservedNotFound = (c: Context<KernelEnv>): Response => {
     c.env.guard.reason('route.not_found');
-    return routeNotFound(c.env.requestId);
+    const path = new URL(c.req.url).pathname;
+    return routeNotFound(c.env.requestId, errorFormat(path));
   };
   for (const root of RESERVED_ROOTS) {
     app.all(root, reservedNotFound);

@@ -1,3 +1,6 @@
+import { sha256Hex } from '@package-broker/core/auth/primitives';
+import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
+import type { KernelOptions } from '@package-broker/core/kernel/kernel';
 import { orgContext } from '@package-broker/core/db/port';
 import { createJobLoop } from './jobs/loop.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,11 +22,23 @@ import { createNodeServer, type NodeBroker } from './index.js';
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 
 const built = vi.hoisted(() => ({
+  kernels: [] as KernelOptions[],
   routes: [] as Array<readonly RouteDefinition[]>,
   dependencies: [] as ApiModuleDeps[],
   drop: undefined as string | undefined,
   policies: [] as unknown[],
 }));
+
+vi.mock('@package-broker/core/kernel/kernel', async (original) => {
+  const actual = await original<typeof import('@package-broker/core/kernel/kernel')>();
+  return {
+    ...actual,
+    createKernel: (options: KernelOptions) => {
+      built.kernels.push(options);
+      return actual.createKernel(options);
+    },
+  };
+});
 
 vi.mock('@package-broker/core/sources/source-service', async (original) => {
   const actual = await original<typeof import('@package-broker/core/sources/source-service')>();
@@ -72,6 +87,16 @@ interface ManagementAssemblyEntry {
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
+    dependency: 'packageDetail',
+    constructed: 'SQLite package detail repository and idempotency repository',
+    routes: [
+      'GET /_pb/projects/:project/packages/:package/readme',
+      'PATCH /_pb/packages/:package/access',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM13a',
+  },
+  {
     dependency: 'packageAccessRequests',
     constructed: 'SQLite access request repository with provider anchors',
     routes: [
@@ -104,6 +129,13 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ],
     jobs: [],
     ownerPacket: 'T531',
+  },
+  {
+    dependency: 'npmLogin',
+    constructed: 'npm login repository and personal token service',
+    routes: ['GET /_pb/me/npm-login/:selector', 'POST /_pb/me/npm-login/:selector'],
+    jobs: ['npm-login-expire'],
+    ownerPacket: 'NPM16',
   },
   {
     dependency: 'access',
@@ -311,13 +343,17 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
     expect(entry.ownerPacket).toBe(
-      entry.dependency === 'publishes'
-        ? 'NPM10'
-        : entry.dependency === 'sourcePackages'
-          ? 'T1041'
-          : entry.dependency === 'packageAccessRequests'
-            ? 'NPM12'
-            : 'T531',
+      entry.dependency === 'packageDetail'
+        ? 'NPM13a'
+        : entry.dependency === 'publishes'
+          ? 'NPM10'
+          : entry.dependency === 'sourcePackages'
+            ? 'T1041'
+            : entry.dependency === 'npmLogin'
+              ? 'NPM16'
+              : entry.dependency === 'packageAccessRequests'
+                ? 'NPM12'
+                : 'T531',
     );
     for (const key of entry.routes) {
       expect(
@@ -464,6 +500,19 @@ describe('Node management API mount', () => {
     expect(JSON.parse(audit[0]!.payload_json).changes.package.new).toBe('widget');
   });
 
+  it('reads a README through the mounted package boundary', async () => {
+    const kernel = await create().ready();
+    const request = await seedReadme(db.executor);
+    const response = await kernel.fetch(request);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      filename: 'README.md',
+      body: '# Mounted',
+      contentType: 'text/markdown',
+      sizeBytes: 9,
+    });
+  });
+
   it('refuses anonymous requests to every route in the API module table', async () => {
     const kernel = await create().ready();
     expect(built.routes).toHaveLength(1);
@@ -506,6 +555,18 @@ describe('Node management API mount', () => {
         key,
       ).toHaveLength(1);
     }
+  });
+
+  it('mounts public npm login routes without registry services', async () => {
+    await create().ready();
+    expect(
+      built.kernels.at(-1)?.ecosystemRoutes?.map((route) => `${route.method} ${route.path}`),
+    ).toEqual(
+      expect.arrayContaining([
+        'POST /:project/npm/-/v1/login',
+        'GET /:project/npm/-/v1/done/:session',
+      ]),
+    );
   });
 
   it('mounts the package manage routes without a rebuild route', async () => {
@@ -625,4 +686,111 @@ async function seedExpiredAccessRequest(
     },
   ]);
   return id;
+}
+
+async function seedReadme(executor: import('@package-broker/core/db/port').SqlExecutor) {
+  const [org] = await executor.all<{ id: string }>({
+    sql: 'SELECT id FROM organization',
+    params: [],
+  });
+  const orgId = org!.id;
+  const packageId = ulid(),
+    versionId = ulid(),
+    projectId = ulid(),
+    sourceId = ulid(),
+    userId = ulid(),
+    roleId = ulid(),
+    credentialId = ulid();
+  const secret = 'R'.repeat(43);
+  const rows: Array<[string, ...import('@package-broker/core/db/port').Statement['params']]> = [
+    ["INSERT INTO project (id,org_id,slug,name) VALUES (?,?,'readme','Readme')", projectId, orgId],
+    [
+      "INSERT INTO source (id,org_id,name,ecosystem,type) VALUES (?,?,'Readme','npm','hosted')",
+      sourceId,
+      orgId,
+    ],
+    [
+      "INSERT INTO package (id,org_id,source_id,ecosystem,name) VALUES (?,?,?,'npm','readme-widget')",
+      packageId,
+      orgId,
+      sourceId,
+    ],
+    [
+      'INSERT INTO project_source (org_id,project_id,source_id) VALUES (?,?,?)',
+      orgId,
+      projectId,
+      sourceId,
+    ],
+    [
+      "INSERT INTO project_package (org_id,project_id,package_id,ecosystem,name,origin) VALUES (?,?,?,'npm','readme-widget','subscription')",
+      orgId,
+      projectId,
+      packageId,
+    ],
+    [
+      "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json,status) VALUES (?,?,?,'1.0.0','1.0.0','2026-01-01T00:00:00Z','import_time','{}','active')",
+      versionId,
+      orgId,
+      packageId,
+    ],
+    [
+      "INSERT INTO dist_tag (org_id,package_id,tag,version_id) VALUES (?,?,'latest',?)",
+      orgId,
+      packageId,
+      versionId,
+    ],
+    [
+      "INSERT INTO version_readme (org_id,version_id,filename,body) VALUES (?,?,'README.md','# Mounted')",
+      orgId,
+      versionId,
+    ],
+    [
+      "INSERT INTO user_account (id,org_id,email) VALUES (?,?,'readme@example.test')",
+      userId,
+      orgId,
+    ],
+    [
+      "INSERT INTO credential (id,org_id,kind,ciphertext,nonce,key_version,aad) VALUES (?,?,'totp',X'00',zeroblob(12),1,'test')",
+      credentialId,
+      orgId,
+    ],
+    [
+      "INSERT INTO local_login (user_id,org_id,password_hash,totp_credential_id,totp_enabled_at) VALUES (?,?,'pbkdf2-sha256$test',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      userId,
+      orgId,
+      credentialId,
+    ],
+    [
+      "INSERT INTO role (id,org_id,key,name,scope,protects_last_holder) VALUES (?,?,'readme_admin','Readme admin','organization',1)",
+      roleId,
+      orgId,
+    ],
+    ...['project:read', 'project:packages:read'].map(
+      (permission) =>
+        [
+          'INSERT INTO role_permission (org_id,role_id,permission) VALUES (?,?,?)',
+          orgId,
+          roleId,
+          permission,
+        ] as [string, ...import('@package-broker/core/db/port').Statement['params']],
+    ),
+    [
+      "INSERT INTO access_grant (id,org_id,role_id,scope,subject_type,subject_value) VALUES (?,?,?,'organization','email','readme@example.test')",
+      ulid(),
+      orgId,
+      roleId,
+    ],
+    [
+      "INSERT INTO session (id,org_id,user_id,secret_hash,csrf_hash,expires_at,last_seen_at) VALUES (?,?,?,?,?,'2099-01-01T00:00:00.000Z',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      ulid(),
+      orgId,
+      userId,
+      await sha256Hex(secret),
+      'b'.repeat(64),
+    ],
+  ];
+  await executor.batch(rows.map(([sql, ...params]) => ({ sql, params })));
+  return new Request(`https://broker.test/_pb/projects/readme/packages/${packageId}/readme`, {
+    headers: { cookie: `${SESSION_COOKIE}=${secret}` },
+  });
 }

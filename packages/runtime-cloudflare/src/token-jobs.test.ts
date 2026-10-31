@@ -27,7 +27,7 @@ import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
 import { createWorker, type Env } from './index.js';
 import type { R2BucketLike } from './blob/r2.js';
 import { createQueueHandler, jobNotification } from './jobs/consumer.js';
-import { createPatJobHolder, patOffboardingRegistrations } from './token-jobs.js';
+import { createPatJobHolder, tokenJobRegistrations } from './token-jobs.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const ANCHOR = 'oidc:https://idp.example.test';
@@ -432,7 +432,7 @@ describe('Worker personal-token job holder', () => {
         settle,
         reap: fail,
       },
-      jobs: { jobs: patOffboardingRegistrations(executor, createPatJobHolder(), () => undefined) },
+      jobs: { jobs: tokenJobRegistrations(executor, createPatJobHolder(), () => undefined) },
       observability,
       scope: () => ({
         ports: {

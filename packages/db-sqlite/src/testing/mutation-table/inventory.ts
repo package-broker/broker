@@ -94,6 +94,8 @@ const productionAccessFactories: ReadonlySet<string> = new Set([
 
 /** Schema exemptions and helpers with no independent organization SQL. */
 export const builderAllowlist: Readonly<Record<string, string>> = {
+  'repositories/npm-login-expire.ts#createNpmLoginExpiryJob':
+    'NOT_A_MUTATION: adds no SQL; registers the hourly handler and calls the separately registered createNpmLoginExpiryRepository.',
   'repositories/catalogue-writer.ts#bindPackage':
     'NOT_A_MUTATION: adds no organization column or scope predicate; substitutes the caller-provided scoped package lookup into prepared parameters. The writer and publish contracts test the winning package identity.',
   'repositories/import-run.ts#getImportRunStatement':

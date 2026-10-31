@@ -243,7 +243,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
       if (isProxy(source.type)) return 'proxy_source';
       if (source.type === 'hosted' && source.project_id !== null) return 'conflict';
       if (
-        source.type === 'hosted' && source.ecosystem === 'npm'
+        (source.type === 'hosted' || source.type === 'vcs') && source.ecosystem === 'npm'
           ? !isNpmClaim(input.pattern)
           : !isValidPattern(input.pattern) || !isRegistrablePattern(input.pattern, source.ecosystem)
       )
@@ -260,7 +260,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
         where org_id = ${ctx.orgId} and ecosystem = ${source.ecosystem}
           and source_id <> ${input.sourceId} and pattern = ${input.pattern})`;
       const storedOverlap =
-        source.type !== 'hosted' || source.ecosystem !== 'npm'
+        (source.type !== 'hosted' && source.type !== 'vcs') || source.ecosystem !== 'npm'
           ? sql<SqlBool>`0`
           : sql<SqlBool>`exists (select 1 from package as stored_package
           join source as stored_source on stored_source.id = stored_package.source_id
@@ -277,7 +277,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               source.ecosystem !== 'npm'
                 ? sql``
                 : sql`or
-              ((${source.type} = 'hosted' or exists (select 1 from source as overlap_participant where overlap_participant.org_id = ${ctx.orgId} and overlap_participant.id = existing.source_id and overlap_participant.type = 'hosted')) and (
+              ((${source.type} in ('hosted', 'vcs') or exists (select 1 from source as overlap_participant where overlap_participant.org_id = ${ctx.orgId} and overlap_participant.id = existing.source_id and overlap_participant.type in ('hosted', 'vcs'))) and (
               (${input.pattern.includes('*') ? 1 : 0} = 1
                 and substr(existing.pattern, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})) = substr(${input.pattern}, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})))
               or
@@ -287,7 +287,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               ${input.pattern.endsWith('/*') ? sql`or substr(existing.pattern, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))`
             }))`;
       const cachedPublic =
-        source.type !== 'hosted' || source.ecosystem !== 'npm'
+        (source.type !== 'hosted' && source.type !== 'vcs') || source.ecosystem !== 'npm'
           ? sql<SqlBool>`0`
           : sql<SqlBool>`exists (
         select 1 from package as claim_package join source as claim_source
@@ -298,7 +298,9 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
           and (claim_package.name = ${input.pattern}
             ${input.pattern.endsWith('/*') ? sql`or substr(claim_package.name, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))`;
       const verified =
-        source.type !== 'hosted' || source.ecosystem !== 'npm' || input.pattern.includes('*')
+        (source.type !== 'hosted' && source.type !== 'vcs') ||
+        source.ecosystem !== 'npm' ||
+        input.pattern.includes('*')
           ? sql<SqlBool>`1`
           : input.claimProbe === undefined
             ? sql<SqlBool>`not ${organizationProxy(ctx)}`

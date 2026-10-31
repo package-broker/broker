@@ -430,15 +430,32 @@ describe('registered route error envelope sweep', () => {
 
   it('keeps the nested shape outside the npm mount despite npm headers or path parameters', async () => {
     const h = await harness('organization');
-    for (const path of ['/fixture/items/npm', '/npm/p2/acme/pkg', '/demo/npm/missing/extra/path']) {
+    for (const path of ['/fixture/items/npm', '/npm/p2/acme/pkg']) {
       const response = await h.kernel.fetch(
         new Request(`${ORIGIN}${path}`, {
           headers: { accept: 'application/vnd.npm.install-v1+json' },
         }),
       );
-      expect(response.status).toBe(path.endsWith('/path') ? 404 : 500);
+      expect(response.status).toBe(500);
       await assertEnvelope(response, h.logs, h.sentinel);
     }
+  });
+
+  it.each(['/_pb/npm/missing', '/health/npm/missing'])(
+    'keeps the nested shape on reserved paths: %s',
+    async (path) => {
+      const h = await harness('organization');
+      const response = await h.kernel.fetch(new Request(`${ORIGIN}${path}`));
+      expect(response.status).toBe(404);
+      await assertEnvelope(response, h.logs, h.sentinel);
+    },
+  );
+
+  it('uses the npm shape for an unmatched path inside the npm mount', async () => {
+    const h = await harness('organization');
+    const response = await h.kernel.fetch(new Request(`${ORIGIN}/demo/npm/missing/extra/path`));
+    expect(response.status).toBe(404);
+    await assertEnvelope(response, h.logs, h.sentinel, true);
   });
 
   it.each(['handler', 'organization', 'authorization'] as const)(

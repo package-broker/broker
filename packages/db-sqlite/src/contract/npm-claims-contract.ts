@@ -19,7 +19,7 @@ export function describeNpmClaimsContract(
   open: () => Promise<{ executor: SqlExecutor; close(): Promise<void> }>,
 ) {
   describe(`npm claim admission: ${backend}`, () => {
-    async function setup() {
+    async function setup(ownerType = 'hosted') {
       const database = await open();
       const { executor } = database;
       const { a, b } = await seedTwoOrganizations(executor);
@@ -72,6 +72,9 @@ export function describeNpmClaimsContract(
           b.orgId,
         ),
       ]);
+      await executor.batch([
+        st("UPDATE source SET type = ? WHERE org_id = ? AND id = 'H'", ownerType, a.orgId),
+      ]);
       const names = createRegisteredNameRepository(executor);
       const fence = mutationFence({ userId: 'U', sessionId: 'S' } as AuthenticatedActor, {});
 
@@ -117,19 +120,39 @@ export function describeNpmClaimsContract(
       return { ...database, a, b, names, fence, anchors, audit, add, snapshot };
     }
 
-    it.each(['npm_registry', 'vcs'])('retains legacy npm grammar for %s', async (type) => {
-      const f = await setup();
-      try {
-        await f.executor.batch([
-          st("UPDATE source SET type = ? WHERE id = 'N' AND org_id = ?", type, f.a.orgId),
-        ]);
-        expect(await f.add('C1', 'N', '@sc*/foo')).toBe('added');
-        expect(await f.add('C2', 'N', 'a'.repeat(51))).toBe('invalid_pattern');
-      } finally {
-        await f.close();
-      }
-    });
-    it('retains legacy overlap rules between non-hosted sources', async () => {
+    it.each(['npm_registry', 'vcs'])(
+      'uses the appropriate npm claim grammar for %s',
+      async (type) => {
+        const f = await setup();
+        try {
+          await f.executor.batch([
+            st("UPDATE source SET type = ? WHERE id = 'N' AND org_id = ?", type, f.a.orgId),
+          ]);
+          expect(await f.add('C1', 'N', '@sc*/foo')).toBe(
+            type === 'vcs' ? 'invalid_pattern' : 'added',
+          );
+          expect(await f.add('C2', 'N', 'a'.repeat(51))).toBe(
+            type === 'vcs' ? 'added' : 'invalid_pattern',
+          );
+        } finally {
+          await f.close();
+        }
+      },
+    );
+    it.each(['lod*', '@sc*/foo', '@scope/pre*'])(
+      'refuses npm VCS legacy wildcard %s without writes',
+      async (pattern) => {
+        const f = await setup('vcs');
+        try {
+          const before = await f.snapshot();
+          expect(await f.add('C1', 'H', pattern)).toBe('invalid_pattern');
+          expect(await f.snapshot()).toBe(before);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+    it('refuses registry and VCS overlap in either direction', async () => {
       const f = await setup();
       try {
         await f.executor.batch([
@@ -139,7 +162,9 @@ export function describeNpmClaimsContract(
           ),
         ]);
         expect(await f.add('C1', 'N', '@scope/*')).toBe('added');
-        expect(await f.add('C2', 'V', '@scope/foo')).toBe('added');
+        expect(await f.add('C2', 'V', '@scope/foo')).toBe('claim_overlap');
+        expect(await f.add('C3', 'V', '@private/*')).toBe('added');
+        expect(await f.add('C4', 'N', '@private/foo')).toBe('claim_overlap');
       } finally {
         await f.close();
       }
@@ -274,23 +299,26 @@ export function describeNpmClaimsContract(
         }
       },
     );
-    it('requires proof for an unattached organization proxy', async () => {
-      const f = await setup();
-      try {
-        expect(await f.names.claimProxy(f.a)).toBe('P');
-        expect(
-          await f.names.add(f.a, f.fence, {
-            id: 'C1',
-            sourceId: 'H',
-            pattern: 'widget',
-            providerAnchors: f.anchors,
-            audit: f.audit('C1'),
-          }),
-        ).toBe('name_public_unverified');
-      } finally {
-        await f.close();
-      }
-    });
+    it.each(['hosted', 'vcs'])(
+      'requires proof for an unattached organization proxy (%s)',
+      async (owner) => {
+        const f = await setup(owner);
+        try {
+          expect(await f.names.claimProxy(f.a)).toBe('P');
+          expect(
+            await f.names.add(f.a, f.fence, {
+              id: 'C1',
+              sourceId: 'H',
+              pattern: 'widget',
+              providerAnchors: f.anchors,
+              audit: f.audit('C1'),
+            }),
+          ).toBe('name_public_unverified');
+        } finally {
+          await f.close();
+        }
+      },
+    );
     it('refuses a replacement whose audited pattern changed', async () => {
       const f = await setup();
       try {
@@ -425,27 +453,30 @@ export function describeNpmClaimsContract(
         await f.close();
       }
     });
-    it('ignores foreign claims and cached packages and allows same-source coverage', async () => {
-      const f = await setup();
-      try {
-        await f.executor.batch([
-          st("UPDATE source SET type = 'npm_registry' WHERE org_id = ? AND id = 'F'", f.b.orgId),
-          st(
-            "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('FC', ?, 'F', 'npm', '@scope/*')",
-            f.b.orgId,
-          ),
-          st(
-            "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('FP', ?, 'F', 'npm', '@scope/widget')",
-            f.b.orgId,
-          ),
-        ]);
-        expect(await f.add('C1', 'H', '@scope/*')).toBe('added');
-        expect(await f.add('C2', 'H', '@scope/widget')).toBe('added');
-        expect((await f.names.list(f.a, { sourceId: 'H', limit: 100 })).items).toHaveLength(2);
-      } finally {
-        await f.close();
-      }
-    });
+    it.each(['hosted', 'vcs'])(
+      'ignores foreign claims and cached packages and allows same-source coverage (%s)',
+      async (owner) => {
+        const f = await setup(owner);
+        try {
+          await f.executor.batch([
+            st("UPDATE source SET type = 'npm_registry' WHERE org_id = ? AND id = 'F'", f.b.orgId),
+            st(
+              "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('FC', ?, 'F', 'npm', '@scope/*')",
+              f.b.orgId,
+            ),
+            st(
+              "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('FP', ?, 'F', 'npm', '@scope/widget')",
+              f.b.orgId,
+            ),
+          ]);
+          expect(await f.add('C1', 'H', '@scope/*')).toBe('added');
+          expect(await f.add('C2', 'H', '@scope/widget')).toBe('added');
+          expect((await f.names.list(f.a, { sourceId: 'H', limit: 100 })).items).toHaveLength(2);
+        } finally {
+          await f.close();
+        }
+      },
+    );
     it('requires proof for an attached proxy and reads it within the organization', async () => {
       const f = await setup();
       try {
@@ -608,93 +639,94 @@ export function describeNpmClaimsContract(
         await f.close();
       }
     });
-    it.each(['overlap', 'stored', 'cached', 'proxy', 'authority'] as const)(
-      'rechecks %s inside the mutation batch',
-      async (race) => {
-        const f = await setup();
-        try {
-          if (race === 'proxy')
-            await f.executor.batch([
-              st("DELETE FROM source WHERE org_id = ? AND id = 'P'", f.a.orgId),
-            ]);
-          let raced = false;
-          const repository = createRegisteredNameRepository({
-            driver: f.executor.driver,
-            all: (statement) => f.executor.all(statement),
-            async batch(statements) {
-              if (!raced) {
-                raced = true;
-                if (race === 'overlap')
-                  await f.executor.batch([
-                    st(
-                      "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('RACE', ?, 'N', 'npm', '@scope/*')",
-                      f.a.orgId,
-                    ),
-                  ]);
-                if (race === 'stored')
-                  await f.executor.batch([
-                    st("UPDATE source SET type = 'vcs' WHERE org_id = ? AND id = 'N'", f.a.orgId),
-                    st(
-                      "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('PK', ?, 'N', 'npm', '@scope/widget')",
-                      f.a.orgId,
-                    ),
-                  ]);
-                if (race === 'cached')
-                  await f.executor.batch([
-                    st(
-                      "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('PK', ?, 'P', 'npm', '@scope/widget')",
-                      f.a.orgId,
-                    ),
-                  ]);
-                if (race === 'proxy')
-                  await f.executor.batch([
-                    st(
-                      "INSERT INTO source (id, org_id, name, type, ecosystem) VALUES ('P', ?, 'proxy', 'npmjs_proxy', 'npm')",
-                      f.a.orgId,
-                    ),
-                    st(
-                      "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
-                      f.a.orgId,
-                    ),
-                    st(
-                      "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'PR', 'P')",
-                      f.a.orgId,
-                    ),
-                  ]);
-                if (race === 'authority')
-                  await f.executor.batch([
-                    st("DELETE FROM access_grant WHERE org_id = ? AND id = 'G'", f.a.orgId),
-                  ]);
-              }
-              return f.executor.batch(statements);
-            },
-          });
-          const result = await repository.add(f.a, f.fence, {
-            id: 'C1',
-            sourceId: 'H',
-            pattern: '@scope/widget',
-            ...(race === 'proxy' ? {} : { claimProbe: { proxyId: 'P' } }),
-            providerAnchors: f.anchors,
-            audit: f.audit('C1'),
-          });
-          expect(result).toBe(
-            race === 'overlap' || race === 'stored'
-              ? 'claim_overlap'
-              : race === 'cached'
-                ? 'name_public'
-                : race === 'proxy'
-                  ? 'name_public_unverified'
-                  : 'forbidden',
-          );
-          expect(
-            await f.executor.all(st("SELECT id FROM registered_name WHERE id = 'C1'")),
-          ).toEqual([]);
-          expect(await f.executor.all(st('SELECT id FROM audit_pending'))).toEqual([]);
-        } finally {
-          await f.close();
-        }
-      },
-    );
+    it.each(
+      ['hosted', 'vcs'].flatMap((owner) =>
+        ['overlap', 'stored', 'cached', 'proxy', 'authority'].map((race) => [owner, race] as const),
+      ),
+    )('rechecks %s %s inside the mutation batch', async (owner, race) => {
+      const f = await setup(owner);
+      try {
+        if (race === 'proxy')
+          await f.executor.batch([
+            st("DELETE FROM source WHERE org_id = ? AND id = 'P'", f.a.orgId),
+          ]);
+        let raced = false;
+        const repository = createRegisteredNameRepository({
+          driver: f.executor.driver,
+          all: (statement) => f.executor.all(statement),
+          async batch(statements) {
+            if (!raced) {
+              raced = true;
+              if (race === 'overlap')
+                await f.executor.batch([
+                  st(
+                    "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('RACE', ?, 'N', 'npm', '@scope/*')",
+                    f.a.orgId,
+                  ),
+                ]);
+              if (race === 'stored')
+                await f.executor.batch([
+                  st("UPDATE source SET type = 'vcs' WHERE org_id = ? AND id = 'N'", f.a.orgId),
+                  st(
+                    "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('PK', ?, 'N', 'npm', '@scope/widget')",
+                    f.a.orgId,
+                  ),
+                ]);
+              if (race === 'cached')
+                await f.executor.batch([
+                  st(
+                    "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('PK', ?, 'P', 'npm', '@scope/widget')",
+                    f.a.orgId,
+                  ),
+                ]);
+              if (race === 'proxy')
+                await f.executor.batch([
+                  st(
+                    "INSERT INTO source (id, org_id, name, type, ecosystem) VALUES ('P', ?, 'proxy', 'npmjs_proxy', 'npm')",
+                    f.a.orgId,
+                  ),
+                  st(
+                    "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+                    f.a.orgId,
+                  ),
+                  st(
+                    "INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, 'PR', 'P')",
+                    f.a.orgId,
+                  ),
+                ]);
+              if (race === 'authority')
+                await f.executor.batch([
+                  st("DELETE FROM access_grant WHERE org_id = ? AND id = 'G'", f.a.orgId),
+                ]);
+            }
+            return f.executor.batch(statements);
+          },
+        });
+        const result = await repository.add(f.a, f.fence, {
+          id: 'C1',
+          sourceId: 'H',
+          pattern: '@scope/widget',
+          ...(race === 'proxy' ? {} : { claimProbe: { proxyId: 'P' } }),
+          providerAnchors: f.anchors,
+          audit: f.audit('C1'),
+        });
+        expect(result).toBe(
+          race === 'overlap' || race === 'stored'
+            ? 'claim_overlap'
+            : race === 'cached'
+              ? 'name_public'
+              : race === 'proxy'
+                ? 'name_public_unverified'
+                : 'forbidden',
+        );
+        expect(await f.executor.all(st("SELECT id FROM registered_name WHERE id = 'C1'"))).toEqual(
+          [],
+        );
+        expect(await f.executor.all(st('SELECT id FROM audit_pending'))).toEqual([]);
+      } finally {
+        await f.close();
+      }
+    });
 
     it('creates multiple organization hosted sources, enables a claim and never schedules upstream polling', async () => {
       const f = await setup();
@@ -796,16 +828,45 @@ export function describeNpmClaimsContract(
         }
       },
     );
-    it('serializes concurrent claims with one audit row for the winner', async () => {
-      const f = await setup();
+    it.each(['hosted', 'vcs'])(
+      'serializes concurrent claims with one audit row for the winner (%s)',
+      async (owner) => {
+        const f = await setup(owner);
+        try {
+          const outcomes = await Promise.all([
+            f.add('C1', 'H', '@scope/*'),
+            f.add('C2', 'N', '@scope/widget'),
+          ]);
+          expect(outcomes.sort()).toEqual(['added', 'claim_overlap']);
+          expect(await f.executor.all(st('SELECT id FROM registered_name'))).toHaveLength(1);
+          expect(await f.executor.all(st('SELECT id FROM audit_pending'))).toHaveLength(1);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+    it('project-owned npm vcs source acquires a claim, and admission still refuses an overlapping or public name', async () => {
+      const f = await setup('vcs');
       try {
-        const outcomes = await Promise.all([
-          f.add('C1', 'H', '@scope/*'),
-          f.add('C2', 'N', '@scope/widget'),
+        await f.executor.batch([
+          st(
+            "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+            f.a.orgId,
+          ),
+          st("UPDATE source SET project_id = 'PR' WHERE org_id = ? AND id = 'H'", f.a.orgId),
         ]);
-        expect(outcomes.sort()).toEqual(['added', 'claim_overlap']);
-        expect(await f.executor.all(st('SELECT id FROM registered_name'))).toHaveLength(1);
-        expect(await f.executor.all(st('SELECT id FROM audit_pending'))).toHaveLength(1);
+        expect(await f.add('C1', 'H', '@private/widget')).toBe('added');
+        expect(await f.add('C2', 'N', '@taken/*')).toBe('added');
+        await f.executor.batch([
+          st(
+            "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('PK', ?, 'P', 'npm', '@public/widget')",
+            f.a.orgId,
+          ),
+        ]);
+        const before = await f.snapshot();
+        expect(await f.add('C3', 'H', '@taken/widget')).toBe('claim_overlap');
+        expect(await f.add('C4', 'H', '@public/widget')).toBe('name_public');
+        expect(await f.snapshot()).toBe(before);
       } finally {
         await f.close();
       }

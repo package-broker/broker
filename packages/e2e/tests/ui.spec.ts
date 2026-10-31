@@ -577,7 +577,7 @@ test.describe('Node management UI', () => {
       create
         .getByRole('group', { name: 'Source type', exact: true })
         .locator('label > span > span:first-child'),
-    ).toHaveText(['npmjs proxy', 'Private npm registry', 'Hosted repository']);
+    ).toHaveText(['npmjs proxy', 'Private npm registry', 'Hosted repository', 'Git repository']);
     await create.getByRole('radio', { name: 'Composer', exact: true }).check();
     await create.getByRole('radio', { name: /^Composer repository/ }).check();
     await expect(create.getByLabel('Package scopes (one per line)', { exact: true })).toHaveCount(

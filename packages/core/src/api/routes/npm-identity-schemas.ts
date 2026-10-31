@@ -33,7 +33,7 @@ export const trustedPublisher = z.strictObject({
 });
 export const NPM_IDENTITY_SCHEMAS = {
   NpmLoginStartBody: z
-    .object({
+    .strictObject({
       create: z.boolean().optional(),
       hostname: z
         .string()

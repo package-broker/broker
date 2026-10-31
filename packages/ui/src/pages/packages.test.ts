@@ -38,6 +38,10 @@ const shared: PackageItem = {
   source: { ...own.source, name: 'Organization source', projectId: null },
 };
 const version: VersionItem = {
+  integrity: null,
+  distTags: [],
+  publishedBy: null,
+  approvedBy: null,
   id: versionId,
   version: '1.2.3',
   stability: 'stable',

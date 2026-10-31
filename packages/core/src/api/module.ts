@@ -1,6 +1,8 @@
+import { packageDetailRoutes } from './routes/package-detail.js';
+import { npmLoginRoutes } from './routes/npm-login.js';
 import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
 import { routesConflict } from '../kernel/routes.js';
-import type { RouteDefinition } from '../plugin.js';
+import type { RouteDefinition } from '../kernel/routes.js';
 import { accessRoutes } from './routes/access.js';
 import { auditRoutes } from './routes/audit.js';
 import { importRoutes } from './routes/import.js';
@@ -22,6 +24,7 @@ import { tokenRoutes } from './routes/tokens.js';
 export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
+  readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
   readonly publishes: Parameters<typeof publishRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
   readonly projects: Parameters<typeof projectRoutes>[0];
@@ -41,6 +44,7 @@ export interface ApiModuleDeps {
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
   readonly imports?: Parameters<typeof importRoutes>[0];
+  readonly packageDetail?: Parameters<typeof packageDetailRoutes>[0];
   readonly packageAccessRequests?: Parameters<typeof packageAccessRequestRoutes>[0];
   readonly extensions?: readonly ApiRouteFactory[];
 }
@@ -52,7 +56,10 @@ export const API_EXEMPT_ROUTES = Object.freeze({
   '/_pb/openapi.json': 'Serves the generated OpenAPI document.',
 });
 
-type RouteDependencies = Omit<ApiModuleDeps, 'extensions' | 'imports' | 'packageAccessRequests'> &
+type RouteDependencies = Omit<
+  ApiModuleDeps,
+  'extensions' | 'imports' | 'packageAccessRequests' | 'packageDetail'
+> &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
   readonly [K in keyof T]?: T[K] extends (...args: never[]) => unknown
@@ -61,6 +68,14 @@ type DependencyRequirements<T> = {
 };
 const CONTEXT_METHODS = { ids: { ulid: true }, clock: { now: true }, clientIp: true } as const;
 const REQUIRED_DEPENDENCIES = {
+  npmLogin: {
+    ...CONTEXT_METHODS,
+    store: { start: true, confirmation: true, poll: true },
+    publicUrl: null,
+    projects: { getBySlug: true },
+    sessions: { authenticate: true, isReauthFresh: true },
+    personal: true,
+  },
   publishes: { ...CONTEXT_METHODS, publishes: { get: true, list: true, decide: true } },
   organization: {
     ...CONTEXT_METHODS,
@@ -235,6 +250,16 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
   const { imports, ...required } = REQUIRED_DEPENDENCIES;
   requireDependencies(deps, required, 'dependencies');
   if (deps.imports != null) requireDependencies(deps, { imports }, 'dependencies');
+  if (deps.packageDetail !== undefined)
+    requireDependencies(
+      deps.packageDetail,
+      {
+        ...CONTEXT_METHODS,
+        repository: { packageName: true, readme: true, setAccess: true },
+        idempotency: { find: true },
+      },
+      'dependencies.packageDetail',
+    );
   if (deps.packageAccessRequests !== undefined)
     requireDependencies(
       deps.packageAccessRequests,
@@ -265,6 +290,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...accessRoutes(deps.access),
     ...projectAccessRoutes(deps.projectAccess),
     ...tokenRoutes(deps.tokens),
+    ...npmLoginRoutes(deps.npmLogin).filter((route) => route.path.startsWith('/_pb/')),
     ...servicePrincipalRoutes({
       ...deps.servicePrincipals,
       sessions: deps.tokens.sessions,
@@ -276,6 +302,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
+    ...(deps.packageDetail === undefined ? [] : packageDetailRoutes(deps.packageDetail)),
     ...publishRoutes(deps.publishes),
     ...(deps.packageAccessRequests === undefined
       ? []

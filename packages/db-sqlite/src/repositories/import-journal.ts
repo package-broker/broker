@@ -388,7 +388,7 @@ export function createImportJournalStore(options: {
             mutations.push(
               ...check(
                 statement(
-                  'exists (SELECT 1 FROM source WHERE org_id = ? AND id = ? AND ecosystem = ?)',
+                  "exists (SELECT 1 FROM source WHERE org_id = ? AND id = ? AND ecosystem = ? AND NOT (type IN ('hosted','vcs') AND ecosystem = 'npm'))",
                   ctx.orgId,
                   owner.id!,
                   item.ecosystem,

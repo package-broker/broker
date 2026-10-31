@@ -40,7 +40,7 @@ export function vcsProviderOptions(
 }
 export const SOURCE_TYPES = {
   composer: ['packagist_proxy', 'composer_repository', 'vcs'],
-  npm: ['npmjs_proxy', 'npm_registry', 'hosted'],
+  npm: ['npmjs_proxy', 'npm_registry', 'hosted', 'vcs'],
 } as const;
 const DEFAULT_URL = {
   packagist_proxy: 'https://repo.packagist.org',
@@ -58,7 +58,7 @@ const TYPE_DESCRIPTIONS: Partial<Record<CreateSource['type'], string>> = {
   packagist_proxy: 'Fetch public Composer packages on demand.',
   composer_repository:
     'Import selected packages from Satis, Private Packagist, or another Composer repository.',
-  vcs: 'Import a Composer package from GitHub or another Git repository.',
+  vcs: 'Import a Composer or npm package from the root of a GitHub or Git repository.',
   npmjs_proxy: 'Fetch public npm packages on demand.',
   npm_registry: 'Fetch packages in selected scopes from another npm registry.',
   hosted: 'Publish private npm packages into this organization.',
@@ -77,7 +77,7 @@ const FIELD_LABELS: Record<string, string> = {
   'config/repository': 'GitHub repository',
   'config/installationId': 'GitHub App installation ID',
   githubAuthentication: 'GitHub authentication',
-  'config/packageName': 'Composer package name override',
+  'config/packageName': 'Package name (optional)',
   'config/refs/branches': 'Branches to import',
   'config/refs/tags': 'Import tags',
   'config/selection/packages': 'Package names (one per line)',
@@ -104,7 +104,7 @@ const FIELD_MESSAGES: Record<string, string> = {
     'Enter a valid repository for the selected provider: owner/repository for GitHub, or a clone URL for Git.',
   'config/installationId': 'Enter a positive whole-number installation ID.',
   githubAuthentication: 'Choose GitHub App or Personal access token.',
-  'config/packageName': 'Enter a Composer package name, such as acme/payments.',
+  'config/packageName': 'Enter a package name matching the source ecosystem.',
   'config/refs/branches': 'Enter valid branch names, one per line, without duplicates.',
   'config/refs/tags': 'Choose whether to import tags.',
   'config/selection/packages':
@@ -126,7 +126,8 @@ const HELP: Record<string, string> = {
     'Packages matching either list are selected. Empty lists select no packages.',
   'config/scopes':
     'One scope per line, including @. Only these scopes use this registry. Register @scope/* for each scope before enabling the source.',
-  'config/packageName': 'Leave blank to use the name in composer.json.',
+  'config/packageName':
+    'Leave blank to use the root manifest name (composer.json or package.json). For npm, this must match the name in package.json.',
   'config/refs/branches': 'One branch name per line. Leave blank to import no branches.',
   'config/installationId':
     'Enter the numeric installation ID for the account that owns this repository.',
@@ -913,7 +914,9 @@ export function SourceForm({
                       ) : null}
                       {type === 'vcs' ? (
                         <>
-                          {input('config/packageName')}
+                          {input('config/packageName', {
+                            placeholder: ecosystem === 'npm' ? '@acme/payments' : 'acme/payments',
+                          })}
                           {input('config/refs/branches', { multiline: true })}
                           {check('config/refs/tags', undefined, undefined, true)}
                         </>

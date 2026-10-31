@@ -7,6 +7,11 @@ import type { PackageEcosystem, RouteDefinition as PluginRouteDefinition } from 
 export interface RouteDefinition extends PluginRouteDefinition {
   readonly bearerOnly?: true;
   readonly organizationAlternative?: string;
+  /** Core management URLs identify packages by id. */
+  readonly corePackageName?: (
+    ctx: import('../db/port.js').OrgContext,
+    params: Readonly<Record<string, string>>,
+  ) => Promise<string | null>;
 }
 
 export const RESERVED_PATH_PREFIXES = ['/health/', '/_pb/'] as const;

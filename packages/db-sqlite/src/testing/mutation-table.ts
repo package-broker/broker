@@ -1,3 +1,5 @@
+import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
+import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
 import { entries as oidcEntries } from './mutation-table/oidc.js';
 import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
 import { entries as publishGuardEntries } from './mutation-table/catalogue-publish-guard.js';
@@ -123,9 +125,11 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...npmLoginEntries,
   ...publishGuardEntries,
   ...publishesEntries,
   ...readmeEntries,
+  ...packageDetailEntries,
   ...accessRequestsEntries,
   ...explicitPackageEntries,
   ...sourceAttachmentCountsEntries,

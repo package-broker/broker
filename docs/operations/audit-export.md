@@ -59,3 +59,18 @@ Cutover refusals return exit 1 with a fixed code. The diagnosis is read after th
 | `outcome_unknown`          | Inspect the ledger before retrying a Cloudflare operation; the commit may have succeeded (exit 7).                                |
 
 Retention completes a pending cutover when its other custody and policy checks pass. Keep the registered artifact available for the full custody period.
+
+## Inspecting and acknowledging audit alerts
+
+`pb audit alert list` lists every registered alert code with a plain-language meaning, its active state, its current revision and its acknowledged revision. It is read-only: it neither observes new incidents nor writes events or ledger rows. Revisions are scoped to the organization and alert code; an unseen code has revision zero. Multiple incident origins are shown together using the highest revision and acknowledged revision, with `active` true when any origin is active. Fingerprints and incident data are omitted.
+
+```sh
+pb audit alert list --sqlite broker.sqlite --generation 0 --actor-type user --actor-id <operator-id>
+pb audit alert ack audit.capacity --revision 3 --sqlite broker.sqlite --generation 0 --actor-type user --actor-id <operator-id>
+```
+
+Use the deployed build generation and an active organization user or service principal (`--actor-type service_principal`). For Cloudflare, replace `--sqlite broker.sqlite` with `--cloudflare --database-id <id>` and supply the same account and API-token environment variables as `pb audit sink`.
+
+`ack` acknowledges exactly the latest revision for the given code, including its older incident origins. It atomically updates health state and stages an `audit.sink_admin` event with operation `alert_ack`, `alert_code` and `revision`; it writes no ledger row. This control event remains available when required-policy capacity refusal is active. Acknowledging an active condition leaves that condition active and does not repair it. Once the condition resolves, an acknowledged incident no longer leaves health degraded. A new occurrence raises a newer revision and needs a new acknowledgement.
+
+A stale, absent or already acknowledged revision is refused as `stale_revision` (exit 1), without staging an event. Unknown alert codes and malformed input are `invalid_input` (exit 2). An unavailable organization exits 5; a stale build generation returns `{"result":"stale"}` and exits 6. At preflight, a generation ahead of stored sinks or an unavailable actor is a named refusal (exit 1). If the generation advances or the operator is suspended between preflight and commit, `ack` returns `{"result":"contended"}` and exits 6. Successful commands emit JSON with `result: "applied"` and exit 0; list also includes `alerts`. A lost Cloudflare mutation response exits 7 with `outcome_unknown`: inspect the alert's acknowledged revision before retrying because the batch may have committed. Other operation failures exit 1 with a fixed refusal message.

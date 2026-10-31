@@ -10,6 +10,10 @@ import {
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import type { ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { sql } from 'kysely';
+import { auditEvent, type AuditEvent } from '@package-broker/core/audit/actions';
+import { isUlid, ulid } from '@package-broker/core/ids';
+import type { OrgContext } from '@package-broker/core/db/port';
+import { auditPendingStatement } from './audit-pending.js';
 import { assertCheck } from '../kysely.js';
 
 const LEDGER_ALERT_CODES: Readonly<Record<string, AuditAlertCode | undefined>> = {
@@ -57,8 +61,52 @@ function newOccurrence(
   return after.size >= before.size || [...after].some((member) => !before.has(member));
 }
 
-export function createAuditHealthRepository(executor: ScalarSqlExecutor): AuditHealthPort {
+export interface AuditAlertOperator {
+  readonly actor: AuditEvent['actor'] & { readonly type: 'user' | 'service_principal' };
+  readonly generation: number;
+  readonly now: Date;
+}
+
+export function createAuditHealthRepository(
+  executor: ScalarSqlExecutor,
+  operator?: AuditAlertOperator,
+): AuditHealthPort & {
+  operatorStatus(
+    ctx: OrgContext,
+  ): Promise<'ready' | 'actor_unavailable' | 'stale' | 'generation_ahead'>;
+} {
+  if (
+    operator &&
+    (!Number.isSafeInteger(operator.generation) ||
+      operator.generation < 0 ||
+      !['user', 'service_principal'].includes(operator.actor.type) ||
+      operator.actor.id === null ||
+      (!isUlid(operator.actor.id) &&
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operator.actor.id)))
+  )
+    throw new TypeError('Invalid audit alert operator');
+  const actorTable = operator?.actor.type === 'user' ? 'user_account' : 'service_principal';
   return {
+    async operatorStatus(ctx) {
+      if (!operator) throw new TypeError('Audit alert operator required');
+      const [actor, generation] = await executor.batch([
+        {
+          sql: `SELECT 1 FROM ${actorTable} WHERE org_id = ? AND id = ? AND status = 'active'`,
+          params: [ctx.orgId, operator.actor.id],
+        },
+        {
+          sql: 'SELECT coalesce(max(generation), 0) AS generation FROM audit_sink WHERE org_id = ?',
+          params: [ctx.orgId],
+        },
+      ]);
+      if (actor!.rows.length !== 1) return 'actor_unavailable';
+      const highest = Number(generation!.rows[0]!['generation']);
+      return operator.generation < highest
+        ? 'stale'
+        : operator.generation > highest
+          ? 'generation_ahead'
+          : 'ready';
+    },
     async raise(ctx, code) {
       if (!AUDIT_ALERT_CODES.includes(code)) throw new TypeError('Invalid audit alert code');
       await executor.all({
@@ -227,16 +275,54 @@ export function createAuditHealthRepository(executor: ScalarSqlExecutor): AuditH
       };
     },
     async acknowledge(ctx, code, revision) {
-      if (!AUDIT_ALERT_CODES.includes(code) || !Number.isSafeInteger(revision) || revision < 1)
+      if (!AUDIT_ALERT_CODES.includes(code) || !Number.isSafeInteger(revision) || revision < 0)
         throw new TypeError('Invalid audit health acknowledgement');
-      const rows = await executor.all({
+      const update: ScalarStatement = {
         sql: `UPDATE audit_health SET acknowledged_revision = revision
           WHERE org_id = ? AND code = ? AND acknowledged_revision < revision
             AND (SELECT max(h.revision) FROM audit_health h WHERE h.org_id = ? AND h.code = ?) = ?
           RETURNING code`,
         params: [ctx.orgId, code, ctx.orgId, code, revision],
+      };
+      if (!operator) return (await executor.all(update)).length > 0;
+      const event = auditEvent({
+        id: ulid(),
+        now: operator.now.toISOString(),
+        action: 'audit.sink_admin',
+        actor: operator.actor,
+        context: { opId: ulid(), requestId: ulid(), sourceIp: null, tokenSelector: null },
+        target: { type: 'organization', id: ctx.orgId },
+        changes: {
+          operation: { new: 'alert_ack' },
+          alert_code: { new: code },
+          revision: { new: revision },
+        },
       });
-      return rows.length > 0;
+      if (!event.ok) throw new TypeError('Audit alert control event refused');
+      const guards = assertCheck(sql`(EXISTS (SELECT 1 FROM ${sql.table(actorTable)}
+        WHERE org_id = ${ctx.orgId} AND id = ${operator.actor.id} AND status = 'active')
+        AND (SELECT coalesce(max(generation), 0) FROM audit_sink WHERE org_id = ${ctx.orgId}) = ${operator.generation})`) as readonly ScalarStatement[];
+      const pending = auditPendingStatement(ctx, event.event, {
+        sql: `EXISTS (SELECT 1 FROM audit_health WHERE org_id = ? AND code = ? AND acknowledged_revision < revision)
+          AND (SELECT max(h.revision) FROM audit_health h WHERE h.org_id = ? AND h.code = ?) = ?`,
+        params: [ctx.orgId, code, ctx.orgId, code, revision],
+      }) as ScalarStatement;
+      try {
+        const results = await executor.batch([
+          ...guards,
+          { ...pending, sql: `${pending.sql} RETURNING id` },
+          update,
+        ]);
+        return results.at(-1)!.rows.length > 0;
+      } catch (error) {
+        if (
+          error instanceof DbError &&
+          error.kind === 'unique' &&
+          error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+        )
+          throw new AuditHealthConflictError();
+        throw error;
+      }
     },
   };
 }

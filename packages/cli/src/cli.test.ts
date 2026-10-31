@@ -28,6 +28,7 @@ it('lists only working commands in --help', async () => {
       'audit sink list|rebind|retire|unblock|skip|replay|resolve|confirm-restore',
       'audit export',
       'audit cutover',
+      'audit alert list|ack',
       'audit policy set required|availability (same target and actor flags)',
       'audit epoch bump',
       'cloudflare setup',

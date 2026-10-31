@@ -1,7 +1,10 @@
 import { expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
-import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
+import {
+  auditAlertAcknowledgementContract,
+  discoveredMigrations,
+} from '@package-broker/db-sqlite/testing/migrated-database';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import { createAuditHealthRepository } from '@package-broker/db-sqlite/repositories/audit-health';
 import { createD1Executor } from './d1-executor.js';
@@ -59,6 +62,29 @@ it('persists health atomically with RETURNING counts, organization isolation and
     expect((await port.observe(b, [])).alerts.map((alert) => alert.code)).toEqual([
       'audit.hold_failed',
     ]);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+it('acknowledges alerts with atomic events, active actors and no ledger rows on D1', async () => {
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: true,
+      script: D1_BRIDGE_SCRIPT,
+      compatibilityDate: '2026-10-01',
+      d1Databases: ['HEALTH'],
+    } as Parameters<typeof convertV4MiniflareOptions>[0]),
+  );
+  try {
+    const executor = createD1Executor(
+      bridgedD1Database('HEALTH', (body) =>
+        mf.dispatchFetch('http://health.test/', { method: 'POST', body }),
+      ),
+    );
+    await migrate(executor, await discoveredMigrations(), { holder: 'alert-ack-test' });
+    const { a, b } = await seedTwoOrganizations(executor);
+    await auditAlertAcknowledgementContract(executor, a, b);
   } finally {
     await mf.dispose();
   }

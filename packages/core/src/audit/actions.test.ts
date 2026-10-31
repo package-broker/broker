@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatToken } from '../secrets/token-format.js';
+import { AUDIT_ALERT_CODES } from '../platform/observability.js';
 import { redactValue } from './redact.js';
 import { FAKE, githubWithSentinel } from '../test-support/credential-fixtures.js';
 import {
@@ -43,9 +44,11 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 63 unique actions', () => {
+  it('has 63 unique actions, with alert_ack registered as a sink administration operation', () => {
     expect(AUDIT_ACTIONS.length).toBe(63);
     expect(new Set(AUDIT_ACTIONS).size).toBe(63);
+    expect(AUDIT_ACTIONS).toContain('audit.sink_admin');
+    expect(AUDIT_ACTIONS).not.toContain('audit.alert_ack');
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -101,6 +104,8 @@ describe('audit control action registration', () => {
         'epoch',
         'generation',
         'reason_code',
+        'alert_code',
+        'revision',
       ],
       changes: {
         sink_id: { new: 'archive' },
@@ -160,6 +165,7 @@ describe('audit control action registration', () => {
     ['audit.mode_change', 'source', ['build', 'env', 'cli']],
     ['audit.mode_change', 'policy', ['availability', 'required']],
     ['audit.sink_admin', 'policy', ['availability', 'required']],
+    ['audit.sink_admin', 'alert_code', AUDIT_ALERT_CODES],
     [
       'audit.sink_admin',
       'operation',
@@ -251,6 +257,7 @@ describe('audit control action registration', () => {
           'cutover_seq',
           'epoch',
           'generation',
+          'revision',
         ].includes(field),
       )
       .map((field) => ({ action, field })),
@@ -1595,4 +1602,46 @@ it('records system actions without invented correlation ids and refuses null ids
     ok: false,
     reason: 'bad_value',
   });
+});
+
+describe('alert acknowledgement control action', () => {
+  const changes = {
+    operation: { new: 'alert_ack' },
+    alert_code: { new: 'audit.capacity' },
+    revision: { new: 0 },
+  };
+  it.each([
+    { operation: { old: 'alert_ack' } },
+    { operation: { old: 'alert_ack' }, sink_id: { new: 'archive' } },
+    { ...changes, operation: { old: 'alert_ack' } },
+    { operation: { old: 'alert_ack', new: 'retire' } },
+    { ...changes, operation: { old: 'alert_ack', new: 'retire' } },
+    { ...changes, operation: { old: 'alert_ack', new: 'alert_ack' }, sink_id: { new: null } },
+  ])('refuses unsupported acknowledgement operation shape %j', (input) => {
+    expect(build('audit.sink_admin', input)).toEqual({ ok: false, reason: 'bad_value' });
+  });
+  it.each(AUDIT_ALERT_CODES)('records registered alert %s without a sink', (code) => {
+    const expected = { ...changes, alert_code: { new: code } };
+    expect(JSON.parse(payloadOf(build('audit.sink_admin', expected))).changes).toEqual(expected);
+  });
+  it.each(['alert_code', 'revision'])('requires %s', (field) => {
+    const input: Record<string, { new: unknown }> = { ...changes };
+    delete input[field];
+    expect(build('audit.sink_admin', input)).toEqual({ ok: false, reason: 'bad_value' });
+  });
+  it.each([null, 'archive'])('refuses sink_id %j', (value) => {
+    expect(build('audit.sink_admin', { ...changes, sink_id: { new: value } })).toEqual({
+      ok: false,
+      reason: 'bad_value',
+    });
+  });
+  it.each(['audit.unknown', 'audit.capacity\n', 'AUDIT.CAPACITY'])(
+    'refuses alert code %j',
+    (value) => {
+      expect(build('audit.sink_admin', { ...changes, alert_code: { new: value } })).toEqual({
+        ok: false,
+        reason: 'bad_value',
+      });
+    },
+  );
 });

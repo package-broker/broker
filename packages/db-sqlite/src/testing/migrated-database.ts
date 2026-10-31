@@ -207,3 +207,12 @@ export async function auditEffectiveRepositorySuite(
   const { auditEffectiveRepositorySuite: run } = await import('./audit-effective-suite.js');
   run(open);
 }
+
+export async function auditAlertAcknowledgementContract(
+  executor: SqlExecutor,
+  a: OrgContext,
+  b: OrgContext,
+): Promise<void> {
+  const { auditAlertAcknowledgementContract: run } = await import('./audit-alert-ack.js');
+  await run(executor, a, b);
+}

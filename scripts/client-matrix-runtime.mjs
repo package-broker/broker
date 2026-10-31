@@ -3,7 +3,7 @@ import { runLogin, saveLoginCapture } from './client-matrix-login.mjs';
 import { hashPassword } from '../packages/core/dist/auth/password.js';
 import { sha256Hex } from '../packages/core/dist/auth/primitives.js';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';

@@ -479,6 +479,56 @@ test('publish uses each native client with provenance disabled and scripts suppr
   }
 });
 
+test('publisher prepares Yarn lockfile before publishing', async () => {
+  const { preparePublisher } = await import('./client-matrix.mjs');
+  const { mkdir, mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const scratch = join(process.cwd(), '.pb', 'client-matrix-tests');
+  await mkdir(scratch, { recursive: true });
+  const directory = await mkdtemp(join(scratch, 'publisher-'));
+  try {
+    for (const client of ['npm', 'pnpm', 'yarn']) {
+      const calls = [];
+      const publisher = await preparePublisher(
+        join(directory, client),
+        client,
+        'http://127.0.0.1:12345/alpha/npm/',
+        'pb_fixture',
+        'matrix-publish-active',
+        {
+          debug: true,
+          run: async (command, args, project, env, options) => {
+            const manifest = JSON.parse(await readFile(join(project, 'package.json'), 'utf8'));
+            assert.equal(manifest.name, 'matrix-publish-active');
+            assert.equal(manifest.dependencies, undefined);
+            assert.equal(await readFile(join(project, 'README.md'), 'utf8'), '# Publish fixture\n');
+            assert.equal(env.COREPACK_ENABLE_NETWORK, '0');
+            assert.deepEqual(options, { debug: true });
+            calls.push({ command, args });
+            return { code: 0, output: '' };
+          },
+        },
+      );
+      assert.deepEqual(calls, client === 'yarn' ? [{ command: 'yarn', args: ['install'] }] : []);
+      assert.equal(publisher.project, join(directory, client, 'client'));
+    }
+    await assert.rejects(
+      () =>
+        preparePublisher(
+          join(directory, 'failed'),
+          'yarn',
+          'http://127.0.0.1:12345/alpha/npm/',
+          'pb_fixture',
+          'matrix-publish-active',
+          { run: async () => ({ code: 1, output: '' }) },
+        ),
+      /Client matrix mismatch: publisher install/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('bridge failure reasons preserve harness assertions and withhold arbitrary errors', async () => {
   const { safeFailureReason, harnessAssert, matrixStep } = await import('./client-matrix.mjs');
   let reason;

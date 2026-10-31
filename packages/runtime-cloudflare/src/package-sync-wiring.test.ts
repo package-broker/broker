@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { parseMasterKey } from '@package-broker/core/secrets/master-key';
 import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
@@ -366,8 +367,8 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
     PB_PUBLIC_URL: PUBLIC_URL,
   };
   const newWorker = () =>
-    createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       cacheStorage,
       registry: { timers: { metadataTtlSeconds: TTL, waitBudgetMs: 1 } },
@@ -509,8 +510,8 @@ const BASE_JOBS = [
 
 it('leaves job registration empty when the registry cannot be built', async () => {
   const kernel = vi.spyOn(kernelModule, 'createKernel');
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     log: () => undefined,
   });
   const response = await worker.fetch(new Request(`${PUBLIC_URL}/health/live`));

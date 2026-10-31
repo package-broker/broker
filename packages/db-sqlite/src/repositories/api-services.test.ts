@@ -1,3 +1,4 @@
+import { auditTrail } from '../testing/audit-trail-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@package-broker/core/api/module';
 import * as importCredentials from '@package-broker/core/import/credentials';
@@ -95,19 +96,13 @@ describe('shared API assembly', () => {
     ).toBe('203.0.113.11');
   });
 
-  it('returns the genesis head for an empty organization and rejects a missing organization', async () => {
+  it('returns unavailable without a composed trail, including a missing organization', async () => {
     const route = createApiRoutes(options).find((route) => route.path === '/_pb/audit/head')!;
-    const response = await route.handler(apiContext(database.orgs!.a, route.path));
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      seq: 0,
-      hash: AUDIT_GENESIS_HASH,
-      pendingCount: 0,
-      lastVerifiedAt: null,
-    });
-    await expect(route.handler(apiContext(null, route.path))).rejects.toThrow(
-      'route requires an organization context',
-    );
+    for (const org of [database.orgs!.a, null]) {
+      const response = await route.handler(apiContext(org, route.path));
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ error: { code: 'audit_trail_unavailable' } });
+    }
   });
 
   it.each(['node', 'cloudflare'] as const)(
@@ -219,37 +214,73 @@ describe('shared API assembly', () => {
     ]);
   });
 
-  it('serves withheld fallback items and decimal cursors from the real journal', async () => {
+  it('rejects malformed JSON before it can enter the journal', async () => {
     const org = database.orgs!.a;
-    await seedAuditJournal(database.executor, org, 3);
-    await database.executor.batch([
-      {
-        sql: 'UPDATE audit_event SET payload_json = ? WHERE org_id = ? AND seq = 1',
-        params: ['{"unexpected":"private"}', org.orgId],
-      },
-    ]);
-    const routes = createApiRoutes(options);
-    for (const project of [false, true]) {
-      const path = project ? '/_pb/projects/:project/audit' : '/_pb/audit';
-      const route = routes.find((route) => route.path === path)!;
-      const context = {
-        ...apiContext(org, path.replace(':project', 'demo') + '?limit=1'),
-        ...(project ? { projectId: 'project-a', params: { project: 'demo' } } : {}),
-      };
-      const response = await route.handler(context);
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { items: unknown[]; next: string };
-      expect(body).toEqual({
-        items: [{ kind: 'withheld', id: expect.any(String), seq: 1, reason: 'content' }],
-        next: '1',
-      });
-      const next = await route.handler({
-        ...context,
-        request: new Request(context.request.url + '&after=' + body.next),
-      });
-      expect(await next.json()).toMatchObject({ items: [{ seq: project ? 3 : 2 }] });
-    }
+    await seedAuditJournal(database.executor, org, 1);
+    await expect(
+      database.executor.batch([
+        {
+          sql: 'UPDATE audit_event SET payload_json = ? WHERE org_id = ? AND seq = 1',
+          params: ['{', org.orgId],
+        },
+      ]),
+    ).rejects.toMatchObject({ kind: 'check' });
   });
+
+  it.each([
+    'null',
+    '[]',
+    JSON.stringify({
+      op_id: 'invalid',
+      request_id: 'invalid',
+      changes: { name: { new: 'private@example.test' } },
+    }),
+    JSON.stringify({ unexpected: 'private' }),
+    JSON.stringify({ op_id: 'invalid', request_id: 'invalid', secret: 'private' }),
+    JSON.stringify({
+      op_id: 'invalid',
+      request_id: 'invalid',
+      changes: { password: { new: 'private' } },
+    }),
+    JSON.stringify({ op_id: 'invalid', request_id: 'invalid', extra: 'x'.repeat(4096) }),
+  ])(
+    'serves withheld trail items and decimal cursors for unsafe stored content (%#)',
+    async (payload) => {
+      const org = database.orgs!.a;
+      await seedAuditJournal(database.executor, org, 3);
+      await database.executor.batch([
+        {
+          sql: 'UPDATE audit_event SET payload_json = ? WHERE org_id = ? AND seq = 1',
+          params: [payload, org.orgId],
+        },
+      ]);
+      const routes = createApiRoutes({
+        ...options,
+        registration: collectRegistrations([auditTrail()]),
+        auditTrail: { effective: async () => ({ policy: 'availability', trailActive: true }) },
+      });
+      for (const project of [false, true]) {
+        const path = project ? '/_pb/projects/:project/audit' : '/_pb/audit';
+        const route = routes.find((route) => route.path === path)!;
+        const context = {
+          ...apiContext(org, path.replace(':project', 'demo') + '?limit=1'),
+          ...(project ? { projectId: 'project-a', params: { project: 'demo' } } : {}),
+        };
+        const response = await route.handler(context);
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as { items: unknown[]; next: string };
+        expect(body).toEqual({
+          items: [{ kind: 'withheld', id: expect.any(String), seq: 1, reason: 'content' }],
+          next: '1',
+        });
+        const next = await route.handler({
+          ...context,
+          request: new Request(context.request.url + '&after=' + body.next),
+        });
+        expect(await next.json()).toMatchObject({ items: [{ seq: project ? 3 : 2 }] });
+      }
+    },
+  );
 
   it('isolates the default composed trail journal services by organization', async () => {
     const { a, b } = database.orgs!;
@@ -333,13 +364,13 @@ describe('shared API assembly', () => {
         : {}),
     }).find((route) => route.path === '/_pb/audit')!;
     const response = await route.handler(apiContext(org, route.path));
-    expect(response.status).toBe(200);
-    if (!composed) {
-      expect(await response.json()).toMatchObject({
-        items: [{ kind: 'withheld', reason: 'unreadable' }],
-      });
+    expect(response.status).toBe(composed ? 200 : 404);
+    if (composed) {
+      expect(counter).toHaveBeenCalledExactlyOnceWith('pb.audit.journal_unreadable');
+    } else {
+      expect(await response.json()).toMatchObject({ error: { code: 'audit_trail_unavailable' } });
+      expect(counter).not.toHaveBeenCalled();
     }
-    expect(counter).toHaveBeenCalledExactlyOnceWith('pb.audit.journal_unreadable');
   });
 
   it('converts typed dependency failures to configuration errors', () => {

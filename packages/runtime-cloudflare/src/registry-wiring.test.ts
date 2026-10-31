@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -419,8 +420,8 @@ async function boot(
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
   };
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     platformPorts,
     cacheStorage,
     log: (record) => void events.push(record),
@@ -742,8 +743,8 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     const prepare = vi.fn(() => {
       throw new Error('unexpected database query');
     });
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       cacheStorage,
       log: () => undefined,
@@ -771,13 +772,13 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
 
   it('fails startup when registry config is set without platformPorts or a database', async () => {
     const registry = { timers: { metadataTtlSeconds: 120 } };
-    const bare = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const bare = createWorker([auditTrail()], {
+      audit: {},
       registry,
       log: () => undefined,
     });
-    const noDb = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const noDb = createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       cacheStorage,
       registry,

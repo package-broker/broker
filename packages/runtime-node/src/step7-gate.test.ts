@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -434,10 +435,10 @@ async function boot(remote: ReturnType<typeof upstream>) {
   const fixture = await seed(db.executor);
   const logged: unknown[] = [];
   const broker = createNodeServerWithSeams(
-    [remote.plugin],
+    [remote.plugin, auditTrail()],
     {
       executor: db.executor,
-      audit: { acceptNoDurableAudit: true },
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       auth: { keyring: keyring(), publicOrigin: ORIGIN, env: {} },
       platformServices: {
         blob: createBlobStore(

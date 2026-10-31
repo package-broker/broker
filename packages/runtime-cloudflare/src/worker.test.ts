@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { ulid } from '@package-broker/core/ids';
@@ -105,7 +106,7 @@ function pingPlugin(onInit: (ports: PluginPorts) => void = () => undefined): Plu
 describe('createWorker', () => {
   it('answers /whoami with the organization id only after bootstrap', async () => {
     const db = await migratedDatabase();
-    const worker = createWorker([whoamiPlugin()]);
+    const worker = createWorker([whoamiPlugin(), auditTrail()]);
 
     const before = await worker.fetch(request('/whoami'), env(db));
     expect(before.status).toBe(503);
@@ -124,7 +125,7 @@ describe('createWorker', () => {
   it('reports not ready when the organization table disappears', async () => {
     const db = await migratedDatabase();
     await bootstrap(db);
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
 
     const first = await worker.fetch(request('/health/ready'), env(db));
     expect(first.status).toBe(200);
@@ -142,7 +143,7 @@ describe('createWorker', () => {
   it('keeps the missing binding out of the binding kernel cache', async () => {
     const db = await migratedDatabase();
     await bootstrap(db);
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
 
     const withoutBinding = await worker.fetch(request('/health/ready'));
     expect(withoutBinding.status).toBe(503);
@@ -175,7 +176,7 @@ describe('createWorker', () => {
         if (attempts === 1) throw new Error('init failed');
       },
     });
-    const worker = createWorker([plugin]);
+    const worker = createWorker([plugin, auditTrail()]);
 
     const first = await worker.fetch(request('/flaky'));
     expect(first.status).toBe(500);
@@ -208,7 +209,7 @@ describe('createWorker', () => {
         if (attempts === 1) throw new Error('init failed');
       },
     });
-    const worker = createWorker([plugin]);
+    const worker = createWorker([plugin, auditTrail()]);
 
     const first = await worker.fetch(request('/flaky-binding'), env(db));
     expect(first.status).toBe(500);
@@ -222,7 +223,7 @@ describe('createWorker', () => {
   it('initializes once per binding', async () => {
     const db = await migratedDatabase();
     let inits = 0;
-    const worker = createWorker([pingPlugin(() => (inits += 1))]);
+    const worker = createWorker([pingPlugin(() => (inits += 1)), auditTrail()]);
 
     await worker.fetch(request('/ping'), env(db));
     await worker.fetch(request('/ping'), env(db));
@@ -237,6 +238,7 @@ describe('createWorker', () => {
       pingPlugin((ports) => {
         received = ports;
       }),
+      auditTrail(),
     ]);
 
     await worker.fetch(request('/ping'), env(db));
@@ -260,8 +262,8 @@ it('reports schema drift through the Worker with a real Miniflare D1 database', 
   if (source === undefined) throw new Error('missing core migration');
   const executor = createD1Executor(db);
   const worker = () =>
-    createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    createWorker([auditTrail()], {
+      audit: {},
       migrations: sources,
       log: () => undefined,
     });

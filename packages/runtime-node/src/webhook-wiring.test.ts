@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -169,9 +170,9 @@ async function boot(options: { jobs?: boolean; mode?: 'real' | 'missing' | 'thro
   const fixture = await seed(db.executor);
   const { plugin, verify } = githubPlugin(options.mode);
   const logged: unknown[] = [];
-  const broker = createNodeServer([plugin], {
+  const broker = createNodeServer([plugin, auditTrail()], {
     executor: db.executor,
-    audit: { acceptNoDurableAudit: true },
+    audit: { capacity: { maxJournalBytes: 67108864 } },
     auth: { keyring: keyring(), publicOrigin: ORIGIN, env: {} },
     ...(options.jobs === false
       ? {}

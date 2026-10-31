@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { expect, it, vi } from 'vitest';
 import { orgContext } from '@package-broker/core/db/port';
 import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
@@ -54,8 +55,8 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
 }
 
 it('builds unlink holder checks without a host freshness clock', async () => {
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     log: () => undefined,
   });
   const response = await worker.fetch(

@@ -5,6 +5,7 @@
   "references": [
     { "path": "../core" },
     { "path": "../db-sqlite" },
+    { "path": "../plugin-audit-trail" },
     { "path": "../plugin-sso-oidc" }
   ]
 }

@@ -4,7 +4,7 @@ import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import type { JobContext } from '@package-broker/core/platform/jobs';
 import { noopObservability, type LogRecord } from '@package-broker/core/platform/observability';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { createAuditQueryRepository } from './audit-query.js';
+import { createAuditJournalReader } from './audit-query.js';
 import { createAuditSealRepository } from './audit-seal.js';
 import { clearAuditVerificationStatements, createAuditVerifyReader } from './audit-verify.js';
 
@@ -59,9 +59,9 @@ describe('audit verification reader on node:sqlite', () => {
     expect(records).toContainEqual(
       expect.objectContaining({ event: 'audit.verified', rows: 503, head_seq: 503 }),
     );
-    const query = createAuditQueryRepository(executor);
-    expect((await query.head(a))?.lastVerifiedAt).toBe(now.toISOString());
-    expect((await query.head(b))?.lastVerifiedAt).toBeNull();
+    const head = (org: typeof a) => createAuditJournalReader(executor, org).head();
+    expect((await head(a))?.verification?.verifiedAt).toBe(now.toISOString());
+    expect((await head(b)).verification).toBeNull();
     const lastVerifiedAt = now.toISOString();
     now = new Date('2026-10-23T12:00:00.000Z');
     records.length = 0;
@@ -75,21 +75,21 @@ describe('audit verification reader on node:sqlite', () => {
     expect(records).toEqual([
       { level: 'error', event: 'audit.chain_broken', seq: 501, reason: 'hash' },
     ]);
-    expect((await query.head(a))?.lastVerifiedAt).toBe(lastVerifiedAt);
+    expect((await head(a))?.verification?.verifiedAt).toBe(lastVerifiedAt);
     records.length = 0;
     await job.handler({}, { ...ctx, org: b });
     expect(records).toContainEqual(expect.objectContaining({ event: 'audit.verified', rows: 503 }));
-    expect((await query.head(b))?.lastVerifiedAt).toBe(now.toISOString());
+    expect((await head(b))?.verification?.verifiedAt).toBe(now.toISOString());
   });
 
   it('persists empty-chain verification and keeps overlapping completions monotonic per organization', async () => {
     database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
     const { a, b } = database.orgs!;
     const reader = createAuditVerifyReader(database.executor);
-    const query = createAuditQueryRepository(database.executor);
+    const head = (org: typeof a) => createAuditJournalReader(database!.executor, org).head();
     const earlier = '2026-10-22T11:00:00.000Z';
     const later = '2026-10-22T12:00:00.000Z';
-    expect(await query.head(a)).toBeNull();
+    expect((await head(a)).verification).toBeNull();
     await reader.markVerified(
       a,
       later,
@@ -108,21 +108,21 @@ describe('audit verification reader on node:sqlite', () => {
       { fromSeq: 1, throughSeq: 0, bodies: 0, withheld: 0 },
       await reader.snapshot(a),
     );
-    expect(await query.head(a)).toEqual({
-      seq: 0,
-      hash: AUDIT_GENESIS_HASH,
-      pending: 0,
-      lastVerifiedAt: later,
+    expect(await head(a)).toMatchObject({
+      headSeq: 0,
+      headHash: AUDIT_GENESIS_HASH,
+      pendingCount: 0,
+      verification: { verifiedAt: later, fromSeq: 1, throughSeq: 0, bodies: 0, withheld: 0 },
     });
-    expect(await query.head(b)).toBeNull();
+    expect((await head(b)).verification).toBeNull();
     await reader.markVerified(
       b,
       earlier,
       { fromSeq: 1, throughSeq: 0, bodies: 0, withheld: 0 },
       await reader.snapshot(b),
     );
-    expect((await query.head(b))?.lastVerifiedAt).toBe(earlier);
-    expect((await query.head(a))?.lastVerifiedAt).toBe(later);
+    expect((await head(b))?.verification?.verifiedAt).toBe(earlier);
+    expect((await head(a))?.verification?.verifiedAt).toBe(later);
   });
 
   it('fences completion against pruning, mode changes, epoch changes and incarnation changes', async () => {
@@ -282,7 +282,7 @@ describe('audit verification reader on node:sqlite', () => {
       );
     }
     await reader.clearVerification(a);
-    expect(await createAuditQueryRepository(database.executor).head(a)).toBeNull();
+    expect((await createAuditJournalReader(database.executor, a).head()).verification).toBeNull();
     const scope = (orgId: string) =>
       database!.executor.all({
         sql: 'SELECT verified_from_seq, verified_through_seq, verified_bodies, verified_withheld, verified_at FROM audit_chain WHERE org_id = ?',
@@ -379,9 +379,9 @@ describe('audit verification reader on node:sqlite', () => {
         { sql: 'SELECT json_extract(?, ?)', params: ['{', '$'] },
       ]),
     ).rejects.toThrow();
-    expect((await createAuditQueryRepository(database.executor).head(org))?.lastVerifiedAt).toBe(
-      '2026-10-22T12:00:00.000Z',
-    );
+    expect(
+      (await createAuditJournalReader(database.executor, org).head())?.verification?.verifiedAt,
+    ).toBe('2026-10-22T12:00:00.000Z');
     await database.executor.batch([
       {
         sql: 'UPDATE audit_chain SET mode_generation = mode_generation + 1 WHERE org_id = ?',
@@ -389,7 +389,7 @@ describe('audit verification reader on node:sqlite', () => {
       },
       ...clearAuditVerificationStatements(org),
     ]);
-    expect(await createAuditQueryRepository(database.executor).head(org)).toBeNull();
+    expect((await createAuditJournalReader(database.executor, org).head()).verification).toBeNull();
   });
 
   it('retains and checks the persisted checkpoint when the journal is ahead', async () => {

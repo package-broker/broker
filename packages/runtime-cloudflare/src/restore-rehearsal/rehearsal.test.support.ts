@@ -1,3 +1,4 @@
+import { auditTrail } from '../audit-trail.test.support.js';
 /* eslint-disable no-restricted-syntax -- Isolated fixture seeding and full database snapshots require SQL; this module is rehearsal-only. */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -173,7 +174,7 @@ export async function destroyDeployment(deployment: Deployment) {
 }
 export async function startDeployment(deployment: Deployment) {
   const logs: string[] = [];
-  const worker = createWorker([], {
+  const worker = createWorker([auditTrail()], {
     platformPorts: ports,
     cacheStorage: {
       open: async () => ({
@@ -193,7 +194,6 @@ export async function startDeployment(deployment: Deployment) {
     JOBS: { send: async () => undefined, sendBatch: async () => undefined },
     DEPLOYMENT_ID: 'restore-rehearsal',
     PB_PUBLIC_URL: ORIGIN,
-    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
     ...Object.fromEntries(deployment.secrets),
   };
   return {

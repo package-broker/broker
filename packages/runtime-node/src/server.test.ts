@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
@@ -98,8 +99,8 @@ describe('createNodeServer', () => {
     plugins: readonly PluginDefinition[],
     overrides: { closeDatabase?: () => Promise<void> } = {},
   ): NodeBroker {
-    return createNodeServer(plugins, {
-      audit: { acceptNoDurableAudit: true },
+    return createNodeServer([...plugins, auditTrail()], {
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       executor: opened.executor,
       log,
       ...overrides,
@@ -200,8 +201,8 @@ describe('createNodeServer', () => {
   it('10: a POST whose body the handler reads completes once at info with its status', async () => {
     const { plugin } = brokerPlugin('whoami');
     const entries: Array<Readonly<Record<string, unknown>>> = [];
-    const broker = createNodeServer([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const broker = createNodeServer([plugin, auditTrail()], {
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       executor: opened.executor,
       log: (entry) => {
         entries.push(entry);
@@ -235,7 +236,7 @@ describe('createNodeServer', () => {
   it('6: without an executor every kernel database call fails as an internal error', async () => {
     const { plugin } = brokerPlugin('whoami');
     const logs: Array<Readonly<Record<string, unknown>>> = [];
-    const broker = createNodeServer([plugin], { log: (entry) => logs.push(entry) });
+    const broker = createNodeServer([plugin, auditTrail()], { log: (entry) => logs.push(entry) });
     const base = await listen(broker);
 
     const response = await fetch(`${base}/whoami`);

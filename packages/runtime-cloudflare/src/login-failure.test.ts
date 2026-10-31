@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { expect, it, vi } from 'vitest';
 import * as failures from '@package-broker/core/audit/failure-events';
 import type { SqlValue, Statement } from '@package-broker/core/db/port';
@@ -55,8 +56,8 @@ it('keeps Worker staging alive through waitUntil and shares one recorder across 
   });
   const output = { log: vi.fn(), error: vi.fn() };
   const clock = vi.spyOn(systemClock, 'now').mockReturnValue(new Date('2026-10-30T10:00:12.000Z'));
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     log: () => undefined,
     console: output,
     platformPorts: {

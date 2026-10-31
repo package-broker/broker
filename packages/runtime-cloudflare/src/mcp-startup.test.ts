@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ulid } from '@package-broker/core/ids';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -43,8 +44,8 @@ async function fixture() {
     MCP_RATE_LIMIT: { limit },
   };
   const worker = () =>
-    createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    createWorker([auditTrail()], {
+      audit: {},
       mcp: { enabled: true },
       log: () => undefined,
     });

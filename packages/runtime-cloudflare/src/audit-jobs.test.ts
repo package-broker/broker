@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import * as sealModule from '@package-broker/db-sqlite/repositories/audit-seal';
 import { MIN_AUDIT_JOURNAL_BYTES } from '@package-broker/core/audit/config';
 import { describe, expect, it, vi } from 'vitest';
@@ -143,10 +144,9 @@ describe.each([
       await migrate(executor, await discoveredMigrations(), { holder: 'audit-jobs-test' });
       const { a, b } = await seedTwoOrganizations(executor);
       const records: unknown[] = [];
-      const worker = createWorker([], {
+      const worker = createWorker([auditTrail()], {
         audit: {
           capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES },
-          acceptNoDurableAudit: true,
         },
         platformPorts,
         console: {

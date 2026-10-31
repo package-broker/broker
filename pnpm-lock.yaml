@@ -334,6 +334,9 @@ importers:
       '@package-broker/db-sqlite':
         specifier: workspace:*
         version: link:../db-sqlite
+      '@package-broker/plugin-audit-trail':
+        specifier: workspace:*
+        version: link:../plugin-audit-trail
       '@package-broker/plugin-sso-oidc':
         specifier: workspace:*
         version: link:../plugin-sso-oidc

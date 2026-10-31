@@ -123,7 +123,6 @@ export function serverEnv(base, { port, dataDir, settings }) {
     ...env,
     PORT: String(port),
     PB_SQLITE_PATH: join(dataDir, 'db.sqlite'),
-    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
     PB_ORG_SLUG: 'smoke',
     PB_ORG_NAME: 'Smoke',
     PB_MASTER_KEY: SMOKE_MASTER_KEY,

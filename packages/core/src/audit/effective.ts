@@ -147,9 +147,6 @@ export function validateAuditBuild(
     throw new AuditEffectiveConfigError('invalid_trail_env');
   }
   const maxJournalBytes = resolveAuditJournalBudget(captured.audit, target, policyEnv);
-  if (trail !== undefined && maxJournalBytes === null) {
-    throw new AuditEffectiveConfigError('journal_budget_required');
-  }
   const sinks = captured.plugins.flatMap((plugin) => plugin.auditSinks ?? []);
   if (
     policy === 'required' &&

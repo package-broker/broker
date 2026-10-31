@@ -220,7 +220,7 @@ export async function checkAuditModes({
       const status = await request('audit/status');
       await expectStatus(`${mode}: audit/status`, status, 200);
       assert.equal((await status.json()).mode, active ? 'trail' : mode);
-      await expectStatus(`${mode}: audit/head`, await request('audit/head'), 200);
+      await expectStatus(`${mode}: audit/head`, await request('audit/head'), active ? 200 : 404);
       await expectStatus(`${mode}: audit/health`, await request('audit/health'), 200);
       const entrypoint = await instance.getWorker();
       await entrypoint.scheduled();

@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { generateKeyPairSync } from 'node:crypto';
 import * as sshProvider from './sources/ssh-provider.js';
 import * as guardedFetch from './sources/guarded-fetch.js';
@@ -110,8 +111,8 @@ describe('Node registry jobs wiring', () => {
       try {
         const path = join(directory, 'broker.sqlite');
         broker = await startNode({
-          audit: { acceptNoDurableAudit: true },
-          plugins: [plugin],
+          audit: { capacity: { maxJournalBytes: 67108864 } },
+          plugins: [plugin, auditTrail()],
           migrations: await discoveredMigrations(),
           env: {
             PB_SQLITE_PATH: path,

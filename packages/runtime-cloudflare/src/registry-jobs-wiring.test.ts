@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import type { SourceProvider } from '@package-broker/core/sources/provider';
 import { createPackageDescription } from '@package-broker/core/sources/provider';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -162,8 +163,8 @@ describe.each([
         PB_PUBLIC_URL: 'https://broker.test',
         DEPLOYMENT_ID: 'registry-jobs',
       };
-      const worker = createWorker([plugin], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([plugin, auditTrail()], {
+        audit: {},
         platformPorts: {
           blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
           cache: { adapter: 'cache-api', namespace: 'registry-jobs' },

@@ -1,3 +1,4 @@
+import { auditWarningEvent } from '@package-broker/core/audit/config';
 import {
   AuditEffectiveConfigError,
   AuditResolutionError,
@@ -17,7 +18,7 @@ import { resolveAuditDestination } from '@package-broker/core/audit/sinks/transp
 import { auditExportJob } from '@package-broker/core/audit/export';
 import { detectAuditFork } from '@package-broker/core/audit/fork';
 import type { AuditSink } from '@package-broker/core/audit/plugin-api';
-import type { BrokerConfig } from '@package-broker/core/config';
+import { brokerAuditWarnings, type BrokerConfig } from '@package-broker/core/config';
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
@@ -67,6 +68,13 @@ export async function createNodeAudit(input: {
       };
     }
   })();
+  for (const warning of brokerAuditWarnings(
+    { ...input.config, audit: { ...input.config.audit, policy: build.policy } },
+    input.config.platform,
+  )) {
+    const event = auditWarningEvent(warning.code);
+    observability.log({ level: 'warn', event, reason_code: event });
+  }
   const capacity = input.maxJournalBytes === null ? {} : { maxJournalBytes: input.maxJournalBytes };
   const none = createAuditNoneRepository(executor, observability);
   const transitions = createAuditEffectiveRepository(executor);

@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fenceKind, type DelegatedMutationFence } from '@package-broker/core/authz/fence';
 import { orgContext, type SqlExecutor } from '@package-broker/core/db/port';
@@ -219,8 +220,8 @@ describe('import jobs on the Node job loop', () => {
 describe('import jobs in the Node server assembly', () => {
   it('registers all import jobs with real stores and completes a claim for an unknown run', async () => {
     const executor = await database();
-    const broker = createNodeServer([], {
-      audit: { acceptNoDurableAudit: true },
+    const broker = createNodeServer([auditTrail()], {
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       executor,
       log: () => undefined,
       auth: {

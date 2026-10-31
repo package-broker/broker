@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -272,9 +273,10 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     jobs: [],
     ownerPacket: 'T531',
   },
+
   {
-    dependency: 'audit',
-    constructed: 'audit query repository adapter',
+    dependency: 'auditTrail',
+    constructed: 'composed audit trail dispatch over journal services',
     routes: [
       'GET /_pb/audit',
       'GET /_pb/audit/head',
@@ -369,8 +371,8 @@ describe('Workers management API mount', () => {
 
   it('refuses anonymous requests to every route in the API module table', async () => {
     const env = await environment();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
     });
     await worker.services(env);
@@ -393,8 +395,8 @@ describe('Workers management API mount', () => {
 
   it('mounts every management route exactly once', async () => {
     const env = await environment();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
     });
     await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
@@ -419,8 +421,8 @@ describe('Workers management API mount', () => {
 
   it('mounts the package manage routes without a rebuild route', async () => {
     const mounted = await mountedAfter(
-      createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      createWorker([auditTrail()], {
+        audit: {},
         log: () => undefined,
       }),
       await environment(),
@@ -436,8 +438,8 @@ describe('Workers management API mount', () => {
 
   it('omits the import routes and logs the reason without a blob store', async () => {
     const records: unknown[] = [];
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: (record) => records.push({ ...record }),
     });
     const mounted = await mountedAfter(worker, await environment());
@@ -466,8 +468,8 @@ describe('Workers management API mount', () => {
       DEPLOYMENT_ID: 'api-mount',
     } as unknown as Env;
     const records: unknown[] = [];
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       cacheStorage: {
         open: async () => ({
@@ -495,8 +497,8 @@ describe('Workers management API mount', () => {
     const env = await environment();
     built.drop = 'tokenList';
     const logged: Array<Record<string, unknown>> = [];
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: (entry) => logged.push({ ...entry }),
     });
     const failure = await worker.services(env).then(

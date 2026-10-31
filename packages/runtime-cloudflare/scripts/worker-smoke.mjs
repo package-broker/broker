@@ -330,7 +330,6 @@ async function createMiniflare(
           PB_MASTER_KEY: MASTER_KEY,
           PB_PUBLIC_URL: PUBLIC_ORIGIN,
           DEPLOYMENT_ID: 'smoke',
-          PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
           ...extraBindings,
         },
       }),

@@ -24,6 +24,8 @@ export const KERNEL_EVENTS = frozenSet([
 
 export const AUDIT_EVENTS = frozenSet([
   'audit.effective_unavailable',
+  'audit.trail_toggle_ignored',
+  'audit.capacity_unbounded',
   'audit.sink_admin_refused',
   'audit.alert',
   'audit.failure_event_invalid',
@@ -95,6 +97,8 @@ const REASON_CODES = [
   'audit.sink_inactive',
   'audit.config_invalid',
   'audit.mode_none',
+  'audit.trail_toggle_ignored',
+  'audit.capacity_unbounded',
   'audit.chain_integrity',
 ] as const;
 

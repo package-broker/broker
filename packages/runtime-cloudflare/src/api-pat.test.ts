@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -105,8 +106,8 @@ async function boot(binding: string) {
     now: now.toISOString(),
   });
   const env = { DB: raw, PB_MASTER_KEY: KEY, PB_PUBLIC_URL: PUBLIC_URL } as unknown as Env;
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     log: () => undefined,
   });
   const call = (input: Request) => worker.fetch(input, env);

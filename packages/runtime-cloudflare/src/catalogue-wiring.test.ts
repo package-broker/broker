@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -187,8 +188,8 @@ async function boot() {
     'P2',
   ]);
   const environment = { DB: raw, PB_MASTER_KEY: KEY, PB_PUBLIC_URL: PUBLIC_URL } as unknown as Env;
-  const worker = createWorker([plugin], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([plugin, auditTrail()], {
+    audit: {},
     log: () => undefined,
   });
   const fetch = (input: Request) => worker.fetch(input, environment);
@@ -232,8 +233,8 @@ describe('cloudflare catalogue wiring on Miniflare D1', () => {
     expect(Object.keys(packages?.writer.statementBudget ?? {})).toContain('syncPackage');
     expect(Object.keys(packages?.visibility ?? {})).toContain('attachSource');
 
-    const bare = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const bare = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
     });
     expect((await bare.services({} as Env)).packages).toBeNull();

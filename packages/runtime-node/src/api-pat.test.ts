@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -82,8 +83,8 @@ describe('Node management API personal access token lifecycle', () => {
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
     const broker = await startNode({
-      audit: { acceptNoDurableAudit: true },
-      plugins: [],
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [auditTrail()],
       migrations: await migrationSources(),
       env: {
         PB_SQLITE_PATH: path,

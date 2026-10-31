@@ -251,7 +251,6 @@ function dependencies(): ApiModuleDeps {
       projects: unused('get'),
     },
     packages: unused('listProject', 'listOrganization', 'listVersions'),
-    audit: unused('list', 'head'),
     packageManage: {
       ...common(),
       service: unused('manage'),
@@ -421,7 +420,7 @@ describe('createApiModule', () => {
     const deps = dependencies();
     createApiModule(deps);
     for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
-    expect(audit.auditRoutes).toHaveBeenCalledWith(deps.audit, deps.auditTrail);
+    expect(audit.auditRoutes).toHaveBeenCalledWith(deps.auditTrail);
   });
 
   it('passes registered trail dispatch services to the trail routes', () => {
@@ -434,7 +433,7 @@ describe('createApiModule', () => {
       services: { journal: { list: vi.fn(), head: vi.fn() }, requestVerification: vi.fn() },
     };
     createApiModule({ ...deps, auditTrail });
-    expect(spy).toHaveBeenCalledWith(deps.audit, auditTrail);
+    expect(spy).toHaveBeenCalledWith(auditTrail);
   });
 
   it('does not require the legacy reader for a composed trail', () => {
@@ -449,7 +448,7 @@ describe('createApiModule', () => {
       effective: async () => ({ policy: 'availability', trailActive: true }),
       services: { journal: { list: vi.fn(), head: vi.fn() }, requestVerification: vi.fn() },
     };
-    expect(() => createApiModule({ ...deps, audit: undefined, auditTrail })).not.toThrow();
+    expect(() => createApiModule({ ...deps, auditTrail })).not.toThrow();
   });
 
   it('omits the import routes when no import dependencies are provided', () => {

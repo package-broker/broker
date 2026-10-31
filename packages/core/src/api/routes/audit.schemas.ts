@@ -14,7 +14,6 @@ const filters = {
 export const auditQuery = z.strictObject({ ...filters, project: filter.optional() });
 export const projectAuditQuery = z.strictObject(filters);
 export const projectAuditParams = z.strictObject({ project: z.string().min(1).max(64) });
-export const auditLimit = z.number().int().min(1).max(200);
 const auditValue = z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]);
 const payload = z.strictObject({
   op_id: z.string().optional(),

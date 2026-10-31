@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createLocalLoginSeed } from './testing/local-login.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { newSessionSecrets } from '@package-broker/core/auth/session';
@@ -193,9 +194,9 @@ describe('node catalogue wiring on node:sqlite', () => {
       "INSERT INTO version (id, org_id, package_id, version, version_normalized, stability, published_at, published_at_basis, metadata_json) VALUES (?, ?, ?, '1.0.0', '1.0.0', 'stable', ?, 'import_time', '{}')",
       [ulid(), orgId, packageId, new Date().toISOString()],
     );
-    broker = createNodeServer([plugin], {
+    broker = createNodeServer([plugin, auditTrail()], {
       executor: db.executor,
-      audit: { acceptNoDurableAudit: true },
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',
@@ -424,7 +425,7 @@ describe('node catalogue wiring on node:sqlite', () => {
     'has no package services with %s',
     async (missing) => {
       await broker.close();
-      broker = createNodeServer([], {
+      broker = createNodeServer([auditTrail()], {
         ...(missing === 'no database'
           ? {
               auth: {
@@ -442,7 +443,7 @@ describe('node catalogue wiring on node:sqlite', () => {
 
   it('rejects package route registration without a database', async () => {
     await broker.close();
-    broker = createNodeServer([plugin], { log: () => undefined });
+    broker = createNodeServer([plugin, auditTrail()], { log: () => undefined });
     await expect(broker.ready()).rejects.toBeInstanceOf(KernelConfigError);
     await expect(broker.ready()).rejects.toMatchObject({
       problems: expect.arrayContaining([expect.stringContaining('package resolver exists')]),

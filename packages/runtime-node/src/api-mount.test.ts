@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiModuleDeps } from '@package-broker/core/api/module';
 import type { RouteDefinition } from '@package-broker/core/plugin';
@@ -224,9 +225,10 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     jobs: [],
     ownerPacket: 'T531',
   },
+
   {
-    dependency: 'audit',
-    constructed: 'audit query repository adapter',
+    dependency: 'auditTrail',
+    constructed: 'composed audit trail dispatch over journal services',
     routes: [
       'GET /_pb/audit',
       'GET /_pb/audit/head',
@@ -341,9 +343,9 @@ describe('Node management API mount', () => {
       log?: KernelLog;
     } = {},
   ): NodeBroker =>
-    (broker = createNodeServer([], {
+    (broker = createNodeServer([auditTrail()], {
       executor: db.executor,
-      audit: { acceptNoDurableAudit: true },
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',
@@ -473,9 +475,9 @@ describe('Node management API mount', () => {
       'node',
       'https://broker.test',
     );
-    broker = createNodeServer([], {
+    broker = createNodeServer([auditTrail()], {
       executor: db.executor,
-      audit: { acceptNoDurableAudit: true },
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',

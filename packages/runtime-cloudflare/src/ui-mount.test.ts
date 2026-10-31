@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import type { SqlValue, Statement } from '@package-broker/core/db/port';
@@ -78,8 +79,8 @@ function migratedD1(): NonNullable<Env['DB']> {
 
 describe('Worker UI mount', () => {
   it('adds only public UI routes without an organization or session requirement', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: () => undefined,
     });
@@ -219,8 +220,8 @@ describe('Worker UI mount from the ASSETS binding', () => {
   };
 
   it('serves every script and stylesheet the document references at the document-relative URL', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: () => undefined,
     });
@@ -290,8 +291,8 @@ describe('Worker UI mount from the ASSETS binding', () => {
   });
 
   it('answers 404, not 500, when the binding holds an invalid manifest', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: () => undefined,
     });
@@ -309,8 +310,8 @@ describe('Worker UI mount from the ASSETS binding', () => {
 
   it('logs a fixed warning for an invalid manifest and retries on the next request', async () => {
     const entries: Record<string, unknown>[] = [];
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: (entry) => entries.push({ ...entry }),
     });
@@ -334,8 +335,8 @@ describe('Worker UI mount from the ASSETS binding', () => {
   });
 
   it('mounts no UI routes without the binding', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: () => undefined,
     });

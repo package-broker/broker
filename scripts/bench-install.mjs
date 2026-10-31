@@ -296,7 +296,6 @@ export async function startBroker(directory, marketplace, keys) {
     DEPLOYMENT_ID: 'bench',
     PB_SQLITE_PATH: database,
     PB_BLOB_ROOT: join(directory, 'blobs'),
-    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
     PB_ORG_SLUG: 'bench',
     PB_ORG_NAME: 'Benchmark',
     PB_PUBLIC_URL: origin,

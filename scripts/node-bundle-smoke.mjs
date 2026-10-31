@@ -426,7 +426,6 @@ async function startBundle(source, extraEnv = {}) {
     PB_PUBLIC_URL: `http://127.0.0.1:${port}`,
     PB_BLOB_ROOT: join(copy, 'data', 'blobs'),
     DEPLOYMENT_ID: 'smoke',
-    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
     ...extraEnv,
   };
   delete env['NODE_PATH'];

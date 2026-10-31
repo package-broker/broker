@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
@@ -83,8 +84,8 @@ async function boot() {
   cleanup.push(async () => {
     spy.mockRestore();
   });
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     platformPorts: {
       blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
       cache: { adapter: 'cache-api', namespace: 'retention-test' },

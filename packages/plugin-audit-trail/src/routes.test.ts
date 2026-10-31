@@ -209,7 +209,7 @@ describe('audit trail', () => {
       },
       requestVerification: vi.fn(async () => undefined),
     };
-    const routes = auditRoutes(undefined, {
+    const routes = auditRoutes({
       trail: { definition: auditTrail().auditTrail },
       effective: async () => ({ policy: 'availability', trailActive: true }),
       services,

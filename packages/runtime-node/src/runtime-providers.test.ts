@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes, type webcrypto } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -257,8 +258,8 @@ describe('runtime SSO providers on the node runtime', () => {
   ): Promise<{ broker: NodeBroker; kernel: Kernel }> {
     const plugins: PluginDefinition[] = [ssoOidc(compiled)];
     const broker = await startNode({
-      audit: { acceptNoDurableAudit: true },
-      plugins,
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [...plugins, auditTrail()],
       migrations: await migrationSources(),
       env,
       log: (entry) => {

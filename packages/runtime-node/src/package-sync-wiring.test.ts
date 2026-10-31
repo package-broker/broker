@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
@@ -293,10 +294,10 @@ describe('Node package-sync wiring', () => {
   async function boot(transport: FetchLike, registry = true) {
     const bytes = await openFilesystemByteStore({ root: join(directory, 'blobs') });
     broker = createNodeServerWithSeams(
-      [],
+      [auditTrail()],
       {
         executor: db.executor,
-        audit: { acceptNoDurableAudit: true },
+        audit: { capacity: { maxJournalBytes: 67108864 } },
         auth: {
           keyring: createKeyring([
             parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
@@ -930,7 +931,7 @@ describe('Node package-sync wiring', () => {
     expect(kernel.registration.jobs.map((job) => job.qualifiedName).sort()).toEqual(
       [...AUDIT, ...AUTH_JOBS, 'core:vulnerability-sync:v1'].sort(),
     );
-    const bare = createNodeServer([]);
+    const bare = createNodeServer([auditTrail()]);
     try {
       expect((await bare.ready()).registration.jobs).toEqual([]);
     } finally {

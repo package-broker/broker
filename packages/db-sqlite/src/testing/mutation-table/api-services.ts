@@ -1,3 +1,5 @@
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { auditTrail } from '../audit-trail-fixture.js';
 import { expect } from 'vitest';
 import { createApiRoutes } from '../../repositories/api-services.js';
 import { apiContext, apiOptions } from '../api-services-fixture.js';
@@ -19,7 +21,11 @@ const auditIsolation: ContractCase = {
       all: (statement) => context.executor.all(context.mutate(statement)),
       batch: (statements) => context.executor.batch(context.mutateBatch(statements)),
     });
-    const route = createApiRoutes(options).find((route) => route.path === '/_pb/audit')!;
+    const route = createApiRoutes({
+      ...options,
+      registration: collectRegistrations([auditTrail()]),
+      auditTrail: { effective: async () => ({ policy: 'availability', trailActive: true }) },
+    }).find((route) => route.path === '/_pb/audit')!;
     const response = await Promise.resolve(route.handler(apiContext(own, '/_pb/audit'))).catch(
       () => null,
     );

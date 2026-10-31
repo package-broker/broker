@@ -338,11 +338,11 @@ describe('effective audit configuration', () => {
     bootError(options([trail], {}, { PB_AUDIT_TRAIL: value }), 'invalid_trail_env');
   });
 
-  it('requires a Node journal budget only with a composed trail', () => {
+  it('allows an unbounded Node journal under availability', () => {
     const input = options();
     input.config = { ...input.config, platform: 'node' };
     input.target = 'node';
-    bootError(input, 'journal_budget_required');
+    expect(resolveEffectiveAuditConfig(input).maxJournalBytes).toBeNull();
     expect(
       resolveEffectiveAuditConfig({
         ...input,
@@ -615,12 +615,15 @@ describe('effective audit configuration', () => {
     bootError(options([trail], {}, { PB_AUDIT_POLICY: '' }), 'invalid_policy_env');
   });
 
-  it('requires a Node budget even when the composed trail is toggled off', () => {
+  it('allows an unbounded Node journal when the availability trail is toggled off', () => {
     const input = options([trail], { acceptNoDurableAudit: true }, { PB_AUDIT_TRAIL: 'off' });
-    bootError(
-      { ...input, target: 'node', config: { ...input.config, platform: 'node' } },
-      'journal_budget_required',
-    );
+    expect(
+      resolveEffectiveAuditConfig({
+        ...input,
+        target: 'node',
+        config: { ...input.config, platform: 'node' },
+      }).maxJournalBytes,
+    ).toBeNull();
   });
 
   it('rejects deployment required acceptance at boot', () => {

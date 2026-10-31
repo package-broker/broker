@@ -72,7 +72,6 @@ const mf = new Miniflare({
     bindings: {
       PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
       PB_PUBLIC_URL: origin,
-      PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
       DEPLOYMENT_ID: 'e2e',
     },
   }),

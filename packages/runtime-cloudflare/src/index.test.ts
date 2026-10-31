@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -29,7 +30,9 @@ import type { Env, WorkerOptions } from './index.js';
 
 describe('runtime-cloudflare', () => {
   it('answers unknown routes with the error envelope', async () => {
-    const response = await createWorker([]).fetch(new Request('https://broker.invalid/nope'));
+    const response = await createWorker([auditTrail()]).fetch(
+      new Request('https://broker.invalid/nope'),
+    );
     expect(response.status).toBe(404);
     const body = (await response.json()) as { error: { code: string; requestId: string } };
     expect(body.error.code).toBe('not_found');
@@ -69,7 +72,7 @@ describe('runtime-cloudflare', () => {
   });
 
   it('resolves the same services from the assembled application on every call', async () => {
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
     const first = await worker.services();
     expect(await worker.services()).toBe(first);
     expect(await first.providerAnchors.anchors({ orgId: 'org' } as never)).toEqual([]);
@@ -94,8 +97,8 @@ describe('runtime-cloudflare', () => {
 
   it('runs work dispatched outside a request and logs that nothing keeps it alive', async () => {
     const log = vi.fn();
-    const services = await createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const services = await createWorker([auditTrail()], {
+      audit: {},
       log,
     }).services();
     let ran = false;
@@ -212,7 +215,7 @@ describe('runtime-cloudflare', () => {
   });
 
   it('does not hold a request open for work dispatched after it ended', async () => {
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
     const waitUntil = vi.fn<(promise: Promise<unknown>) => void>();
     await worker.fetch(new Request('https://broker.invalid/nope'), undefined, { waitUntil });
     const services = await worker.services();
@@ -397,8 +400,8 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('hands the kernel all four services when the cloudflare stanza is bound', async () => {
     let seen: PluginPorts | undefined;
-    const worker = createWorker([probe((ports) => void (seen = ports))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe((ports) => void (seen = ports)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -415,15 +418,15 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('keeps platform services disabled without a stanza', async () => {
     let seen: PluginPorts | undefined;
-    const worker = createWorker([probe((ports) => void (seen = ports))], quiet);
+    const worker = createWorker([probe((ports) => void (seen = ports)), auditTrail()], quiet);
     await worker.fetch(new Request('https://broker.test/nope'), boundEnv());
     expect(seen?.platform).toBeUndefined();
   });
 
   it('runs queue and scheduled events through the application the fetch built', async () => {
     let inits = 0;
-    const worker = createWorker([probe(() => void (inits += 1))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe(() => void (inits += 1)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -446,8 +449,8 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('rejects enqueue of a job type nobody registered', async () => {
     let seen: PluginPorts | undefined;
-    const worker = createWorker([probe((ports) => void (seen = ports))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe((ports) => void (seen = ports)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -471,8 +474,8 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('builds distinct kernels for envs sharing DB but differing in STORAGE, JOBS or DEPLOYMENT_ID', async () => {
     let inits = 0;
-    const worker = createWorker([probe(() => void (inits += 1))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe(() => void (inits += 1)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -489,8 +492,8 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('reuses the kernel for a new env object carrying the same bindings', async () => {
     let inits = 0;
-    const worker = createWorker([probe(() => void (inits += 1))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe(() => void (inits += 1)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -504,8 +507,8 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('shares one pending initialization between concurrent cold requests', async () => {
     let inits = 0;
-    const worker = createWorker([probe(() => void (inits += 1))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe(() => void (inits += 1)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -529,9 +532,10 @@ describe('runtime-cloudflare platform assembly', () => {
           inits += 1;
           if (inits === 1) throw new Error('first init fails');
         }),
+        auditTrail(),
       ],
       {
-        audit: { acceptNoDurableAudit: true },
+        audit: {},
         ...quiet,
         platformPorts: STANZA,
         cacheStorage: fakeCaches(),
@@ -557,8 +561,8 @@ describe('runtime-cloudflare platform assembly', () => {
     ['a STORAGE string instead of a bucket', { STORAGE: 'bucket' }],
   ])('answers 503 misconfigured when %s is missing', async (_name, overrides) => {
     let inits = 0;
-    const worker = createWorker([probe(() => void (inits += 1))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe(() => void (inits += 1)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -575,8 +579,8 @@ describe('runtime-cloudflare platform assembly', () => {
   });
 
   it('answers 503 misconfigured when the Cache API is unavailable', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: null,
@@ -590,8 +594,8 @@ describe('runtime-cloudflare platform assembly', () => {
   });
 
   it('returns without throwing from queue and scheduled when bindings are missing', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -606,8 +610,8 @@ describe('runtime-cloudflare platform assembly', () => {
     'exports completion spans independently of log level %s',
     async (level) => {
       const calls: Array<{ url: string; body: string }> = [];
-      const worker = createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         ...quiet,
         platformPorts: STANZA,
         cacheStorage: fakeCaches(),
@@ -683,8 +687,8 @@ describe('runtime-cloudflare platform assembly', () => {
           });
         },
       };
-      const worker = createWorker([plugin], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([plugin, auditTrail()], {
+        audit: {},
         ...quiet,
         platformPorts: STANZA,
         cacheStorage: fakeCaches(),
@@ -753,8 +757,8 @@ describe('runtime-cloudflare platform assembly', () => {
 
   it('defers the OTLP export to waitUntil and never flushes eagerly', async () => {
     const otlp = otlpFetch();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -779,8 +783,8 @@ describe('runtime-cloudflare platform assembly', () => {
       ...STANZA,
       observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
     };
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: { log: (value) => void lines.push(value), error: (value) => void lines.push(value) },
       platformPorts: stanza,
@@ -794,8 +798,8 @@ describe('runtime-cloudflare platform assembly', () => {
     expect(lines.some((line) => (line as { event?: string }).event === 'http.request')).toBe(true);
 
     const analytics = fakeAnalytics();
-    const withAnalytics = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const withAnalytics = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -842,8 +846,8 @@ describe('runtime-cloudflare inbound traceparent', () => {
 
   async function traceIds(observability: WorkerOptions['observability']): Promise<unknown[]> {
     const lines: unknown[] = [];
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: { log: (value) => void lines.push(value), error: (value) => void lines.push(value) },
       platformPorts: STANZA,
@@ -879,8 +883,8 @@ describe('runtime-cloudflare inbound traceparent', () => {
   });
 
   it('answers 503 misconfigured on a non-boolean flag without echoing it', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -897,8 +901,8 @@ describe('runtime-cloudflare inbound traceparent', () => {
   });
 
   it('answers 503 misconfigured on an unknown observability key', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -934,8 +938,8 @@ describe('runtime-cloudflare job path', () => {
       },
     });
     const lines: unknown[] = [];
-    const worker = createWorker([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: { log: (value) => void lines.push(value), error: (value) => void lines.push(value) },
       platformPorts: STANZA,
@@ -998,8 +1002,8 @@ describe('runtime-cloudflare event delivery', () => {
   it('retries every message and acks none when the organization lookup fails', async () => {
     const lines: unknown[] = [];
     const record = (value: unknown) => void lines.push(value);
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: { log: record, error: record },
       platformPorts: STANZA,
@@ -1036,8 +1040,8 @@ describe('runtime-cloudflare event delivery', () => {
 
   it('retries every message and acks none when the application cannot be built', async () => {
     const { entries, log } = recordingLog();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       log,
       platformPorts: STANZA,
@@ -1063,8 +1067,8 @@ describe('runtime-cloudflare event delivery', () => {
 
   it('logs job.cron_failed when the scheduled event cannot build the application', async () => {
     const { entries, log } = recordingLog();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       log,
       platformPorts: STANZA,
@@ -1099,8 +1103,8 @@ describe('runtime-cloudflare event delivery', () => {
         ports = initPorts;
       },
     });
-    const worker = createWorker([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -1133,8 +1137,8 @@ describe('runtime-cloudflare event delivery', () => {
 describe('runtime-cloudflare application cache', () => {
   function counting() {
     let inits = 0;
-    const worker = createWorker([probe(() => void (inits += 1))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([probe(() => void (inits += 1)), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -1175,8 +1179,8 @@ describe('runtime-cloudflare application cache', () => {
 
   it('logs the names of failed bindings once per failed build and keeps them out of the 503 body', async () => {
     const { entries, log } = recordingLog();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       log,
       platformPorts: STANZA,
@@ -1288,8 +1292,8 @@ describe('runtime-cloudflare deferred work per request', () => {
             releases.push(() => resolve(new Response('{}', { status: 200 })));
           })
         : Promise.resolve(new Response('{}', { status: 200 }));
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: fakeCaches(),
@@ -1314,8 +1318,8 @@ describe('runtime-cloudflare deferred work per request', () => {
 
   it('keeps a held cache put with the request that created it', async () => {
     const puts = heldPuts();
-    const worker = createWorker([cachePlugin(() => undefined)], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([cachePlugin(() => undefined), auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: puts.caches,
@@ -1343,8 +1347,8 @@ describe('runtime-cloudflare deferred work per request', () => {
     const lines: unknown[] = [];
     const record = (value: unknown) => void lines.push(value);
     let seen: PluginPorts | undefined;
-    const worker = createWorker([cachePlugin((ports) => void (seen = ports))], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([cachePlugin((ports) => void (seen = ports)), auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: { log: record, error: record },
       platformPorts: STANZA,
@@ -1365,7 +1369,7 @@ describe('runtime-cloudflare deferred work per request', () => {
 
 describe('runtime-cloudflare event delivery without a stanza', () => {
   it('retries every message instead of returning silently', async () => {
-    const worker = createWorker([], quiet);
+    const worker = createWorker([auditTrail()], quiet);
     const first = messageProbe({ v: 1 });
     const second = messageProbe({ v: 1 });
     await worker.queue({ messages: [first.message, second.message] }, boundEnv());
@@ -1380,8 +1384,8 @@ describe('runtime-cloudflare fingerprint memo', () => {
   it('computes the configuration digest once for one env object', async () => {
     const digest = vi.spyOn(crypto.subtle, 'digest');
     try {
-      const worker = createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         ...quiet,
         platformPorts: STANZA,
         cacheStorage: fakeCaches(),
@@ -1405,8 +1409,8 @@ describe('runtime-cloudflare handler failure reporting', () => {
     const lines: unknown[] = [];
     const record = (value: unknown) => void lines.push(value);
     const logged: unknown[] = [];
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: (entry) => void logged.push(entry),
       console: { log: record, error: record },
       platformPorts: STANZA,
@@ -1500,8 +1504,8 @@ describe('runtime-cloudflare request scope', () => {
         ports = initPorts;
       },
     });
-    const worker = createWorker([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
       ...quiet,
       platformPorts: STANZA,
       cacheStorage: puts.caches,
@@ -1607,8 +1611,8 @@ describe('runtime-cloudflare request scope', () => {
         });
       },
     });
-    const worker = createWorker([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
       log,
       console: quiet.console,
     });
@@ -1620,8 +1624,8 @@ describe('runtime-cloudflare request scope', () => {
 
   it('logs untracked dispatches once, through the platform observability path', async () => {
     const out = consoleLines();
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: out.console,
       platformPorts: STANZA,
@@ -1662,8 +1666,8 @@ describe('runtime-cloudflare request scope', () => {
         ports = initPorts;
       },
     });
-    const worker = createWorker([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
       log: () => undefined,
       console: out.console,
       platformPorts: STANZA,
@@ -1811,8 +1815,8 @@ it.each([undefined, true, false])(
         PB_PUBLIC_URL: 'https://broker.test',
         DEPLOYMENT_ID: 'vulnerability-test',
       };
-      const worker = createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         ...(enabled === undefined ? {} : { vulnerability: { enabled } }),
         platformPorts: {
           blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
@@ -1948,8 +1952,8 @@ describe('runtime MCP mount', () => {
   it.each([true, false])(
     'checks binding availability after a cached startup with binding present: %s',
     async (initiallyBound) => {
-      const worker = createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         mcp: { enabled: true },
         log: () => undefined,
       });
@@ -1971,7 +1975,10 @@ describe('runtime MCP mount', () => {
   it.each([undefined, false])(
     'MCP disabled (%s) matches the unknown core route',
     async (enabled) => {
-      const worker = createWorker([], enabled === undefined ? {} : { mcp: { enabled } });
+      const worker = createWorker(
+        [auditTrail()],
+        enabled === undefined ? {} : { mcp: { enabled } },
+      );
       const snapshot = async (path: string) => {
         const response = await worker.fetch(
           new Request(`https://broker.test${path}`, { method: 'POST' }),
@@ -1991,8 +1998,8 @@ describe('runtime MCP mount', () => {
   it('MCP enabled refuses startup without the binding and sanitizes the response and log', async () => {
     const log = vi.fn();
     const env = { PB_PUBLIC_URL: 'https://broker.test', PB_MASTER_KEY: 'environment-sentinel' };
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       mcp: { enabled: true },
       log,
     });
@@ -2044,8 +2051,8 @@ describe('runtime MCP mount', () => {
         PB_MASTER_KEY: key,
         MCP_RATE_LIMIT: { limit },
       };
-      const worker = createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         mcp: { enabled: true },
         log: () => undefined,
       });

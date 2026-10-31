@@ -119,7 +119,7 @@ async function project(options: Options = {}) {
   const configPath = path.join(configDir, 'broker.config.ts');
   await writeFile(
     configPath,
-    `import { platform } from 'cfg-dep';\nexport default { platform, plugins: [], ${assets} };\n`,
+    `import { platform } from 'cfg-dep';\nexport default { platform, audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [], ${assets} };\n`,
   );
   const runtimeEntry = path.join(cwd, 'entry.ts');
   await writeFile(runtimeEntry, "export { platformPorts } from '#pb-manifest';");
@@ -239,7 +239,7 @@ describe('asset staging', () => {
     const unselected = path.join(p.configDir, 'unselected.config.ts');
     await writeFile(
       unselected,
-      "import { platform } from 'cfg-dep';\nexport default { platform, plugins: [] };\n",
+      "import { platform } from 'cfg-dep';\nexport default { platform, audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [] };\n",
     );
     await run(p, { configPath: unselected });
     expect(await exists(path.join(first.outDir, 'assets', 'manifest.json'))).toBe(false);
@@ -297,7 +297,7 @@ describe('asset validation', () => {
     const p = await project();
     await writeFile(
       p.configPath,
-      "export default { platform: 'node', plugins: [], assets: [{ kind: 'ui', provider: 'a' }, { kind: 'ui', provider: 'b' }] };\n",
+      "export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [], assets: [{ kind: 'ui', provider: 'a' }, { kind: 'ui', provider: 'b' }] };\n",
     );
 
     expect((await failure(run(p))).problems).toContain('assets: duplicate ui selection');
@@ -411,7 +411,7 @@ describe('config location', () => {
     const configPath = path.join(p.configDir, 'plugin.config.ts');
     await writeFile(
       configPath,
-      "export default { platform: 'node', plugins: [{ id: 'widgets', package: 'widgets-plugin', apiVersion: 3, platforms: ['node'], migrations: { dir: 'migrations' }, register: () => undefined }] };\n",
+      "export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [{ id: 'widgets', package: 'widgets-plugin', apiVersion: 3, platforms: ['node'], migrations: { dir: 'migrations' }, register: () => undefined }] };\n",
     );
     return configPath;
   }
@@ -425,7 +425,10 @@ describe('config location', () => {
     const info = JSON.parse(await readFile(result.buildInfo, 'utf8')) as {
       plugins: Record<string, string>;
     };
-    expect(info.plugins).toEqual({ 'widgets-plugin': '4.5.6' });
+    expect(info.plugins).toEqual({
+      'widgets-plugin': '4.5.6',
+      '@package-broker/plugin-audit-trail': '0.1.0-rc.0',
+    });
     expect(
       await readFile(path.join(result.migrations, 'widgets', '0001_init.sql'), 'utf8'),
     ).toContain('widgets_items');
@@ -471,7 +474,7 @@ describe('config location, shared sources and core', () => {
     const configPath = path.join(p.configDir, 'shared.config.ts');
     await writeFile(
       configPath,
-      "import { platform } from 'cfg-dep';\nimport { ports } from '../shared/x.ts';\nexport default { platform, plugins: [], platformPorts: ports ?? undefined };\n",
+      "import { platform } from 'cfg-dep';\nimport { ports } from '../shared/x.ts';\nexport default { platform, audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [], platformPorts: ports ?? undefined };\n",
     );
 
     await expect(run(p, { configPath })).resolves.toBeDefined();
@@ -495,7 +498,7 @@ describe('config location, shared sources and core', () => {
     const configPath = path.join(p.configDir, 'missing.config.ts');
     await writeFile(
       configPath,
-      "export default { platform: 'node', plugins: [{ id: 'widgets', package: 'absent-plugin', apiVersion: 3, platforms: ['node'], register: () => undefined }] };\n",
+      "export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [{ id: 'widgets', package: 'absent-plugin', apiVersion: 3, platforms: ['node'], register: () => undefined }] };\n",
     );
 
     expect((await failure(run(p, { configPath }))).problems.join('\n')).toContain(

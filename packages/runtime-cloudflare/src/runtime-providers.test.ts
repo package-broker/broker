@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -274,8 +275,8 @@ function harness(compiled: unknown[] = []): Harness {
       return plugin.identityProviders!(ctx);
     },
   };
-  const worker = createWorker([counted], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([counted, auditTrail()], {
+    audit: {},
     log: (entry) => void log.push({ ...entry }),
   });
   return { worker, log, builds: () => builds };

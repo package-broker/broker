@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '@package-broker/core/db/port';
 import type { KernelOptions } from '@package-broker/core/kernel/kernel';
@@ -114,8 +115,8 @@ const authEnv: Env = {
 };
 
 function harness() {
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     authorization: engine,
     log: () => undefined,
   });
@@ -260,8 +261,8 @@ describe('Worker setup mount', () => {
   });
 
   it('mounts no setup routes without the ASSETS binding', async () => {
-    const worker = createWorker([], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: () => undefined,
     });

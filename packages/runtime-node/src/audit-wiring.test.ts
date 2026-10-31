@@ -233,15 +233,21 @@ describe('Node audit assembly', () => {
       plugins: [trail],
       audit: { capacity, policy: 'required', alerts: { webhookEnv: 'ALERT_URL' } },
     };
+    const log = vi.fn();
     const audit = await createNodeAudit({
       config,
       env: (name) => ({ ALERT_URL: 'https://alerts.example.test', PB_AUDIT_TRAIL: 'off' })[name],
       executor: database.executor,
-      observability: noopObservability,
+      observability: { ...noopObservability, log },
       maxJournalBytes: capacity.maxJournalBytes,
       generation: 0,
       telemetryActive: false,
       registration: () => collectRegistrations([trail]),
+    });
+    expect(log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'audit.trail_toggle_ignored',
+      reason_code: 'audit.trail_toggle_ignored',
     });
     try {
       expect(await audit.effective(org)).toMatchObject({

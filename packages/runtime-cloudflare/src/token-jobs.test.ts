@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import * as personalTokens from '@package-broker/core/authz/pat-service';
 import * as serviceTokens from '@package-broker/core/authz/service-token-service';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -194,8 +195,8 @@ async function boot() {
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: 'https://broker.test',
   };
-  const worker = createWorker([plugin], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([plugin, auditTrail()], {
+    audit: {},
     platformPorts,
     log: (entry) => void logs.push(entry),
     console: { log: () => undefined, error: () => undefined },

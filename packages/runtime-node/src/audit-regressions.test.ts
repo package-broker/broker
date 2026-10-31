@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import * as effectiveRepository from '@package-broker/db-sqlite/repositories/audit-effective';
 import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
@@ -247,9 +248,9 @@ describe('Node audit resolution regressions', () => {
   it('returns retryable audit_unavailable when org resolution fails transiently', async () => {
     const { database } = await fixture();
     const executor = { ...database.executor, all: vi.fn(database.executor.all) };
-    const broker = createNodeServer([], {
+    const broker = createNodeServer([auditTrail()], {
       executor: executor as SqlExecutor,
-      audit: { capacity, acceptNoDurableAudit: true },
+      audit: { capacity },
       auditEnv: {},
       auth,
       log: () => {},

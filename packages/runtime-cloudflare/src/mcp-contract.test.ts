@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -96,8 +97,8 @@ runMcpContract(
         PB_PUBLIC_URL: ORIGIN,
         ...(binding === undefined ? {} : { MCP_RATE_LIMIT: binding }),
       };
-      const worker = createWorker([], {
-        audit: { acceptNoDurableAudit: true },
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         mcp: { enabled: true },
         log: () => undefined,
       });

@@ -6,7 +6,13 @@ import {
   type BrokerConfig,
 } from '../config.js';
 import type { PluginDefinition } from '../plugin.js';
-import { DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES, MIN_AUDIT_JOURNAL_BYTES } from './config.js';
+import {
+  AUDIT_WARNING_EVENTS,
+  auditWarningEvent,
+  DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES,
+  MIN_AUDIT_JOURNAL_BYTES,
+} from './config.js';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-codes.js';
 
 const sink = (id: string): PluginDefinition => ({
   id: `plugin-${id}`,
@@ -220,11 +226,20 @@ describe('audit build configuration', () => {
     );
     expect(brokerAuditProblems(selected, 'node')).toEqual([]);
     expect(brokerAuditWarnings(selected, 'node')).toEqual([
-      'audit: trail toggleEnv is ignored under required policy',
+      {
+        code: 'trail_toggle_ignored',
+        message: 'audit: trail toggleEnv is ignored under required policy',
+      },
     ]);
     expect(
       brokerAuditWarnings(config({ policy: 'availability' }, { plugins: [trail] }), 'node'),
-    ).toEqual([]);
+    ).toEqual([
+      {
+        code: 'capacity_unbounded',
+        message:
+          'audit.capacity.maxJournalBytes: unset; Node audit capacity enforcement is disabled',
+      },
+    ]);
     expect(brokerAuditWarnings(config({ policy: 'required' }), 'node')).toEqual([]);
     expect(
       brokerAuditWarnings(
@@ -606,7 +621,10 @@ describe('audit build configuration', () => {
       'audit: required policy needs a telemetry OTLP endpoint or alerts.webhookEnv',
     ]);
     expect(brokerAuditWarnings(selected, 'node')).toEqual([
-      'audit: trail toggleEnv is ignored under required policy',
+      {
+        code: 'trail_toggle_ignored',
+        message: 'audit: trail toggleEnv is ignored under required policy',
+      },
     ]);
   });
 
@@ -654,4 +672,38 @@ describe('audit build configuration', () => {
       ]);
     },
   );
+});
+
+it('warns only for unbounded Node availability trails', () => {
+  const selected = config(undefined, { plugins: [trail] });
+  expect(brokerAuditWarnings(selected, 'node')).toEqual([
+    {
+      code: 'capacity_unbounded',
+      message: 'audit.capacity.maxJournalBytes: unset; Node audit capacity enforcement is disabled',
+    },
+  ]);
+  expect(brokerAuditWarnings(selected, 'cloudflare')).toEqual([]);
+  expect(
+    brokerAuditWarnings(
+      { ...selected, audit: { capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES } } },
+      'node',
+    ),
+  ).toEqual([]);
+});
+
+it('maps every audit warning code to a registered event and reason code', () => {
+  const warnings = [
+    ...brokerAuditWarnings(config(undefined, { plugins: [trail] }), 'node'),
+    ...brokerAuditWarnings(
+      config({ policy: 'required', alerts: { webhookEnv: 'ALERT_URL' } }, { plugins: [trail] }),
+      'cloudflare',
+    ),
+  ];
+  expect(warnings.map(({ code }) => code).sort()).toEqual(Object.keys(AUDIT_WARNING_EVENTS).sort());
+  for (const warning of warnings) {
+    const event = auditWarningEvent(warning.code);
+    expect(AUDIT_EVENTS.has(event)).toBe(true);
+    expect(KERNEL_REASON_CODES.has(event)).toBe(true);
+    expect(warning.message).not.toBe('');
+  }
 });

@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
@@ -59,8 +60,8 @@ async function probe(
   overrides: Record<string, string | undefined> = {},
 ): Promise<{ status: number; text: string; logs: string }> {
   const entries: string[] = [];
-  const worker = createWorker([], {
-    audit: { acceptNoDurableAudit: true },
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     log: (entry) => void entries.push(JSON.stringify(entry)),
   });
   const response = await worker.fetch(

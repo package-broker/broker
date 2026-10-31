@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
 import {
+  brokerAuditProblems,
+  brokerAuditWarnings,
   brokerObservabilityProblems,
   brokerVulnerabilityProblems,
 } from '@package-broker/core/config';
@@ -18,6 +20,7 @@ import {
 import type { PackageVisibilityPort } from '@package-broker/core/db/catalogue';
 import type { Platform, PluginDefinition } from '@package-broker/core/plugin';
 import { build as esbuild, type Metafile } from 'esbuild';
+import { auditTrail } from '@package-broker/plugin-audit-trail';
 import { AssetProblemsError, prepareAssets, stageAssets } from './build-assets.js';
 import {
   credentialProblems,
@@ -33,6 +36,7 @@ import {
   isRouteProblem,
   orderPlugins,
   renderManifestJson,
+  describeAudit,
   validatePluginShape,
 } from './manifest.js';
 import {
@@ -118,7 +122,12 @@ async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig
     ],
   });
   try {
-    const loaded = (await import(`${pathToFileURL(outfile).href}`)) as { default?: BrokerConfig };
+    const hash = createHash('sha256')
+      .update(await readFile(outfile))
+      .digest('hex');
+    const loaded = (await import(`${pathToFileURL(outfile).href}?hash=${hash}`)) as {
+      default?: BrokerConfig;
+    };
     if (!loaded.default) throw new BuildConfigError(['default']);
     return loaded.default;
   } finally {
@@ -166,14 +175,38 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   }
   gitSha = process.env.GITHUB_SHA ?? gitSha;
   const configPath = path.resolve(cwd, options.configPath);
-  const config = await loadConfig(configPath, cwd);
+  const loadedConfig = await loadConfig(configPath, cwd);
+  if (loadedConfig.plugins.some((plugin) => plugin.id === 'audit-trail' && !plugin.auditTrail)) {
+    throw new BuildConfigError(
+      ['plugins.id'],
+      'invalid broker config: audit-trail id requires a trail definition',
+    );
+  }
+  const defaultTrail =
+    loadedConfig.audit?.acceptNoDurableAudit !== true &&
+    !loadedConfig.plugins.some((plugin) => plugin.auditTrail || plugin.auditSinks?.length);
+  const config: BrokerConfig = defaultTrail
+    ? { ...loadedConfig, plugins: [...loadedConfig.plugins, auditTrail()] }
+    : loadedConfig;
   const target = options.target ?? config.platform;
 
-  const observabilityProblems = [
+  const configProblems = [
     ...brokerObservabilityProblems(config),
     ...brokerVulnerabilityProblems(config),
+    ...brokerAuditProblems(config, target),
   ];
-  if (observabilityProblems.length > 0) throw new BuildDiagnosticsError(observabilityProblems);
+  if (
+    config.audit?.policy === 'required' &&
+    !config.plugins.some(
+      (plugin) =>
+        plugin.auditTrail || plugin.auditSinks?.some((sink) => sink.custody === 'durable'),
+    )
+  ) {
+    configProblems.push('audit: required policy needs a durable path');
+  }
+  if (configProblems.length > 0) throw new BuildDiagnosticsError(configProblems);
+  for (const warning of brokerAuditWarnings(config, target))
+    console.warn(`warning: ${warning.message}`);
   const pluginKeys: string[] = [];
   validatePluginShape(config.plugins, target, (key) => pluginKeys.push(key));
   if (pluginKeys.length > 0) throw new BuildConfigError(pluginKeys);
@@ -221,7 +254,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const resolveFromConfig = defaultResolvePackageDir(configDir);
   const resolveFromCli = defaultResolvePackageDir(path.dirname(fileURLToPath(import.meta.url)));
   const resolvePackageDir: ResolvePackageDir = (packageName) => {
-    if (packageName === DB_SQLITE_PACKAGE) return resolveFromCli(packageName);
+    if (
+      packageName === DB_SQLITE_PACKAGE ||
+      (defaultTrail && packageName === '@package-broker/plugin-audit-trail')
+    )
+      return resolveFromCli(packageName);
     try {
       return resolveFromConfig(packageName);
     } catch (error) {
@@ -265,6 +302,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
   const manifestTs = path.join(generated, 'manifest.ts');
   const manifestJson = path.join(generated, 'manifest.json');
+  const audit = describeAudit(config, target);
   await writeFile(
     manifestTs,
     renderBuildManifest(
@@ -273,6 +311,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       target === 'node' ? sources : sources.map(({ id, checksum }) => ({ id, checksum })),
       process.platform,
       platformPorts,
+      {
+        buildGeneration: audit.build_generation,
+        ...(defaultTrail ? { defaultTrailImport: '@package-broker/plugin-audit-trail' } : {}),
+      },
     ),
   );
   await writeFile(
@@ -284,6 +326,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
           registration,
         }),
         platformPorts,
+        audit,
       },
       null,
       2,
@@ -323,6 +366,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     options.runtimeEntry ??
     createRequire(import.meta.url).resolve(`@package-broker/${runtime}/entry`);
   const bundle = path.join(outDir, target === 'cloudflare' ? 'worker.js' : 'server.js');
+  const manifestRealPath = await realpath(manifestTs);
   const result = await esbuild({
     entryPoints: [entry],
     outfile: bundle,
@@ -336,6 +380,59 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         ? ['cloudflare:*', 'node:async_hooks', 'node:buffer', 'node:zlib']
         : ['better-sqlite3'],
     alias: { '#pb-manifest': manifestTs },
+    plugins: [
+      {
+        name: 'cli-audit-dependencies',
+        async setup(pluginBuild) {
+          const resolving = {};
+          const roots = await Promise.all(
+            ['@package-broker/core', '@package-broker/plugin-audit-trail'].map(async (name) => {
+              const dir = resolveFromCli(name);
+              const metadata = JSON.parse(
+                await readFile(path.join(dir, 'package.json'), 'utf8'),
+              ) as { sideEffects?: unknown };
+              return { name, dir, sideEffects: metadata.sideEffects === false ? false : undefined };
+            }),
+          );
+          const packageModule = (file: string) => {
+            for (const root of roots) {
+              const relative = path.relative(root.dir, file);
+              if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
+              return {
+                path: file,
+                ...(root.sideEffects === false ? { sideEffects: false } : {}),
+              };
+            }
+            return undefined;
+          };
+          pluginBuild.onResolve({ filter: /.*/ }, async (args) => {
+            if (args.pluginData === resolving) return undefined;
+            if (args.path.startsWith('.') || path.isAbsolute(args.path)) {
+              const file = path.resolve(args.resolveDir, args.path);
+              if (/\.[cm]?[jt]s$/.test(file)) return packageModule(file);
+            }
+            if (!/^@package-broker\/(?:core|plugin-audit-trail)(?:\/|$)/.test(args.path))
+              return undefined;
+            const resolved =
+              args.path === '@package-broker/plugin-audit-trail' &&
+              (args.importer === manifestTs || args.importer === manifestRealPath) &&
+              defaultTrail
+                ? {
+                    path: createRequire(import.meta.url).resolve(args.path),
+                    external: false,
+                    errors: [],
+                  }
+                : await pluginBuild.resolve(args.path, {
+                    kind: args.kind,
+                    resolveDir: args.resolveDir,
+                    pluginData: resolving,
+                  });
+            if (resolved.errors.length > 0 || resolved.external) return resolved;
+            return packageModule(resolved.path) ?? resolved;
+          });
+        },
+      },
+    ],
     nodePaths: [path.join(cwd, 'node_modules')],
     absWorkingDir: cwd,
     sourcemap: true,

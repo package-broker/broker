@@ -308,14 +308,45 @@ export function brokerAuditProblems(config: BrokerConfig, target: Platform): str
   return problems;
 }
 
-export function brokerAuditWarnings(config: BrokerConfig, target: Platform): string[] {
-  void target;
+export const AUDIT_WARNING_EVENTS = {
+  trail_toggle_ignored: 'audit.trail_toggle_ignored',
+  capacity_unbounded: 'audit.capacity_unbounded',
+} as const;
+
+export type AuditWarningCode = keyof typeof AUDIT_WARNING_EVENTS;
+
+export interface BrokerAuditWarning {
+  readonly code: AuditWarningCode;
+  readonly message: string;
+}
+
+export function auditWarningEvent(code: AuditWarningCode) {
+  return AUDIT_WARNING_EVENTS[code];
+}
+
+export function brokerAuditWarnings(config: BrokerConfig, target: Platform): BrokerAuditWarning[] {
   try {
     const audit = snapshot(ownData(config, 'audit'));
-    if (!object(audit) || audit.policy !== 'required') return [];
-    return auditDefinitions(config, []).toggle
-      ? ['audit: trail toggleEnv is ignored under required policy']
-      : [];
+    const definitions = auditDefinitions(config, []);
+    const warnings: BrokerAuditWarning[] = [];
+    if (object(audit) && audit.policy === 'required') {
+      if (definitions.toggle)
+        warnings.push({
+          code: 'trail_toggle_ignored',
+          message: 'audit: trail toggleEnv is ignored under required policy',
+        });
+    } else if (
+      target === 'node' &&
+      config.plugins.some((plugin) => plugin.auditTrail) &&
+      (!object(audit) || !object(audit.capacity) || audit.capacity.maxJournalBytes === undefined)
+    ) {
+      warnings.push({
+        code: 'capacity_unbounded',
+        message:
+          'audit.capacity.maxJournalBytes: unset; Node audit capacity enforcement is disabled',
+      });
+    }
+    return warnings;
   } catch {
     return [];
   }

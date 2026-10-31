@@ -151,7 +151,6 @@ async function nodeSmoke(out) {
     PB_BLOB_ROOT: join(out, 'blobs'),
     PB_MASTER_KEY: key,
     PB_PUBLIC_URL: base,
-    PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
     PB_ORG_SLUG: 'smoke',
     PB_ORG_NAME: 'Smoke',
     DEPLOYMENT_ID: 't767',

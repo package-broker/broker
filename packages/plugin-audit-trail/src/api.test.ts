@@ -1,20 +1,22 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { sha256Hex } from '../../auth/primitives.js';
+import { sha256Hex } from '@package-broker/core/auth/primitives';
 import {
   createAuthorizationEngine,
   patValidationGate,
   type EngineAccessPort,
-} from '../../authz/engine.js';
-import type { AuditRow } from '../../audit/chain.js';
-import { orgContext } from '../../db/port.js';
-import type { RequestContext } from '../../plugin.js';
-import type { AuditTrailServices } from '../../internal/audit-trail-context.js';
-import { validateAuditBuild, resolveOrgAudit } from '../../audit/effective.js';
-import { fixedClock } from '../../ids.js';
-import { collectRegistrations } from '../../kernel/registry.js';
-import { createKernel } from '../../kernel/kernel.js';
-import { createKeyring } from '../../secrets/keyring.js';
-import { auditRoutes, type AuditReader, type AuditTrailDispatch } from './audit.js';
+} from '@package-broker/core/authz/engine';
+import type { AuditRow } from '@package-broker/core/audit/chain';
+import { orgContext } from '@package-broker/core/db/port';
+import type { RequestContext } from '@package-broker/core/plugin';
+type AuditTrailServices = AuditTrailDispatch['services'];
+import { validateAuditBuild, resolveOrgAudit } from '@package-broker/core/audit/effective';
+import { fixedClock } from '@package-broker/core/ids';
+import { collectRegistrations } from '@package-broker/core/kernel/registry';
+import { createKernel } from '@package-broker/core/kernel/kernel';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { auditRoutes, type AuditTrailDispatch } from '@package-broker/core/api/routes/audit';
+
+import { auditTrail } from './index.js';
 
 beforeEach(() => {
   vi.spyOn(crypto, 'randomUUID').mockReturnValue('11111111-1111-4111-8111-111111111111');
@@ -51,7 +53,7 @@ async function fixture(
     stub?: boolean;
     dispatch?: AuditTrailDispatch;
     permissions?: string[];
-    rows?: (AuditRow | import('../../audit/plugin-api.js').AuditWithheldMarkerV1)[];
+    rows?: (AuditRow | import('@package-broker/core/audit/plugin-api').AuditWithheldMarkerV1)[];
     projects?: {
       id: string;
       slug: string;
@@ -61,10 +63,10 @@ async function fixture(
     }[];
   } = {},
 ) {
-  const list = vi.fn<AuditReader['list']>((ctx, query) =>
+  const list = vi.fn<AuditTrailServices['journal']['list']>((ctx, query) =>
     Promise.resolve({
       items: (options.rows ?? [row('project-a'), row('project-b'), row(null)])
-        .filter((item) => ('org_id' in item ? item.org_id : item.orgId) === ctx.org?.orgId)
+        .filter((item) => ('org_id' in item ? item.org_id : item.orgId) === ctx.orgId)
         .filter(
           (item) =>
             query.projectId === null ||
@@ -73,12 +75,46 @@ async function fixture(
               : 'projectId' in item
                 ? item.projectId
                 : null) === query.projectId,
+        )
+        .map((item) =>
+          'kind' in item
+            ? item
+            : {
+                kind: 'event' as const,
+                schemaVersion: 1 as const,
+                chainId: 'chain',
+                epoch: 1,
+                id: item.id,
+                orgId: item.org_id,
+                seq: item.seq,
+                prevHash: item.prev_hash,
+                hash: item.hash,
+                createdAt: item.created_at,
+                actorType: item.actor_type,
+                actorId: item.actor_id,
+                tokenSelector: item.token_selector,
+                sourceIp: item.source_ip,
+                action: item.action,
+                targetType: item.target_type,
+                targetId: item.target_id,
+                projectId: item.project_id,
+                payloadJson: item.payload_json,
+              },
         ),
-      next: '1',
+      next: 1,
     }),
   );
-  const head = vi.fn<AuditReader['head']>(() =>
-    Promise.resolve({ seq: 1, hash: '1'.repeat(64), pendingCount: 2, lastVerifiedAt: null }),
+  const head = vi.fn<AuditTrailServices['journal']['head']>(() =>
+    Promise.resolve({
+      chainId: 'chain',
+      epoch: 1,
+      headSeq: 1,
+      headHash: '1'.repeat(64),
+      boundarySeq: 1,
+      boundaryPrevHash: '0'.repeat(64),
+      pendingCount: 2,
+      verification: null,
+    }),
   );
   const permissions = options.permissions ?? ['org:audit:read', 'project:audit:read'];
   const projects = options.projects ?? [
@@ -108,7 +144,16 @@ async function fixture(
   const kernel = await createKernel({
     platform: 'node',
     plugins: [],
-    coreRoutes: auditRoutes(options.stub ? undefined : { list, head }, options.dispatch),
+    coreRoutes: auditRoutes(
+      options.stub
+        ? undefined
+        : (options.dispatch ?? {
+            trail: { definition: auditTrail().auditTrail! },
+            effective: async () => ({ trailActive: true, policy: 'availability' as const }),
+            services: { journal: { list, head }, requestVerification: async () => undefined },
+            log: () => undefined,
+          }),
+    ),
     ports: {
       organizations: { get: () => Promise.resolve(null) },
       clock: fixedClock('2026-10-16T00:00:00.000Z'),
@@ -263,7 +308,7 @@ it('forwards exact filters and cursor on the organization list', async () => {
     projectId: 'project-a',
     actor: 'user-1',
     action: 'project.update',
-    after: '1',
+    afterSeq: 1,
     limit: 200,
   });
 });
@@ -324,11 +369,12 @@ for (const payload of [
   JSON.stringify({ op_id: ID, request_id: ID, changes: { password: { to: SENTINEL } } }),
   JSON.stringify({ op_id: ID, request_id: ID, extra: 'x'.repeat(4096) }),
 ]) {
-  it(`fails closed on unsafe payload ${payload.length}`, async () => {
-    const f = await fixture({ rows: [{ ...row(null), payload_json: payload }] });
-    expect(
-      ((await (await f.request()).json()) as { items: { payload: unknown }[] }).items[0]?.payload,
-    ).toEqual({});
+  it(`keeps unsafe legacy payload unavailable without a composed trail ${payload.length}`, async () => {
+    const f = await fixture({ stub: true, rows: [{ ...row(null), payload_json: payload }] });
+    const response = await f.request();
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain(SENTINEL);
+    expect(f.list).not.toHaveBeenCalled();
   });
 }
 for (const success of [true, false]) {
@@ -347,8 +393,8 @@ it('accepts limit 200', async () => {
 });
 
 it('refuses a project handler without a resolved project', async () => {
-  const reader: AuditReader = { list: vi.fn(), head: vi.fn() };
-  const route = auditRoutes(reader)[2]!;
+  const trail = trailDispatch();
+  const route = auditRoutes(trail.dispatch)[2]!;
   const response = await route.handler({
     request: new Request('https://broker.test/_pb/projects/demo/audit'),
     params: { project: 'demo' },
@@ -356,7 +402,7 @@ it('refuses a project handler without a resolved project', async () => {
     requestId: ID,
   } as unknown as RequestContext);
   expect(response.status).toBe(404);
-  expect(reader.list).not.toHaveBeenCalled();
+  expect(trail.create).not.toHaveBeenCalled();
 });
 
 it.each(['/_pb/audit', '/_pb/audit/head', '/_pb/projects/demo/audit'])(
@@ -388,11 +434,13 @@ function trailDispatch(active = true, policy: 'availability' | 'required' = 'ava
     },
     requestVerification: vi.fn(async () => undefined),
   };
-  const handle = vi.fn<import('../../audit/plugin-api.js').AuditTrail['handle']>(async () => ({
-    items: [],
-    next: null,
-  }));
-  const create = vi.fn((ctx: import('../../audit/plugin-api.js').AuditTrailContext) => {
+  const handle = vi.fn<import('@package-broker/core/audit/plugin-api').AuditTrail['handle']>(
+    async () => ({
+      items: [],
+      next: null,
+    }),
+  );
+  const create = vi.fn((ctx: import('@package-broker/core/audit/plugin-api').AuditTrailContext) => {
     handle.mockImplementation(async (...args) => {
       const [operation] = args;
       if (operation !== 'auditHead') return { items: [], next: null };
@@ -499,18 +547,18 @@ it('keeps authorization ahead of trail creation', async () => {
   expect(trail.dispatch.effective).not.toHaveBeenCalled();
 });
 
-it('preserves the reader fallback with no composed trail', async () => {
+it('refuses a missing composed trail', async () => {
   const trail = trailDispatch();
   const f = await fixture({ dispatch: { ...trail.dispatch, trail: null } });
-  expect((await f.request(paths[0])).status).toBe(200);
-  expect(f.list).toHaveBeenCalledOnce();
+  expect((await f.request(paths[0])).status).toBe(404);
+  expect(f.list).not.toHaveBeenCalled();
   expect(trail.create).not.toHaveBeenCalled();
 });
 
 it('keeps concurrent organization list and head requests bound to their own contexts', async () => {
   const trail = trailDispatch();
   trail.create.mockImplementation((ctx) => ({
-    handle: vi.fn<import('../../audit/plugin-api.js').AuditTrail['handle']>(
+    handle: vi.fn<import('@package-broker/core/audit/plugin-api').AuditTrail['handle']>(
       async (...[operation, request]) => {
         if (operation === 'auditHead') {
           const head = await ctx.journal.head();
@@ -583,38 +631,41 @@ it('rejects extra trail response fields without exposing body data', async () =>
   expect(body).not.toContain(SENTINEL);
 });
 
-it.each([paths[0], paths[2]])('keeps withheld items minimal on the fallback %s', async (path) => {
-  const f = await fixture({
-    rows: [
-      {
-        kind: 'withheld',
-        markerId: 'marker',
-        reasonCode: 'content_unavailable',
-        chainId: 'chain',
-        epoch: 1,
-        orgId: 'org-1',
-        seq: 7,
-        prevHash: '0'.repeat(64),
-        hash: 'a'.repeat(64),
-        id: ID,
-        createdAt: SENTINEL,
-        actorType: 'system',
-        actorId: SENTINEL,
-        action: SENTINEL,
-        targetType: 'project',
-        targetId: 'project-a',
-        projectId: 'project-a',
-      },
-    ],
-  });
-  const response = await f.request(path);
-  expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({
-    items: [{ kind: 'withheld', id: ID, seq: 7, reason: 'content' }],
-    next: '1',
-  });
-});
-it('keeps unreadable items minimal on the fallback', async () => {
+it.each([paths[0], paths[2]])(
+  'keeps withheld items minimal through the composed trail %s',
+  async (path) => {
+    const f = await fixture({
+      rows: [
+        {
+          kind: 'withheld',
+          markerId: 'marker',
+          reasonCode: 'content_unavailable',
+          chainId: 'chain',
+          epoch: 1,
+          orgId: 'org-1',
+          seq: 7,
+          prevHash: '0'.repeat(64),
+          hash: 'a'.repeat(64),
+          id: ID,
+          createdAt: SENTINEL,
+          actorType: 'system',
+          actorId: SENTINEL,
+          action: SENTINEL,
+          targetType: 'project',
+          targetId: 'project-a',
+          projectId: 'project-a',
+        },
+      ],
+    });
+    const response = await f.request(path);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      items: [{ kind: 'withheld', id: ID, seq: 7, reason: 'content' }],
+      next: '1',
+    });
+  },
+);
+it('keeps unreadable items minimal through the composed trail', async () => {
   const f = await fixture({
     rows: [
       {

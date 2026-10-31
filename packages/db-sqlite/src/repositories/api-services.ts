@@ -18,14 +18,13 @@ import { createProjectGrantReader } from './project-grant-read.js';
 import type { createVulnerabilityRuntime } from '@package-broker/core/runtime/vulnerability';
 import { createApiModule, ApiModuleDependencyError } from '@package-broker/core/api/module';
 import type { Registration } from '@package-broker/core/kernel/registry';
-import type { AuditTrailDispatch, AuditReader } from '@package-broker/core/api/routes/audit';
-import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
+import type { AuditTrailDispatch } from '@package-broker/core/api/routes/audit';
 import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
 import { createAuditApiExportStore } from './audit-api-export.js';
-import { createAuditJournalReader, createAuditQueryRepository } from './audit-query.js';
+import { createAuditJournalReader } from './audit-query.js';
 import { createPackageAdminReader } from './package-admin-read.js';
 import { createProjectSourceReader } from './project-source-read.js';
 import { createRegisteredNameRepository } from './registered-name.js';
@@ -52,58 +51,6 @@ import { createCredentialRepository } from './credential.js';
 import { createSourceRepository } from './source.js';
 import { createVisibilityStore } from './catalogue-writer.js';
 import type { AccessAssembly } from './access-services.js';
-
-function auditReader(executor: SqlExecutor, observability: Observability): AuditReader {
-  const audit = createAuditQueryRepository(executor);
-  const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
-    if (ctx.org === null) throw new TypeError('route requires an organization context');
-    return ctx.org;
-  };
-  return {
-    async list(ctx, query) {
-      const page = await createAuditJournalReader(executor, organization(ctx), observability).list({
-        projectId: query.projectId,
-        limit: query.limit,
-        ...(query.actor === undefined ? {} : { actor: query.actor }),
-        ...(query.action === undefined ? {} : { action: query.action }),
-        ...(query.after === undefined ? {} : { afterSeq: Number(query.after) }),
-      });
-      return {
-        items: page.items.map((item) =>
-          item.kind === 'withheld'
-            ? item
-            : {
-                id: item.id,
-                org_id: item.orgId,
-                seq: item.seq,
-                prev_hash: item.prevHash,
-                hash: item.hash,
-                created_at: item.createdAt,
-                actor_type: item.actorType,
-                actor_id: item.actorId,
-                token_selector: item.tokenSelector,
-                source_ip: item.sourceIp ?? null,
-                action: item.action,
-                target_type: item.targetType,
-                target_id: item.targetId,
-                project_id: item.projectId,
-                payload_json: item.payloadJson,
-              },
-        ),
-        next: page.next === null ? null : String(page.next),
-      };
-    },
-    async head(ctx) {
-      const head = await audit.head(organization(ctx));
-      return {
-        seq: head?.seq ?? 0,
-        hash: head?.hash ?? AUDIT_GENESIS_HASH,
-        pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: head?.lastVerifiedAt ?? null,
-      };
-    },
-  };
-}
 
 export interface ApiRoutesOptions {
   readonly registration?: Pick<Registration, 'audit'>;
@@ -264,7 +211,6 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         ...createPackageAdminReader(executor),
         readStatuses: input.vulnerability.readStatuses,
       },
-      audit: auditReader(executor, observability),
       ...(input.auditStatus === undefined ? {} : { auditStatus: input.auditStatus }),
       ...(input.auditHealth === undefined ? {} : { auditHealth: input.auditHealth }),
       ...(input.registration?.audit.trail == null

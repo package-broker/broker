@@ -110,7 +110,6 @@ import { entries as auditLedgerEntries } from './mutation-table/audit-ledger.js'
 import { entries as auditPendingEntries } from './mutation-table/audit-pending.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
 import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
-import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import { entries as packageIdEntries } from './mutation-table/package-id.js';
 import { entries as registryReadsEntries } from './mutation-table/registry-reads.js';
 import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
@@ -233,7 +232,6 @@ const registeredEntries: readonly MutationEntry[] = [
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,
-  ...auditQueryEntries,
   ...auditJournalEntries,
   ...auditTrailServicesEntries,
   ...catalogueReblobEntries,

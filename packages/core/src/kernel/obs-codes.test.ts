@@ -18,9 +18,10 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
-  it('has exactly the 18 audit events', () => {
+  it('has exactly the 20 audit events', () => {
     expect([...AUDIT_EVENTS].sort()).toEqual([
       'audit.alert',
+      'audit.capacity_unbounded',
       'audit.chain_broken',
       'audit.chain_integrity',
       'audit.delivery_loss',
@@ -35,6 +36,7 @@ describe('vocabularies', () => {
       'audit.seal_repaired',
       'audit.sealed',
       'audit.sink_admin_refused',
+      'audit.trail_toggle_ignored',
       'audit.verified',
       'audit.verify_continued',
       'audit.verify_partial',
@@ -44,7 +46,7 @@ describe('vocabularies', () => {
     expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
-    expect(AUDIT_EVENTS.size).toBe(18);
+    expect(AUDIT_EVENTS.size).toBe(20);
   });
 
   it('has exactly the 5 kernel events', () => {
@@ -107,10 +109,12 @@ describe('vocabularies', () => {
         'audit.sink_inactive',
         'audit.config_invalid',
         'audit.mode_none',
+        'audit.trail_toggle_ignored',
+        'audit.capacity_unbounded',
         'audit.chain_integrity',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(52);
+    expect(KERNEL_REASON_CODES.size).toBe(54);
   });
 
   it('matches the port CODE pattern for every value', () => {

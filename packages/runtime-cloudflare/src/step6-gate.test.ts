@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -321,8 +322,8 @@ describe('step 6 release gate on Miniflare D1', () => {
       PB_MASTER_KEY: KEY,
       PB_PUBLIC_URL: PUBLIC_URL,
     } as unknown as Env;
-    const worker = createWorker([plugin], {
-      audit: { acceptNoDurableAudit: true },
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
       log: () => undefined,
     });
     const services = await worker.services(environment);

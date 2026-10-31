@@ -1,3 +1,7 @@
+import { jobNotification } from './jobs/consumer.js';
+import type { SourceProvider } from '@package-broker/core/sources/provider';
+import type { PluginDefinition } from '@package-broker/core/plugin';
+import { gitTarball } from '@package-broker/core/ingest/vcs/git-tar';
 import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { createNpmHandleOf } from '@package-broker/core/registry/module';
@@ -17,7 +21,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
-import type { SqlExecutor } from '@package-broker/core/db/port';
+import type { SqlExecutor, SqlValue } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import * as kernelModule from '@package-broker/core/kernel/kernel';
@@ -57,7 +61,7 @@ const platformPorts: PlatformPortConfig = {
   observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
 };
 
-const slots = Array.from({ length: 31 }, (_, index) => index);
+const slots = Array.from({ length: 32 }, (_, index) => index);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
@@ -108,6 +112,30 @@ function memoryBucket() {
       }
       objects.set(key, { bytes, contentType: options?.httpMetadata?.contentType });
       return { size: bytes.byteLength, httpMetadata: options?.httpMetadata ?? {} };
+    },
+    async createMultipartUpload(
+      key: string,
+      options?: { httpMetadata?: { contentType?: string } },
+    ) {
+      const parts = new Map<number, Uint8Array>();
+      return {
+        uploadPart: async (partNumber: number, bytes: Uint8Array) => {
+          parts.set(partNumber, bytes.slice());
+          return { partNumber, etag: String(partNumber) };
+        },
+        complete: async (ordered: { partNumber: number }[]) => {
+          const bytes = new Uint8Array(
+            await new Blob(
+              ordered.map(({ partNumber }) => Uint8Array.from(parts.get(partNumber)!)),
+            ).arrayBuffer(),
+          );
+          objects.set(key, { bytes, contentType: options?.httpMetadata?.contentType });
+          return { key };
+        },
+        abort: async () => {
+          parts.clear();
+        },
+      };
     },
     async get(key: string, options?: { range?: { offset: number; length: number } }) {
       const object = objects.get(key);
@@ -285,6 +313,7 @@ interface SourceSeed {
 async function boot(
   options: {
     sources?: SourceSeed[];
+    vcs?: boolean;
     worker?: WorkerOptions;
     registry?: WorkerOptions['registry'];
   } = {},
@@ -433,7 +462,7 @@ async function boot(
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
   };
-  const worker = createWorker([], {
+  const worker = createWorker(options.vcs ? [vcsPlugin] : [], {
     platformPorts,
     cacheStorage,
     log: (record) => void events.push(record),
@@ -525,6 +554,37 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { packages: Record<string, unknown[]> };
     expect(body.packages['acme/lib']).toHaveLength(3);
+  });
+
+  it('queues an unbuilt VCS tarball and serves its integrity after building', async () => {
+    const app = await boot({
+      vcs: true,
+      worker: {
+        platformPorts: {
+          ...platformPorts,
+          blob: { ...platformPorts.blob!, maxBytes: 64 * 1024 * 1024 },
+        },
+      },
+    });
+    await checkVcsBuildHttp({
+      executor: app.executor,
+      orgId: app.orgId,
+      sourceId: 'NX1',
+      projectId: 'P1',
+      prefix: '/p1',
+      get: (path) => app.fetch(request(path, { headers: { cookie: app.cookie } })),
+      runBuild: async (id) => {
+        const ack = vi.fn();
+        const retry = vi.fn();
+        await app.worker.queue(
+          { messages: [{ body: jobNotification(orgContext(app.orgId), id), ack, retry }] },
+          app.environment,
+        );
+        expect(retry).not.toHaveBeenCalled();
+        expect(ack).toHaveBeenCalledOnce();
+      },
+      boot: async () => {},
+    });
   });
 
   it('serves an npm packument through the policy fetch and a tarball in two passes', async () => {
@@ -1577,3 +1637,150 @@ describe('npm audit matrix', () => {
     expect(seen).toEqual([]);
   });
 });
+
+const vcsCommit = 'a'.repeat(40);
+const vcsConfig = {
+  provider: 'github',
+  repository: 'owner/repo',
+  packageName: 'fixture',
+  refs: { tags: true, branches: [] },
+};
+const vcsProvider: SourceProvider = {
+  id: 'github',
+  sourceTypes: ['vcs'],
+  ecosystems: ['npm'],
+  async describe() {
+    throw new Error('unexpected metadata fetch');
+  },
+  async openDist(context) {
+    const text = '{"name":"fixture","version":"1.0.0"}';
+    const bytes = new TextEncoder().encode(text);
+    return {
+      size: null,
+      body: await gitTarball(
+        {
+          commit: vcsCommit,
+          committedAt: '',
+          skipped: 0,
+          entries: [{ path: 'package.json', oid: vcsCommit, mode: '100644', type: 'blob' }],
+        },
+        { read: async () => ({ size: bytes.length, body: new Blob([bytes]).stream() }) },
+        context.codecs,
+        context.signal,
+      ),
+    };
+  },
+};
+const vcsPlugin: PluginDefinition = {
+  id: 'vcs-fixture',
+  package: 'vcs-fixture',
+  apiVersion: 3,
+  platforms: ['node', 'cloudflare'],
+  binds: ['source'],
+  sourceProviders: () => [vcsProvider],
+};
+
+async function checkVcsBuildHttp(input: {
+  executor: SqlExecutor;
+  orgId: string;
+  sourceId: string;
+  projectId: string;
+  prefix: string;
+  get(path: string): Promise<Response>;
+  boot(): Promise<void>;
+  runBuild(id: string, state?: 'succeeded' | 'dead'): Promise<void>;
+}) {
+  const { executor, orgId, sourceId, projectId, prefix } = input;
+  const run = (sql: string, params: SqlValue[]) => executor.batch([{ sql, params }]);
+  await run("UPDATE source SET type='vcs',url=NULL,config_json=? WHERE org_id=? AND id=?", [
+    JSON.stringify(vcsConfig),
+    orgId,
+    sourceId,
+  ]);
+  await run(
+    "INSERT INTO registered_name (id,org_id,source_id,ecosystem,pattern) VALUES ('R',?,?,'npm','fixture')",
+    [orgId, sourceId],
+  );
+  await run(
+    "INSERT INTO package (id,org_id,source_id,ecosystem,name,last_synced_at) VALUES ('K',?,?,'npm','fixture','2026-01-01T00:00:00.000Z')",
+    [orgId, sourceId],
+  );
+  await run(
+    "INSERT INTO project_package (org_id,project_id,package_id,origin,ecosystem,name) VALUES (?,?,'K','subscription','npm','fixture')",
+    [orgId, projectId],
+  );
+  await run(
+    "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json,dist_type,source_ref) VALUES ('V',?,'K','1.0.0','1.0.0','2026-01-01T00:00:00.000Z','broker',?,'tgz',?)",
+    [orgId, JSON.stringify({ name: 'fixture', version: '1.0.0', gitHead: vcsCommit }), vcsCommit],
+  );
+  await run(
+    "INSERT INTO upstream_state (org_id,package_id,form,checked_at,fresh_until) VALUES (?,'K','composer-p2','2026-01-01T00:00:00.000Z','2999-01-01T00:00:00.000Z')",
+    [orgId],
+  );
+  await input.boot();
+  const before = await input.get(`${prefix}/npm/fixture`);
+  expect(before.status, await before.clone().text()).toBe(200);
+  const metadata = (await before.json()) as {
+    versions: Record<string, { dist: { tarball: string; integrity?: string } }>;
+  };
+  const dist = metadata.versions['1.0.0']!.dist;
+  expect(dist).not.toHaveProperty('integrity');
+  const path = new URL(dist.tarball).pathname;
+  const pending = await input.get(path);
+  expect(pending.status).toBe(503);
+  expect(pending.headers.get('Retry-After')).toBe('10');
+  expect(
+    await executor.all({
+      sql: "SELECT resource_key,payload_json FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+      params: [orgId],
+    }),
+  ).toEqual([
+    expect.objectContaining({
+      resource_key: 'V',
+      payload_json: expect.stringContaining('"versionId":"V"'),
+    }),
+  ]);
+  const [queued] = await executor.all<{ id: string }>({
+    sql: "SELECT id FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+    params: [orgId],
+  });
+  await input.runBuild(queued!.id);
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'succeeded' }]);
+  // Re-running after attachment exercises the plan's no-work branch.
+  await run(
+    "UPDATE job SET state='queued', run_at='2020-01-01T00:00:00.000Z' WHERE org_id=? AND id=?",
+    [orgId, queued!.id],
+  );
+  await input.runBuild(queued!.id);
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'succeeded' }]);
+  const after = await input.get(`${prefix}/npm/fixture`);
+  expect(after.status).toBe(200);
+  const built = (await after.json()) as typeof metadata;
+  const archive = await input.get(path);
+  expect(archive.status).toBe(200);
+  const bytes = new Uint8Array(await archive.arrayBuffer());
+  expect(built.versions['1.0.0']!.dist.integrity).toBe(
+    `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+  );
+  await run(
+    "UPDATE job SET state='queued',run_at='2020-01-01T00:00:00.000Z',payload_json='{}' WHERE org_id=? AND id=?",
+    [orgId, queued!.id],
+  );
+  await input.runBuild(queued!.id, 'dead');
+  expect(
+    await executor.all({
+      sql: 'SELECT state,last_error FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'dead', last_error: 'invalid_payload' }]);
+}

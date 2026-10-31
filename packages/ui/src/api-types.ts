@@ -7200,7 +7200,14 @@ export interface operations {
                         | 'too_large'
                         | 'policy_denied'
                         | 'credential_unavailable'
-                        | 'internal';
+                        | 'internal'
+                        | 'name_mismatch'
+                        | 'version_mismatch'
+                        | 'invalid_manifest'
+                        | 'unsupported_files_pattern'
+                        | 'invalid_packlist'
+                        | 'invalid_tarball'
+                        | 'archive_changed';
                       count: number;
                     }[];
                     /** @description Terminal package failures. */
@@ -7299,7 +7306,14 @@ export interface operations {
                         | 'too_large'
                         | 'policy_denied'
                         | 'credential_unavailable'
-                        | 'internal';
+                        | 'internal'
+                        | 'name_mismatch'
+                        | 'version_mismatch'
+                        | 'invalid_manifest'
+                        | 'unsupported_files_pattern'
+                        | 'invalid_packlist'
+                        | 'invalid_tarball'
+                        | 'archive_changed';
                       count: number;
                     }[];
                     /** @description Terminal package failures. */
@@ -10409,7 +10423,14 @@ export interface operations {
                     | 'too_large'
                     | 'policy_denied'
                     | 'credential_unavailable'
-                    | 'internal';
+                    | 'internal'
+                    | 'name_mismatch'
+                    | 'version_mismatch'
+                    | 'invalid_manifest'
+                    | 'unsupported_files_pattern'
+                    | 'invalid_packlist'
+                    | 'invalid_tarball'
+                    | 'archive_changed';
                   count: number;
                 }[];
                 /** @description Terminal package failures. */

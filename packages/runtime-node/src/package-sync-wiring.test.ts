@@ -913,6 +913,7 @@ describe('Node package-sync wiring', () => {
         ...AUTH_JOBS,
         'core:publish-approval-expire:v1',
         SYNC,
+        'core:npm-vcs-build:v1',
         'core:package-access-expire:v1',
         'core:source-sync:v1',
         'core:source-poll:v1',

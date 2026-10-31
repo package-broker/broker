@@ -1086,6 +1086,13 @@ export const SYNC_ERROR_LABELS: Record<(typeof SOURCE_ERROR_CODES)[number], stri
   policy_denied: 'Policy denied',
   credential_unavailable: 'Credential unavailable',
   internal: 'Internal error',
+  name_mismatch: 'Package name differs from configuration',
+  version_mismatch: 'Manifest version differs from tag',
+  invalid_manifest: 'Invalid package manifest',
+  unsupported_files_pattern: 'Unsupported package file pattern',
+  invalid_packlist: 'Package files could not be packed',
+  invalid_tarball: 'Invalid repository archive',
+  archive_changed: 'Repository archive changed during packing',
 };
 
 function SyncStatus({ source }: { source: Source }) {

@@ -1,3 +1,6 @@
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
+import { fixtureStream, repositoryRuleFlood } from '../../test-support/npm-publish-bounds.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -5,11 +8,12 @@ import { realpathSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { gunzipSync, createDeflateRaw } from 'node:zlib';
 import { Duplex } from 'node:stream';
-import { describe, expect, it } from 'vitest';
-import { archive, checksum, entry, pax, stream } from '../../test-support/npm-publish';
-import { packTarball } from './tarball-pack';
-import { PACKLIST_VERSION } from './packlist-rules';
-import { walkRepositoryTarball, walkTarball } from './tarball-walk';
+import { describe, expect, it, vi } from 'vitest';
+import { archive, checksum, entry, pax, stream } from '../../test-support/npm-publish.js';
+import { packTarball } from './tarball-pack.js';
+import { PACKLIST_VERSION } from './packlist-rules.js';
+import * as packlistRules from './packlist-rules.js';
+import { walkRepositoryTarball, walkTarball } from './tarball-walk.js';
 
 const npmPath = resolve(dirname(process.execPath), 'npm');
 const npmRequire = createRequire(realpathSync(npmPath));
@@ -336,20 +340,22 @@ describe('two-pass repository pack', () => {
     }).flat();
     await expect(
       pack(archive(entry('repo/package.json', manifest), ...parts)),
-    ).rejects.toMatchObject({ detail: 'packlist_budget' });
+    ).rejects.toMatchObject({ code: 'invalid_tarball', detail: 'path_bytes' });
   });
   it('surfaces a repository abort reason instead of truncated', async () => {
     const abort = new AbortController();
     const reason = new Error('consumer_cancelled');
-    let pulling = false;
+    let signalPull!: () => void;
+    const pulled = new Promise<void>((resolve) => {
+      signalPull = resolve;
+    });
     const body = new ReadableStream<Uint8Array>({
       pull() {
-        pulling = true;
+        signalPull();
       },
     });
     const result = walkRepositoryTarball(body, async () => {}, { signal: abort.signal });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(pulling).toBe(true);
+    await pulled;
     abort.abort(reason);
     await expect(result).rejects.toBe(reason);
   });
@@ -360,6 +366,10 @@ describe('two-pass repository pack', () => {
       entry('repo/package.json', manifest),
       entry('repo/a', 'x'.repeat(200000)),
     );
+    let signalCancel!: () => void;
+    const cancelledInput = new Promise<void>((resolve) => {
+      signalCancel = resolve;
+    });
     const result = await packTarball({
       open: async () => {
         if (++opens === 1) return stream(bytes);
@@ -372,6 +382,7 @@ describe('two-pass repository pack', () => {
           },
           async cancel(reason) {
             cancelled = reason;
+            signalCancel();
             await reader.cancel(reason);
           },
         });
@@ -382,7 +393,7 @@ describe('two-pass repository pack', () => {
     await reader.read();
     const reason = new Error('consumer_cancelled');
     await reader.cancel(reason);
-    await new Promise((r) => setTimeout(r, 20));
+    await cancelledInput;
     expect(cancelled).toBe(reason);
   });
 });
@@ -493,4 +504,297 @@ describe('differential repository fixtures against npm pack', () => {
     },
     30000,
   );
+});
+
+it.each([
+  ['ignore', 'rule_cap'],
+  ['manifest', 'rule_cap'],
+  ['compiled', 'compiled_rule_cap'],
+] as const)('bounds retained %s metadata during selection', async (kind, detail) => {
+  await expect(
+    packTarball({ codecs, open: async () => fixtureStream(repositoryRuleFlood(kind)) }),
+  ).rejects.toMatchObject({ code: 'invalid_packlist', detail });
+});
+
+it('keeps retained rule flood heap and buffers below 32 MiB with forced GC', async () => {
+  setFlagsFromString('--expose_gc');
+  const gc = runInNewContext('gc') as () => void;
+  const used = () => {
+    const usage = process.memoryUsage();
+    return usage.heapUsed + usage.arrayBuffers;
+  };
+  gc();
+  const before = used();
+  let retained = Number.NaN;
+  let samples = 0;
+  const signals = {
+    pulls: 0,
+    pull() {
+      if (signals.pulls % 8 !== 0) return;
+      gc();
+      const delta = used() - before;
+      retained = samples++ ? Math.max(retained, delta) : delta;
+    },
+  };
+  await expect(
+    packTarball({ codecs, open: async () => fixtureStream(repositoryRuleFlood(), signals) }),
+  ).rejects.toMatchObject({ detail: 'rule_cap' });
+  expect(samples).toBeGreaterThan(10);
+  expect(retained).toBeLessThan(32 * 1024 * 1024);
+});
+
+it.each([
+  ['single-file lines', ['\n'.repeat(2000)]],
+  ['long rule', ['x'.repeat(4097)]],
+  ['aggregate lines', Array.from({ length: 6 }, () => '\n'.repeat(1999))],
+] as const)('refuses consumed %s during selection', async (_label, bodies) => {
+  function* parts() {
+    yield entry('repo/package.json', manifest);
+    for (let i = 0; i < bodies.length; i++) yield entry('repo/d' + i + '/.gitignore', bodies[i]);
+    yield new Uint8Array(1024);
+  }
+  let opens = 0;
+  await expect(
+    packTarball({
+      codecs,
+      open: async () => {
+        opens++;
+        return fixtureStream(parts());
+      },
+    }),
+  ).rejects.toMatchObject({ detail: 'packlist_budget' });
+  expect(opens).toBe(1);
+});
+
+it('accepts exactly 4 MiB of retained metadata bytes', async () => {
+  function* parts() {
+    yield entry('repo/package.json', manifest);
+    let remaining = 4 * 1024 * 1024 - new TextEncoder().encode(manifest).length;
+    for (let i = 0; remaining; i++) {
+      const size = Math.min(262144, remaining);
+      yield entry('repo/d' + i + '/.gitignore', '#' + 'x'.repeat(size - 1));
+      remaining -= size;
+    }
+    yield new Uint8Array(1024);
+  }
+  const result = await packTarball({ codecs, open: async () => fixtureStream(parts()) });
+  expect(result.files).toEqual(['package.json']);
+  await collect(result.body);
+});
+
+it('budgets expanded manifest selectors before reopening the archive', async () => {
+  const list = '{' + Array.from({ length: 16 }, (_, i) => i).join(',') + '}';
+  function* parts() {
+    yield entry(
+      'repo/package.json',
+      JSON.stringify({
+        name: 'fixture-package',
+        version: '1.0.0',
+        files: Array.from({ length: 100 }, (_, i) => 'a'.repeat(2500) + i + list),
+      }),
+    );
+    yield new Uint8Array(1024);
+  }
+  await expect(
+    packTarball({ codecs, open: async () => fixtureStream(parts()) }),
+  ).rejects.toMatchObject({ detail: 'compiled_rule_cap' });
+});
+
+it('applies a smaller caller rule cap before reopening the archive', async () => {
+  function* parts() {
+    yield entry('repo/package.json', manifest);
+    yield new Uint8Array(1024);
+  }
+  await expect(
+    packTarball({ codecs, maxRuleBytes: 1, open: async () => fixtureStream(parts()) }),
+  ).rejects.toMatchObject({ detail: 'rule_cap' });
+});
+
+it('accepts more than 2000 manifest selectors within the aggregate line budget', async () => {
+  const result = await pack(
+    archive(
+      entry(
+        'repo/package.json',
+        JSON.stringify({
+          name: 'fixture-package',
+          version: '1.0.0',
+          files: Array.from({ length: 2001 }, () => 'a.js'),
+        }),
+      ),
+      entry('repo/a.js', 'yes'),
+    ),
+  );
+  expect(result.files).toEqual(['a.js', 'package.json']);
+});
+
+it.each(['lines', 'compiled', 'raw'] as const)(
+  'does not charge %s in ignored directories or unbundled manifests',
+  async (kind) => {
+    const body =
+      kind === 'lines'
+        ? '\n'.repeat(10001)
+        : kind === 'compiled'
+          ? 'x'.repeat(4097)
+          : '#'.repeat(4 * 1024 * 1024);
+    const result = await pack(
+      archive(
+        entry('repo/ignored/.npmignore', body),
+        entry(
+          'repo/node_modules/unused/package.json',
+          JSON.stringify({ files: Array.from({ length: 10001 }, () => 'x') }),
+        ),
+        entry('repo/.npmignore', 'ignored/'),
+        entry('repo/package.json', manifest),
+        entry('repo/a.js', 'yes'),
+      ),
+    );
+    expect(result.files).toEqual(['a.js', 'package.json']);
+  },
+);
+
+it('uses the selection compiler refusal for expanded manifest selectors', async () => {
+  const list = '{' + Array.from({ length: 16 }, (_, i) => i).join(',') + '}';
+  await expect(
+    pack(
+      archive(
+        entry(
+          'repo/package.json',
+          JSON.stringify({
+            name: 'fixture-package',
+            version: '1.0.0',
+            files: Array.from({ length: 100 }, (_, i) => 'a'.repeat(2500) + i + list),
+          }),
+        ),
+      ),
+    ),
+  ).rejects.toMatchObject({ code: 'invalid_packlist', detail: 'compiled_rule_cap' });
+});
+
+it('reopens only consumed metadata when unused captures fill the cache', async () => {
+  const result = await pack(
+    archive(
+      entry('répo/node_modules/unused/package.json', 'x'.repeat(80)),
+      entry('répo/package.json', manifest),
+      entry('répo/.npmignore', 'excluded'),
+      entry('répo/excluded', 'no'),
+      entry('répo/a.js', 'yes'),
+    ),
+    { maxRuleBytes: 100 },
+  );
+  expect(result.files).toEqual(['a.js', 'package.json']);
+  expect(result.opens).toBe(3);
+});
+
+it('refuses a changed archive while reopening consumed metadata', async () => {
+  let opens = 0;
+  await expect(
+    packTarball({
+      codecs,
+      maxRuleBytes: 100,
+      open: async () =>
+        stream(
+          archive(
+            entry('repo/node_modules/unused/package.json', 'x'.repeat(++opens === 1 ? 80 : 79)),
+            entry('repo/package.json', manifest),
+          ),
+        ),
+    }),
+  ).rejects.toMatchObject({ code: 'archive_changed' });
+});
+
+it('uses one metadata replay for 5000 consumed ignores after an unused capture fills the cache', async () => {
+  const input = archive(
+    entry('repo/.gitignore', '#'.repeat(4 * 1024 * 1024 - 1)),
+    entry('repo/package.json', manifest),
+    entry('repo/.npmignore', '#'),
+    ...Array.from({ length: 5000 }, (_, i) => entry(`repo/d${i}/.npmignore`, '#')),
+  );
+  let opens = 0;
+  try {
+    const result = await packTarball({
+      codecs,
+      open: async () => {
+        if (++opens > 3) throw new Error('too_many_walks');
+        return stream(input, 65536);
+      },
+    });
+    await collect(result.body);
+    expect(opens).toBe(3);
+  } catch (error) {
+    expect(error).toMatchObject({ code: 'invalid_packlist', detail: 'packlist_budget' });
+    expect(opens).toBe(2);
+  }
+});
+
+it('charges metadata replay bytes to the shared selection work budget', async () => {
+  const input = archive(
+    entry('repo/.gitignore', '#'.repeat(4 * 1024 * 1024 - 1)),
+    entry('repo/package.json', manifest),
+    entry('repo/.npmignore', '#'),
+  );
+  const select = packlistRules.selectPacklist;
+  let selections = 0;
+  const spy = vi.spyOn(packlistRules, 'selectPacklist').mockImplementation((...args) => {
+    if (++selections === 1) args[4]!(1_999_000_000);
+    return select(...args);
+  });
+  let opens = 0;
+  try {
+    await expect(
+      packTarball({
+        codecs,
+        open: async () => {
+          opens++;
+          return stream(input, 65536);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_packlist', detail: 'packlist_budget' });
+    expect(opens).toBe(2);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('bounds the combined retained and replayed metadata bytes', async () => {
+  let opens = 0;
+  await expect(
+    packTarball({
+      codecs,
+      maxRuleBytes: 100,
+      open: async () => {
+        opens++;
+        return stream(
+          archive(
+            entry('repo/node_modules/unused/package.json', 'x'.repeat(80)),
+            entry('repo/package.json', manifest),
+            entry('repo/.npmignore', '#'.repeat(80)),
+          ),
+        );
+      },
+    }),
+  ).rejects.toMatchObject({ code: 'invalid_packlist', detail: 'packlist_budget' });
+  expect(opens).toBe(2);
+});
+
+it('refuses newly revealed metadata instead of walking a second time', async () => {
+  let opens = 0;
+  await expect(
+    packTarball({
+      codecs,
+      maxRuleBytes: 100,
+      open: async () => {
+        opens++;
+        return stream(
+          archive(
+            entry('repo/node_modules/unused/package.json', 'x'.repeat(81)),
+            entry('repo/package.json', JSON.stringify({ files: ['nested'] })),
+            entry('repo/.npmignore', 'nested'),
+            entry('repo/nested/.npmignore', '#'),
+            entry('repo/nested/a.js', 'yes'),
+          ),
+        );
+      },
+    }),
+  ).rejects.toMatchObject({ code: 'invalid_packlist', detail: 'packlist_budget' });
+  expect(opens).toBe(2);
 });

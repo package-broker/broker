@@ -1,4 +1,4 @@
-import { walkTarball } from '../registry/npm/tarball-walk';
+import { walkTarball } from '../registry/npm/tarball-walk.js';
 
 const enc = new TextEncoder();
 export function entry(path: string, body = '', type = '0', size?: number): Uint8Array {

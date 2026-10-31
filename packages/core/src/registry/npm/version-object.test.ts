@@ -615,3 +615,32 @@ it.each(['_npmVersion', '_nodeVersion'])(
     });
   },
 );
+describe('npm VCS version input', () => {
+  it('accepts a dist-less VCS manifest and retains its commit with no integrity', () => {
+    const result = npmVersionInput(
+      'left-pad',
+      manifest({ dist: undefined }),
+      {},
+      { ...origin, kind: 'vcs' },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      input: { distType: 'tgz', sourceRef: 'b'.repeat(40), metadata: { npmIntegrity: null } },
+    });
+    expect(stored(result)).not.toHaveProperty('dist');
+  });
+  it('refuses dist-less registry manifests and VCS manifests without an immutable commit', () => {
+    expect(npmVersionInput('left-pad', manifest({ dist: undefined }), {}, origin)).toMatchObject({
+      ok: false,
+      reason: 'no_installable_reference',
+    });
+    expect(
+      npmVersionInput(
+        'left-pad',
+        manifest({ dist: undefined, gitHead: 'main' }),
+        {},
+        { ...origin, kind: 'vcs' },
+      ),
+    ).toMatchObject({ ok: false, reason: 'no_installable_reference' });
+  });
+});

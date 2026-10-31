@@ -1,10 +1,8 @@
-import { z } from 'zod';
 import { safeParse, type $ZodType, type $ZodTypes } from 'zod/v4/core';
 import { toJsonSchema } from './json-schema.js';
 import type { OpenApiDocument } from './openapi.js';
 import type { ApiRouteSpec } from './route.js';
-import { VALIDATION_DETAIL_CODES } from './validate.js';
-import { weakPasswordErrorResponse } from './auth-schemas.js';
+import { errorEnvelopeSchema as baseErrorEnvelope } from './error-envelope-schema.js';
 
 export interface ContractFinding {
   readonly check:
@@ -27,25 +25,10 @@ interface Sample {
 type ContractSpec =
   ApiRouteSpec | (Omit<ApiRouteSpec, 'api'> & { readonly api: { exempt: string } });
 
-const errorEnvelope = z.strictObject({
-  error: z
-    .strictObject({
-      code: z.string(),
-      message: z.string(),
-      requestId: z.string(),
-      problems: weakPasswordErrorResponse.shape.error.shape.problems.optional(),
-      details: z
-        .array(
-          z.strictObject({
-            path: z.string(),
-            code: z.enum(VALIDATION_DETAIL_CODES),
-            location: z.enum(['params', 'query', 'body']).optional(),
-          }),
-        )
-        .max(20)
-        .optional(),
-    })
-    .refine(({ code, problems }) => problems === undefined || code === 'weak_password'),
+const errorEnvelopeSchema = baseErrorEnvelope.extend({
+  error: baseErrorEnvelope.shape.error.refine(
+    ({ code, problems }) => problems === undefined || code === 'weak_password',
+  ),
 });
 
 function bodyObjects(schema: $ZodType): readonly $ZodType[] {
@@ -157,7 +140,7 @@ export async function runApiContract(input: {
       valid =
         schema === null
           ? response.status >= 400
-            ? safeParse(errorEnvelope, await response.json()).success
+            ? safeParse(errorEnvelopeSchema, await response.json()).success
             : (await response.text()) === ''
           : schema !== undefined && safeParse(schema, await response.json()).success;
     } catch {

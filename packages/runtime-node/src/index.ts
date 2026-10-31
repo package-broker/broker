@@ -8,6 +8,11 @@ import {
   createPublishScanJob,
   createPublishScanSweepJob,
 } from '@package-broker/core/ingest/publish-scan-job';
+import {
+  createNpmVcsBuildReader,
+  createNpmVcsBuildPendingReader,
+} from '@package-broker/db-sqlite/repositories/npm-vcs-build';
+import { createCatalogueWriteGuard } from '@package-broker/db-sqlite/repositories/catalogue-write-package';
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
 import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
 import { createPackageAccessExpiryJob } from '@package-broker/core/api/routes/package-access-requests-expiry';
@@ -886,6 +891,11 @@ function assembleRegistry(input: {
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential: credentials.forSource,
       credentialUnavailable: (ctx, id) => sources.markCredentialUnavailable(ctx, id),
+    },
+    npmVcsBuild: {
+      target: createNpmVcsBuildReader(executor),
+      pending: createNpmVcsBuildPendingReader(executor),
+      writeGuard: createCatalogueWriteGuard,
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,

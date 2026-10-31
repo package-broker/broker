@@ -494,6 +494,7 @@ const BASE_JOBS = [
   'core:publish-scan-sweep:v1',
   'core:vulnerability-sync:v1',
   'core:source-sync:v1',
+  'core:npm-vcs-build:v1',
   'core:source-poll:v1',
   'core:retention-scan:v1',
   'core:blob-purge:v1',

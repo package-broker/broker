@@ -619,3 +619,67 @@ describe('token source request controls', () => {
     expect(requested).toHaveLength(4);
   });
 });
+
+describe('npm repository adapter', () => {
+  it('reads package.json at the winning npm ref and emits npm-vcs', async () => {
+    vi.mocked(readFileAtRefs).mockResolvedValue([
+      {
+        ref: 'refs/tags/v1.0.0',
+        commit: sha,
+        committedAt: null,
+        text: '{"name":"@scope/a","version":"1.0.0"}',
+      },
+    ]);
+    const { provider, ctx } = setup();
+    const result = await provider.describe(
+      ctx,
+      { ...source, ecosystem: 'npm', config: { ...source.config, packageName: '@scope/a' } },
+      '@scope/a',
+      {},
+    );
+    if (result.kind !== 'found') throw new Error('missing description');
+    expect(await collect(result.description.members)).toMatchObject([
+      { form: 'npm-vcs', version: '1.0.0' },
+    ]);
+    expect(vi.mocked(readFileAtRefs).mock.calls[0]![3]).toBe('package.json');
+    expect(result.description.distTags).toEqual({ latest: '1.0.0' });
+  });
+  it('reports name mismatch and publishes nothing for a configured different name', async () => {
+    vi.mocked(readFileAtRefs).mockResolvedValue([
+      {
+        ref: 'refs/tags/v1.0.0',
+        commit: sha,
+        committedAt: null,
+        text: '{"name":"@scope/b","version":"1.0.0"}',
+      },
+    ]);
+    const { provider, ctx } = setup();
+    const result = await provider.describe(
+      ctx,
+      { ...source, ecosystem: 'npm', config: { ...source.config, packageName: '@scope/a' } },
+      '@scope/a',
+      {},
+    );
+    if (result.kind !== 'found') throw new Error('missing description');
+    expect(await collect(result.description.members)).toEqual([]);
+    expect(result.description.skippedMembers).toEqual([
+      { version: '1.0.0', reason: 'name_mismatch' },
+    ]);
+  });
+  it('opens a capped repository tarball for npm and binds the commit URL', async () => {
+    const { provider, ctx, hops } = setup();
+    const opened = await provider.openDist(
+      ctx,
+      { ...source, ecosystem: 'npm' },
+      { packageName: '@scope/a', version: '1.0.0', distType: 'tgz', sourceRef: sha, url: null },
+    );
+    await opened.body.cancel();
+    expect(hops[0]?.url).toBe(`https://api.github.com/repos/owner/repo/tarball/${sha}`);
+  });
+});
+
+async function collect<T>(values: AsyncIterable<T>): Promise<T[]> {
+  const items: T[] = [];
+  for await (const value of values) items.push(value);
+  return items;
+}

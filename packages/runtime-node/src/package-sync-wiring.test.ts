@@ -915,6 +915,7 @@ describe('Node package-sync wiring', () => {
         'core:publish-scan:v1',
         'core:publish-scan-sweep:v1',
         SYNC,
+        'core:npm-vcs-build:v1',
         'core:package-access-expire:v1',
         'core:source-sync:v1',
         'core:source-poll:v1',

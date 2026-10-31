@@ -21,6 +21,7 @@ export interface TarballPackResult {
   readonly files: readonly string[];
   readonly readme: string | null;
   readonly readmeTruncated: boolean;
+  readonly readmeFilename: string | null;
 }
 const encoder = new TextEncoder();
 function fail(detail: string, code = 'invalid_packlist'): never {
@@ -76,6 +77,7 @@ export async function packTarball(options: TarballPackOptions): Promise<TarballP
   const metadata = new Map<string, { entry: RepositoryTarEntry; bytes?: Uint8Array }>();
   let readmeBytes = 0;
   const readmes = new Map<string, { bytes: Uint8Array; truncated: boolean }>();
+  let readmeFilename: string | null = null;
   let readme: string | null = null,
     readmeTruncated = false;
   await walkRepositoryTarball(
@@ -216,6 +218,7 @@ export async function packTarball(options: TarballPackOptions): Promise<TarballP
   const selected = new Set(files);
   for (const [path, captured] of readmes) {
     if (!selected.has(path)) continue;
+    readmeFilename = path;
     readmeTruncated = captured.truncated;
     readme = text(captured.bytes, readmeTruncated);
     // eslint-disable-next-line no-control-regex -- Match the publish readme grammar.
@@ -304,5 +307,5 @@ export async function packTarball(options: TarballPackOptions): Promise<TarballP
       await reader.cancel(reason);
     },
   });
-  return { body: output, files, readme, readmeTruncated };
+  return { body: output, files, readme, readmeTruncated, readmeFilename };
 }

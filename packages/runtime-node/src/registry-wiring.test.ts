@@ -1,3 +1,7 @@
+import { createJobLoop } from './jobs/loop.js';
+import type { SourceProvider } from '@package-broker/core/sources/provider';
+import type { PluginDefinition } from '@package-broker/core/plugin';
+import { gitTarball } from '@package-broker/core/ingest/vcs/git-tar';
 import { formatToken } from '@package-broker/core/secrets/token-format';
 import { hashToken } from '@package-broker/core/secrets/token-hash';
 import { createNpmHandleOf } from '@package-broker/core/registry/module';
@@ -271,6 +275,7 @@ describe('node registry wiring', () => {
     extra: {
       auditEnabled?: boolean;
       jobs?: Jobs;
+      vcs?: boolean;
       level?: 'info' | 'debug';
       executor?: SqlExecutor;
       closeDatabase?: () => Promise<void>;
@@ -280,7 +285,7 @@ describe('node registry wiring', () => {
   ): Promise<NodeBroker> {
     const byteStore = await openFilesystemByteStore({ root: join(directory, 'blobs') });
     broker = createNodeServerWithSeams(
-      [],
+      extra.vcs ? [vcsPlugin] : [],
       {
         executor: extra.executor ?? db.executor,
         ...(extra.closeDatabase === undefined ? {} : { closeDatabase: extra.closeDatabase }),
@@ -293,7 +298,10 @@ describe('node registry wiring', () => {
           blob: createBlobStore(
             byteStore,
             createBlobRepository(db.executor, { purgeLeaseSeconds: 900 }),
-            { admission: createBlobUploadAdmission(), maxBytes: 1_048_576 },
+            {
+              admission: createBlobUploadAdmission(),
+              maxBytes: extra.vcs ? 64 * 1024 * 1024 : 1_048_576,
+            },
           ),
           cache: createLruCache({}),
           jobStore: createJobRepository(db.executor),
@@ -694,6 +702,41 @@ describe('node registry wiring', () => {
       const archive = await get(brokerPath(dist!.url));
       expect(archive.status).toBe(200);
       expect(new Uint8Array(await archive.arrayBuffer())).toEqual(ZIP);
+    });
+
+    it('queues an unbuilt VCS tarball and serves its integrity after building', async () => {
+      await checkVcsBuildHttp({
+        executor: db.executor,
+        orgId,
+        sourceId: sources.npm,
+        projectId,
+        prefix: '/alpha',
+        get,
+        runBuild: async (id, state = 'succeeded') => {
+          const kernel = await broker!.ready();
+          const loop = createJobLoop({
+            executor: db.executor,
+            jobs: kernel.registration.jobs,
+            scope: (job, claim) => kernel.jobScope(job, claim),
+            observability: { log() {}, counter() {}, histogram() {} },
+          });
+          loop.start();
+          try {
+            await vi.waitFor(
+              async () =>
+                expect(
+                  await db.executor.all({ sql: 'SELECT state FROM job WHERE id=?', params: [id] }),
+                ).toEqual([{ state }]),
+              { timeout: 5000 },
+            );
+          } finally {
+            await loop.stop();
+          }
+        },
+        boot: async () => {
+          await boot(upstream().transport, { vcs: true });
+        },
+      });
     });
 
     it('serves an npm packument and tarball through the guarded policy fetch', async () => {
@@ -1478,4 +1521,151 @@ async function npmWhoami(
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+const vcsCommit = 'a'.repeat(40);
+const vcsConfig = {
+  provider: 'github',
+  repository: 'owner/repo',
+  packageName: 'fixture',
+  refs: { tags: true, branches: [] },
+};
+const vcsProvider: SourceProvider = {
+  id: 'github',
+  sourceTypes: ['vcs'],
+  ecosystems: ['npm'],
+  async describe() {
+    throw new Error('unexpected metadata fetch');
+  },
+  async openDist(context) {
+    const text = '{"name":"fixture","version":"1.0.0"}';
+    const bytes = new TextEncoder().encode(text);
+    return {
+      size: null,
+      body: await gitTarball(
+        {
+          commit: vcsCommit,
+          committedAt: '',
+          skipped: 0,
+          entries: [{ path: 'package.json', oid: vcsCommit, mode: '100644', type: 'blob' }],
+        },
+        { read: async () => ({ size: bytes.length, body: new Blob([bytes]).stream() }) },
+        context.codecs,
+        context.signal,
+      ),
+    };
+  },
+};
+const vcsPlugin: PluginDefinition = {
+  id: 'vcs-fixture',
+  package: 'vcs-fixture',
+  apiVersion: 3,
+  platforms: ['node', 'cloudflare'],
+  binds: ['source'],
+  sourceProviders: () => [vcsProvider],
+};
+
+async function checkVcsBuildHttp(input: {
+  executor: SqlExecutor;
+  orgId: string;
+  sourceId: string;
+  projectId: string;
+  prefix: string;
+  get(path: string): Promise<Response>;
+  boot(): Promise<void>;
+  runBuild(id: string, state?: 'succeeded' | 'dead'): Promise<void>;
+}) {
+  const { executor, orgId, sourceId, projectId, prefix } = input;
+  const run = (sql: string, params: SqlValue[]) => executor.batch([{ sql, params }]);
+  await run("UPDATE source SET type='vcs',url=NULL,config_json=? WHERE org_id=? AND id=?", [
+    JSON.stringify(vcsConfig),
+    orgId,
+    sourceId,
+  ]);
+  await run(
+    "INSERT INTO registered_name (id,org_id,source_id,ecosystem,pattern) VALUES ('R',?,?,'npm','fixture')",
+    [orgId, sourceId],
+  );
+  await run(
+    "INSERT INTO package (id,org_id,source_id,ecosystem,name,last_synced_at) VALUES ('K',?,?,'npm','fixture','2026-01-01T00:00:00.000Z')",
+    [orgId, sourceId],
+  );
+  await run(
+    "INSERT INTO project_package (org_id,project_id,package_id,origin,ecosystem,name) VALUES (?,?,'K','subscription','npm','fixture')",
+    [orgId, projectId],
+  );
+  await run(
+    "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json,dist_type,source_ref) VALUES ('V',?,'K','1.0.0','1.0.0','2026-01-01T00:00:00.000Z','broker',?,'tgz',?)",
+    [orgId, JSON.stringify({ name: 'fixture', version: '1.0.0', gitHead: vcsCommit }), vcsCommit],
+  );
+  await run(
+    "INSERT INTO upstream_state (org_id,package_id,form,checked_at,fresh_until) VALUES (?,'K','composer-p2','2026-01-01T00:00:00.000Z','2999-01-01T00:00:00.000Z')",
+    [orgId],
+  );
+  await input.boot();
+  const before = await input.get(`${prefix}/npm/fixture`);
+  expect(before.status, await before.clone().text()).toBe(200);
+  const metadata = (await before.json()) as {
+    versions: Record<string, { dist: { tarball: string; integrity?: string } }>;
+  };
+  const dist = metadata.versions['1.0.0']!.dist;
+  expect(dist).not.toHaveProperty('integrity');
+  const path = new URL(dist.tarball).pathname;
+  const pending = await input.get(path);
+  expect(pending.status).toBe(503);
+  expect(pending.headers.get('Retry-After')).toBe('10');
+  expect(
+    await executor.all({
+      sql: "SELECT resource_key,payload_json FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+      params: [orgId],
+    }),
+  ).toEqual([
+    expect.objectContaining({
+      resource_key: 'V',
+      payload_json: expect.stringContaining('"versionId":"V"'),
+    }),
+  ]);
+  const [queued] = await executor.all<{ id: string }>({
+    sql: "SELECT id FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+    params: [orgId],
+  });
+  await input.runBuild(queued!.id);
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'succeeded' }]);
+  // Re-running after attachment exercises the plan's no-work branch.
+  await run(
+    "UPDATE job SET state='queued', run_at='2020-01-01T00:00:00.000Z' WHERE org_id=? AND id=?",
+    [orgId, queued!.id],
+  );
+  await input.runBuild(queued!.id);
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'succeeded' }]);
+  const after = await input.get(`${prefix}/npm/fixture`);
+  expect(after.status).toBe(200);
+  const built = (await after.json()) as typeof metadata;
+  const archive = await input.get(path);
+  expect(archive.status).toBe(200);
+  const bytes = new Uint8Array(await archive.arrayBuffer());
+  expect(built.versions['1.0.0']!.dist.integrity).toBe(
+    `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+  );
+  await run(
+    "UPDATE job SET state='queued',run_at='2020-01-01T00:00:00.000Z',payload_json='{}' WHERE org_id=? AND id=?",
+    [orgId, queued!.id],
+  );
+  await input.runBuild(queued!.id, 'dead');
+  expect(
+    await executor.all({
+      sql: 'SELECT state,last_error FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'dead', last_error: 'invalid_payload' }]);
 }

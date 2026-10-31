@@ -54,7 +54,7 @@ export interface SourceSyncPayload {
 }
 
 export interface SourceSyncDeps {
-  readonly sources: Pick<SourceRepository, 'get' | 'pollState'>;
+  readonly sources: Pick<SourceRepository, 'get' | 'pollState' | 'reportCandidateSkipped'>;
   readonly providers: Pick<ProviderRegistry, 'forSource'>;
   readonly toProviderSource: (record: SourceRecord) => ProviderSource;
   /** Decrypts inside the handler; the plaintext never leaves the returned credential object. */

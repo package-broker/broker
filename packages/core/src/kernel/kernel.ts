@@ -279,7 +279,17 @@ function validateCoreRoutes(
     if (typeof route.path !== 'string') {
       problems.push(`${label}: path must be a string`);
       placeable = false;
-    } else if (!route.path.startsWith(prefix)) {
+    } else if (
+      !route.path.startsWith(prefix) &&
+      !(
+        ecosystem &&
+        route.method === 'POST' &&
+        route.path === '/-/npm/v1/oidc/token/exchange/package/:name' &&
+        route.permission === null &&
+        route.boundary === 'none' &&
+        route.needsOrg === false
+      )
+    ) {
       problems.push(`${label}: path ${JSON.stringify(route.path)} must start with "${prefix}"`);
       placeable = false;
     } else if (route.path === prefix) {

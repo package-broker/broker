@@ -452,6 +452,17 @@ describe('service token rotation batch', () => {
     expect(await rotate({}, repository)).toEqual({ status: 'refused', reason: 'conflict' });
     await nothingAdded();
   });
+  it('refuses rotation of a package-bound workload token, including a binding race', async () => {
+    await oldToken();
+    const repository = createTokenRepository(executor);
+    expect(await repository.getService(a, TOKEN)).not.toBeNull();
+    await executor.batch([
+      stmt('UPDATE token SET package_name = ? WHERE org_id = ? AND id = ?', 'test', a.orgId, TOKEN),
+    ]);
+    expect(await repository.getService(a, TOKEN)).toBeNull();
+    expect(await rotate({}, repository)).toEqual({ status: 'refused', reason: 'conflict' });
+    await nothingAdded();
+  });
   it('aborts when the old token expires before the batch', async () => {
     await oldToken(PROJECT, iso(-1000));
     expect(await rotate()).toEqual({ status: 'refused', reason: 'conflict' });

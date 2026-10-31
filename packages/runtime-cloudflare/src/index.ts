@@ -1,3 +1,6 @@
+import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
+import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
+import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
 import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
 import {
   checkPublishAdmission,
@@ -153,7 +156,12 @@ import {
   createCredentialStore,
 } from '@package-broker/core/secrets/credential-store';
 import { DbError } from '@package-broker/core/db/errors';
-import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
+import {
+  orgContext,
+  type OrgContext,
+  type ScalarSqlExecutor,
+  type SqlExecutor,
+} from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
@@ -759,6 +767,19 @@ function buildRegistryModule(input: {
     });
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
+    npmOidc: {
+      repository: createOidcRepository(executor),
+      tokens: createWorkloadTokenService({
+        tokens: createWorkloadTokenStore(executor),
+        keyring: input.keyring,
+        clock: systemClock,
+        ids: { ulid },
+      }),
+      organization: async () => {
+        const org = await createOrganizationBootstrap(executor).findSingleton();
+        return org === null ? null : orgContext(org.id);
+      },
+    },
     npmPublish: {
       reads: createPublishReads(executor),
       lookupToken: createAccessRepository(executor).lookupToken,

@@ -1,3 +1,5 @@
+import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
+import { createOidcVerifier } from './npm/oidc/verify.js';
 import { createPublishService, type PublishDependencies } from './npm/publish-service.js';
 export { createPublishService } from './npm/publish-service.js';
 import { probeNpmClaim } from '../sources/claim-admission.js';
@@ -143,6 +145,7 @@ export function createNpmHandleOf(
 }
 
 export interface RegistryModuleDeps {
+  readonly npmOidc?: Omit<OidcExchangeDependencies, 'verify' | 'clock'>;
   readonly npmPublish?: PublishDependencies;
   readonly runtime: Platform;
   readonly ports: Partial<
@@ -589,6 +592,18 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   }
 
   const ecosystemRoutes: readonly RouteDefinition[] = Object.freeze([
+    ...(deps.npmOidc === undefined
+      ? []
+      : [
+          createOidcExchangeRoute({
+            ...deps.npmOidc,
+            clock: deps.clock,
+            verify: createOidcVerifier({
+              publicUrl: deps.publicUrl,
+              policyFetch: deps.policyFetch(registry.userAgent.default),
+            }),
+          }),
+        ]),
     ...composerRoutes({
       access: packageAccess,
       fill: onDemand,

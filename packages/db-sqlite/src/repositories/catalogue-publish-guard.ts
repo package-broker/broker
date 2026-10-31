@@ -57,6 +57,7 @@ export function createPublishWriteGuard(
       providerAnchors,
     },
     sql<boolean>` pa.token_id = ${input.tokenId} and pa.revoked_at is null and pa.expired = 0
+    and (pa.token_package_name is null or pa.token_package_name = ${input.key})
     and pa.principal_status = 'active' and pa.binding_ok = 1 and pa.stamp_invalid = 0
     and (pa.kind = 'svc' or pa.validation_fresh = 1)
     and pa.read_only = 0 and json_array_length(pa.scopes_json) = 1

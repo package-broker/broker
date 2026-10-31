@@ -1,3 +1,4 @@
+import type { OidcReplayBatch, TrustedPublisherBinding } from '../db/oidc.js';
 import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
 import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
@@ -28,6 +29,95 @@ export interface MintedServiceToken {
   readonly hash: string;
   readonly pepperVersion: number;
   readonly plaintext: string;
+}
+
+export interface WorkloadTokenFence {
+  readonly publisher: TrustedPublisherBinding;
+  readonly replay: OidcReplayBatch;
+}
+export interface WorkloadTokenInput {
+  readonly id: string;
+  readonly now: string;
+  readonly expiresAt: string;
+  readonly audit: AuditEvent;
+}
+export interface WorkloadTokenStore {
+  issueWorkload(
+    ctx: OrgContext,
+    fence: WorkloadTokenFence,
+    input: WorkloadTokenInput,
+    mint: () => MintedServiceToken | Promise<MintedServiceToken>,
+  ): Promise<ServiceTokenIssueOutcome>;
+}
+export function createWorkloadTokenService(deps: {
+  readonly tokens: WorkloadTokenStore;
+  readonly keyring: Keyring;
+  readonly clock: Clock;
+  readonly ids: { ulid(): string };
+}) {
+  return {
+    async issueWorkload(
+      ctx: OrgContext,
+      fence: WorkloadTokenFence,
+      input: {
+        readonly requestId: string;
+        readonly changes: NonNullable<Parameters<typeof auditEvent>[0]['changes']>;
+      },
+    ) {
+      const now = deps.clock.now();
+      const expiry = requestedExpiry(
+        { expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString() },
+        now.getTime(),
+        1,
+      );
+      if (!expiry.ok || expiry.expiresMs === null) throw new TypeError('invalid_workload_expiry');
+      const expiresAt = new Date(expiry.expiresMs).toISOString();
+      const id = deps.ids.ulid();
+      const event = auditEvent({
+        id: deps.ids.ulid(),
+        now: now.toISOString(),
+        action: 'token.workload_issue',
+        actor: { type: 'service_principal', id: fence.publisher.servicePrincipalId },
+        context: {
+          opId: deps.ids.ulid(),
+          requestId: input.requestId,
+          sourceIp: null,
+          tokenSelector: null,
+        },
+        target: { type: 'token', id },
+        changes: { ...input.changes, token_id: { new: id }, expires_at: { new: expiresAt } },
+      });
+      if (!event.ok) throw new TypeError('invalid_workload_audit');
+      const result = await deps.tokens.issueWorkload(
+        ctx,
+        fence,
+        { id, now: now.toISOString(), expiresAt, audit: event.event },
+        async () => {
+          const selector = randomSelector();
+          const plaintext = formatToken(
+            'svc',
+            selector,
+            crypto.getRandomValues(new Uint8Array(SECRET_BYTES)),
+          );
+          const pepperVersion = deps.keyring.currentVersion;
+          return {
+            selector,
+            plaintext,
+            pepperVersion,
+            hash: await hashToken(deps.keyring, pepperVersion, plaintext),
+          };
+        },
+      );
+      return result.status === 'issued'
+        ? {
+            status: 'issued' as const,
+            token: result.plaintext,
+            created: now.toISOString(),
+            expires: expiresAt,
+          }
+        : result;
+    },
+  };
 }
 
 export interface ServiceTokenAuthority {
@@ -138,7 +228,8 @@ export interface ServiceTokenRotationStore {
  * status and token_max_scope, and the issuer authority on database time.
  */
 /** Issuance-only adapters may omit rotation; runtimes supply the complete repository. */
-export interface ServiceTokenStore extends Partial<ServiceTokenRotationStore> {
+export interface ServiceTokenStore
+  extends Partial<ServiceTokenRotationStore>, Partial<WorkloadTokenStore> {
   issueService(
     ctx: OrgContext,
     fence: MutationFence,
@@ -273,35 +364,36 @@ function conferred(target: ServicePrincipalRecord, level: ScopeLevel): string[] 
   return covers.length === 0 ? null : covers;
 }
 
+function requestedExpiry(
+  request: Pick<ServiceTokenIssueInput, 'expiresAt' | 'lifetimeDays'>,
+  nowMs: number,
+  maxDays: number,
+):
+  | { readonly ok: true; readonly expiresMs: number | null; readonly defaulted: boolean }
+  | { readonly ok: false; readonly error: 'invalid_expiry' } {
+  const expiryProvided = Object.hasOwn(request, 'expiresAt');
+  const lifetimeProvided = Object.hasOwn(request, 'lifetimeDays');
+  if (expiryProvided && lifetimeProvided) return fail('invalid_expiry');
+  const defaulted = !expiryProvided && !lifetimeProvided;
+  const expiresMs = expiryProvided
+    ? canonicalTimestampMs(request.expiresAt)
+    : lifetimeProvided
+      ? lifetimeExpiry(nowMs, maxDays, request.lifetimeDays as number)
+      : null;
+  if (
+    !defaulted &&
+    (expiresMs === null || expiresMs <= nowMs || expiresMs > nowMs + maxDays * DAY_MS)
+  ) {
+    return fail('invalid_expiry');
+  }
+  return { ok: true, expiresMs, defaulted };
+}
+
 export function createServiceTokenService(deps: ServiceTokenServiceDeps): ServiceTokenService {
   const { tokens, principals, authority, sessions, organizations, providers, keyring, clock, ids } =
     deps;
 
   const maxDays = (deps.lifetime ?? resolveTokenLifetimePolicy(undefined)).service.maxDays;
-
-  function requestedExpiry(
-    request: Pick<ServiceTokenIssueInput, 'expiresAt' | 'lifetimeDays'>,
-    nowMs: number,
-  ):
-    | { readonly ok: true; readonly expiresMs: number | null; readonly defaulted: boolean }
-    | { readonly ok: false; readonly error: 'invalid_expiry' } {
-    const expiryProvided = Object.hasOwn(request, 'expiresAt');
-    const lifetimeProvided = Object.hasOwn(request, 'lifetimeDays');
-    if (expiryProvided && lifetimeProvided) return fail('invalid_expiry');
-    const defaulted = !expiryProvided && !lifetimeProvided;
-    const expiresMs = expiryProvided
-      ? canonicalTimestampMs(request.expiresAt)
-      : lifetimeProvided
-        ? lifetimeExpiry(nowMs, maxDays, request.lifetimeDays as number)
-        : null;
-    if (
-      !defaulted &&
-      (expiresMs === null || expiresMs <= nowMs || expiresMs > nowMs + maxDays * DAY_MS)
-    ) {
-      return fail('invalid_expiry');
-    }
-    return { ok: true, expiresMs, defaulted };
-  }
 
   function emit(entry: Readonly<Record<string, unknown>>): void {
     try {
@@ -382,7 +474,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
     }
 
     const nowMs = clock.now().getTime();
-    const expiry = requestedExpiry(request, nowMs);
+    const expiry = requestedExpiry(request, nowMs, maxDays);
     if (!expiry.ok) return expiry;
     const { defaulted } = expiry;
     let { expiresMs } = expiry;
@@ -579,7 +671,7 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
       if (!sessions.isReauthFresh(authenticated)) return fail('reauth_required');
       if (![0, 1, 7].includes(request.overlapDays)) return fail('invalid_overlap');
       if (Object.hasOwn(request, 'name') && !isValidName(request.name)) return fail('invalid_name');
-      const expiry = requestedExpiry(request, clock.now().getTime());
+      const expiry = requestedExpiry(request, clock.now().getTime(), maxDays);
       if (!expiry.ok) return expiry;
       if (tokens.getService === undefined) throw new TypeError('rotation store is required');
       const old =

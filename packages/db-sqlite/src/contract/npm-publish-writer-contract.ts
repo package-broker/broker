@@ -213,6 +213,13 @@ export function describeNpmPublishWriterContract(
     }
   }
   describe(`npm publish service on ${name}`, () => {
+    it('rechecks package binding inside the publish mutation fence', () =>
+      run(async (e, w) => {
+        await e.all(st("UPDATE token SET package_name='other' WHERE id='token'"));
+        await expect(w.writer.publishVersion(ctx, w.guard, w.input(false))).rejects.toThrow();
+        expect(await e.all(st('SELECT id FROM version'))).toEqual([]);
+        expect(await e.all(st('SELECT id FROM audit_pending'))).toEqual([]);
+      }));
     it('scan CAS is scoped, leased, retryable and activates only after both gates', () =>
       run(async (e, w) => {
         const input = w.input(true);

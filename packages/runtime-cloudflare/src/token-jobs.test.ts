@@ -462,3 +462,14 @@ describe('Worker personal-token job holder', () => {
     );
   });
 });
+
+it('registers the hourly OIDC replay expiry job', () => {
+  const jobs = tokenJobRegistrations(
+    { driver: 'none', all: async () => [], batch: async () => [] },
+    createPatJobHolder(),
+    () => undefined,
+  );
+  expect(
+    jobs.find((job) => job.qualifiedName === 'core:oidc-replay-expire:v1')?.definition,
+  ).toMatchObject({ version: 1, schedule: { everySeconds: 3600 } });
+});

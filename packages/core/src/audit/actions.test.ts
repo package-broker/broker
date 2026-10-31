@@ -43,9 +43,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 68 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(68);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(68);
+  it('has 69 unique actions', () => {
+    expect(AUDIT_ACTIONS.length).toBe(69);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(69);
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -1378,5 +1378,66 @@ describe('npm audit values', () => {
     expect(build(action, { package: { new: 'a'.repeat(214) } }).ok).toBe(true);
     expect(build(action, { package: { new: 'a'.repeat(215) } }).ok).toBe(false);
     expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(false);
+  });
+});
+
+describe('workload claim audit bounds', () => {
+  it.each([
+    ['workflow', 255],
+    ['environment', 255],
+    ['ref', 1024],
+  ] as const)('preserves %s at its byte limit and refuses excess bytes', (field, limit) => {
+    const value = field === 'workflow' ? 'w'.repeat(limit - 4) + '.yml' : 'a'.repeat(limit);
+    const result = build('token.workload_issue', { [field]: { new: value } });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.parse(result.event.payloadJson).changes[field].new).toBe(value);
+    for (const oversized of [value + 'a', 'é'.repeat(Math.floor(limit / 2) + 1)])
+      expect(build('token.workload_issue', { [field]: { new: oversized } })).toEqual({
+        ok: false,
+        reason: 'bad_value',
+      });
+  });
+});
+
+describe('verified workload claim audit values', () => {
+  const uuid = '123e4567-e89b-12d3-a456-426614174000';
+  it.each([
+    ['workflow', `release-${uuid}.yml`],
+    ['environment', `release-${uuid}`],
+    ['ref', `refs/heads/release-${uuid}`],
+    ['repository_id', '12345678901234567890'],
+    ['repository_owner_id', '98765432109876543210'],
+    ['repository_visibility', 'private'],
+  ])('preserves verified %s without generic credential detection', (field, value) => {
+    const result = build('token.workload_issue', { [field]: { new: value } });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.parse(result.event.payloadJson).changes[field].new).toBe(value);
+  });
+  it.each([
+    ['workflow', 'invalid.txt'],
+    ['workflow', 'dir/publish.yml'],
+    ['workflow', 'publish@main.yml'],
+    ['workflow', '\ud800.yml'],
+    ['environment', 'prod\n'],
+    ['ref', 'refs/heads/with space'],
+    ['ref', ''],
+    ['repository_id', '0123'],
+    ['repository_owner_id', 'a'],
+    ['repository_visibility', 'unknown'],
+  ])('refuses invalid %s claim characters', (field, value) => {
+    expect(build('token.workload_issue', { [field]: { new: value } })).toEqual({
+      ok: false,
+      reason: 'bad_value',
+    });
+  });
+  it('keeps credential detection on other actions and workload fields', () => {
+    expect(build('token.issue', { name: { new: `release-${uuid}` } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+    expect(build('token.workload_issue', { token_id: { new: `release-${uuid}` } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
   });
 });

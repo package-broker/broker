@@ -5,6 +5,7 @@ import {
   auditCanonicalVectors,
   auditMarkerFixtures,
   auditSinkConformanceFixtures,
+  auditSinkConformanceFixturesFor,
   AuditSinkConformanceError,
   runAuditSinkConformance,
   type AuditSinkConformanceAdapter,
@@ -197,7 +198,7 @@ describe('sink fixture runner', () => {
       expect(result.frontier).toBe('passed');
       expect(result.acknowledgement).toBe('receiver');
       expect(result.partialOutcome).toBe(outcome);
-      expect(result.passed).toHaveLength(15);
+      expect(result.passed).toHaveLength(16);
     },
   );
 
@@ -275,7 +276,7 @@ describe('sink fixture runner', () => {
             : response;
         },
       });
-      expect(result.passed).toHaveLength(15);
+      expect(result.passed).toHaveLength(16);
     },
   );
 
@@ -288,6 +289,102 @@ describe('sink fixture runner', () => {
           base.respond(reply === 'rejected' ? 'accepted' : reply, batch, options),
       }),
     ).rejects.toMatchObject({ fixture: 'permanent-rejection' });
+  });
+
+  it('uses adapter retryable statuses and tests terminal statuses separately', async () => {
+    const base = adapter();
+    const statuses: { reply: string; status: number | undefined }[] = [];
+    await runAuditSinkConformance({
+      ...base,
+      retryableStatuses: [429, 503],
+      terminalStatuses: [400, 422],
+      respond: (reply, batch, options) => {
+        if (reply === 'retry' || (reply === 'rejected' && options.status !== undefined))
+          statuses.push({ reply, status: options.status });
+        return base.respond(reply, batch, options);
+      },
+    });
+    expect(statuses).toEqual([
+      { reply: 'retry', status: 429 },
+      { reply: 'retry', status: 503 },
+      { reply: 'retry', status: 503 },
+      { reply: 'rejected', status: 400 },
+      { reply: 'rejected', status: 422 },
+    ]);
+  });
+
+  it('exports exactly the protocol status fixtures that run', async () => {
+    const base = adapter();
+    const config = { ...base, retryableStatuses: [429, 503], terminalStatuses: [400, 422] };
+    const fixtures = auditSinkConformanceFixturesFor(config);
+    expect(
+      fixtures
+        .find(({ name }) => name === 'retryable-http-status')!
+        .steps.map(({ status }) => status),
+    ).toEqual([429, 503, 503]);
+    expect(
+      fixtures
+        .find(({ name }) => name === 'terminal-http-status')!
+        .steps.map(({ status }) => status),
+    ).toEqual([400, 422]);
+    expect((await runAuditSinkConformance(config)).passed).toEqual(
+      fixtures.map(({ name }) => name),
+    );
+    const otlp = auditSinkConformanceFixturesFor({ wireFormat: 'otlp' });
+    expect(
+      otlp.find(({ name }) => name === 'retryable-http-status')!.steps.map(({ status }) => status),
+    ).toEqual([429, 502, 503, 504, 504]);
+    expect(
+      otlp.find(({ name }) => name === 'terminal-http-status')!.steps.map(({ status }) => status),
+    ).toEqual([408, 500]);
+  });
+
+  it.each([
+    {
+      retryableStatuses: [408, 429, 500, 503],
+      terminalStatuses: [400],
+      fixture: 'retryable-http-status',
+    },
+    {
+      retryableStatuses: [429, 503, 504],
+      terminalStatuses: [408, 500],
+      fixture: 'retryable-http-status',
+    },
+    {
+      retryableStatuses: [429, 502, 503, 504, 500],
+      terminalStatuses: [408],
+      fixture: 'retryable-http-status',
+    },
+    { terminalStatuses: [400], fixture: 'terminal-http-status' },
+    { terminalStatuses: [408], fixture: 'terminal-http-status' },
+    { terminalStatuses: [500], fixture: 'terminal-http-status' },
+    { terminalStatuses: [408, 500, 503], fixture: 'terminal-http-status' },
+  ])(
+    'refuses declarations that weaken the OTLP status policy: %j',
+    async ({ fixture, ...statuses }) => {
+      await expect(
+        runAuditSinkConformance({ ...adapter(), wireFormat: 'otlp', ...statuses }),
+      ).rejects.toMatchObject({ fixture });
+    },
+  );
+
+  it.each([200, 204, 299])('refuses HTTP %s in terminalStatuses', async (status) => {
+    await expect(
+      runAuditSinkConformance({ ...adapter(), terminalStatuses: [status] }),
+    ).rejects.toMatchObject({ fixture: 'terminal-http-status' });
+  });
+
+  it('refuses retry for an adapter terminal status', async () => {
+    const base = adapter();
+    await expect(
+      runAuditSinkConformance({
+        ...base,
+        respond: (reply, batch, options) =>
+          reply === 'rejected' && options.status !== undefined
+            ? base.respond('retry', batch, { status: 503 })
+            : base.respond(reply, batch, options),
+      }),
+    ).rejects.toMatchObject({ fixture: 'terminal-http-status' });
   });
 
   it('rejects the reviewer sink that wraps camelCase records and accepts non-errors', async () => {
@@ -455,7 +552,7 @@ describe('sink fixture runner', () => {
         },
       })),
     );
-    expect(result.passed).toHaveLength(15);
+    expect(result.passed).toHaveLength(16);
   });
 
   it.each([0, 91])('accepts any differing receiver epoch (%s)', async (epoch) => {
@@ -469,7 +566,7 @@ describe('sink fixture runner', () => {
           : response;
       },
     });
-    expect(result.passed).toHaveLength(15);
+    expect(result.passed).toHaveLength(16);
   });
 
   it.each([
@@ -572,7 +669,7 @@ describe('sink fixture runner', () => {
         await expect(runAuditSinkConformance(otlp)).rejects.toMatchObject({
           fixture: 'canonical-vectors',
         });
-      else expect((await runAuditSinkConformance(otlp)).passed).toHaveLength(15);
+      else expect((await runAuditSinkConformance(otlp)).passed).toHaveLength(16);
     },
   );
 
@@ -741,7 +838,7 @@ describe('sink fixture runner', () => {
           options,
         ),
     };
-    expect((await runAuditSinkConformance(transport)).passed).toHaveLength(15);
+    expect((await runAuditSinkConformance(transport)).passed).toHaveLength(16);
   });
 
   it('accepts a sink rejecting an incorrect receiver epoch as bad_response', async () => {
@@ -754,7 +851,7 @@ describe('sink fixture runner', () => {
           : result;
       },
     }));
-    expect((await runAuditSinkConformance(strict)).passed).toHaveLength(15);
+    expect((await runAuditSinkConformance(strict)).passed).toHaveLength(16);
   });
 
   it.each(['chainId', 'orgId'] as const)('refuses a probe that ignores %s', async (field) => {

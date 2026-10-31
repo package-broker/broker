@@ -259,6 +259,7 @@ export async function reconcileAuditSinks(
     if (markers.length > 0) {
       const batch: AuditBatchV1 = {
         v: 1,
+        frozenAt: now.getTime(),
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: ctx.orgId,

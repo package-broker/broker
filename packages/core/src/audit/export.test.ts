@@ -5,6 +5,7 @@ import { jobFences } from '../platform/job-fences.js';
 import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '../kernel/obs-codes.js';
 import { createObservability, safeRecord } from '../platform/observability.js';
 import type { JobContext } from '../platform/jobs.js';
+import { administerAuditSink } from './sink-admin.js';
 import { auditEvent } from './actions.js';
 import { hashRow, type AuditRow } from './chain.js';
 import type { AuditBatchV1, AuditDelivery } from './plugin-api.js';
@@ -36,6 +37,7 @@ const ack = (batch: AuditBatchV1): Extract<AuditDelivery, { outcome: 'accepted' 
 async function setup(durableAck = true) {
   let now = new Date('2026-10-30T00:00:00.000Z');
   let active = true;
+  let activeFence = fence;
   const event = auditEvent({
     id: '01J00000000000000000000003',
     now: now.toISOString(),
@@ -115,7 +117,7 @@ async function setup(durableAck = true) {
     }),
     save: vi.fn(async (ctx, guard, expected, next, buildGeneration) => {
       expect(ctx).toEqual(org);
-      expect(guard).toEqual(fence);
+      expect(guard).toEqual(activeFence);
       if (
         buildGeneration < stored.highestGeneration ||
         !active ||
@@ -128,7 +130,7 @@ async function setup(durableAck = true) {
     }),
     hold: vi.fn(async (ctx, guard, expected, next, buildGeneration) => {
       expect(ctx).toEqual(org);
-      expect(guard).toEqual(fence);
+      expect(guard).toEqual(activeFence);
       const fields = (snapshot: AuditExportSnapshot) =>
         JSON.stringify({ ...snapshot, boundarySeq: 0, boundaryPrevHash: '' });
       if (
@@ -166,6 +168,15 @@ async function setup(durableAck = true) {
     },
     expire: () => {
       active = false;
+    },
+    acquire: () => {
+      active = true;
+      activeFence = systemMutationFence(
+        'audit-export',
+        { ...lease, owner: 'second', fence: 2 },
+        {},
+      );
+      return activeFence;
     },
     advance: () => {
       now = new Date(now.getTime() + 3_600_000);
@@ -438,6 +449,66 @@ describe('audit delivery', () => {
     expect(f.get().sink.inflightBody).not.toBeNull();
   });
 
+  it('preserves frozenAt after lease expiry and another instance retries', async () => {
+    const f = await setup();
+    f.deliver.mockImplementationOnce(async (batch) => {
+      f.expire();
+      return ack(batch);
+    });
+    expect(await f.run()).toBe('contended');
+    const original = f.get().sink.inflightBody!;
+    const frozenAt = f.deliver.mock.calls[0]![0].frozenAt;
+    expect(frozenAt).toBe(Date.parse('2026-10-30T00:00:00.000Z'));
+    f.advance();
+    const nextFence = f.acquire();
+    const deliver = vi.fn(async (batch: AuditBatchV1) => ack(batch));
+    expect(
+      await exportAuditBatch(f.port, org, nextFence, { ...f.options, sink: { deliver } }, signal),
+    ).toBe('accepted');
+    expect(deliver.mock.calls[0]![0].frozenAt).toBe(frozenAt);
+    expect(JSON.stringify(deliver.mock.calls[0]![0])).toBe(original);
+    expect(f.get().sink.progressSeq).toBe(1);
+  });
+
+  it.each([undefined, null, -1, 1.5, '123', 18446744073710, Number.MAX_SAFE_INTEGER + 1])(
+    'refuses a frozen batch with invalid frozenAt %s',
+    async (frozenAt) => {
+      const f = await setup();
+      f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+      expect(await f.run()).toBe('retry');
+      f.advance();
+      f.change({
+        sink: {
+          ...f.get().sink,
+          inflightBody: JSON.stringify({
+            ...JSON.parse(f.get().sink.inflightBody!),
+            frozenAt,
+          }),
+        },
+      });
+      await expect(f.run()).rejects.toThrow('Audit sink in-flight batch malformed');
+      expect(f.deliver).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([0, 18446744073709])('accepts the frozenAt boundary %s on read', async (frozenAt) => {
+    const f = await setup();
+    f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+    await f.run();
+    f.advance();
+    f.change({
+      sink: {
+        ...f.get().sink,
+        inflightBody: JSON.stringify({
+          ...JSON.parse(f.get().sink.inflightBody!),
+          frozenAt,
+        }),
+      },
+    });
+    expect(await f.run()).toBe('accepted');
+    expect(f.deliver.mock.calls.at(-1)![0].frozenAt).toBe(frozenAt);
+  });
+
   it('ignores a late original ACK after another worker commits', async () => {
     const f = await setup();
     let release!: (result: AuditDelivery) => void;
@@ -583,6 +654,7 @@ describe('audit delivery', () => {
       const f = await setup();
       const batch = {
         v: 1,
+        frozenAt: 0,
         chainId,
         epoch: 0,
         orgId: org.orgId,
@@ -995,6 +1067,7 @@ describe('audit rejection delivery', () => {
           registryMarkerOriginalAttempt: 0,
           registryMarkerBody: JSON.stringify({
             v: 1,
+            frozenAt: 0,
             orgId: org.orgId,
             chainId,
             epoch: 0,
@@ -1084,6 +1157,100 @@ describe('audit rejection delivery', () => {
     });
     expect(vi.mocked(f.port.save).mock.calls.at(-1)![5]?.ledger).toBeUndefined();
     expect(f.alert).toHaveBeenCalledExactlyOnceWith('blocked');
+  });
+
+  it('gives bisected halves their own freeze time and preserves it through retries and tail activation', async () => {
+    const f = await fixture('otlp');
+    const second = { ...f.row, seq: 2, prev_hash: f.row.hash };
+    second.hash = await hashRow(second.prev_hash, second);
+    f.port.page = async () => [f.row, second];
+    f.deliver.mockImplementationOnce(async () => {
+      f.advance();
+      return { outcome: 'rejected', code: 'too_large' };
+    });
+    expect(await f.run()).toBe('resolved');
+    const parent = f.deliver.mock.calls[0]![0];
+    const left = JSON.parse(f.get().sink.inflightBody!) as AuditBatchV1;
+    const tail = JSON.parse(f.get().sink.inflightRepr!).rejectionTail[0] as AuditBatchV1;
+    expect(left.frozenAt).toBe(f.options.now().getTime());
+    expect(left.frozenAt).toBeGreaterThan(parent.frozenAt);
+    expect(tail.frozenAt).toBe(left.frozenAt);
+    f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+    f.advance();
+    expect(await f.run()).toBe('retry');
+    f.advance();
+    expect(await f.run()).toBe('accepted');
+    expect(f.deliver.mock.calls[1]![0]).toEqual(left);
+    expect(f.deliver.mock.calls[2]![0]).toEqual(left);
+    expect(await f.run()).toBe('accepted');
+    expect(f.deliver.mock.calls[3]![0]).toEqual(tail);
+  });
+
+  it('freezes a rejection disposition at creation and keeps it across retries', async () => {
+    const f = await fixture('otlp');
+    f.deliver.mockImplementationOnce(async () => {
+      f.advance();
+      return { outcome: 'rejected', code: 'http_status' };
+    });
+    expect(await f.run()).toBe('resolved');
+    const marker = JSON.parse(f.get().sink.inflightBody!) as AuditBatchV1;
+    expect(marker.frozenAt).toBeGreaterThan(f.deliver.mock.calls[0]![0].frozenAt);
+    f.advance();
+    f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+    expect(await f.run()).toBe('retry');
+    f.advance();
+    expect(await f.run()).toBe('accepted');
+    expect(f.deliver.mock.calls[1]![0]).toEqual(marker);
+    expect(f.deliver.mock.calls[2]![0]).toEqual(marker);
+  });
+
+  it('freezes an operator-skip tombstone at creation and keeps it across retries', async () => {
+    const f = await fixture('otlp', 'required');
+    f.change({ sink: { ...f.get().sink, durableAck: true } });
+    f.deliver.mockResolvedValueOnce({ outcome: 'rejected', code: 'http_status' });
+    expect(await f.run()).toBe('resolved');
+    const original = f.deliver.mock.calls[0]![0];
+    f.advance();
+    await administerAuditSink(
+      {
+        actorExists: async () => true,
+        resolution: async () => ({ target: null, resolved: false }),
+        read: async () => ({
+          ...f.get(),
+          sinks: [{ ...f.get().sink, bodyVersion: 0 }],
+          headSeq: 1,
+          headHash: f.row.hash,
+          boundaryReason: null,
+          mode: 'export',
+          pendingMode: null,
+        }),
+        hashAt: async () => f.row.hash,
+        save: async (ctx, _expected, _observed, change) => {
+          expect(ctx).toEqual(org);
+          f.change({ sink: change.sinks[0]! });
+          return true;
+        },
+      },
+      org,
+      { operation: 'skip', sinkId: 'test', seq: 1 },
+      {
+        generation: 1,
+        now: f.options.now(),
+        alert: vi.fn(),
+        actor: { type: 'user', id: '01J00000000000000000000009' },
+      },
+    );
+    const marker = JSON.parse(f.get().sink.inflightBody!) as AuditBatchV1;
+    expect(marker.records[0]).toMatchObject({ kind: 'tombstone', reasonCode: 'operator_skip' });
+    expect(marker.frozenAt).toBe(f.options.now().getTime());
+    expect(marker.frozenAt).toBeGreaterThan(original.frozenAt);
+    f.advance();
+    f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+    expect(await f.run()).toBe('retry');
+    f.advance();
+    expect(await f.run()).toBe('accepted');
+    expect(f.deliver.mock.calls[1]![0]).toEqual(marker);
+    expect(f.deliver.mock.calls[2]![0]).toEqual(marker);
   });
 
   it('bisects a poison batch and preserves the frozen suffix through nested splits', async () => {

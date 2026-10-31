@@ -33,9 +33,8 @@ function nanos(milliseconds: number): string {
   return String(value);
 }
 
-/** The caller freezes the delivery time with the batch for byte-identical retries. */
-export function encodeAuditBatch(batch: AuditBatchV1, observedAt: Date): string {
-  const observedTimeUnixNano = nanos(observedAt.getTime());
+export function encodeAuditBatch(batch: AuditBatchV1, deploymentId: string): string {
+  const observedTimeUnixNano = nanos(batch.frozenAt);
   const logRecords = batch.records.map((record) => {
     const event = record.kind === 'event';
     const createdAt = 'createdAt' in record ? record.createdAt : undefined;
@@ -66,6 +65,7 @@ export function encodeAuditBatch(batch: AuditBatchV1, observedAt: Date): string 
       {
         resource: {
           attributes: attributes({
+            deploymentId,
             v: batch.v,
             chainId: batch.chainId,
             epoch: batch.epoch,

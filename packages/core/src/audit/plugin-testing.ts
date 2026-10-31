@@ -439,6 +439,7 @@ function batch(
 ): AuditBatchV1 {
   return freeze({
     v: 1,
+    frozenAt: Date.parse('2026-10-28T00:00:02.000Z'),
     chainId: first.chainId,
     epoch: first.epoch,
     orgId: first.orgId,
@@ -484,7 +485,7 @@ const accepted = (input: AuditBatchV1): AuditConformanceStep => ({
   reply: 'accepted',
 });
 
-/** Faults model the core/receiver boundary; database leases and cursor CAS require integration tests. */
+/** Webhook-default fixtures; use auditSinkConformanceFixturesFor for protocol-specific lists. */
 export const auditSinkConformanceFixtures: readonly AuditConformanceFixture[] = freeze([
   {
     name: 'canonical-vectors',
@@ -536,6 +537,10 @@ export const auditSinkConformanceFixtures: readonly AuditConformanceFixture[] = 
     })),
   },
   { name: 'permanent-rejection', steps: [{ batch: eventBatch, reply: 'rejected' }] },
+  {
+    name: 'terminal-http-status',
+    steps: [{ batch: eventBatch, reply: 'rejected', status: 400 }],
+  },
   {
     name: 'crash-before-marker-commit',
     steps: [
@@ -596,6 +601,10 @@ export type AuditConformanceResponse = Awaited<ReturnType<AuditBoundFetch>>;
 export interface AuditSinkConformanceAdapter {
   /** OTLP acknowledges transport success; a webhook echoes the receiver's position. */
   readonly acknowledgement: 'transport' | 'receiver';
+  /** Retryable HTTP statuses; defaults to the wire protocol's retry policy. */
+  readonly retryableStatuses?: readonly number[];
+  /** Terminal HTTP statuses; defaults to 408/500 for OTLP, otherwise 400. */
+  readonly terminalStatuses?: readonly number[];
   /** A new build generation may change encoder defaults, but must retain v1 encoding. */
   readonly create: (ctx: AuditSinkContext, generation: number) => AuditSink;
   /** Decode the actual protocol body to public camelCase fields; null denotes a frontier probe. */
@@ -659,13 +668,63 @@ export interface AuditSinkConformanceResult {
   readonly partialOutcome: AuditSinkConformanceAdapter['partialOutcome'];
 }
 
+/** Resolves the exact fixtures run for this protocol, including declared status cases. */
+export function auditSinkConformanceFixturesFor(
+  adapter: Pick<
+    AuditSinkConformanceAdapter,
+    'wireFormat' | 'retryableStatuses' | 'terminalStatuses'
+  >,
+): readonly AuditConformanceFixture[] {
+  const otlp = adapter.wireFormat === 'otlp';
+  const otlpRetryable = [429, 502, 503, 504];
+  const retryable = adapter.retryableStatuses ?? (otlp ? otlpRetryable : [408, 429, 500, 503]);
+  const terminal = adapter.terminalStatuses ?? (otlp ? [408, 500] : [400]);
+  const httpStatus = (status: number) => Number.isInteger(status) && status >= 100 && status <= 599;
+  if (
+    retryable.length === 0 ||
+    !retryable.every(httpStatus) ||
+    (otlp &&
+      (!otlpRetryable.every((status) => retryable.includes(status)) ||
+        retryable.some((status) => !otlpRetryable.includes(status))))
+  )
+    throw new AuditSinkConformanceError('retryable-http-status');
+  if (
+    terminal.length === 0 ||
+    !terminal.every(
+      (status) =>
+        httpStatus(status) && (status < 200 || status >= 300) && !retryable.includes(status),
+    ) ||
+    (otlp && ![408, 500].every((status) => terminal.includes(status)))
+  )
+    throw new AuditSinkConformanceError('terminal-http-status');
+  return freeze(
+    auditSinkConformanceFixtures.map((template) => ({
+      ...template,
+      steps:
+        template.name === 'retryable-http-status'
+          ? [
+              ...retryable.map((status) => ({
+                batch: eventBatch,
+                reply: 'retry' as const,
+                status,
+                retryAfterMs: 1234,
+              })),
+              { batch: eventBatch, reply: 'retry' as const, status: retryable.at(-1)! },
+            ]
+          : template.name === 'terminal-http-status'
+            ? terminal.map((status) => ({ batch: eventBatch, reply: 'rejected' as const, status }))
+            : template.steps,
+    })),
+  );
+}
+
 /** Runs without a test framework, network, timers, or database. Failure text never includes sink data. */
 export async function runAuditSinkConformance(
   adapter: AuditSinkConformanceAdapter,
 ): Promise<AuditSinkConformanceResult> {
   const passed: string[] = [];
   let frontier: AuditSinkConformanceResult['frontier'] = 'unsupported';
-  for (const fixture of auditSinkConformanceFixtures) {
+  for (const fixture of auditSinkConformanceFixturesFor(adapter)) {
     const fail = (): never => {
       throw new AuditSinkConformanceError(fixture.name);
     };
@@ -703,8 +762,11 @@ export async function runAuditSinkConformance(
         const pending = contexts.get(request.signal);
         assertConformance(pending !== undefined);
         const { step } = pending!;
-        const normalize = (input: AuditBatchV1 | null): AuditBatchV1 | null =>
-          adapter.wireFormat !== 'otlp' || input === null
+        const normalize = (value: AuditBatchV1 | null) => {
+          if (value === null) return null;
+          // Frozen time need not appear as a batch field in the protocol envelope.
+          const input = { ...value, frozenAt: 0 };
+          return adapter.wireFormat !== 'otlp'
             ? input
             : {
                 ...input,
@@ -712,6 +774,7 @@ export async function runAuditSinkConformance(
                   Object.fromEntries(Object.entries(record).filter(([, value]) => value !== null)),
                 ) as unknown as AuditBatchV1['records'],
               };
+        };
         pending!.calls++;
         assertConformance(
           pending!.calls === 1 && stable(normalize(decoded)) === stable(normalize(step.batch)),
@@ -775,7 +838,9 @@ export async function runAuditSinkConformance(
           deploymentId: 'conformance',
           fetch,
           env: () => undefined,
-          clock: { now: () => new Date('2026-10-28T00:00:02.000Z') },
+          clock: {
+            now: () => new Date(Date.parse('2026-10-28T00:00:02.000Z') + generation * 60_000),
+          },
         },
         generation,
       );

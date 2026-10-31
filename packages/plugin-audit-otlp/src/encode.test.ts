@@ -5,7 +5,9 @@ import {
   auditMarkerFixtures,
   auditSinkConformanceFixtures,
 } from '@package-broker/core/plugin/testing';
-import { encodeAuditBatch } from './encode.js';
+import { encodeAuditBatch as encode } from './encode.js';
+
+const encodeAuditBatch = (batch: AuditBatchV1) => encode(batch, 'deployment-test');
 
 interface Attribute {
   key: string;
@@ -35,6 +37,7 @@ const observedNanos = '1793363696789000000';
 function batch(records: AuditBatchV1['records'] = [first]): AuditBatchV1 {
   return {
     v: 1,
+    frozenAt: observed.getTime(),
     chainId: first.chainId,
     epoch: first.epoch,
     orgId: first.orgId,
@@ -110,8 +113,9 @@ describe('audit OTLP encoding', () => {
         throughSeq: vector.record.seq,
         throughHash: vector.record.hash,
       };
-      const { resource, logs } = decode(encodeAuditBatch(input, observed));
+      const { resource, logs } = decode(encodeAuditBatch(input));
       expect(resource).toEqual({
+        deployment_id: 'deployment-test',
         v: '1',
         chain_id: input.chainId,
         epoch: '3',
@@ -147,7 +151,7 @@ describe('audit OTLP encoding', () => {
 
   for (const { marker, wire } of auditMarkerFixtures) {
     it(`preserves every ${marker.kind} marker field and its own identity`, () => {
-      const { logs } = decode(encodeAuditBatch(batch([marker]), observed));
+      const { logs } = decode(encodeAuditBatch(batch([marker])));
       expect(logs).toHaveLength(1);
       const log = logs[0]!;
       expect(fields(log.attributes)).toEqual(expectedFields(wire));
@@ -164,7 +168,7 @@ describe('audit OTLP encoding', () => {
     const input = auditSinkConformanceFixtures.find(
       ({ name }) => name === 'additive-fields-and-marker-kind',
     )!.steps[0]!.batch;
-    const body = encodeAuditBatch(input, observed);
+    const body = encodeAuditBatch(input);
     const { logs } = decode(body);
     expect(logs).toHaveLength(2);
     expect(fields(logs[0]!.attributes)['future_field']).toBe('preserved');
@@ -176,21 +180,18 @@ describe('audit OTLP encoding', () => {
       future_field: 'preserved',
     });
     expect(logs[1]!.eventName).toBe('package_broker.audit.marker.future_marker');
-    expect(encodeAuditBatch(input, observed)).toBe(body);
+    expect(encodeAuditBatch(input)).toBe(body);
     for (const futureField of [{}, [], () => 'value', Symbol('value'), 1n, NaN, Infinity]) {
+      expect(() => encodeAuditBatch(batch([{ ...first, futureField } as typeof first]))).toThrow(
+        'Invalid audit attribute',
+      );
       expect(() =>
-        encodeAuditBatch(batch([{ ...first, futureField } as typeof first]), observed),
-      ).toThrow('Invalid audit attribute');
-      expect(() =>
-        encodeAuditBatch({ ...batch(), orgId: futureField } as unknown as AuditBatchV1, observed),
+        encodeAuditBatch({ ...batch(), orgId: futureField } as unknown as AuditBatchV1),
       ).toThrow('Invalid audit attribute');
     }
     const scalarFields = { futureString: 'value', futureNumber: 42, futureBoolean: false };
     expect(
-      fields(
-        decode(encodeAuditBatch(batch([{ ...first, ...scalarFields }]), observed)).logs[0]!
-          .attributes,
-      ),
+      fields(decode(encodeAuditBatch(batch([{ ...first, ...scalarFields }]))).logs[0]!.attributes),
     ).toMatchObject({ future_string: 'value', future_number: '42', future_boolean: 'false' });
   });
 
@@ -206,7 +207,7 @@ describe('audit OTLP encoding', () => {
       hash: first.hash,
       reasonCode: 'unreadable',
     } as const;
-    const { logs } = decode(encodeAuditBatch(batch([marker]), observed));
+    const { logs } = decode(encodeAuditBatch(batch([marker])));
     expect(fields(logs[0]!.attributes)).toEqual({
       kind: 'withheld',
       marker_id: marker.markerId,
@@ -223,9 +224,7 @@ describe('audit OTLP encoding', () => {
 
   it('omits absent and null IPs without claiming they are hashed', () => {
     for (const sourceIp of [undefined, null]) {
-      const { logs } = decode(
-        encodeAuditBatch(batch([{ ...first, sourceIp } as typeof first]), observed),
-      );
+      const { logs } = decode(encodeAuditBatch(batch([{ ...first, sourceIp } as typeof first])));
       const wire = fields(logs[0]!.attributes);
       expect(wire).not.toHaveProperty('source_ip');
       expect(wire).not.toHaveProperty('source_ip.hashed');
@@ -234,14 +233,14 @@ describe('audit OTLP encoding', () => {
 
   it('preserves millisecond precision without rounding nanoseconds', () => {
     const { logs } = decode(
-      encodeAuditBatch(batch([{ ...first, createdAt: '2026-10-30T12:34:56.789Z' }]), observed),
+      encodeAuditBatch(batch([{ ...first, createdAt: '2026-10-30T12:34:56.789Z' }])),
     );
     expect(logs[0]!.timeUnixNano).toBe(observedNanos);
   });
 
   it('encodes 100 records in order without truncating payloads', () => {
     const records = Array.from({ length: 100 }, (_, index) => ({ ...first, seq: index + 1 }));
-    const { logs } = decode(encodeAuditBatch(batch(records), observed));
+    const { logs } = decode(encodeAuditBatch(batch(records)));
     expect(logs).toHaveLength(100);
     expect(logs.map((log) => fields(log.attributes)['seq'])).toEqual(
       records.map(({ seq }) => String(seq)),
@@ -253,25 +252,27 @@ describe('audit OTLP encoding', () => {
 
   it('enforces the exact UTF-8 byte limit after escaping without truncation', () => {
     const input = batch([{ ...first, payloadJson: '' }]);
-    const overhead = new TextEncoder().encode(encodeAuditBatch(input, observed)).length;
+    const overhead = new TextEncoder().encode(encodeAuditBatch(input)).length;
     const payloadJson = 'x'.repeat(512 * 1024 - overhead);
     const exact = batch([{ ...first, payloadJson }]);
-    const body = encodeAuditBatch(exact, observed);
+    const body = encodeAuditBatch(exact);
     expect(new TextEncoder().encode(body).length).toBe(512 * 1024);
     expect(fields(decode(body).logs[0]!.attributes)['payload_json']).toBe(payloadJson);
-    expect(() =>
-      encodeAuditBatch(batch([{ ...first, payloadJson: payloadJson + 'x' }]), observed),
-    ).toThrow('Audit OTLP body exceeds byte limit');
+    expect(() => encodeAuditBatch(batch([{ ...first, payloadJson: payloadJson + 'x' }]))).toThrow(
+      'Audit OTLP body exceeds byte limit',
+    );
     for (const character of ['界', '"', '\\', '\n']) {
       expect(() =>
-        encodeAuditBatch(batch([{ ...first, payloadJson: character.repeat(270_000) }]), observed),
+        encodeAuditBatch(batch([{ ...first, payloadJson: character.repeat(270_000) }])),
       ).toThrow(RangeError);
     }
   });
 
   it('refuses invalid and out-of-range timestamps with a fixed error', () => {
     for (const date of [new Date(NaN), new Date(-1), new Date('9999-01-01')]) {
-      expect(() => encodeAuditBatch(batch(), date)).toThrow('Invalid audit timestamp');
+      expect(() => encodeAuditBatch({ ...batch(), frozenAt: date.getTime() })).toThrow(
+        'Invalid audit timestamp',
+      );
     }
     for (const createdAt of [
       'invalid',
@@ -283,7 +284,7 @@ describe('audit OTLP encoding', () => {
       '2026-10-30 12:34:56.789Z',
       '2026-13-30T12:34:56.789Z',
     ]) {
-      expect(() => encodeAuditBatch(batch([{ ...first, createdAt }]), observed)).toThrow(
+      expect(() => encodeAuditBatch(batch([{ ...first, createdAt }]))).toThrow(
         'Invalid audit timestamp',
       );
     }

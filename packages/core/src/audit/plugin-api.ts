@@ -244,6 +244,8 @@ export interface AuditPositionV1 {
 
 export interface AuditBatchV1 {
   readonly v: 1;
+  /** Integer milliseconds since the epoch, fixed when core first freezes the batch. */
+  readonly frozenAt: number;
   readonly chainId: string;
   readonly epoch: number;
   readonly orgId: string;

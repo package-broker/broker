@@ -221,6 +221,7 @@ describe('organization-bound audit composition', () => {
       });
       const batch: AuditBatchV1 = {
         v: 1,
+        frozenAt: 0,
         orgId: org.orgId,
         chainId: head.chainId,
         epoch: head.epoch,

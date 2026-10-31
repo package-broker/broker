@@ -1,3 +1,7 @@
+import { runApiGate, assertRuntimeParity } from './client-matrix-api.mjs';
+import { runLogin, saveLoginCapture } from './client-matrix-login.mjs';
+import { hashPassword } from '../packages/core/dist/auth/password.js';
+import { sha256Hex } from '../packages/core/dist/auth/primitives.js';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -26,6 +30,7 @@ import { createLruCache } from '../packages/runtime-node/dist/cache/lru.js';
 import { createD1Executor } from '../packages/runtime-cloudflare/dist/db/d1-executor.js';
 import {
   prepareClient,
+  preparePublisher,
   harnessAssert as assert,
   PACKAGES,
   PUBLISH_PACKAGES,
@@ -159,9 +164,93 @@ export async function seed(executor) {
       );
     }
   }
+  const oidcPublisherId = ulid();
+  const oidcPrincipal = ulid();
+  await sql('INSERT INTO service_principal (id,org_id,name,created_by_user_id) VALUES (?,?,?,?)', [
+    oidcPrincipal,
+    orgId,
+    'Trusted publisher',
+    userId,
+  ]);
+  await sql(
+    "INSERT INTO service_principal_permission (org_id,service_principal_id,permission) VALUES (?,?,'org:packages:publish')",
+    [orgId, oidcPrincipal],
+  );
+  await sql(
+    "INSERT INTO trusted_publisher (id,org_id,package_name,repository_id,repository_owner_id,repository,workflow,environment,service_principal_id,created_by_user_id) VALUES (?,?,'matrix-publish-active','123','456','fixture/repository','publish.yml','',?,?)",
+    [oidcPublisherId, orgId, oidcPrincipal, userId],
+  );
+  const sessionSecret = 's'.repeat(43);
+  const csrf = 'c'.repeat(43);
+  const roleId = ulid();
+  const credentialId = ulid();
+  await sql(
+    "INSERT INTO role (id,org_id,key,name,scope,protects_last_holder) VALUES (?,?,'matrix-admin','Matrix admin','organization',1)",
+    [roleId, orgId],
+  );
+  for (const permission of [
+    'project:read',
+    'project:packages:read',
+    'project:packages:write',
+    'org:read',
+    'org:packages:read',
+    'org:packages:approve',
+    'org:packages:publish',
+    'org:service-principals:write',
+    'org:sources:read',
+    'org:sources:write',
+    'org:packages:manage',
+    'project:packages:manage',
+  ])
+    await sql('INSERT INTO role_permission (org_id,role_id,permission) VALUES (?,?,?)', [
+      orgId,
+      roleId,
+      permission,
+    ]);
+  await sql(
+    "INSERT INTO access_grant (id,org_id,subject_type,subject_value,scope,role_id) VALUES (?,?,'email','fixture@matrix.test','organization',?)",
+    [ulid(), orgId, roleId],
+  );
+  await sql(
+    "INSERT INTO credential (id,org_id,kind,ciphertext,nonce,key_version,aad) VALUES (?,?,'totp',x'00',x'000000000000000000000000',1,'test')",
+    [credentialId, orgId],
+  );
+  await sql(
+    "INSERT INTO local_login (user_id,org_id,password_hash,totp_credential_id,totp_enabled_at,last_login_at) VALUES (?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    [userId, orgId, await hashPassword('matrix fixture password', keyring), credentialId],
+  );
+  await sql(
+    "INSERT INTO session (id,org_id,user_id,secret_hash,csrf_hash,expires_at,last_seen_at,reauth_at) VALUES (?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 hour'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    [ulid(), orgId, userId, await sha256Hex(sessionSecret), await sha256Hex(csrf)],
+  );
   return {
     token,
     publishToken,
+    orgId,
+    projectId,
+    oidcPublisherId,
+    prepareRequestProject: async () => {
+      const requestProjectId = ulid();
+      await sql("INSERT INTO project (id,org_id,slug,name) VALUES (?,?,'beta','Beta')", [
+        requestProjectId,
+        orgId,
+      ]);
+      await sql(
+        "INSERT INTO project_source (org_id,project_id,source_id) SELECT org_id,?,id FROM source WHERE org_id=? AND type='hosted'",
+        [requestProjectId, orgId],
+      );
+    },
+    browserHeaders: (origin) => ({
+      cookie: `__Host-pb_session=${sessionSecret}; __Host-pb_csrf=${csrf}`,
+      'x-csrf-token': csrf,
+      origin,
+      'content-type': 'application/json',
+    }),
+    inspectLogin: () =>
+      executor.all({
+        sql: `SELECT t.project_mode, p.project_id, l.state, l.token_ciphertext FROM npm_login_session l JOIN token t ON t.org_id=l.org_id AND t.id=l.token_id JOIN token_project p ON p.org_id=t.org_id AND p.token_id=t.id WHERE l.org_id=?`,
+        params: [orgId],
+      }),
     inspectPublish: async (name) =>
       executor.all({
         sql: `SELECT v.status, b.refetchable FROM version v JOIN package p ON p.id = v.package_id AND p.org_id = v.org_id JOIN blob b ON b.id = v.blob_id AND b.org_id = v.org_id WHERE v.org_id = ? AND p.name = ?`,
@@ -178,6 +267,7 @@ export async function seed(executor) {
 
 async function frontServer(routes) {
   let dispatch;
+  let onLogin;
   let failure;
   let auditStatus = 200;
   const server = createServer(async (incoming, outgoing) => {
@@ -193,8 +283,12 @@ async function frontServer(routes) {
         headers: incoming.headers,
         body,
       });
+      const loginRequest =
+        onLogin && /\/-\/v1\/(?:login|done\/)/.test(url.pathname) ? request.clone() : null;
       const response = await dispatch(request);
-      await observeResponse(routes, request, response, auditStatus);
+      if (loginRequest) await onLogin(loginRequest, response);
+      if (!(onLogin && url.pathname.endsWith('/-/whoami')))
+        await observeResponse(routes, request, response, auditStatus);
       const bytes = new Uint8Array(await response.arrayBuffer());
       const headers = Object.fromEntries(response.headers);
       delete headers['transfer-encoding'];
@@ -212,6 +306,9 @@ async function frontServer(routes) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   return {
     origin,
+    login: (handler) => {
+      onLogin = handler;
+    },
     bind: (handler) => {
       dispatch = handler;
     },
@@ -326,6 +423,9 @@ async function bootWorker(directory, origin, audits, cleanup, options) {
 }
 
 export async function runMatrix({ client, version, verboseSteps = false, debug = false }) {
+  const integrationEvidence = [];
+  let nodeEvidence;
+  let nodeLogin;
   for (const target of ['node', 'cloudflare']) {
     const scratch = join(root, '.pb', 'client-matrix');
     const step = (name, action) => matrixStep(`${target} ${client} ${name}`, action, verboseSteps);
@@ -350,6 +450,33 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
       await step('version', async () => {
         const installed = await runCommand(client, ['--version'], project, env, { debug });
         checkVersion(installed, client, version);
+      });
+      await step('login', async () => {
+        const loginClient = await prepareClient(
+          join(directory, 'login'),
+          client,
+          `${front.origin}/alpha/npm/`,
+          '',
+        );
+        const evidence = await runLogin({ client, ...loginClient, front, broker, debug });
+        await saveLoginCapture(scratch, target, evidence);
+        if (target === 'node') nodeLogin = evidence;
+        else {
+          assert.equal(evidence.status, nodeLogin.status, 'Runtime login outcome differs');
+          assertRuntimeParity(
+            [...new Set(nodeLogin.requests.map((r) => JSON.stringify(r)))].sort(),
+            [...new Set(evidence.requests.map((r) => JSON.stringify(r)))].sort(),
+          );
+          await writeFile(
+            join(
+              root,
+              'packages/core/src/registry/npm/fixtures',
+              `web-login-${client}-${version}.json`,
+            ),
+            JSON.stringify({ ...evidence, runtimes: ['node', 'cloudflare'] }, null, 2) + '\n',
+          );
+        }
+        console.log(`client-matrix: ${target} ${client} login ${evidence.status}`);
       });
       const commands = clientCommands(client);
       for (const name of ['install', 'whoami', 'ping', 'audit']) {
@@ -378,18 +505,14 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
       for (const name of PUBLISH_PACKAGES) {
         await step(`publish ${name}`, async () => {
           const publishRoot = join(directory, 'publish-' + PUBLISH_PACKAGES.indexOf(name));
-          const publisher = await prepareClient(
+          const publisher = await preparePublisher(
             publishRoot,
             client,
             `${front.origin}/alpha/npm/`,
             broker.publishToken,
+            name,
+            { debug },
           );
-          await writeFile(
-            join(publisher.project, 'package.json'),
-            JSON.stringify({ name, version: '1.0.0', main: 'index.js', license: 'MIT' }),
-          );
-          await writeFile(join(publisher.project, 'index.js'), 'module.exports = true;\n');
-          await writeFile(join(publisher.project, 'README.md'), '# Publish fixture\n');
           const command = commands.publish;
           const result = await runCommand(
             command.command,
@@ -422,6 +545,11 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
           await read.body?.cancel();
         });
       }
+      await step('npm API routes', async () => {
+        const evidence = await runApiGate(broker, front.origin);
+        if (target === 'node') nodeEvidence = evidence;
+        else assertRuntimeParity(nodeEvidence, evidence, { debug });
+      });
       const forwardedBeforeRefusal = audits.length;
       await step('detach proxy', () => broker.detach());
       front.expectAudit(501);
@@ -438,6 +566,7 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
         front.assertHealthy();
         checkTraffic(routes, audits, client);
       });
+      integrationEvidence.push({ target, login: nodeLogin.status, routesVerified: true });
       console.log(
         `client-matrix: ${target} ${client} audit without proxy refused; all route evidence verified`,
       );
@@ -456,4 +585,5 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
       });
     }
   }
+  return integrationEvidence;
 }

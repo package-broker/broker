@@ -1,3 +1,5 @@
+import { assertIntegrationEvidence } from './client-matrix-api.mjs';
+import { matrixJwks } from './client-matrix-oidc.mjs';
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -240,6 +242,15 @@ const tarballs = new Map(
 
 export async function fixtureReply(request, audits) {
   const url = new URL(request.url);
+  if (url.href === 'https://token.actions.githubusercontent.com/.well-known/jwks') {
+    harnessAssert.ok(
+      request.method === 'GET' &&
+        !request.headers.has('authorization') &&
+        !request.headers.has('cookie'),
+      'Invalid JWKS fixture request',
+    );
+    return Response.json(matrixJwks);
+  }
   harnessAssert.ok(
     ['https://registry.npmjs.org', 'https://npm.matrix.test'].includes(url.origin),
     'Unexpected outbound destination',
@@ -293,6 +304,7 @@ export async function fixtureReply(request, audits) {
 
 export function redactClientOutput(output) {
   return stripVTControlCharacters(output)
+    .replace(/((?:#\/npm-login|\/-\/v1\/done)\/)[A-Za-z0-9_-]{43}/g, '$1[REDACTED]')
     .replace(/pb_[a-z0-9_-]+/gi, '[REDACTED]')
     .replace(/(_authToken["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi, '$1[REDACTED]')
     .replace(/((?:authorization|cookie|set-cookie)["']?\s*[:=]\s*)[^\r\n]*/gi, '$1[REDACTED]')
@@ -300,7 +312,13 @@ export function redactClientOutput(output) {
     .replace(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, '[REDACTED]');
 }
 
-export function runCommand(command, args, cwd, env, { debug = false, log = console.log } = {}) {
+export function runCommand(
+  command,
+  args,
+  cwd,
+  env,
+  { debug = false, log = console.log, input } = {},
+) {
   if (debug) log(`client-matrix: command ${redactClientOutput([command, ...args].join(' '))}`);
   return new Promise((resolve) => {
     const complete = (error, stdout = '', stderr = '') => {
@@ -313,7 +331,7 @@ export function runCommand(command, args, cwd, env, { debug = false, log = conso
       resolve(result);
     };
     try {
-      execFile(
+      const child = execFile(
         command,
         args,
         {
@@ -326,10 +344,45 @@ export function runCommand(command, args, cwd, env, { debug = false, log = conso
         },
         complete,
       );
+      if (input !== undefined) {
+        child.stdin.on('error', () => undefined);
+        child.stdin.end(input);
+      }
     } catch (error) {
       complete(error);
     }
   });
+}
+
+export async function preparePublisher(
+  directory,
+  client,
+  registry,
+  token,
+  name,
+  { debug = false, run = runCommand } = {},
+) {
+  const publisher = await prepareClient(directory, client, registry, token);
+  await writeFile(
+    join(publisher.project, 'package.json'),
+    JSON.stringify({
+      name,
+      version: '1.0.0',
+      main: 'index.js',
+      license: 'MIT',
+      files: ['index.js', 'README.md'],
+    }),
+  );
+  await writeFile(join(publisher.project, 'index.js'), 'module.exports = true;\n');
+  await writeFile(join(publisher.project, 'README.md'), '# Publish fixture\n');
+  if (client === 'yarn') {
+    const command = clientCommands(client).install;
+    const result = await run(command.command, command.args, publisher.project, publisher.env, {
+      debug,
+    });
+    checkResult(result, 'publisher install', client);
+  }
+  return publisher;
 }
 
 export async function prepareClient(directory, client, registry, token) {
@@ -475,7 +528,7 @@ async function main() {
   } else {
     await matrixStep(`${selection.client} runtime harness`, async () => {
       const { runMatrix } = await import('./client-matrix-runtime.mjs');
-      await runMatrix(selection);
+      assertIntegrationEvidence(await runMatrix(selection));
     });
   }
   console.log(`client-matrix: ${selection.client} ${selection.version} passed`);

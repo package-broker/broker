@@ -1142,6 +1142,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n      ) #1",
         "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'blob/filesystem.ts', import.meta.url).href\n      ) #1",
         'db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(new URL(core, import.meta.url).href) #1',
+        'db-sqlite/src/contract/npm-publish-adversarial.ts:dynamic dependency: import(new URL(runtime, import.meta.url).href) #1',
       ],
     },
     {

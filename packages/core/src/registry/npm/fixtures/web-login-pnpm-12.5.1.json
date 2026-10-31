@@ -1,7 +1,11 @@
 {
   "client": "pnpm",
   "version": "12.5.1",
-  "provenance": "Design revision 2 wire fixture; live capture pending because the sandbox cannot bind a loopback server",
-  "requests": [{ "method": "POST", "path": "/demo/npm/-/v1/login", "body": "{}" }],
-  "pending": { "status": 202, "body": {}, "retryAfter": "5" }
+  "transport": "Real CLI argument parser; refused before any registry HTTP request. Runtime HTTP capture awaits the Linux gate host.",
+  "command": ["pnpm", "login", "--auth-type=web"],
+  "exitCode": 2,
+  "status": "refused",
+  "reason": "client_does_not_support_web_login_option",
+  "output": "error: unexpected argument '--auth-type' found\n\nUsage: pnpm login [OPTIONS]\n\nFor more information, try '--help'.\n",
+  "requests": []
 }

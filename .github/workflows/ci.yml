@@ -47,7 +47,7 @@ jobs:
           if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = 0000000000000000000000000000000000000000 ]; then
             node scripts/ci-scope.mjs --full < /dev/null
           else
-            git diff --name-only -z "$BASE_SHA"..."$HEAD_SHA" | node scripts/ci-scope.mjs --head-branch "$HEAD_BRANCH"
+            git diff --no-renames --name-only -z "$BASE_SHA"..."$HEAD_SHA" | node scripts/ci-scope.mjs --head-branch "$HEAD_BRANCH"
           fi
 
   install:
@@ -142,7 +142,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: node scripts/ci-scope.mjs --check unit --shard=${{ matrix.shard }}/2 --exclude '**/test-support/**' --exclude '**/*.browser.test.ts'
+      - run: node scripts/ci-scope.mjs --check unit --passWithNoTests --shard=${{ matrix.shard }}/2 --exclude '**/test-support/**' --exclude '**/*.browser.test.ts'
       - if: matrix.shard == 1 && needs.scope.outputs.full == 'true'
         run: |
           pnpm test:scripts

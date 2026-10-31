@@ -284,7 +284,7 @@ test('workflow uses event bases, full checkout, scoped checks and scope-aware ga
     'github.event.merge_group.base_sha',
     'github.event.before',
     'fetch-depth: 0',
-    'git diff --name-only -z "$BASE_SHA"..."$HEAD_SHA"',
+    'git diff --no-renames --name-only -z "$BASE_SHA"..."$HEAD_SHA"',
     'github.head_ref',
     "--exclude '**/test-support/**' --exclude '**/*.browser.test.ts'",
     "if: matrix.shard == 1 && needs.scope.outputs.full == 'true'",
@@ -398,4 +398,93 @@ test('workflow gates every expensive job and preserves metadata checks on pull r
   for (const job of ['dco', 'pr-meta'])
     assert.ok(jobs[job].includes("if: github.event_name == 'pull_request'"));
   assert.ok(jobs['commit-gate'].includes('if: always()'));
+});
+
+test('scoped unit runner executes a one-file selection across both workflow shards', () => {
+  const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+  const command = workflow.match(/run: node scripts\/ci-scope.mjs --check unit (.+)/)[1];
+  for (const shard of [1, 2]) {
+    const args = command
+      .replace('${{ matrix.shard }}', shard)
+      .match(/'[^']*'|\S+/g)
+      .map((arg) => arg.replace(/^'|'$/g, ''));
+    const result = spawnSync(
+      process.execPath,
+      ['scripts/ci-scope.mjs', '--check', 'unit', ...args],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, PACKAGES: '["ui-assets"]' },
+      },
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    if (shard === 1) assert.match(result.stdout, /1 passed/);
+    else assert.match(result.stdout + result.stderr, /No test files found/);
+  }
+});
+
+test('browser backend and bundle inputs select the browser suite', () => {
+  for (const path of [
+    'packages/core/src/kernel/ui-routes.ts',
+    'packages/core/src/authz/permissions.ts',
+    'packages/db-sqlite/src/repositories/admin-bootstrap.ts',
+    'packages/runtime-cloudflare/src/db/d1-executor.ts',
+    'packages/runtime-node/src/entry.ts',
+    'packages/cli/src/build.ts',
+    'packages/plugin-github/src/provider.ts',
+    'packages/ui-assets/src/index.ts',
+    'broker.config.ts',
+  ]) {
+    assert.equal(scope([path]).uiBrowser, true, path);
+    assert.equal(scope([path]).full, false, path);
+  }
+});
+
+test('client and smoke harness imports select their consumers', () => {
+  assert.equal(scope(['packages/cli/src/build.ts']).clientMatrix, true);
+  for (const path of [
+    'scripts/held-batch-smoke.mjs',
+    'fixtures/observability-base.config.ts',
+    'packages/runtime-cloudflare/src/db/d1-executor.ts',
+    'packages/runtime-cloudflare/scripts/traceparent-smoke.mjs',
+    'packages/runtime-cloudflare/scripts/ui-bundle-regression.mjs',
+  ]) {
+    assert.equal(scope([path]).smokeNode, true, path);
+    assert.equal(scope([path]).full, false, path);
+  }
+  assert.equal(scope(['scripts/held-batch-smoke.mjs']).smokeCloudflare, true);
+  assert.equal(scope(['fixtures/observability-base.config.ts']).smokeCloudflare, true);
+});
+
+test('workflow diff includes the source of a rename out of core', () => {
+  const dir = mkdtempSync('.ci-scope-test-');
+  const git = (...args) => {
+    const result = spawnSync('git', args, {
+      cwd: dir,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  try {
+    git('init', '-q');
+    mkdirSync(join(dir, 'packages/core/src'), { recursive: true });
+    writeFileSync(join(dir, 'packages/core/src/moved.ts'), 'export const moved = true;\n');
+    git('add', '.');
+    const base = git('write-tree').trim();
+    mkdirSync(join(dir, 'docs'));
+    git('mv', 'packages/core/src/moved.ts', 'docs/moved.ts');
+    const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+    const options = workflow.match(/git diff (.+) "\$BASE_SHA"/)[1].split(' ');
+    const paths = git('diff', ...options, '--cached', base)
+      .split('\0')
+      .filter(Boolean);
+    assert.ok(paths.includes('packages/core/src/moved.ts'));
+    assert.ok(paths.includes('docs/moved.ts'));
+    const selection = scope(paths);
+    assert.deepEqual(selection, scope(['packages/core/src/moved.ts']));
+    assert.ok(selection.packages.includes('core'));
+    assert.ok(selection.packages.includes('runtime-node'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -9,6 +9,35 @@ const bundles = ['smokeCloudflare', 'smokeNode', 'treeshake', 'pack'];
 // Path table: runtime wiring imports more than the workspace dependency graph records.
 export const pathRules = [
   {
+    pattern: /^fixtures\/observability-base\.config\.ts$/,
+    checks: ['smokeNode', 'smokeCloudflare'],
+    reason: 'Both smokes build the trusted traceparent fixture, which inherits observability-base.',
+  },
+  {
+    pattern:
+      /^packages\/(core|db-[^/]+|runtime-node|runtime-cloudflare|cli|ui-assets|plugin-[^/]+)\/|^broker\.config\.ts$/,
+    checks: ['uiBrowser'],
+    reason:
+      'Browser fixtures import core UI routes and database/Worker helpers; e2e fixtures build and launch the configured broker bundles.',
+  },
+  {
+    pattern: /^packages\/cli\//,
+    checks: ['clientMatrix'],
+    reason: 'client-matrix-runtime.mjs invokes the CLI to build its runtime bundles.',
+  },
+  {
+    pattern: /^scripts\/held-batch-smoke\.mjs$/,
+    checks: ['smokeNode', 'smokeCloudflare'],
+    reason: 'Both smoke harnesses execute the shared held-batch assertions.',
+  },
+  {
+    pattern:
+      /^packages\/runtime-cloudflare\/(scripts\/(traceparent-smoke|ui-bundle-regression)\.mjs|src\/db\/d1-executor\.ts)$/,
+    checks: ['smokeNode'],
+    reason:
+      'Node smoke imports the shared Worker assertion helpers; held-batch smoke imports the D1 executor.',
+  },
+  {
     pattern: /^packages\/core\//,
     checks: ['clientMatrix', ...bundles],
     reason:

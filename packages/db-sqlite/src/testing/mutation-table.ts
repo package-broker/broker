@@ -3,6 +3,8 @@ import { entries as registeredNameClaimProxyEntries } from './mutation-table/reg
 import { entries as publishGuardEntries } from './mutation-table/catalogue-publish-guard.js';
 import { entries as publishesEntries } from './mutation-table/publishes.js';
 import { entries as readmeEntries } from './mutation-table/package-readme.js';
+import { entries as accessRequestsEntries } from './mutation-table/package-access-requests.js';
+import { entries as explicitPackageEntries } from './mutation-table/visibility-explicit-package.js';
 import { entries as sourcePackageRequestEntries } from './mutation-table/source-package-request.js';
 import { entries as npmAuditSnapshotEntries } from './mutation-table/npm-audit-snapshot.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
@@ -124,6 +126,8 @@ export const mutationTable: readonly MutationEntry[] = [
   ...publishGuardEntries,
   ...publishesEntries,
   ...readmeEntries,
+  ...accessRequestsEntries,
+  ...explicitPackageEntries,
   ...sourceAttachmentCountsEntries,
   ...sourceSelectionRevisionEntries,
   ...sourceVisibleEntries,

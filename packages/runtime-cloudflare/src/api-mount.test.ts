@@ -118,6 +118,19 @@ interface ManagementAssemblyEntry {
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
+    dependency: 'packageAccessRequests',
+    constructed: 'SQLite access request repository with provider anchors',
+    routes: [
+      'POST /_pb/projects/:project/package-access-requests',
+      'GET /_pb/package-access-requests',
+      'POST /_pb/package-access-requests/:id/approve',
+      'POST /_pb/package-access-requests/:id/reject',
+      'GET /_pb/projects/:project/requestable-packages',
+    ],
+    jobs: ['package-access-expire'],
+    ownerPacket: 'NPM12',
+  },
+  {
     dependency: 'organization',
     constructed: 'organization and user repositories; access administration',
     routes: ['GET /_pb/me', 'GET /_pb/organization', 'GET /_pb/users', 'PATCH /_pb/users/:user'],
@@ -348,7 +361,9 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
         ? 'NPM10'
         : entry.dependency === 'sourcePackages'
           ? 'T1041'
-          : 'T531',
+          : entry.dependency === 'packageAccessRequests'
+            ? 'NPM12'
+            : 'T531',
     );
     for (const key of entry.routes) {
       expect(

@@ -1,4 +1,5 @@
 import { createPublishesRepository } from './publishes.js';
+import { createPackageAccessRequestRepository } from './package-access-requests.js';
 import { createSourcePackageStore } from './source-package-request.js';
 import type { SourcePackageProbe } from '@package-broker/core/ingest/source-package';
 import { createProjectGrantReader } from './project-grant-read.js';
@@ -118,6 +119,10 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
   try {
     return createApiModule({
       publishes: { ...common, publishes: createPublishesRepository(executor, anchors) },
+      packageAccessRequests: {
+        ...common,
+        repository: createPackageAccessRequestRepository(executor, anchors),
+      },
       organization: {
         ...common,
         organizations,

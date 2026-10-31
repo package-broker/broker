@@ -438,6 +438,13 @@ describe('differential repository fixtures against npm pack', () => {
     );
   });
   const installed = (npmRequire('npm-packlist/package.json') as { version: string }).version;
+  it('requires the live parity oracle when CI requests it', () => {
+    if (process.env['PB_NPM_PARITY_REQUIRED'] === '1') {
+      expect(installed, 'Required live npm pack differential must not be skipped').toBe(
+        PACKLIST_VERSION,
+      );
+    }
+  });
   const differential = installed === PACKLIST_VERSION ? it : it.skip;
   if (installed !== PACKLIST_VERSION)
     console.warn(

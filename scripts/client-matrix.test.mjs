@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   selectClient,
   clientCommands,
@@ -577,6 +579,127 @@ test('Node harness stages an upload using the configured publish cap', async () 
     await store.discard(ctx, staged);
   } finally {
     db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('seeded harness passes startup keyring verification and grants hosted access management', async () => {
+  const { seed } = await import('./client-matrix-runtime.mjs');
+  const { openMigratedDatabase } =
+    await import('../packages/db-sqlite/dist/testing/migrated-database.js');
+  const { createKeyringVerifierStore } =
+    await import('../packages/db-sqlite/dist/repositories/keyring-verifier.js');
+  const { verifyKeyring } = await import('../packages/core/dist/secrets/keyring-verifier.js');
+  const { createKeyring } = await import('../packages/core/dist/secrets/keyring.js');
+  const { parseMasterKey } = await import('../packages/core/dist/secrets/master-key.js');
+  const db = await openMigratedDatabase();
+  try {
+    const { orgId } = await seed(db.executor);
+    const keyring = createKeyring([
+      parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
+    ]);
+    await verifyKeyring(keyring, createKeyringVerifierStore(db.executor));
+    assert.equal(
+      (
+        await db.executor.all({
+          sql: "SELECT permission FROM role_permission WHERE org_id=? AND permission='org:sources:write'",
+          params: [orgId],
+        })
+      ).length,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('publisher restricts packed files and prepares Yarn lockfile before publishing', async () => {
+  const { preparePublisher } = await import('./client-matrix.mjs');
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'npm21-publisher-'));
+  try {
+    const calls = [];
+    const publisher = await preparePublisher(
+      directory,
+      'yarn',
+      'http://127.0.0.1:12345/alpha/npm/',
+      'pb_fixture',
+      'matrix-publish-active',
+      {
+        debug: true,
+        run: async (command, args, project, env, options) => {
+          const manifest = JSON.parse(await readFile(`${project}/package.json`, 'utf8'));
+          assert.equal(manifest.name, 'matrix-publish-active');
+          assert.deepEqual(manifest.files, ['index.js', 'README.md']);
+          assert.equal(await readFile(`${project}/README.md`, 'utf8'), '# Publish fixture\n');
+          assert.equal(env.COREPACK_ENABLE_NETWORK, '0');
+          assert.deepEqual(options, { debug: true });
+          calls.push({ command, args });
+          return { code: 0, output: '' };
+        },
+      },
+    );
+    assert.deepEqual(calls, [{ command: 'yarn', args: ['install'] }]);
+    assert.equal(publisher.project, `${directory}/client`);
+    await assert.rejects(
+      () =>
+        preparePublisher(
+          `${directory}/failed`,
+          'yarn',
+          'http://127.0.0.1:12345/alpha/npm/',
+          'pb_fixture',
+          'matrix-publish-active',
+          { run: async () => ({ code: 1, output: '' }) },
+        ),
+      /Client matrix mismatch: publisher install/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('debug login output redacts browser and done capabilities', async () => {
+  const { redactClientOutput } = await import('./client-matrix.mjs');
+  for (const path of ['/#/npm-login/', '/alpha/npm/-/v1/done/']) {
+    const selector = 's'.repeat(43);
+    const redacted = redactClientOutput(`Login at http://127.0.0.1:12345${path}${selector}`);
+    assert.ok(!redacted.includes(selector));
+    assert.match(redacted, /REDACTED/);
+  }
+});
+
+test('independent publisher roots pack identical bytes without local config or credentials', async () => {
+  const { preparePublisher, runCommand } = await import('./client-matrix.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'npm21-pack-'));
+  try {
+    const integrities = [];
+    for (const target of ['node', 'worker']) {
+      const publisher = await preparePublisher(
+        `${directory}/${target}`,
+        'npm',
+        'http://127.0.0.1:12345/alpha/npm/',
+        `pb_synthetic_${target}`,
+        'matrix-publish-active',
+      );
+      const result = await runCommand(
+        'npm',
+        ['pack', '--dry-run', '--json', '--ignore-scripts', '--offline'],
+        publisher.project,
+        publisher.env,
+      );
+      assert.equal(result.code, 0);
+      const [pack] = JSON.parse(result.stdout);
+      assert.deepEqual(pack.files.map((item) => item.path).sort(), [
+        'README.md',
+        'index.js',
+        'package.json',
+      ]);
+      assert.match(pack.integrity, /^sha512-/);
+      integrities.push(pack.integrity);
+    }
+    assert.equal(integrities[0], integrities[1]);
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

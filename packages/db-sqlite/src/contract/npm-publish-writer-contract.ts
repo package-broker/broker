@@ -5,7 +5,7 @@ import {
 import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { createJobRepository } from '../repositories/job.js';
 import { DbError } from '@package-broker/core/db/errors';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { mkdtemp, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -42,7 +42,7 @@ import type { PublishVersionInput } from '@package-broker/core/db/catalogue';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
 import { ulid } from '@package-broker/core/ids';
 import { auditEvent } from '@package-broker/core/audit/actions';
-import type { Sha256 } from '@package-broker/core/platform/blob';
+import type { ByteStore, Sha256 } from '@package-broker/core/platform/blob';
 import { createPackageAccess } from '@package-broker/core/catalogue/package-access';
 import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -72,7 +72,7 @@ const NOW = '2026-10-30T00:00:00.000Z';
 const st = (sql: string, ...params: Statement['params']): Statement => ({ sql, params });
 const ref = { projectId: 'project', ecosystem: 'npm' as const, key: 'widget' };
 
-async function world(executor: SqlExecutor) {
+async function world(executor: SqlExecutor, bytes?: ByteStore) {
   await migrate(executor, await discoveredMigrations(), { holder: 'publish-contract' });
   await executor.batch([
     st("INSERT INTO organization (id,slug,name) VALUES ('org','org','Organization')"),
@@ -190,6 +190,7 @@ async function world(executor: SqlExecutor) {
     };
   }
   return {
+    bytes,
     guard,
     input,
     writer: createCatalogueWriter(executor),
@@ -200,14 +201,14 @@ async function world(executor: SqlExecutor) {
 
 export function describeNpmPublishWriterContract(
   name: string,
-  open: () => Promise<OpenedCatalogueWriteDatabase>,
+  open: () => Promise<OpenedCatalogueWriteDatabase & { bytes?: ByteStore }>,
 ) {
   async function run(
     body: (executor: SqlExecutor, w: Awaited<ReturnType<typeof world>>) => Promise<void>,
   ) {
     const opened = await open();
     try {
-      await body(opened.executor, await world(opened.executor));
+      await body(opened.executor, await world(opened.executor, opened.bytes));
     } finally {
       await opened.close();
     }
@@ -354,6 +355,8 @@ export function describeNpmPublishWriterContract(
         organizationFallback?: boolean;
         descriptionBytes?: number;
         writerFailure?: boolean;
+        cancelMidBody?: boolean;
+        crashAfterPromote?: boolean;
         clientInfoEcho?: boolean;
       } = {},
     ) {
@@ -400,7 +403,10 @@ export function describeNpmPublishWriterContract(
         const bytes = gzipSync(
           archive(
             entry('package/package.json', JSON.stringify({ name: 'widget', version: '2.0.0' })),
-            entry('package/README.md', '# Widget'),
+            entry(
+              'package/README.md',
+              options.cancelMidBody ? randomBytes(8192).toString('hex') : '# Widget',
+            ),
           ),
         );
         const body = JSON.stringify({
@@ -428,6 +434,13 @@ export function describeNpmPublishWriterContract(
                 },
               }),
         });
+        const abort = new AbortController();
+        let bodyReads = 0;
+        let stagedBytes = 0;
+        let beganStaging!: () => void;
+        const stagingStarted = new Promise<void>((resolve) => {
+          beganStaging = resolve;
+        });
         const request = () =>
           new Request('https://broker.test/project/npm/widget', {
             method: 'PUT',
@@ -436,9 +449,23 @@ export function describeNpmPublishWriterContract(
               'content-type': options.contentType ?? 'application/json',
               'content-length': String(Buffer.byteLength(body)),
             },
-            body,
-          });
-        const physical = await openFilesystemByteStore({ root: directory });
+            body: options.cancelMidBody
+              ? new ReadableStream<Uint8Array>({
+                  async pull(controller) {
+                    if (bodyReads++ === 0) {
+                      const end = body.indexOf('"data":"') + 8 + 8192;
+                      controller.enqueue(new TextEncoder().encode(body.slice(0, end)));
+                    } else {
+                      await stagingStarted;
+                      abort.abort();
+                    }
+                  },
+                })
+              : body,
+            signal: abort.signal,
+            duplex: 'half',
+          } as RequestInit);
+        const physical = w.bytes ?? (await openFilesystemByteStore({ root: directory }));
         const removed: string[] = [];
         if (options.superseded) {
           await physical.putVerified('npm-publish/old', new Blob(['old']).stream(), {
@@ -460,7 +487,24 @@ export function describeNpmPublishWriterContract(
               head: (key: string) =>
                 key === 'npm-publish/old' ? Promise.resolve(null) : physical.head(key),
             }
-          : physical;
+          : ({
+              ...physical,
+              putStaged: (handle, body, maxBytes, mediaType) =>
+                physical.putStaged(
+                  handle,
+                  body.pipeThrough(
+                    new TransformStream<Uint8Array, Uint8Array>({
+                      transform(chunk, controller) {
+                        stagedBytes += chunk.length;
+                        controller.enqueue(chunk);
+                        beganStaging();
+                      },
+                    }),
+                  ),
+                  maxBytes,
+                  mediaType,
+                ),
+            } satisfies ByteStore);
         const blob = createBlobStore(
           promotionStore,
           createBlobRepository(e, {
@@ -477,50 +521,70 @@ export function describeNpmPublishWriterContract(
           },
         );
         let discardCalls = 0;
-        const publish = createPublishService({
-          reads: createPublishReads(e),
-          lookupToken: createAccessRepository(e).lookupToken,
-          anchors: async () => [],
-          admitted: (org, input) => checkPublishAdmission(e, org, input),
-          writeGuard: createPublishWriteGuard,
-          writer: {
-            publishVersion: async (...args) => {
-              if (options.writerFailure)
-                throw new DbError('unique', 'fixture', { constraint: 'audit_pending.id' });
-              if (options.mutation) await e.batch([st(options.mutation)]);
-              return w.writer.publishVersion(...args);
-            },
-          },
-          requiredScanners: () => (options.policy ? ['scanner'] : []),
-          scanJobs: createRepositoryJobs({
-            store: createJobRepository(e),
-            clock: fixedClock(NOW),
-            ids: { ulid },
-            jobs: [
-              {
-                qualifiedName: 'core:publish-scan:v1',
-                definition: {
-                  name: 'publish-scan',
-                  version: 1,
-                  maxAttempts: 3,
-                  validate: (input: unknown) => input,
-                  handler: async () => {},
-                },
+        let crashPending = options.crashAfterPromote;
+        let promotions = 0;
+        const makePublish = () =>
+          createPublishService({
+            reads: {
+              ...createPublishReads(e),
+              blobId: async (...args) => {
+                if (crashPending) {
+                  crashPending = false;
+                  throw new Error('process_stopped_after_promote');
+                }
+                return createPublishReads(e).blobId(...args);
               },
-            ],
-          })('core', { projectId: null, tokenId: null }),
-          blob: {
-            ...blob,
-            discard: async (...args) => {
-              discardCalls += 1;
-              await blob.discard(...args);
             },
-          },
-          codecs: nodeCodecs,
-          registry: { ...REGISTRY_DEFAULTS, outbound: { allowPrivateHosts: [], selfOrigins: [] } },
-          clock: fixedClock(NOW),
-          publicUrl: 'https://broker.test',
-        });
+            lookupToken: createAccessRepository(e).lookupToken,
+            anchors: async () => [],
+            admitted: (org, input) => checkPublishAdmission(e, org, input),
+            writeGuard: createPublishWriteGuard,
+            writer: {
+              publishVersion: async (...args) => {
+                if (options.writerFailure)
+                  throw new DbError('unique', 'fixture', { constraint: 'audit_pending.id' });
+                if (options.mutation) await e.batch([st(options.mutation)]);
+                return w.writer.publishVersion(...args);
+              },
+            },
+            requiredScanners: () => (options.policy ? ['scanner'] : []),
+            scanJobs: createRepositoryJobs({
+              store: createJobRepository(e),
+              clock: fixedClock(NOW),
+              ids: { ulid },
+              jobs: [
+                {
+                  qualifiedName: 'core:publish-scan:v1',
+                  definition: {
+                    name: 'publish-scan',
+                    version: 1,
+                    maxAttempts: 3,
+                    validate: (input: unknown) => input,
+                    handler: async () => {},
+                  },
+                },
+              ],
+            })('core', { projectId: null, tokenId: null }),
+            blob: {
+              ...blob,
+              promote: async (...args) => {
+                promotions += 1;
+                return blob.promote(...args);
+              },
+              discard: async (...args) => {
+                discardCalls += 1;
+                await blob.discard(...args);
+              },
+            },
+            codecs: nodeCodecs,
+            registry: {
+              ...REGISTRY_DEFAULTS,
+              outbound: { allowPrivateHosts: [], selfOrigins: [] },
+            },
+            clock: fixedClock(NOW),
+            publicUrl: 'https://broker.test',
+          });
+        let publish = makePublish();
         const authorization = createAuthorizationEngine({
           access: createAccessRepository(e),
           providerAnchors: async () => [],
@@ -564,6 +628,25 @@ export function describeNpmPublishWriterContract(
           ],
         });
         const response = await kernel.fetch(request());
+        const interrupted = options.crashAfterPromote
+          ? {
+              versions: await e.all(st("SELECT id FROM version WHERE org_id='org'")),
+              audits: await e.all(
+                st("SELECT id FROM audit_pending WHERE org_id='org' AND action='package.publish'"),
+              ),
+              blobs: await e.all(
+                st(
+                  "SELECT sha256,refetchable FROM blob WHERE org_id='org' AND sha256<>?",
+                  'a'.repeat(64),
+                ),
+              ),
+            }
+          : null;
+        let retryStatus: number | undefined;
+        if (options.crashAfterPromote) {
+          publish = makePublish();
+          retryStatus = (await kernel.fetch(request())).status;
+        }
         let duplicateStatus: number | undefined;
         if (options.duplicate) duplicateStatus = (await kernel.fetch(request())).status;
         const value = await response.json();
@@ -573,6 +656,11 @@ export function describeNpmPublishWriterContract(
           ),
         );
         return {
+          interrupted,
+          retryStatus,
+          promotions,
+          bodyReads,
+          stagedBytes,
           discardCalls,
           metadata: await e.all<{ metadata: string }>(
             st("SELECT metadata_json as metadata FROM version WHERE org_id = 'org'"),
@@ -590,6 +678,54 @@ export function describeNpmPublishWriterContract(
         await rm(directory, { recursive: true, force: true });
       }
     }
+    it('cancel mid-body through publish service leaves no blob, version or publication audit', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { cancelMidBody: true });
+        expect(result.bodyReads).toBeGreaterThan(1);
+        expect(result.stagedBytes).toBeGreaterThan(0);
+        expect(result.response.status).toBe(400);
+        expect(result.value).toMatchObject({ code: 'publish_cancelled' });
+        expect(result.promotions).toBe(0);
+        expect(result.staged).toEqual([]);
+        expect(await e.all(st("SELECT id FROM blob WHERE org_id='org' AND id<>'blob'"))).toEqual(
+          [],
+        );
+        expect(result.versions).toEqual([]);
+        expect(await e.all(st("SELECT id FROM version WHERE org_id='org'"))).toEqual([]);
+        expect(
+          await e.all(
+            st("SELECT id FROM audit_pending WHERE org_id='org' AND action='package.publish'"),
+          ),
+        ).toEqual([]);
+      }));
+
+    it('publish service stops after promote without a version or audit and restarts to retry once', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { crashAfterPromote: true });
+        expect(result.response.status).toBe(503);
+        expect(result.interrupted?.versions).toEqual([]);
+        expect(result.interrupted?.audits).toEqual([]);
+        expect(result.interrupted?.blobs).toEqual([{ sha256: expect.any(String), refetchable: 0 }]);
+        expect(result.retryStatus).toBe(201);
+        expect(result.promotions).toBe(2);
+        expect(result.versions).toHaveLength(1);
+        expect(await e.all(st("SELECT id FROM version WHERE org_id='org'"))).toHaveLength(1);
+        expect(result.staged).toEqual([]);
+        expect(
+          await e.all(
+            st(
+              "SELECT sha256,refetchable FROM blob WHERE org_id='org' AND sha256<>?",
+              'a'.repeat(64),
+            ),
+          ),
+        ).toEqual(result.interrupted?.blobs);
+        expect(
+          await e.all(
+            st("SELECT id FROM audit_pending WHERE org_id='org' AND action='package.publish'"),
+          ),
+        ).toHaveLength(1);
+      }));
+
     it('accepts and queues a scanned publish atomically', () =>
       run(async (e, w) => {
         const result = await flow(e, w, { policy: true });

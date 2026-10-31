@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -b && pnpm --filter @package-broker/ui run build",
     "test": "vitest run",
-    "test:scripts": "node --test scripts/bench-install.test.mjs scripts/stage-prebuilt.test.mjs scripts/prebuilt-smoke.test.mjs scripts/publish-packages.test.mjs",
+    "test:scripts": "node --test scripts/bench-install.test.mjs scripts/stage-prebuilt.test.mjs scripts/prebuilt-smoke.test.mjs scripts/publish-packages.test.mjs scripts/client-matrix*.test.mjs",
     "rehearsal": "pnpm build && pnpm bundle && vitest run --project runtime-node --project runtime-cloudflare src/restore-rehearsal",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",

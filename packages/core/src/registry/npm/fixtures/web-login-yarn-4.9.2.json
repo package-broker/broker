@@ -1,0 +1,7 @@
+{
+  "client": "yarn",
+  "version": "4.9.2",
+  "status": "not_run",
+  "reason": "Live runtime/client capture requires a listener-enabled gate host. Run pnpm client-matrix --client yarn; after matching real Node and Workers outcomes the harness replaces this pending record.",
+  "requests": []
+}

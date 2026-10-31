@@ -1,3 +1,12 @@
+import type { AuditTrailDefinition, AuditTrailRequest } from '../../audit/plugin-api.js';
+import type { KernelLog } from '../../kernel/errors.js';
+import type { AuditWithheldMarkerV1 } from '../../audit/plugin-api.js';
+import type { EffectiveAuditConfig, OrgAuditResult } from '../../audit/effective.js';
+import type { OrgContext } from '../../db/port.js';
+import {
+  createAuditTrailContext,
+  type AuditTrailServices,
+} from '../../internal/audit-trail-context.js';
 import { auditEvent, type AuditAction, type AuditEventInput } from '../../audit/actions.js';
 import type { AuditRow } from '../../audit/chain.js';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
@@ -22,7 +31,7 @@ export interface AuditReader {
       after?: string;
       limit: number;
     },
-  ): Promise<{ items: readonly AuditRow[]; next: string | null }>;
+  ): Promise<{ items: readonly (AuditRow | AuditWithheldMarkerV1)[]; next: string | null }>;
   head(ctx: RequestContext): Promise<{
     seq: number;
     hash: string;
@@ -61,7 +70,14 @@ function payloadOf(row: AuditRow): Record<string, unknown> {
   }
 }
 
-function publicItem(row: AuditRow) {
+function publicItem(row: AuditRow | AuditWithheldMarkerV1) {
+  if ('kind' in row)
+    return {
+      kind: 'withheld' as const,
+      id: 'id' in row ? row.id : row.markerId,
+      seq: row.seq,
+      reason: row.reasonCode === 'unreadable' ? ('unreadable' as const) : ('content' as const),
+    };
   return {
     id: row.id,
     seq: row.seq,
@@ -75,7 +91,47 @@ function publicItem(row: AuditRow) {
   };
 }
 
-export function auditRoutes(reader?: AuditReader): readonly RouteDefinition[] {
+export interface AuditTrailDispatch {
+  readonly trail: { readonly definition: AuditTrailDefinition } | null;
+  readonly effective: (
+    org: OrgContext,
+  ) => Promise<Pick<EffectiveAuditConfig, 'trailActive' | 'policy'> | OrgAuditResult>;
+  readonly services: AuditTrailServices;
+  readonly log: KernelLog;
+}
+
+export function auditRoutes(
+  reader?: AuditReader,
+  dispatch?: AuditTrailDispatch,
+): readonly RouteDefinition[] {
+  const handle = async (ctx: RequestContext, ...args: AuditTrailRequest): Promise<ApiOutcome> => {
+    if (dispatch?.trail == null || ctx.org === null) return { error: 'audit_trail_unavailable' };
+    let active: boolean;
+    try {
+      const result = await dispatch.effective(ctx.org);
+      if ('ok' in result && !result.ok) throw new Error('Audit configuration refused');
+      active = 'ok' in result ? result.effective.trailActive : result.trailActive;
+      if (typeof active !== 'boolean') throw new Error('Audit configuration unavailable');
+    } catch {
+      dispatch.log({
+        level: 'error',
+        event: 'audit.effective_unavailable',
+        reason_code: 'audit.effective_unavailable',
+      });
+      return { error: 'audit_trail_unavailable' };
+    }
+    const context = createAuditTrailContext(ctx.org, active, dispatch.services);
+    if (!context.active) return { error: 'audit_trail_unavailable' };
+    const body = await dispatch.trail.definition.create(context).handle(...args);
+    if (body !== null && typeof body === 'object' && 'error' in body) return body;
+    const parsed =
+      args[0] === 'auditHead'
+        ? auditHeadResponse.safeParse(body)
+        : auditListResponse.safeParse(body);
+    return parsed.success
+      ? { status: 200, body: parsed.data }
+      : { error: 'audit_trail_invalid_response' };
+  };
   const list = async (
     ctx: RequestContext,
     query: {
@@ -85,7 +141,13 @@ export function auditRoutes(reader?: AuditReader): readonly RouteDefinition[] {
       limit?: string | undefined;
     },
     projectId: string | null,
+    projectRoute = false,
   ): Promise<ApiOutcome> => {
+    if (dispatch?.trail != null) {
+      return !projectRoute || projectId === null
+        ? handle(ctx, 'listAudit', { query, projectId })
+        : handle(ctx, 'listProjectAudit', { query, projectId });
+    }
     if (reader === undefined) return { error: 'audit_trail_unavailable' };
     const limit = validateInput(auditLimit, Number(query.limit ?? 50));
     if (!limit.ok)
@@ -93,6 +155,11 @@ export function auditRoutes(reader?: AuditReader): readonly RouteDefinition[] {
         error: 'invalid_request',
         details: limit.details.map((detail) => ({ path: '/query/limit', code: detail.code })),
       };
+    if (
+      query.after !== undefined &&
+      (!/^[0-9]+$/.test(query.after) || !Number.isSafeInteger(Number(query.after)))
+    )
+      return { error: 'invalid_request', details: [{ path: '/query/after', code: 'invalid' }] };
     const page = await reader.list(ctx, {
       projectId,
       limit: limit.data,
@@ -133,9 +200,11 @@ export function auditRoutes(reader?: AuditReader): readonly RouteDefinition[] {
         },
       },
       async ({ ctx }) =>
-        reader === undefined
-          ? { error: 'audit_trail_unavailable' }
-          : { status: 200, body: await reader.head(ctx) },
+        dispatch?.trail != null
+          ? handle(ctx, 'auditHead', { query: undefined, projectId: null })
+          : reader === undefined
+            ? { error: 'audit_trail_unavailable' }
+            : { status: 200, body: await reader.head(ctx) },
     ),
     apiRoute(
       {
@@ -155,7 +224,7 @@ export function auditRoutes(reader?: AuditReader): readonly RouteDefinition[] {
       ({ ctx, query }) =>
         ctx.projectId === null
           ? Promise.resolve({ error: 'not_found' })
-          : list(ctx, query, ctx.projectId),
+          : list(ctx, query, ctx.projectId, true),
     ),
   ];
 }

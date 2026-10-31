@@ -31,7 +31,10 @@ const trail: PluginDefinition = {
   platforms: ['node', 'cloudflare'],
   apiVersion: 4,
   binds: ['audit-trail'],
-  auditTrail: { toggleEnv: 'PB_AUDIT_TRAIL', create: () => ({}) },
+  auditTrail: {
+    toggleEnv: 'PB_AUDIT_TRAIL',
+    create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+  },
 };
 const config = (audit?: unknown, overrides: Partial<BrokerConfig> = {}): BrokerConfig =>
   ({
@@ -227,7 +230,18 @@ describe('audit build configuration', () => {
       brokerAuditWarnings(
         config(
           { policy: 'required' },
-          { plugins: [{ ...trail, auditTrail: { create: () => ({}) } }] },
+          {
+            plugins: [
+              {
+                ...trail,
+                auditTrail: {
+                  create: () => ({
+                    handle: async () => ({ error: 'audit_trail_unavailable' as const }),
+                  }),
+                },
+              },
+            ],
+          },
         ),
         'node',
       ),

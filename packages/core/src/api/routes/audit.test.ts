@@ -8,10 +8,13 @@ import {
 import type { AuditRow } from '../../audit/chain.js';
 import { orgContext } from '../../db/port.js';
 import type { RequestContext } from '../../plugin.js';
+import type { AuditTrailServices } from '../../internal/audit-trail-context.js';
+import { validateAuditBuild, resolveOrgAudit } from '../../audit/effective.js';
 import { fixedClock } from '../../ids.js';
+import { collectRegistrations } from '../../kernel/registry.js';
 import { createKernel } from '../../kernel/kernel.js';
 import { createKeyring } from '../../secrets/keyring.js';
-import { auditRoutes, type AuditReader } from './audit.js';
+import { auditRoutes, type AuditReader, type AuditTrailDispatch } from './audit.js';
 
 beforeEach(() => {
   vi.spyOn(crypto, 'randomUUID').mockReturnValue('11111111-1111-4111-8111-111111111111');
@@ -44,9 +47,11 @@ const row = (projectId: string | null): AuditRow => ({
 
 async function fixture(
   options: {
+    orgId?: string;
     stub?: boolean;
+    dispatch?: AuditTrailDispatch;
     permissions?: string[];
-    rows?: AuditRow[];
+    rows?: (AuditRow | import('../../audit/plugin-api.js').AuditWithheldMarkerV1)[];
     projects?: {
       id: string;
       slug: string;
@@ -59,9 +64,17 @@ async function fixture(
   const list = vi.fn<AuditReader['list']>((ctx, query) =>
     Promise.resolve({
       items: (options.rows ?? [row('project-a'), row('project-b'), row(null)])
-        .filter((item) => item.org_id === ctx.org?.orgId)
-        .filter((item) => query.projectId === null || item.project_id === query.projectId),
-      next: ID,
+        .filter((item) => ('org_id' in item ? item.org_id : item.orgId) === ctx.org?.orgId)
+        .filter(
+          (item) =>
+            query.projectId === null ||
+            ('project_id' in item
+              ? item.project_id
+              : 'projectId' in item
+                ? item.projectId
+                : null) === query.projectId,
+        ),
+      next: '1',
     }),
   );
   const head = vi.fn<AuditReader['head']>(() =>
@@ -95,13 +108,13 @@ async function fixture(
   const kernel = await createKernel({
     platform: 'node',
     plugins: [],
-    coreRoutes: auditRoutes(options.stub ? undefined : { list, head }),
+    coreRoutes: auditRoutes(options.stub ? undefined : { list, head }, options.dispatch),
     ports: {
       organizations: { get: () => Promise.resolve(null) },
       clock: fixedClock('2026-10-16T00:00:00.000Z'),
       ids: { ulid: () => ID },
     },
-    resolveOrg: () => Promise.resolve(orgContext('org-1')),
+    resolveOrg: () => Promise.resolve(orgContext(options.orgId ?? 'org-1')),
     health: () => Promise.resolve(true),
     log: () => undefined,
     authorization: createAuthorizationEngine({
@@ -238,19 +251,19 @@ it('passes only the resolved project and returns its rows', async () => {
   const f = await fixture();
   const response = await f.request(paths[2]);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ items: [{ projectId: 'project-a' }], next: ID });
+  expect(await response.json()).toMatchObject({ items: [{ projectId: 'project-a' }], next: '1' });
   expect(f.list.mock.calls[0]?.[1]).toEqual({ projectId: 'project-a', limit: 50 });
 });
 it('forwards exact filters and cursor on the organization list', async () => {
   const f = await fixture();
   await f.request(
-    `/_pb/audit?project=project-a&actor=user-1&action=project.update&after=${ID}&limit=200`,
+    `/_pb/audit?project=project-a&actor=user-1&action=project.update&after=1&limit=200`,
   );
   expect(f.list.mock.calls[0]?.[1]).toEqual({
     projectId: 'project-a',
     actor: 'user-1',
     action: 'project.update',
-    after: ID,
+    after: '1',
     limit: 200,
   });
 });
@@ -357,3 +370,275 @@ it.each(['/_pb/audit', '/_pb/audit/head', '/_pb/projects/demo/audit'])(
     expect(f.head).not.toHaveBeenCalled();
   },
 );
+
+function trailDispatch(active = true, policy: 'availability' | 'required' = 'availability') {
+  const services = {
+    journal: {
+      list: vi.fn<AuditTrailServices['journal']['list']>(async () => ({ items: [], next: null })),
+      head: vi.fn<AuditTrailServices['journal']['head']>(async () => ({
+        chainId: 'chain',
+        epoch: 1,
+        headSeq: 7,
+        headHash: 'a'.repeat(64),
+        boundarySeq: 1,
+        boundaryPrevHash: '0'.repeat(64),
+        pendingCount: 2,
+        verification: null,
+      })),
+    },
+    requestVerification: vi.fn(async () => undefined),
+  };
+  const handle = vi.fn<import('../../audit/plugin-api.js').AuditTrail['handle']>(async () => ({
+    items: [],
+    next: null,
+  }));
+  const create = vi.fn((ctx: import('../../audit/plugin-api.js').AuditTrailContext) => {
+    handle.mockImplementation(async (...args) => {
+      const [operation] = args;
+      if (operation !== 'auditHead') return { items: [], next: null };
+      const head = await ctx.journal.head();
+      return {
+        seq: head.headSeq,
+        hash: head.headHash,
+        pendingCount: head.pendingCount,
+        lastVerifiedAt: null,
+      };
+    });
+    return { handle };
+  });
+  const registration = collectRegistrations([
+    {
+      id: 'trail',
+      package: '@test/trail',
+      apiVersion: 4,
+      platforms: ['node'],
+      binds: ['audit-trail'],
+      auditTrail: { toggleEnv: 'PB_AUDIT_TRAIL', create },
+    },
+  ]);
+  const dispatch: AuditTrailDispatch = {
+    log: vi.fn(),
+    trail: registration.audit.trail,
+    effective: vi.fn(async () => ({ policy, trailActive: active })),
+    services,
+  };
+  return { dispatch, create, handle, services };
+}
+
+it.each([
+  [
+    paths[0] + '?actor=user-1&limit=3&project=project-b',
+    'listAudit',
+    { query: { actor: 'user-1', limit: '3', project: 'project-b' }, projectId: 'project-b' },
+  ],
+  [paths[1], 'auditHead', { query: undefined, projectId: null }],
+  [
+    paths[2] + '?action=project.update',
+    'listProjectAudit',
+    { query: { action: 'project.update' }, projectId: 'project-a' },
+  ],
+] as const)('dispatches a registered trail on %s', async (path, operation, request) => {
+  const trail = trailDispatch();
+  const f = await fixture({ dispatch: trail.dispatch });
+  expect((await f.request(path)).status).toBe(200);
+  expect(trail.handle).toHaveBeenCalledWith(operation, request);
+  expect(trail.create.mock.calls[0]?.[0].active).toBe(true);
+  expect(trail.dispatch.effective).toHaveBeenCalledWith(orgContext('org-1'));
+  expect(f.list).not.toHaveBeenCalled();
+  expect(f.head).not.toHaveBeenCalled();
+  if (operation === 'auditHead')
+    expect(trail.services.journal.head).toHaveBeenCalledWith(orgContext('org-1'));
+  expect(trail.services.requestVerification).not.toHaveBeenCalled();
+});
+
+it.each(paths)('refuses an inactive trail on %s without falling back', async (path) => {
+  const trail = trailDispatch(false);
+  const f = await fixture({ dispatch: trail.dispatch });
+  const response = await f.request(path);
+  expect(response.status).toBe(404);
+  expect((await error(response)).error.code).toBe('audit_trail_unavailable');
+  expect(trail.create).not.toHaveBeenCalled();
+  expect(f.list).not.toHaveBeenCalled();
+  expect(f.head).not.toHaveBeenCalled();
+});
+
+it('ignores the disabled trail toggle under required policy', async () => {
+  const trail = trailDispatch(false, 'required');
+  const build = validateAuditBuild(
+    {
+      platform: 'cloudflare',
+      plugins: [
+        {
+          id: 'trail',
+          package: '@test/trail',
+          apiVersion: 4,
+          platforms: ['cloudflare'],
+          binds: ['audit-trail'],
+          auditTrail: trail.dispatch.trail!.definition,
+        },
+      ],
+      audit: { policy: 'required', alerts: { webhookEnv: 'AUDIT_ALERT_URL' } },
+    },
+    (name) => (name === 'PB_AUDIT_TRAIL' ? 'off' : undefined),
+    'cloudflare',
+  );
+  const result = resolveOrgAudit({ build, storedPolicy: null, sinks: [], alertPathActive: true });
+  if (!result.ok) throw new Error('Expected effective configuration');
+  trail.dispatch = { ...trail.dispatch, effective: async () => result.effective };
+  const f = await fixture({ dispatch: trail.dispatch });
+  expect((await f.request(paths[1])).status).toBe(200);
+  expect(trail.create.mock.calls[0]?.[0].active).toBe(true);
+  expect(trail.services.journal.head).toHaveBeenCalledWith(orgContext('org-1'));
+});
+
+it('keeps authorization ahead of trail creation', async () => {
+  const trail = trailDispatch();
+  const f = await fixture({ dispatch: trail.dispatch, permissions: [] });
+  for (const path of paths) expect((await f.request(path)).status).toBe(403);
+  expect(trail.create).not.toHaveBeenCalled();
+  expect(trail.dispatch.effective).not.toHaveBeenCalled();
+});
+
+it('preserves the reader fallback with no composed trail', async () => {
+  const trail = trailDispatch();
+  const f = await fixture({ dispatch: { ...trail.dispatch, trail: null } });
+  expect((await f.request(paths[0])).status).toBe(200);
+  expect(f.list).toHaveBeenCalledOnce();
+  expect(trail.create).not.toHaveBeenCalled();
+});
+
+it('keeps concurrent organization list and head requests bound to their own contexts', async () => {
+  const trail = trailDispatch();
+  trail.create.mockImplementation((ctx) => ({
+    handle: vi.fn<import('../../audit/plugin-api.js').AuditTrail['handle']>(
+      async (...[operation, request]) => {
+        if (operation === 'auditHead') {
+          const head = await ctx.journal.head();
+          return {
+            seq: head.headSeq,
+            hash: head.headHash,
+            pendingCount: head.pendingCount,
+            lastVerifiedAt: null,
+          };
+        }
+        await ctx.journal.list({ projectId: request.projectId, limit: 50 });
+        return { items: [], next: null };
+      },
+    ),
+  }));
+  const a = await fixture({ orgId: 'org-a', dispatch: trail.dispatch });
+  const b = await fixture({ orgId: 'org-b', dispatch: trail.dispatch });
+  const responses = await Promise.all([
+    a.request(paths[0]),
+    b.request(paths[0]),
+    a.request(paths[1]),
+    b.request(paths[1]),
+  ]);
+  expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+  expect(
+    [...trail.services.journal.list.mock.calls].sort(([a], [b]) => a.orgId.localeCompare(b.orgId)),
+  ).toEqual([
+    [orgContext('org-a'), { projectId: null, limit: 50 }],
+    [orgContext('org-b'), { projectId: null, limit: 50 }],
+  ]);
+  expect(
+    [...trail.services.journal.head.mock.calls].sort(([a], [b]) => a.orgId.localeCompare(b.orgId)),
+  ).toEqual([[orgContext('org-a')], [orgContext('org-b')]]);
+});
+
+it.each([
+  new Error(SENTINEL),
+  { ok: false as const, code: 'alert_path_required' as const, persistRaise: false, data: SENTINEL },
+])('fences failed or refused effective configuration with one fixed log', async (failure) => {
+  const trail = trailDispatch();
+  trail.dispatch = {
+    ...trail.dispatch,
+    effective: async () => {
+      if (failure instanceof Error) throw failure;
+      return failure;
+    },
+  };
+  const f = await fixture({ dispatch: trail.dispatch });
+  const response = await f.request();
+  expect(response.status).toBe(404);
+  expect(await response.text()).not.toContain(SENTINEL);
+  expect(trail.dispatch.log).toHaveBeenCalledExactlyOnceWith({
+    level: 'error',
+    event: 'audit.effective_unavailable',
+    reason_code: 'audit.effective_unavailable',
+  });
+  expect(trail.create).not.toHaveBeenCalled();
+});
+
+it('rejects extra trail response fields without exposing body data', async () => {
+  const trail = trailDispatch();
+  trail.create.mockImplementation(() => ({
+    handle: vi.fn(async () => ({ items: [], next: null, payloadJson: SENTINEL })),
+  }));
+  const f = await fixture({ dispatch: trail.dispatch });
+  const response = await f.request();
+  expect(response.status).toBe(500);
+  const body = await response.text();
+  expect(JSON.parse(body)).toMatchObject({ error: { code: 'audit_trail_invalid_response' } });
+  expect(body).not.toContain(SENTINEL);
+});
+
+it.each([paths[0], paths[2]])('keeps withheld items minimal on the fallback %s', async (path) => {
+  const f = await fixture({
+    rows: [
+      {
+        kind: 'withheld',
+        markerId: 'marker',
+        reasonCode: 'content_unavailable',
+        chainId: 'chain',
+        epoch: 1,
+        orgId: 'org-1',
+        seq: 7,
+        prevHash: '0'.repeat(64),
+        hash: 'a'.repeat(64),
+        id: ID,
+        createdAt: SENTINEL,
+        actorType: 'system',
+        actorId: SENTINEL,
+        action: SENTINEL,
+        targetType: 'project',
+        targetId: 'project-a',
+        projectId: 'project-a',
+      },
+    ],
+  });
+  const response = await f.request(path);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    items: [{ kind: 'withheld', id: ID, seq: 7, reason: 'content' }],
+    next: '1',
+  });
+});
+it('keeps unreadable items minimal on the fallback', async () => {
+  const f = await fixture({
+    rows: [
+      {
+        kind: 'withheld',
+        markerId: 'marker',
+        reasonCode: 'unreadable',
+        chainId: 'chain',
+        epoch: 1,
+        orgId: 'org-1',
+        seq: 7,
+        prevHash: '0'.repeat(64),
+        hash: 'a'.repeat(64),
+      },
+    ],
+  });
+  expect(await (await f.request()).json()).toEqual({
+    items: [{ kind: 'withheld', id: 'marker', seq: 7, reason: 'unreadable' }],
+    next: '1',
+  });
+});
+
+it('does not override an inactive effective trail under required policy', async () => {
+  const trail = trailDispatch(false, 'required');
+  const f = await fixture({ dispatch: trail.dispatch });
+  expect((await f.request()).status).toBe(404);
+  expect(trail.create).not.toHaveBeenCalled();
+});

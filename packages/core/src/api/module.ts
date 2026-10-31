@@ -37,6 +37,7 @@ export interface ApiModuleDeps {
   readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
   readonly packages: Parameters<typeof packageRoutes>[0];
   readonly auditExport?: Parameters<typeof auditExportRoutes>[0];
+  readonly auditTrail?: Parameters<typeof auditRoutes>[1];
   readonly audit: Parameters<typeof auditRoutes>[0];
   readonly auditStatus?: Omit<NonNullable<Parameters<typeof auditStatusRoutes>[0]>, 'health'>;
   readonly auditHealth?: Parameters<typeof auditHealthRoutes>[0];
@@ -55,7 +56,7 @@ export const API_EXEMPT_ROUTES = Object.freeze({
 
 type RouteDependencies = Omit<
   ApiModuleDeps,
-  'extensions' | 'imports' | 'auditHealth' | 'auditStatus'
+  'extensions' | 'imports' | 'auditHealth' | 'auditStatus' | 'auditTrail'
 > &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
@@ -235,8 +236,9 @@ function operationId(route: RouteDefinition): string {
 }
 
 export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDefinition[] } {
-  const { imports, ...required } = REQUIRED_DEPENDENCIES;
+  const { imports, audit, ...required } = REQUIRED_DEPENDENCIES;
   requireDependencies(deps, required, 'dependencies');
+  if (deps.auditTrail?.trail == null) requireDependencies(deps, { audit }, 'dependencies');
   if (deps.imports != null) requireDependencies(deps, { imports }, 'dependencies');
   if (deps.packageManage.rebuild !== undefined) {
     requireDependencies(
@@ -274,7 +276,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),
     ...packageRoutes(deps.packages),
-    ...auditRoutes(deps.audit),
+    ...auditRoutes(deps.audit, deps.auditTrail),
     ...auditExportRoutes(deps.auditExport),
     ...auditHealthRoutes(deps.auditHealth),
     ...auditStatusRoutes(

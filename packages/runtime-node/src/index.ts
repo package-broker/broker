@@ -1231,6 +1231,7 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : createApiRoutes({
+            registration,
             clientIp,
             executor,
             runtime: 'node',

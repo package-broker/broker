@@ -1547,29 +1547,40 @@ export interface operations {
         };
         content: {
           'application/json': {
-            items: {
-              action: string;
-              actor: {
-                id: string | null;
-                type: string;
-              };
-              createdAt: string;
-              id: string;
-              payload: {
-                changes?: {
-                  [key: string]: {
-                    new?: string | number | boolean | null | string[];
-                    old?: string | number | boolean | null | string[];
+            items: (
+              | {
+                  action: string;
+                  actor: {
+                    id: string | null;
+                    type: string;
                   };
-                };
-                op_id?: string;
-                request_id?: string;
-              };
-              projectId: string | null;
-              seq: number;
-              targetId: string | null;
-              targetType: string;
-            }[];
+                  createdAt: string;
+                  id: string;
+                  payload: {
+                    changes?: {
+                      [key: string]: {
+                        new?: string | number | boolean | null | string[];
+                        old?: string | number | boolean | null | string[];
+                      };
+                    };
+                    op_id?: string;
+                    request_id?: string;
+                  };
+                  projectId: string | null;
+                  seq: number;
+                  targetId: string | null;
+                  targetType: string;
+                }
+              | {
+                  /** @description Original event id when reason is content; marker id when reason is unreadable. */
+                  id: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  /** @enum {string} */
+                  reason: 'content' | 'unreadable';
+                  seq: number;
+                }
+            )[];
             next: string | null;
           };
         };
@@ -4852,29 +4863,40 @@ export interface operations {
         };
         content: {
           'application/json': {
-            items: {
-              action: string;
-              actor: {
-                id: string | null;
-                type: string;
-              };
-              createdAt: string;
-              id: string;
-              payload: {
-                changes?: {
-                  [key: string]: {
-                    new?: string | number | boolean | null | string[];
-                    old?: string | number | boolean | null | string[];
+            items: (
+              | {
+                  action: string;
+                  actor: {
+                    id: string | null;
+                    type: string;
                   };
-                };
-                op_id?: string;
-                request_id?: string;
-              };
-              projectId: string | null;
-              seq: number;
-              targetId: string | null;
-              targetType: string;
-            }[];
+                  createdAt: string;
+                  id: string;
+                  payload: {
+                    changes?: {
+                      [key: string]: {
+                        new?: string | number | boolean | null | string[];
+                        old?: string | number | boolean | null | string[];
+                      };
+                    };
+                    op_id?: string;
+                    request_id?: string;
+                  };
+                  projectId: string | null;
+                  seq: number;
+                  targetId: string | null;
+                  targetType: string;
+                }
+              | {
+                  /** @description Original event id when reason is content; marker id when reason is unreadable. */
+                  id: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  /** @enum {string} */
+                  reason: 'content' | 'unreadable';
+                  seq: number;
+                }
+            )[];
             next: string | null;
           };
         };

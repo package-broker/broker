@@ -1894,6 +1894,7 @@ export function createWorker(
       built === undefined || packages === null
         ? []
         : createApiRoutes({
+            registration,
             clientIp: clientIpOf,
             executor: executor as SqlExecutor,
             ...(registryModule?.module.probePackage === undefined

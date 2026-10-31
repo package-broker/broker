@@ -30,7 +30,10 @@ const trail: PluginDefinition = {
   platforms: ['node', 'cloudflare'],
   apiVersion: 4,
   binds: ['audit-trail'],
-  auditTrail: { toggleEnv: 'PB_AUDIT_TRAIL', create: () => ({}) },
+  auditTrail: {
+    toggleEnv: 'PB_AUDIT_TRAIL',
+    create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+  },
 };
 function sink(custody: 'delivery' | 'durable'): PluginDefinition {
   return {

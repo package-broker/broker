@@ -1,3 +1,11 @@
+import type { output } from 'zod/v4/core';
+import type {
+  auditQuery,
+  projectAuditQuery,
+  auditListResponse,
+  auditHeadResponse,
+} from '../api/routes/audit.schemas.js';
+import type { ValidationDetail } from '../api/validate.js';
 import type { Clock } from '../ids.js';
 import type { AuditActorType } from './actions.js';
 
@@ -151,9 +159,28 @@ export interface AuditTrailContext {
   readonly requestVerification: () => Promise<void>;
 }
 
-// Reserved by the public contract for later additive members.
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface AuditTrail {}
+export type AuditTrailRequest =
+  | [
+      operation: 'listAudit',
+      request: { readonly query: output<typeof auditQuery>; readonly projectId: string | null },
+    ]
+  | [operation: 'auditHead', request: { readonly query: undefined; readonly projectId: null }]
+  | [
+      operation: 'listProjectAudit',
+      request: { readonly query: output<typeof projectAuditQuery>; readonly projectId: string },
+    ];
+
+export type AuditTrailResponse =
+  | output<typeof auditListResponse>
+  | output<typeof auditHeadResponse>
+  | {
+      readonly error: 'audit_trail_unavailable' | 'invalid_request';
+      readonly details?: readonly ValidationDetail[];
+    };
+
+export interface AuditTrail {
+  handle(...args: AuditTrailRequest): Promise<AuditTrailResponse>;
+}
 
 export type AuditSinkErrorCode =
   'network' | 'timeout' | 'refused' | 'too_large' | 'http_status' | 'bad_response';

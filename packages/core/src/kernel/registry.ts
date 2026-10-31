@@ -27,7 +27,7 @@ import {
   type JobDefinition,
 } from '../platform/jobs.js';
 import {
-  AUDIT_PLUGINS_AVAILABLE,
+  AUDIT_SINKS_AVAILABLE,
   collectAuditDefinitions,
   snapshotPluginGate,
   pluginLabel,
@@ -223,7 +223,7 @@ export function collectRegistrations(
   const problems: string[] = [];
   const gates = plugins.map((plugin) => snapshotPluginGate(plugin, problems));
   const audit = collectAuditDefinitions(plugins, gates, problems);
-  if (!AUDIT_PLUGINS_AVAILABLE && (audit.trail !== null || audit.sinks.length > 0)) {
+  if (!AUDIT_SINKS_AVAILABLE && audit.sinks.length > 0) {
     problems.push('audit plugins are not available in this build');
   }
   for (const plugin of plugins) {

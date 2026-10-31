@@ -228,7 +228,7 @@ describe('public audit plugin contract', () => {
     expectTypeOf<keyof AuditTrailContext>().toEqualTypeOf<
       'active' | 'journal' | 'requestVerification'
     >();
-    expectTypeOf<keyof AuditTrail>().toEqualTypeOf<never>();
+    expectTypeOf<keyof AuditTrail>().toEqualTypeOf<'handle'>();
     expectTypeOf<keyof AuditSink>().toEqualTypeOf<'deliver' | 'frontier'>();
     expectTypeOf<keyof AuditSinkContext>().toEqualTypeOf<
       'runtime' | 'env' | 'fetch' | 'clock' | 'deploymentId'
@@ -298,7 +298,7 @@ describe('public audit plugin contract', () => {
         create: (ctx) => {
           expect(ctx.active).toBe(false);
           void ctx.requestVerification();
-          return {};
+          return { handle: async () => ({ error: 'audit_trail_unavailable' as const }) };
         },
       },
       auditSinks: [
@@ -472,3 +472,23 @@ describe('public audit plugin contract', () => {
     expect(error.code).toBe('invalid_endpoint');
   });
 });
+
+function dispatchTypes(trail: AuditTrail): void {
+  void trail.handle('listAudit', {
+    query: { actor: 'actor', limit: '10' },
+    projectId: null,
+  });
+  void trail.handle('listProjectAudit', { query: {}, projectId: 'project' });
+  void trail.handle('auditHead', { query: undefined, projectId: null });
+  // @ts-expect-error project dispatch requires a resolved project
+  void trail.handle('listProjectAudit', { query: {}, projectId: null });
+  // @ts-expect-error head has no query
+  void trail.handle('auditHead', { query: { actor: 'actor' }, projectId: null });
+  // @ts-expect-error request schemas expose string limits
+  void trail.handle('listAudit', { query: { limit: 10 }, projectId: null });
+  // @ts-expect-error organization authority is bound by core
+  void trail.handle('listAudit', { query: {}, projectId: null, orgId: 'other' });
+  // @ts-expect-error only the three trail operations may be dispatched
+  void trail.handle('status', { query: undefined, projectId: null });
+}
+void dispatchTypes;

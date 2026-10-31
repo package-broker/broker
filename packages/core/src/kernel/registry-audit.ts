@@ -4,8 +4,8 @@ import type { AuditSinkDefinition, AuditTrailDefinition, PluginDefinition } from
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/;
 const SINK_NAME = /^[a-z0-9-]{1,32}(?![\s\S])/;
 
-// Enabled only when runtime audit consumers are installed.
-export const AUDIT_PLUGINS_AVAILABLE = false;
+// Sink consumers remain gated until runtime assembly is installed.
+export const AUDIT_SINKS_AVAILABLE = false;
 
 const AUDIT_DESTINATIONS = new Set([
   'PB_AUDIT_OTLP_ENDPOINT',

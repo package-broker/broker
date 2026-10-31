@@ -35,7 +35,21 @@ const item = z.strictObject({
   payload,
 });
 export const auditListResponse = z.strictObject({
-  items: z.array(item),
+  items: z.array(
+    z.union([
+      item,
+      z.strictObject({
+        kind: z.literal('withheld'),
+        id: z
+          .string()
+          .describe(
+            'Original event id when reason is content; marker id when reason is unreadable.',
+          ),
+        seq: z.number().int(),
+        reason: z.enum(['content', 'unreadable']),
+      }),
+    ]),
+  ),
   next: z.string().nullable(),
 });
 export const auditHeadResponse = z.strictObject({

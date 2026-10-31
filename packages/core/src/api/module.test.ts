@@ -421,7 +421,35 @@ describe('createApiModule', () => {
     const deps = dependencies();
     createApiModule(deps);
     for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
-    expect(audit.auditRoutes).toHaveBeenCalledWith(deps.audit);
+    expect(audit.auditRoutes).toHaveBeenCalledWith(deps.audit, deps.auditTrail);
+  });
+
+  it('passes registered trail dispatch services to the trail routes', () => {
+    const spy = vi.spyOn(audit, 'auditRoutes');
+    const deps = dependencies();
+    const auditTrail: NonNullable<ApiModuleDeps['auditTrail']> = {
+      log: vi.fn(),
+      trail: null,
+      effective: async () => ({ policy: 'availability', trailActive: false }),
+      services: { journal: { list: vi.fn(), head: vi.fn() }, requestVerification: vi.fn() },
+    };
+    createApiModule({ ...deps, auditTrail });
+    expect(spy).toHaveBeenCalledWith(deps.audit, auditTrail);
+  });
+
+  it('does not require the legacy reader for a composed trail', () => {
+    const deps = dependencies();
+    const auditTrail: NonNullable<ApiModuleDeps['auditTrail']> = {
+      log: vi.fn(),
+      trail: {
+        definition: {
+          create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' }) }),
+        },
+      },
+      effective: async () => ({ policy: 'availability', trailActive: true }),
+      services: { journal: { list: vi.fn(), head: vi.fn() }, requestVerification: vi.fn() },
+    };
+    expect(() => createApiModule({ ...deps, audit: undefined, auditTrail })).not.toThrow();
   });
 
   it('omits the import routes when no import dependencies are provided', () => {

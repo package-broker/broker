@@ -13,6 +13,12 @@ import { ListState } from '../components/ui/list-state.js';
 
 type AuditList = operations['listAudit']['responses'][200]['content']['application/json'];
 type AuditHead = operations['auditHead']['responses'][200]['content']['application/json'];
+function isWithheld(
+  item: AuditList['items'][number],
+): item is Extract<AuditList['items'][number], { kind: 'withheld' }> {
+  return 'kind' in item && item.kind === 'withheld';
+}
+
 export interface AuditFilters {
   actor: string;
   action: string;
@@ -213,44 +219,68 @@ export function AuditView(props: {
               label="Audit events"
               items={props.data.items}
               columns={[
-                { key: 'seq', label: 'Sequence', value: (item) => item.seq },
+                {
+                  key: 'seq',
+                  label: 'Sequence',
+                  value: (item) => item.seq,
+                  render: (item) =>
+                    isWithheld(item) ? (
+                      <>
+                        {item.seq}
+                        <span className="block">
+                          {item.reason === 'content'
+                            ? 'Content withheld: the stored record differs from its safe form'
+                            : 'Record unreadable'}
+                        </span>
+                      </>
+                    ) : (
+                      item.seq
+                    ),
+                },
                 {
                   key: 'time',
                   label: 'Time',
-                  value: (item) => item.createdAt,
-                  render: (item) => <Time value={item.createdAt} />,
+                  value: (item) => (isWithheld(item) ? '' : item.createdAt),
+                  render: (item) => (isWithheld(item) ? null : <Time value={item.createdAt} />),
                 },
-                { key: 'action', label: 'Action', value: (item) => item.action },
+                {
+                  key: 'action',
+                  label: 'Action',
+                  value: (item) => (isWithheld(item) ? '' : item.action),
+                },
                 {
                   key: 'actor',
                   label: 'Actor',
-                  value: (item) => item.actor.id ?? '',
-                  render: (item) => (
-                    <>
-                      <span className="block text-xs text-neutral-600">{item.actor.type}</span>
-                      <IdText value={item.actor.id} label="actor ID" />
-                    </>
-                  ),
+                  value: (item) => (isWithheld(item) ? '' : (item.actor.id ?? '')),
+                  render: (item) =>
+                    isWithheld(item) ? null : (
+                      <>
+                        <span className="block text-xs text-neutral-600">{item.actor.type}</span>
+                        <IdText value={item.actor.id} label="actor ID" />
+                      </>
+                    ),
                 },
                 {
                   key: 'project',
                   label: 'Project',
                   priority: 2,
-                  value: (item) => item.projectId ?? '',
-                  render: (item) => <IdText value={item.projectId} label="project ID" />,
+                  value: (item) => (isWithheld(item) ? '' : (item.projectId ?? '')),
+                  render: (item) =>
+                    isWithheld(item) ? null : <IdText value={item.projectId} label="project ID" />,
                 },
                 {
                   key: 'targetType',
                   label: 'Target type',
                   priority: 2,
-                  value: (item) => item.targetType,
+                  value: (item) => (isWithheld(item) ? '' : item.targetType),
                 },
                 {
                   key: 'targetId',
                   label: 'Target ID',
                   priority: 3,
-                  value: (item) => item.targetId ?? '',
-                  render: (item) => <IdText value={item.targetId} label="target ID" />,
+                  value: (item) => (isWithheld(item) ? '' : (item.targetId ?? '')),
+                  render: (item) =>
+                    isWithheld(item) ? null : <IdText value={item.targetId} label="target ID" />,
                 },
               ]}
             />

@@ -142,7 +142,7 @@ describe('organization-bound audit composition', () => {
     vi.resetModules();
     vi.doMock('../kernel/registry-audit.js', async (original) => ({
       ...(await original<typeof import('../kernel/registry-audit.js')>()),
-      AUDIT_PLUGINS_AVAILABLE: true,
+      AUDIT_SINKS_AVAILABLE: true,
     }));
     try {
       const { collectRegistrations } = await import('../kernel/registry.js');
@@ -157,7 +157,7 @@ describe('organization-bound audit composition', () => {
           auditTrail: {
             create: (ctx) => {
               trailContext = ctx;
-              return {};
+              return { handle: async () => ({ error: 'audit_trail_unavailable' as const }) };
             },
           },
           auditSinks: [

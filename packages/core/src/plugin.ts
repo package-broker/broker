@@ -33,6 +33,8 @@ export type {
   AuditSinkDefinition,
   AuditSinkWarningCode,
   AuditTrail,
+  AuditTrailRequest,
+  AuditTrailResponse,
   AuditTrailContext,
   AuditTrailDefinition,
   AuditVerificationScopeV1,

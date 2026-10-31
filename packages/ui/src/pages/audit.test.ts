@@ -78,6 +78,36 @@ describe('audit', () => {
     expect(html).not.toContain('source_ip');
     expect(html).not.toContain('private-source-ip');
   });
+  it('renders events alongside both withheld reasons without inventing event fields', () => {
+    const html = markup({
+      data: {
+        items: [
+          item,
+          { kind: 'withheld', id: 'withheld-content', seq: 43, reason: 'content' },
+          { kind: 'withheld', id: 'withheld-unreadable', seq: 44, reason: 'unreadable' },
+        ],
+        next: null,
+      },
+    });
+    const rows = html.match(/<tbody[^>]*>(.*?)<\/tbody>/s)![1]!.match(/<tr\b.*?<\/tr>/gs)!;
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(rows[0]).toContain('2026-10-22T10:00:00Z');
+    expect(rows[0]).toContain('user-1');
+    expect(rows[0]).toContain('source-1');
+    for (const [index, seq, reason] of [
+      [1, 43, 'Content withheld: the stored record differs from its safe form'],
+      [2, 44, 'Record unreadable'],
+    ] as const) {
+      const cells = rows[index]!.match(/<td\b.*?<\/td>/gs)!;
+      expect(cells).toHaveLength(7);
+      expect(cells[0]).toContain(`${seq}<span class="block">${reason}</span>`);
+      for (const cell of cells.slice(1)) {
+        expect(cell).toMatch(/<div class="cell-value"><\/div><\/td>$/);
+      }
+      expect(rows[index]).not.toContain('withheld-');
+    }
+  });
   it('uses the organization list filters and chain-head client routes', async () => {
     const fetch = vi.fn<(_: string, init: RequestInit) => Promise<Response>>(async () =>
       Response.json({ items: [], next: null }),

@@ -152,7 +152,9 @@ describe('audit registration', () => {
   });
 
   it('captures one trail and multiple sinks without invoking factories', () => {
-    const create = vi.fn(() => ({}));
+    const create = vi.fn(() => ({
+      handle: async () => ({ error: 'audit_trail_unavailable' as const }),
+    }));
     const sinkCreate = vi.fn(sink().create);
     const registration = collectValidatedAudit([
       plugin({
@@ -179,7 +181,11 @@ describe('audit registration', () => {
 
   it.each([
     { binds: ['audit-trail'] },
-    { auditTrail: { create: () => ({}) } },
+    {
+      auditTrail: {
+        create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      },
+    },
     { auditSinks: [] },
   ] as Partial<PluginDefinition>[])(
     'gates every audit declaration under apiVersion 3 (%#)',
@@ -191,7 +197,9 @@ describe('audit registration', () => {
   it('rejects a second trail and duplicate sink ids across plugins', () => {
     const definition = plugin({
       binds: ['audit-trail'],
-      auditTrail: { create: () => ({}) },
+      auditTrail: {
+        create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      },
       auditSinks: [sink()],
     });
     expect(() => collectRegistrations([definition, { ...definition, id: 'second' }])).toThrow(
@@ -208,7 +216,11 @@ describe('audit registration', () => {
 
   it.each([
     { binds: ['audit-trail'] },
-    { auditTrail: { create: () => ({}) } },
+    {
+      auditTrail: {
+        create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      },
+    },
   ] as Partial<PluginDefinition>[])(
     'requires the trail binding and definition together (%#)',
     (declaration) => {
@@ -220,9 +232,18 @@ describe('audit registration', () => {
     null,
     {},
     { create: 1 },
-    { create: () => ({}), toggleEnv: '' },
-    { create: () => ({}), toggleEnv: 'bad-name' },
-    { create: () => ({}), extra: 'secret' },
+    {
+      create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      toggleEnv: '',
+    },
+    {
+      create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      toggleEnv: 'bad-name',
+    },
+    {
+      create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      extra: 'secret',
+    },
   ])('refuses malformed trail definitions (%#)', (auditTrail) => {
     reject({ binds: ['audit-trail'], auditTrail: auditTrail as never }, 'malformed');
   });
@@ -327,7 +348,10 @@ describe('audit registration', () => {
 
   it('freezes snapshots before the input can change', () => {
     const definition = sink({ envNames: ['CUSTOM_OPTION'] });
-    const auditTrail = { create: () => ({}), toggleEnv: 'PB_AUDIT_TRAIL' };
+    const auditTrail = {
+      create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+      toggleEnv: 'PB_AUDIT_TRAIL',
+    };
     const result = collectValidatedAudit([
       plugin({
         binds: ['audit-trail'],
@@ -391,15 +415,23 @@ describe('audit registration', () => {
     const definitions = Object.assign([null], { [Symbol.iterator]: function* () {} });
     reject({ auditSinks: definitions as never }, 'malformed');
   });
-  it.each([
-    { auditSinks: [sink()] },
-    { binds: ['audit-trail'], auditTrail: { create: () => ({}) } },
-  ] as Partial<PluginDefinition>[])(
+  it.each([{ auditSinks: [sink()] }] as Partial<PluginDefinition>[])(
     'fails closed until runtime consumers exist (%#)',
     (overrides) => {
       reject(overrides, 'audit plugins are not available in this build');
     },
   );
+
+  it('accepts a trail without invoking its factory', () => {
+    const create = vi.fn(() => ({
+      handle: async () => ({ error: 'audit_trail_unavailable' as const }),
+    }));
+    const registration = collectRegistrations([
+      plugin({ binds: ['audit-trail'], auditTrail: { create } }),
+    ]);
+    expect(registration.audit.trail?.definition.create).toBe(create);
+    expect(create).not.toHaveBeenCalled();
+  });
 
   it('keeps compositions without audit plugins available', () => {
     expect(collectRegistrations([plugin()]).audit).toEqual({ trail: null, sinks: [] });
@@ -609,7 +641,13 @@ describe('audit registration', () => {
   ])('refuses core variable %s for env access and trail toggle', (name) => {
     reject({ auditSinks: [sink({ envNames: [name] })] }, 'reserved or destination');
     reject(
-      { binds: ['audit-trail'], auditTrail: { create: () => ({}), toggleEnv: name } },
+      {
+        binds: ['audit-trail'],
+        auditTrail: {
+          create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+          toggleEnv: name,
+        },
+      },
       'reserved or destination',
     );
   });
@@ -623,7 +661,10 @@ describe('audit registration', () => {
     reject(
       {
         binds: ['audit-trail'],
-        auditTrail: { create: () => ({}), toggleEnv },
+        auditTrail: {
+          create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+          toggleEnv,
+        },
         auditSinks: [sink()],
       },
       'reserved or destination',
@@ -677,7 +718,13 @@ describe('audit registration', () => {
   ])('denies mixed-case sensitive variable %s in all roles', (name) => {
     reject({ auditSinks: [sink({ envNames: [name] })] }, 'reserved or destination');
     reject(
-      { binds: ['audit-trail'], auditTrail: { create: () => ({}), toggleEnv: name } },
+      {
+        binds: ['audit-trail'],
+        auditTrail: {
+          create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' as const }) }),
+          toggleEnv: name,
+        },
+      },
       'reserved or destination',
     );
     for (const destination of [

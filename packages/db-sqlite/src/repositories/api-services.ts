@@ -14,7 +14,8 @@ import type { SourcePackageProbe } from '@package-broker/core/ingest/source-pack
 import { createProjectGrantReader } from './project-grant-read.js';
 import type { createVulnerabilityRuntime } from '@package-broker/core/runtime/vulnerability';
 import { createApiModule, ApiModuleDependencyError } from '@package-broker/core/api/module';
-import type { AuditReader } from '@package-broker/core/api/routes/audit';
+import type { Registration } from '@package-broker/core/kernel/registry';
+import type { AuditTrailDispatch, AuditReader } from '@package-broker/core/api/routes/audit';
 import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
 import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
@@ -49,21 +50,46 @@ import { createSourceRepository } from './source.js';
 import { createVisibilityStore } from './catalogue-writer.js';
 import type { AccessAssembly } from './access-services.js';
 
-function auditReader(executor: SqlExecutor): AuditReader {
+function auditReader(executor: SqlExecutor, observability: Observability): AuditReader {
   const audit = createAuditQueryRepository(executor);
   const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
     if (ctx.org === null) throw new TypeError('route requires an organization context');
     return ctx.org;
   };
   return {
-    list: (ctx, query) =>
-      audit.list(organization(ctx), {
+    async list(ctx, query) {
+      const page = await createAuditJournalReader(executor, organization(ctx), observability).list({
+        projectId: query.projectId,
         limit: query.limit,
-        ...(query.projectId === null ? {} : { projectId: query.projectId }),
         ...(query.actor === undefined ? {} : { actor: query.actor }),
         ...(query.action === undefined ? {} : { action: query.action }),
-        ...(query.after === undefined ? {} : { afterId: query.after }),
-      }),
+        ...(query.after === undefined ? {} : { afterSeq: Number(query.after) }),
+      });
+      return {
+        items: page.items.map((item) =>
+          item.kind === 'withheld'
+            ? item
+            : {
+                id: item.id,
+                org_id: item.orgId,
+                seq: item.seq,
+                prev_hash: item.prevHash,
+                hash: item.hash,
+                created_at: item.createdAt,
+                actor_type: item.actorType,
+                actor_id: item.actorId,
+                token_selector: item.tokenSelector,
+                source_ip: item.sourceIp ?? null,
+                action: item.action,
+                target_type: item.targetType,
+                target_id: item.targetId,
+                project_id: item.projectId,
+                payload_json: item.payloadJson,
+              },
+        ),
+        next: page.next === null ? null : String(page.next),
+      };
+    },
     async head(ctx) {
       const head = await audit.head(organization(ctx));
       return {
@@ -77,6 +103,9 @@ function auditReader(executor: SqlExecutor): AuditReader {
 }
 
 export interface ApiRoutesOptions {
+  readonly registration?: Pick<Registration, 'audit'>;
+  readonly auditTrail?: Omit<AuditTrailDispatch, 'trail' | 'log' | 'services'> &
+    Partial<Pick<AuditTrailDispatch, 'services'>>;
   readonly runtime: 'node' | 'cloudflare';
   readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
@@ -227,7 +256,30 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         ...createPackageAdminReader(executor),
         readStatuses: input.vulnerability.readStatuses,
       },
-      audit: auditReader(executor),
+      audit: auditReader(executor, observability),
+      ...(input.registration?.audit.trail == null
+        ? {}
+        : {
+            auditTrail: {
+              trail: input.registration.audit.trail,
+              effective:
+                input.auditTrail?.effective ??
+                (async () => {
+                  throw new Error('Audit configuration unavailable');
+                }),
+              services: input.auditTrail?.services ?? {
+                journal: {
+                  list: (org, query) =>
+                    createAuditJournalReader(executor, org, observability).list(query),
+                  head: (org) => createAuditJournalReader(executor, org, observability).head(),
+                },
+                requestVerification: async () => {
+                  throw new Error('Audit verification unavailable');
+                },
+              },
+              log,
+            },
+          }),
       auditExport: {
         ...common,
         store: createAuditApiExportStore(executor, anchors),

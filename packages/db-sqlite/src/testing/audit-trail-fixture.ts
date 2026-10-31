@@ -18,6 +18,7 @@ export function auditTrail(): PluginDefinition {
               hash: head.headHash,
               pendingCount: head.pendingCount,
               lastVerifiedAt: null,
+              verification: null,
             };
           }
           const page = await ctx.journal.list({

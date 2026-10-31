@@ -34,7 +34,7 @@ import { Select } from './components/ui/select.js';
 import { cn } from './lib/utils.js';
 import { buildListFilterHash } from './page-hash.js';
 import { AccessPage } from './pages/access.js';
-import { AuditPage } from './pages/audit.js';
+import { AuditPage, clearAuditNames } from './pages/audit.js';
 import { ImportPage } from './pages/import.js';
 import { PackagesPage } from './pages/packages.js';
 import { ProjectsPage } from './pages/projects.js';
@@ -139,6 +139,7 @@ export async function signOut(deps: {
 }): Promise<boolean> {
   const result = await deps.client.request('post', '/_pb/auth/logout');
   if (!result.ok) return false;
+  clearAuditNames(deps.client);
   deps.clearPending();
   if (deps.storage) clearPendingTokenIssue(deps.storage);
   deps.onSignedOut();
@@ -205,13 +206,18 @@ export function Shell(props: {
   onSignOut: () => void;
   signOutError?: boolean;
   visibleRoutes?: readonly PageRoute[];
+  auditTrail?: boolean | undefined;
+  organizationAuditor?: boolean;
   children?: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const isVisible = (item: { route: PageRoute }) =>
     props.visibleRoutes === undefined || props.visibleRoutes.includes(item.route);
   const primary = PRIMARY_NAV.filter(isVisible);
-  const administration = ADMINISTRATION_NAV.filter(isVisible);
+  const administration = ADMINISTRATION_NAV.filter(isVisible).filter(
+    (item) =>
+      item.route !== 'audit' || props.auditTrail === true || props.organizationAuditor === true,
+  );
   const renderItem = (item: { route: PageRoute; label: string }, secondary = false) => (
     <li key={item.route}>
       <a
@@ -308,6 +314,7 @@ export async function checkSession(
 ): Promise<Session | null> {
   const result = await client.request('get', '/_pb/session');
   if (!isCurrent()) return null;
+  clearAuditNames(client);
   const parsed = parseHash(hash);
   if (
     result.ok &&
@@ -321,6 +328,87 @@ export async function checkSession(
   return result.ok ? 'in' : 'out';
 }
 
+interface AuditCapabilities {
+  features: { auditTrail: boolean } | null | undefined;
+  organizationAuditor: boolean | null;
+}
+
+export function createAuditCapabilities(client: AuthClient) {
+  function cache<T>(read: () => Promise<T | null>) {
+    let pending: Promise<T | null> | null = null;
+    return () => {
+      pending ??= read()
+        .catch(() => null)
+        .then((value) => {
+          if (value === null) pending = null;
+          return value;
+        });
+      return pending;
+    };
+  }
+  const readers = () => ({
+    features: cache(async () => {
+      const result = await client.request('get', '/_pb/me');
+      return result.ok ? result.data.features : null;
+    }),
+    organizationAuditor: cache(async () => {
+      const result = await client.request('get', '/_pb/me/permissions');
+      return result.ok ? result.data.organization.includes('org:audit:read') : null;
+    }),
+  });
+  let current = readers();
+  return {
+    reset() {
+      current = readers();
+    },
+    async load(): Promise<AuditCapabilities> {
+      const [features, organizationAuditor] = await Promise.all([
+        current.features(),
+        current.organizationAuditor(),
+      ]);
+      return { features, organizationAuditor };
+    },
+  };
+}
+
+export function useAuditCapabilities(client: AuthClient, session: Session, hash: string) {
+  const capabilities = useMemo(() => createAuditCapabilities(client), [client]);
+  const [audit, setAudit] = useState<AuditCapabilities>({
+    features: undefined,
+    organizationAuditor: null,
+  });
+  const generation = useRef(0);
+  const resetAuditCapabilities = useCallback(() => {
+    generation.current += 1;
+    capabilities.reset();
+    setAudit({ features: undefined, organizationAuditor: null });
+  }, [capabilities]);
+  const refreshAuditCapabilities = useCallback(async () => {
+    const expected = generation.current;
+    const next = await capabilities.load();
+    if (expected === generation.current) setAudit(next);
+  }, [capabilities]);
+  useEffect(() => {
+    if (session === 'in') void refreshAuditCapabilities();
+    else resetAuditCapabilities();
+    return () => {
+      generation.current += 1;
+    };
+  }, [session, hash, refreshAuditCapabilities, resetAuditCapabilities]);
+  return { audit, refreshAuditCapabilities, resetAuditCapabilities };
+}
+
+export function createSessionClient(source: AuthClient): AuthClient {
+  const client: AuthClient = {
+    request: async (method, path, ...args) => {
+      const result = await source.request(method, path, ...args);
+      if (result.status === 401) clearAuditNames(client);
+      return result;
+    },
+  };
+  return client;
+}
+
 export function App(props: { client?: AuthClient }) {
   return (
     <CSPProvider disableStyleElements>
@@ -332,17 +420,20 @@ export function App(props: { client?: AuthClient }) {
 function AppContent(props: { client?: AuthClient }) {
   const client = useMemo<AuthClient>(
     () =>
-      props.client ??
-      createApiClient<paths>({
-        fetch: (url, init) => fetch(url, init),
-        readCookie: (name) => {
-          for (const part of document.cookie.split('; ')) {
-            const eq = part.indexOf('=');
-            if (eq > 0 && part.slice(0, eq) === name) return decodeURIComponent(part.slice(eq + 1));
-          }
-          return undefined;
-        },
-      }),
+      createSessionClient(
+        props.client ??
+          createApiClient<paths>({
+            fetch: (url, init) => fetch(url, init),
+            readCookie: (name) => {
+              for (const part of document.cookie.split('; ')) {
+                const eq = part.indexOf('=');
+                if (eq > 0 && part.slice(0, eq) === name)
+                  return decodeURIComponent(part.slice(eq + 1));
+              }
+              return undefined;
+            },
+          }),
+      ),
     [props.client],
   );
   const [hash, go] = useHash();
@@ -350,6 +441,11 @@ function AppContent(props: { client?: AuthClient }) {
   const initialProbe = useRef(true);
   const [signOutError, setSignOutError] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const { audit, refreshAuditCapabilities, resetAuditCapabilities } = useAuditCapabilities(
+    client,
+    session,
+    hash,
+  );
   const [projectsVersion, setProjectsVersion] = useState(0);
   const onProjectsChanged = useCallback(() => setProjectsVersion((version) => version + 1), []);
   const storage = useMemo<PendingStorage>(
@@ -401,15 +497,20 @@ function AppContent(props: { client?: AuthClient }) {
   const services = useMemo<ShellServices>(
     () => ({
       client,
+      features: audit.features,
+      organizationAuditor: audit.organizationAuditor,
+      refreshAuditCapabilities,
+      projects,
       subscribeReplay: flow.subscribeReplay,
       onProjectsChanged,
       requireReauth: (request, options) =>
         flow.requireReauth(request, options, window.location.hash),
     }),
-    [client, flow, onProjectsChanged],
+    [client, flow, onProjectsChanged, audit, projects, refreshAuditCapabilities],
   );
 
   const onSignedIn = useCallback(() => {
+    clearAuditNames(client);
     initialProbe.current = false;
     void client.request('get', '/_pb/session').then((result) => {
       setSession(result.ok ? 'in' : 'out');
@@ -438,6 +539,8 @@ function AppContent(props: { client?: AuthClient }) {
   return (
     <ServicesContext.Provider value={services}>
       <Shell
+        auditTrail={audit.features?.auditTrail}
+        organizationAuditor={audit.organizationAuditor === true}
         route={resolved.route}
         project={resolved.project}
         projects={projects}
@@ -455,6 +558,7 @@ function AppContent(props: { client?: AuthClient }) {
             storage,
             onSignedOut: () => {
               setProjects([]);
+              resetAuditCapabilities();
               setSession('out');
               go('#/login');
             },

@@ -1778,6 +1778,13 @@ export interface operations {
             lastVerifiedAt: string | null;
             pendingCount: number;
             seq: number;
+            verification: {
+              bodies: number;
+              fromSeq: number;
+              throughSeq: number;
+              verifiedAt: string;
+              withheld: number;
+            } | null;
           };
         };
       };

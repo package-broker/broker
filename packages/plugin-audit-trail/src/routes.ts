@@ -55,6 +55,16 @@ export function createTrail(ctx: AuditTrailContext): AuditTrail {
           seq: head.headSeq,
           hash: head.headHash,
           pendingCount: head.pendingCount,
+          verification:
+            head.verification === null
+              ? null
+              : {
+                  fromSeq: head.verification.fromSeq,
+                  throughSeq: head.verification.throughSeq,
+                  bodies: head.verification.bodies,
+                  withheld: head.verification.withheld,
+                  verifiedAt: head.verification.verifiedAt,
+                },
           lastVerifiedAt:
             head.verification !== null && head.verification.fromSeq <= head.verification.throughSeq
               ? head.verification.verifiedAt

@@ -324,13 +324,40 @@ for (const limit of ['0', '-1', '1.5', SENTINEL]) {
     expect((await f.request(`/_pb/audit?limit=${limit}`)).status).toBe(400);
   });
 }
-it('returns head metadata', async () => {
+it('returns head metadata with verification null through the composed trail', async () => {
   const f = await fixture();
-  expect(await (await f.request(paths[1])).json()).toEqual({
+  const response = await f.request(paths[1]);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
     seq: 1,
     hash: '1'.repeat(64),
     pendingCount: 2,
     lastVerifiedAt: null,
+    verification: null,
+  });
+});
+it('preserves an explicitly supplied verification suffix through the composed trail', async () => {
+  const f = await fixture();
+  const verification = {
+    fromSeq: 10,
+    throughSeq: 12,
+    bodies: 2,
+    withheld: 1,
+    verifiedAt: '2026-10-31T00:00:00Z',
+  };
+  f.head.mockResolvedValue({
+    ...(await f.head(orgContext('org-1'))),
+    headSeq: 14,
+    verification,
+  });
+  const response = await f.request(paths[1]);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    seq: 14,
+    hash: '1'.repeat(64),
+    pendingCount: 2,
+    verification,
+    lastVerifiedAt: verification.verifiedAt,
   });
 });
 it('serializes only public row fields and allowlisted payload', async () => {
@@ -450,6 +477,7 @@ function trailDispatch(active = true, policy: 'availability' | 'required' = 'ava
         hash: head.headHash,
         pendingCount: head.pendingCount,
         lastVerifiedAt: null,
+        verification: null,
       };
     });
     return { handle };
@@ -567,6 +595,7 @@ it('keeps concurrent organization list and head requests bound to their own cont
             hash: head.headHash,
             pendingCount: head.pendingCount,
             lastVerifiedAt: null,
+            verification: null,
           };
         }
         await ctx.journal.list({ projectId: request.projectId, limit: 50 });
@@ -617,6 +646,34 @@ it.each([
   });
   expect(trail.create).not.toHaveBeenCalled();
 });
+
+it.each([
+  ['bodies', -1],
+  ['bodies', 1.5],
+  ['withheld', -1],
+  ['withheld', 1.5],
+] as const)(
+  'rejects invalid verification %s count (%s) through the composed trail without response data',
+  async (field, count) => {
+    const f = await fixture();
+    f.head.mockResolvedValue({
+      ...(await f.head(orgContext('org-1'))),
+      verification: {
+        fromSeq: 1,
+        throughSeq: 1,
+        bodies: 1,
+        withheld: 0,
+        verifiedAt: SENTINEL,
+        [field]: count,
+      },
+    });
+    const response = await f.request(paths[1]);
+    expect(response.status).toBe(500);
+    const body = await response.text();
+    expect(JSON.parse(body)).toMatchObject({ error: { code: 'audit_trail_invalid_response' } });
+    expect(body).not.toContain(SENTINEL);
+  },
+);
 
 it('rejects extra trail response fields without exposing body data', async () => {
   const trail = trailDispatch();

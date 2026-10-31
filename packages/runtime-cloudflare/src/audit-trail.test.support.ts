@@ -13,7 +13,13 @@ export function auditTrail(): PluginDefinition {
       create: () => ({
         handle: async (...[operation]) =>
           operation === 'auditHead'
-            ? { seq: 0, hash: AUDIT_GENESIS_HASH, pendingCount: 0, lastVerifiedAt: null }
+            ? {
+                seq: 0,
+                hash: AUDIT_GENESIS_HASH,
+                pendingCount: 0,
+                lastVerifiedAt: null,
+                verification: null,
+              }
             : { items: [], next: null },
       }),
     },

@@ -205,13 +205,18 @@ export function Shell(props: {
   onSignOut: () => void;
   signOutError?: boolean;
   visibleRoutes?: readonly PageRoute[];
+  auditTrail?: boolean | undefined;
+  organizationAuditor?: boolean;
   children?: ReactNode;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const isVisible = (item: { route: PageRoute }) =>
     props.visibleRoutes === undefined || props.visibleRoutes.includes(item.route);
   const primary = PRIMARY_NAV.filter(isVisible);
-  const administration = ADMINISTRATION_NAV.filter(isVisible);
+  const administration = ADMINISTRATION_NAV.filter(isVisible).filter(
+    (item) =>
+      item.route !== 'audit' || props.auditTrail === true || props.organizationAuditor === true,
+  );
   const renderItem = (item: { route: PageRoute; label: string }, secondary = false) => (
     <li key={item.route}>
       <a
@@ -321,6 +326,76 @@ export async function checkSession(
   return result.ok ? 'in' : 'out';
 }
 
+interface AuditCapabilities {
+  features: { auditTrail: boolean } | null | undefined;
+  organizationAuditor: boolean | null;
+}
+
+export function createAuditCapabilities(client: AuthClient) {
+  function cache<T>(read: () => Promise<T | null>) {
+    let pending: Promise<T | null> | null = null;
+    return () => {
+      pending ??= read()
+        .catch(() => null)
+        .then((value) => {
+          if (value === null) pending = null;
+          return value;
+        });
+      return pending;
+    };
+  }
+  const readers = () => ({
+    features: cache(async () => {
+      const result = await client.request('get', '/_pb/me');
+      return result.ok ? result.data.features : null;
+    }),
+    organizationAuditor: cache(async () => {
+      const result = await client.request('get', '/_pb/me/permissions');
+      return result.ok ? result.data.organization.includes('org:audit:read') : null;
+    }),
+  });
+  let current = readers();
+  return {
+    reset() {
+      current = readers();
+    },
+    async load(): Promise<AuditCapabilities> {
+      const [features, organizationAuditor] = await Promise.all([
+        current.features(),
+        current.organizationAuditor(),
+      ]);
+      return { features, organizationAuditor };
+    },
+  };
+}
+
+export function useAuditCapabilities(client: AuthClient, session: Session, hash: string) {
+  const capabilities = useMemo(() => createAuditCapabilities(client), [client]);
+  const [audit, setAudit] = useState<AuditCapabilities>({
+    features: undefined,
+    organizationAuditor: null,
+  });
+  const generation = useRef(0);
+  const resetAuditCapabilities = useCallback(() => {
+    generation.current += 1;
+    capabilities.reset();
+    setAudit({ features: undefined, organizationAuditor: null });
+  }, [capabilities]);
+  const refreshAuditCapabilities = useCallback(async () => {
+    const expected = generation.current;
+    const next = await capabilities.load();
+    if (expected === generation.current) setAudit(next);
+  }, [capabilities]);
+  useEffect(() => {
+    if (session === 'in') void refreshAuditCapabilities();
+    else resetAuditCapabilities();
+    return () => {
+      generation.current += 1;
+    };
+  }, [session, hash, refreshAuditCapabilities, resetAuditCapabilities]);
+  return { audit, refreshAuditCapabilities, resetAuditCapabilities };
+}
+
 export function App(props: { client?: AuthClient }) {
   return (
     <CSPProvider disableStyleElements>
@@ -350,6 +425,11 @@ function AppContent(props: { client?: AuthClient }) {
   const initialProbe = useRef(true);
   const [signOutError, setSignOutError] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const { audit, refreshAuditCapabilities, resetAuditCapabilities } = useAuditCapabilities(
+    client,
+    session,
+    hash,
+  );
   const [projectsVersion, setProjectsVersion] = useState(0);
   const onProjectsChanged = useCallback(() => setProjectsVersion((version) => version + 1), []);
   const storage = useMemo<PendingStorage>(
@@ -401,12 +481,16 @@ function AppContent(props: { client?: AuthClient }) {
   const services = useMemo<ShellServices>(
     () => ({
       client,
+      features: audit.features,
+      organizationAuditor: audit.organizationAuditor,
+      refreshAuditCapabilities,
+      projects,
       subscribeReplay: flow.subscribeReplay,
       onProjectsChanged,
       requireReauth: (request, options) =>
         flow.requireReauth(request, options, window.location.hash),
     }),
-    [client, flow, onProjectsChanged],
+    [client, flow, onProjectsChanged, audit, projects, refreshAuditCapabilities],
   );
 
   const onSignedIn = useCallback(() => {
@@ -438,6 +522,8 @@ function AppContent(props: { client?: AuthClient }) {
   return (
     <ServicesContext.Provider value={services}>
       <Shell
+        auditTrail={audit.features?.auditTrail}
+        organizationAuditor={audit.organizationAuditor === true}
         route={resolved.route}
         project={resolved.project}
         projects={projects}
@@ -455,6 +541,7 @@ function AppContent(props: { client?: AuthClient }) {
             storage,
             onSignedOut: () => {
               setProjects([]);
+              resetAuditCapabilities();
               setSession('out');
               go('#/login');
             },

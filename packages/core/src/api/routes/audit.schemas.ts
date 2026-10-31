@@ -57,4 +57,13 @@ export const auditHeadResponse = z.strictObject({
   hash: z.string(),
   pendingCount: z.number().int(),
   lastVerifiedAt: z.string().nullable(),
+  verification: z
+    .strictObject({
+      fromSeq: z.number().int().nonnegative(),
+      throughSeq: z.number().int().nonnegative(),
+      bodies: z.number().int().nonnegative(),
+      withheld: z.number().int().nonnegative(),
+      verifiedAt: z.string(),
+    })
+    .nullable(),
 });

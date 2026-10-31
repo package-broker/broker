@@ -286,6 +286,28 @@ it('returns head metadata', async () => {
     hash: '1'.repeat(64),
     pendingCount: 2,
     lastVerifiedAt: null,
+    verification: null,
+  });
+});
+it('preserves an explicitly supplied verification suffix in the fallback', async () => {
+  const f = await fixture();
+  const verification = {
+    fromSeq: 10,
+    throughSeq: 12,
+    bodies: 2,
+    withheld: 1,
+    verifiedAt: '2026-10-31T00:00:00Z',
+  };
+  f.head.mockResolvedValue({
+    seq: 14,
+    hash: '1'.repeat(64),
+    pendingCount: 2,
+    lastVerifiedAt: verification.verifiedAt,
+    verification,
+  });
+  expect(await (await f.request(paths[1])).json()).toMatchObject({
+    verification,
+    lastVerifiedAt: verification.verifiedAt,
   });
 });
 it('serializes only public row fields and allowlisted payload', async () => {
@@ -402,6 +424,7 @@ function trailDispatch(active = true, policy: 'availability' | 'required' = 'ava
         hash: head.headHash,
         pendingCount: head.pendingCount,
         lastVerifiedAt: null,
+        verification: null,
       };
     });
     return { handle };
@@ -519,6 +542,7 @@ it('keeps concurrent organization list and head requests bound to their own cont
             hash: head.headHash,
             pendingCount: head.pendingCount,
             lastVerifiedAt: null,
+            verification: null,
           };
         }
         await ctx.journal.list({ projectId: request.projectId, limit: 50 });
@@ -569,6 +593,26 @@ it.each([
   });
   expect(trail.create).not.toHaveBeenCalled();
 });
+
+it.each([-1, 1.5])(
+  'rejects invalid verification counts (%s) without response data',
+  async (bodies) => {
+    const trail = trailDispatch();
+    trail.create.mockImplementation(() => ({
+      handle: vi.fn(async () => ({
+        seq: 7,
+        hash: 'a'.repeat(64),
+        pendingCount: 0,
+        lastVerifiedAt: null,
+        verification: { fromSeq: 4, throughSeq: 7, bodies, withheld: 1, verifiedAt: SENTINEL },
+      })),
+    }));
+    const f = await fixture({ dispatch: trail.dispatch });
+    const response = await f.request(paths[1]);
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain(SENTINEL);
+  },
+);
 
 it('rejects extra trail response fields without exposing body data', async () => {
   const trail = trailDispatch();

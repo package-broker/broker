@@ -3,6 +3,7 @@ import { renderToString } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   App,
+  createAuditCapabilities,
   ScopeSwitcher,
   checkSession,
   PAGES,
@@ -88,6 +89,7 @@ describe('scope switcher options', () => {
 
 describe('shell markup', () => {
   const base = {
+    auditTrail: true,
     route: 'projects' as const,
     project: null,
     projects: [],
@@ -96,6 +98,14 @@ describe('shell markup', () => {
     onSignOut: () => undefined,
   };
 
+  it.each([false, undefined])(
+    'hides audit navigation unless the trail capability is true (%s)',
+    (auditTrail) => {
+      const html = renderToString(createElement(Shell, { ...base, auditTrail }));
+      expect(html).not.toContain('href="#/audit"');
+      expect(html).toContain('href="#/import"');
+    },
+  );
   it('groups primary and administration links in one Main navigation before account controls', () => {
     const html = renderToString(createElement(Shell, { ...base, project: 'acme' }));
     expect(html.match(/<nav\b/g)).toHaveLength(1);
@@ -461,3 +471,90 @@ it.each([false, true])(
     expect(navigate).not.toHaveBeenCalled();
   },
 );
+
+describe('audit capability loading for navigation', () => {
+  it.each([
+    [true, false, true],
+    [false, false, false],
+    [false, true, true],
+  ])(
+    'gates navigation with trail %s and organization auditor %s',
+    async (auditTrail, organizationAuditor, visible) => {
+      const request = vi.fn(async (_method, path) => ({
+        ok: true,
+        data:
+          path === '/_pb/me'
+            ? { features: { auditTrail } }
+            : { organization: organizationAuditor ? ['org:audit:read'] : [] },
+      }));
+      const capabilities = createAuditCapabilities({ request } as unknown as AuthClient);
+      const next = await capabilities.load();
+      const html = renderToString(
+        createElement(Shell, {
+          route: 'projects',
+          project: null,
+          projects: [],
+          unknown: null,
+          onScope: vi.fn(),
+          onSignOut: vi.fn(),
+          auditTrail: next.features?.auditTrail,
+          organizationAuditor: next.organizationAuditor === true,
+        }),
+      );
+      expect(html.includes('href="#/audit"')).toBe(visible);
+      await capabilities.load();
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
+  it('keeps failed permissions distinct from known absence of audit access and retries them', async () => {
+    let failed = true;
+    const request = vi.fn(async (_method, path) =>
+      path === '/_pb/me/permissions' && failed
+        ? { ok: false, status: 503 }
+        : {
+            ok: true,
+            data: path === '/_pb/me' ? { features: { auditTrail: true } } : { organization: [] },
+          },
+    );
+    const capabilities = createAuditCapabilities({ request } as unknown as AuthClient);
+    expect(await capabilities.load()).toEqual({
+      features: { auditTrail: true },
+      organizationAuditor: null,
+    });
+    failed = false;
+    expect(await capabilities.load()).toEqual({
+      features: { auditTrail: true },
+      organizationAuditor: false,
+    });
+    expect(request.mock.calls.filter(([, path]) => path === '/_pb/me')).toHaveLength(1);
+    expect(request.mock.calls.filter(([, path]) => path === '/_pb/me/permissions')).toHaveLength(2);
+  });
+  it('retries a failed /me on the next navigation and resets cached authority at sign-out', async () => {
+    let fail = true;
+    let active = true;
+    const request = vi.fn(async (_method, path) =>
+      path === '/_pb/me' && fail
+        ? { ok: false, status: 503 }
+        : {
+            ok: true,
+            data: path === '/_pb/me' ? { features: { auditTrail: active } } : { organization: [] },
+          },
+    );
+    const capabilities = createAuditCapabilities({ request } as unknown as AuthClient);
+    expect(await capabilities.load()).toEqual({ features: null, organizationAuditor: false });
+    fail = false;
+    expect(await capabilities.load()).toEqual({
+      features: { auditTrail: true },
+      organizationAuditor: false,
+    });
+    expect(request.mock.calls.filter(([, path]) => path === '/_pb/me')).toHaveLength(2);
+    expect(request.mock.calls.filter(([, path]) => path === '/_pb/me/permissions')).toHaveLength(1);
+    capabilities.reset();
+    active = false;
+    expect(await capabilities.load()).toEqual({
+      features: { auditTrail: false },
+      organizationAuditor: false,
+    });
+    expect(request.mock.calls.filter(([, path]) => path === '/_pb/me')).toHaveLength(3);
+  });
+});

@@ -38,6 +38,13 @@ export interface AuditReader {
     hash: string;
     pendingCount: number;
     lastVerifiedAt: string | null;
+    verification?: {
+      fromSeq: number;
+      throughSeq: number;
+      bodies: number;
+      withheld: number;
+      verifiedAt: string;
+    } | null;
   }>;
 }
 
@@ -196,12 +203,13 @@ export function auditRoutes(
           responses: { 200: auditHeadResponse },
         },
       },
-      async ({ ctx }) =>
-        dispatch?.trail != null
-          ? handle(ctx, 'auditHead', { query: undefined, projectId: null })
-          : reader === undefined
-            ? { error: 'audit_trail_unavailable' }
-            : { status: 200, body: await reader.head(ctx) },
+      async ({ ctx }) => {
+        if (dispatch?.trail != null)
+          return handle(ctx, 'auditHead', { query: undefined, projectId: null });
+        if (reader === undefined) return { error: 'audit_trail_unavailable' };
+        const head = await reader.head(ctx);
+        return { status: 200, body: { ...head, verification: head.verification ?? null } };
+      },
     ),
     apiRoute(
       {

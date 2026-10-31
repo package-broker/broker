@@ -102,9 +102,46 @@ describe('audit trail', () => {
       hash: 'a'.repeat(64),
       pendingCount: 2,
       lastVerifiedAt: '2026-10-31T00:00:00Z',
+      verification: {
+        fromSeq: 1,
+        throughSeq: 7,
+        bodies: 7,
+        withheld: 0,
+        verifiedAt: '2026-10-31T00:00:00Z',
+      },
     });
     expect(ctx.journal.head).toHaveBeenCalledOnce();
     expect(ctx.requestVerification).not.toHaveBeenCalled();
+  });
+
+  it('exposes the actual suffix and withheld scope without journal metadata', async () => {
+    const { ctx, trail } = fixture();
+    const head = await ctx.journal.head();
+    const verification = {
+      fromSeq: 4,
+      throughSeq: 7,
+      bodies: 2,
+      withheld: 2,
+      verifiedAt: '2026-10-31T00:00:00Z',
+    };
+    vi.mocked(ctx.journal.head).mockResolvedValue({ ...head, verification });
+    expect(await trail.handle('auditHead', { query: undefined, projectId: null })).toEqual({
+      seq: 7,
+      hash: 'a'.repeat(64),
+      pendingCount: 2,
+      lastVerifiedAt: verification.verifiedAt,
+      verification,
+    });
+  });
+
+  it('keeps absent verification explicit', async () => {
+    const { ctx, trail } = fixture();
+    const head = await ctx.journal.head();
+    vi.mocked(ctx.journal.head).mockResolvedValue({ ...head, verification: null });
+    expect(await trail.handle('auditHead', { query: undefined, projectId: null })).toMatchObject({
+      lastVerifiedAt: null,
+      verification: null,
+    });
   });
 
   it('does not report an empty verification range as verified', async () => {
@@ -122,6 +159,13 @@ describe('audit trail', () => {
     });
     expect(await trail.handle('auditHead', { query: undefined, projectId: null })).toMatchObject({
       lastVerifiedAt: null,
+      verification: {
+        fromSeq: 1,
+        throughSeq: 0,
+        bodies: 0,
+        withheld: 0,
+        verifiedAt: '2026-10-31T00:00:00Z',
+      },
     });
     expect(ctx.requestVerification).not.toHaveBeenCalled();
   });

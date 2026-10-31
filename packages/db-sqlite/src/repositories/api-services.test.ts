@@ -104,6 +104,7 @@ describe('shared API assembly', () => {
       hash: AUDIT_GENESIS_HASH,
       pendingCount: 0,
       lastVerifiedAt: null,
+      verification: null,
     });
     await expect(route.handler(apiContext(null, route.path))).rejects.toThrow(
       'route requires an organization context',
@@ -115,7 +116,13 @@ describe('shared API assembly', () => {
     async (runtime) => {
       const handle = vi.fn<AuditTrail['handle']>(async (...args) =>
         args[0] === 'auditHead'
-          ? { seq: 0, hash: AUDIT_GENESIS_HASH, pendingCount: 0, lastVerifiedAt: null }
+          ? {
+              seq: 0,
+              hash: AUDIT_GENESIS_HASH,
+              pendingCount: 0,
+              lastVerifiedAt: null,
+              verification: null,
+            }
           : { items: [], next: null },
       );
       const plugin: PluginDefinition = {

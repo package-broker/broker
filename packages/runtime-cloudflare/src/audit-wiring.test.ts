@@ -54,6 +54,7 @@ const trail: PluginDefinition = {
             hash: head.headHash,
             pendingCount: head.pendingCount,
             lastVerifiedAt: null,
+            verification: null,
           };
         }
         return { items: [], next: null };

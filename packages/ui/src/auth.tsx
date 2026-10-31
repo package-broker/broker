@@ -448,6 +448,10 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
 }
 
 export interface ShellServices {
+  refreshAuditCapabilities?: () => Promise<void>;
+  features?: { auditTrail: boolean } | null | undefined;
+  organizationAuditor?: boolean | null;
+  projects?: readonly { id: string; name: string }[];
   readonly onProjectsChanged?: () => void;
   readonly subscribeReplay?: (listener: (result: ReplayResult) => void) => () => void;
   readonly client: AuthClient;

@@ -163,8 +163,20 @@ describe('GitHub plugin wiring', () => {
           return Response.json({
             total_count: 120,
             repositories: [
-              { owner: { login: 'acme' }, name: 'lib', archived: false, default_branch: 'main' },
-              { owner: { login: 'acme' }, name: 'old', archived: true, default_branch: 'main' },
+              {
+                owner: { login: 'acme' },
+                name: 'lib',
+                archived: false,
+                fork: false,
+                default_branch: 'main',
+              },
+              {
+                owner: { login: 'acme' },
+                name: 'old',
+                archived: true,
+                fork: false,
+                default_branch: 'main',
+              },
             ],
           });
         }

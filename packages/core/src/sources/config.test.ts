@@ -392,8 +392,8 @@ describe('round 2', () => {
     expect(problems(parse('vcs', 'pypi' as 'npm', null, github))).toEqual(['ecosystem']);
   });
 
-  it('refuses vcs for npm', () => {
-    expect(problems(parse('vcs', 'npm', null, github))).toEqual(['ecosystem']);
+  it('accepts vcs for npm', () => {
+    expect(parse('vcs', 'npm', null, github).ok).toBe(true);
   });
 
   it('classifies urls and dist hosts through the outbound policy', () => {
@@ -1006,3 +1006,24 @@ describe('hosted npm config', () => {
     expect(parse('hosted', 'composer', null, {}).ok).toBe(false);
   });
 });
+
+it.each(['widget', '@scope/widget'])('accepts npm VCS package %s', (packageName) => {
+  expect(parse('vcs', 'npm', null, { ...github, packageName }).ok).toBe(true);
+});
+
+it.each(['Vendor/widget', 'vendor/widget', 'widget*'])(
+  'refuses noncanonical npm VCS name %s',
+  (packageName) => {
+    expect(problems(parse('vcs', 'npm', null, { ...github, packageName }))).toContain(
+      'packageName',
+    );
+  },
+);
+
+it.each(['a'.repeat(214), '@scope/' + 'a'.repeat(207)])(
+  'accepts maximum length npm VCS package %s',
+  (packageName) => {
+    expect(parse('vcs', 'npm', null, { ...github, packageName }).ok).toBe(true);
+    expect(parse('vcs', 'npm', null, { ...github, packageName: packageName + 'a' }).ok).toBe(false);
+  },
+);

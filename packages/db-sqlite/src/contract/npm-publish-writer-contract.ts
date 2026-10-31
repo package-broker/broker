@@ -1,3 +1,4 @@
+import { createPackageDetailRepository } from '../repositories/package-detail.js';
 import { publishRoutes } from '@package-broker/core/api/routes/publishes';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
@@ -96,9 +97,9 @@ async function world(executor: SqlExecutor) {
     now: NOW,
     action: 'package.publish',
     actor: { type: 'service_principal', id: ulid() },
-    target: { type: 'package', id: ulid() },
+    target: { type: 'version', id: 'version-1.0.0' },
     context: { opId: ulid(), requestId: ulid(), sourceIp: null, tokenSelector: null },
-    changes: {},
+    changes: { version: { new: '1.0.0' } },
   });
   if (!event.ok) throw new Error('invalid test audit');
   const preparedEvent = event.event;
@@ -154,7 +155,13 @@ async function world(executor: SqlExecutor) {
       routeProjectId: 'project',
       tokenId: 'token',
       now: NOW,
-      event: { ...preparedEvent, id: ulid() },
+      event: {
+        ...preparedEvent,
+        id: ulid(),
+        actor: { type: 'service_principal', id: 'principal' },
+        target: { type: 'version', id: `version-${version}` },
+        payloadJson: JSON.stringify({ changes: { version: { new: version } } }),
+      },
     };
   }
   return {
@@ -231,6 +238,304 @@ export function describeNpmPublishWriterContract(
       };
       return { repo, fence, input, result };
     }
+    it('package detail reads latest and explicit readmes with project visibility', () =>
+      run(async (e, w) => {
+        const published = await w.writer.publishVersion(ctx, w.guard, w.input());
+        const repo = createPackageDetailRepository(e);
+        const query = { packageId: published.packageId, projectId: 'project' };
+        expect(await repo.packageName(ctx, published.packageId)).toBe('widget');
+        expect(await repo.packageName(orgContext('foreign'), published.packageId)).toBeNull();
+        expect(await repo.readme(ctx, query)).toEqual({ filename: 'README.md', body: '# Widget' });
+        expect(await repo.readme(ctx, { ...query, version: '1.0.0' })).toEqual({
+          filename: 'README.md',
+          body: '# Widget',
+        });
+        expect(await repo.readme(ctx, { ...query, version: 'missing' })).toBeNull();
+        const second = w.input(false, '2.0.0');
+        await w.writer.publishVersion(ctx, w.guard, {
+          ...second,
+          readme: { filename: 'README.txt', body: 'Second' },
+        });
+        expect(await repo.readme(ctx, query)).toEqual({ filename: 'README.txt', body: 'Second' });
+        expect(await repo.readme(ctx, { ...query, version: '1.0.0' })).toEqual({
+          filename: 'README.md',
+          body: '# Widget',
+        });
+        await e.batch([st("DELETE FROM dist_tag WHERE org_id='org' AND tag='latest'")]);
+        expect(await repo.readme(ctx, query)).toBeNull();
+        expect(await repo.readme(ctx, { ...query, version: '2.0.0' })).toEqual({
+          filename: 'README.txt',
+          body: 'Second',
+        });
+        expect(await repo.readme(orgContext('foreign'), query)).toBeNull();
+        await e.batch([st("DELETE FROM project_package WHERE org_id='org'")]);
+        expect(await repo.readme(ctx, query)).toBeNull();
+      }));
+    it('package detail masks inactive readmes and does not substitute another latest', () =>
+      run(async (e, w) => {
+        const published = await w.writer.publishVersion(ctx, w.guard, w.input());
+        const repo = createPackageDetailRepository(e);
+        const query = { packageId: published.packageId, projectId: 'project' };
+        await e.batch([st("UPDATE version SET status='quarantined'")]);
+        expect(await repo.readme(ctx, query)).toBeNull();
+        expect(await repo.readme(ctx, { ...query, version: '1.0.0' })).toBeNull();
+      }));
+    it('package access requires the source owning project authority', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        const repo = createPackageDetailRepository(e, [
+          {
+            provider: 'oidc',
+            anchor: 'oidc:https://idp.example.test',
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        ]);
+        await e.batch([
+          st("INSERT INTO cache_epoch (org_id,version) VALUES ('org','epoch')"),
+          st("UPDATE source SET project_id='project' WHERE id='source'"),
+          st("INSERT INTO role_permission VALUES ('org','approver-role','org:sources:write')"),
+        ]);
+        const input = {
+          packageId: h.result.packageId,
+          visibleToNewProjects: false,
+          newProjectAccessMode: 'request' as const,
+          revision: 2,
+          audit: { ...w.input().event, id: ulid(), action: 'package.access_update' as const },
+        };
+        expect(await repo.setAccess(ctx, h.fence, input)).toEqual({
+          ok: false,
+          error: 'forbidden',
+        });
+        await e.batch([
+          st(
+            "INSERT INTO role (id,org_id,key,name,scope) VALUES ('project-admin','org','project_admin','Project admin','project')",
+          ),
+          ...DEFAULT_ROLES.find((role) => role.key === 'project_owner')!.permissions.map(
+            (permission) =>
+              st("INSERT INTO role_permission VALUES ('org','project-admin',?)", permission),
+          ),
+          st(
+            "INSERT INTO access_grant (id,org_id,role_id,scope,project_id,subject_type,subject_value) VALUES ('project-grant','org','project-admin','project','project','email','approver@example.test')",
+          ),
+        ]);
+        expect(await repo.setAccess(ctx, h.fence, input)).toEqual({ ok: true });
+        const [row] = await e.all<{ payload_json: string }>(
+          st("SELECT payload_json FROM audit_pending WHERE action='package.access_update'"),
+        );
+        expect(JSON.parse(row!.payload_json)).toEqual(
+          expect.objectContaining({
+            changes: {
+              visible_to_new_projects: { old: true, new: false },
+              new_project_access_mode: { old: 'none', new: 'request' },
+            },
+          }),
+        );
+        let moved = false;
+        const moving: SqlExecutor = {
+          ...e,
+          all: async <T>(statement: Statement) => {
+            const rows = await e.all<T>(statement);
+            if (!moved && statement.sql.startsWith('select source.project_id')) {
+              moved = true;
+              await e.batch([st("UPDATE source SET project_id=NULL WHERE id='source'")]);
+            }
+            return rows;
+          },
+        };
+        expect(
+          await createPackageDetailRepository(moving, [
+            {
+              provider: 'oidc',
+              anchor: 'oidc:https://idp.example.test',
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test'],
+            },
+          ]).setAccess(ctx, h.fence, {
+            ...input,
+            revision: 3,
+            audit: { ...input.audit, id: ulid() },
+          }),
+        ).toEqual({ ok: false, error: 'conflict' });
+      }));
+    it('package access is revision fenced, audited atomically and authority checked', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.batch([st("INSERT INTO cache_epoch (org_id,version) VALUES ('org','epoch')")]);
+        await e.batch([
+          st("INSERT INTO role_permission VALUES ('org','approver-role','org:sources:write')"),
+        ]);
+        const repo = createPackageDetailRepository(e, [
+          {
+            provider: 'oidc',
+            anchor: 'oidc:https://idp.example.test',
+            emailAuthoritative: true,
+            emailAuthoritativeDomains: ['example.test'],
+          },
+        ]);
+        const input = {
+          packageId: h.result.packageId,
+          visibleToNewProjects: false,
+          newProjectAccessMode: 'request' as const,
+          revision: 2,
+          idempotency: {
+            principalKey: 'user:approver',
+            key: 'access',
+            route: 'PATCH /_pb/packages/:package/access',
+            requestHash: 'a'.repeat(64),
+            status: 200,
+            responseJson: '{}',
+            createdAt: NOW,
+            expiresAt: '2099-01-01T00:00:00.000Z',
+          },
+          audit: { ...w.input().event, id: ulid(), action: 'package.access_update' as const },
+        };
+        expect(await repo.setAccess(ctx, h.fence, input)).toEqual({ ok: true });
+        expect(
+          await e.all(
+            st("SELECT count(*) n FROM api_idempotency WHERE org_id='org' AND key='access'"),
+          ),
+        ).toEqual([{ n: 1 }]);
+        expect(
+          await e.all(
+            st('SELECT visible_to_new_projects, new_project_access_mode, rev FROM package'),
+          ),
+        ).toEqual([{ visible_to_new_projects: 0, new_project_access_mode: 'request', rev: 3 }]);
+        expect(
+          await e.all(
+            st("SELECT count(*) n FROM audit_pending WHERE action='package.access_update'"),
+          ),
+        ).toEqual([{ n: 1 }]);
+        expect(
+          await repo.setAccess(ctx, h.fence, {
+            ...input,
+            idempotency: { ...input.idempotency, key: 'stale' },
+            audit: { ...input.audit, id: ulid() },
+          }),
+        ).toEqual({ ok: false, error: 'conflict' });
+        await expect(
+          repo.setAccess(ctx, h.fence, { ...input, visibleToNewProjects: true }),
+        ).rejects.toThrow('invalid package access');
+        for (const invalid of [
+          { ...input, visibleToNewProjects: 'yes' as never },
+          { ...input, newProjectAccessMode: 'invalid' as never },
+          { ...input, revision: 0 },
+          { ...input, revision: 1.5 },
+        ])
+          await expect(repo.setAccess(ctx, h.fence, invalid)).rejects.toThrow(
+            'invalid package access',
+          );
+        expect(await repo.setAccess(orgContext('foreign'), h.fence, input)).toEqual({
+          ok: false,
+          error: 'not_found',
+        });
+        await e.batch([
+          st(
+            "CREATE TRIGGER reject_access_audit BEFORE INSERT ON audit_pending WHEN NEW.action='package.access_update' BEGIN SELECT RAISE(ABORT, 'test audit failure'); END",
+          ),
+        ]);
+        expect(
+          await repo.setAccess(ctx, h.fence, {
+            ...input,
+            revision: 3,
+            idempotency: { ...input.idempotency, key: 'rollback' },
+            audit: { ...input.audit, id: ulid() },
+          }),
+        ).toEqual({ ok: false, error: 'unavailable' });
+        expect(await e.all(st('SELECT rev FROM package'))).toEqual([{ rev: 3 }]);
+        expect(
+          await e.all(st("SELECT count(*) n FROM api_idempotency WHERE key='rollback'")),
+        ).toEqual([{ n: 0 }]);
+        await e.batch([st('DROP TRIGGER reject_access_audit')]);
+        await e.batch([st("DELETE FROM role_permission WHERE permission='org:sources:write'")]);
+        expect(
+          await repo.setAccess(ctx, h.fence, {
+            ...input,
+            revision: 3,
+            idempotency: { ...input.idempotency, key: 'revoked' },
+            audit: { ...input.audit, id: ulid() },
+          }),
+        ).toEqual({
+          ok: false,
+          error: 'forbidden',
+        });
+        expect(
+          await e.all(
+            st("SELECT count(*) n FROM audit_pending WHERE action='package.access_update'"),
+          ),
+        ).toEqual([{ n: 1 }]);
+      }));
+    it('unheld publication attribution survives audit sealing and tags remain version specific', () =>
+      run(async (e, w) => {
+        const input = w.input();
+        const published = await w.writer.publishVersion(ctx, w.guard, input);
+        expect(
+          await e.all(
+            st(
+              "SELECT target_type,target_id,payload_json FROM audit_pending WHERE action='package.publish'",
+            ),
+          ),
+        ).toEqual([
+          {
+            target_type: 'version',
+            target_id: published.versionId,
+            payload_json: JSON.stringify({ changes: { version: { new: '1.0.0' } } }),
+          },
+        ]);
+        const query = { packageId: published.packageId, projectId: null, limit: 10 };
+        expect((await w.admin.listVersions(ctx, query))?.items[0]).toMatchObject({
+          publishedBy: { kind: 'service', displayName: 'Publisher' },
+          approvedBy: null,
+        });
+        await e.batch([
+          st(
+            "INSERT INTO audit_event (id,org_id,seq,prev_hash,hash,created_at,actor_type,actor_id,action,target_type,target_id,payload_json) SELECT id,org_id,1,?,?,created_at,actor_type,actor_id,action,target_type,target_id,payload_json FROM audit_pending WHERE action='package.publish'",
+            'a'.repeat(64),
+            'b'.repeat(64),
+          ),
+          st("DELETE FROM audit_pending WHERE action='package.publish'"),
+        ]);
+        expect((await w.admin.listVersions(ctx, query))?.items[0]?.publishedBy).toEqual({
+          kind: 'service',
+          displayName: 'Publisher',
+        });
+        await w.writer.publishVersion(ctx, w.guard, w.input(false, '2.0.0'));
+        expect((await w.admin.listVersions(ctx, query))?.items.map((v) => v.distTags)).toEqual([
+          [],
+          ['latest'],
+        ]);
+      }));
+    it('version detail returns integrity, current tags and redacted publication attribution', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await h.repo.decide(ctx, h.fence, h.input);
+        await e.batch([st("UPDATE user_account SET display_name='Approver' WHERE id='approver'")]);
+        const page = await w.admin.listVersions(ctx, {
+          packageId: h.result.packageId,
+          projectId: null,
+          limit: 10,
+        });
+        expect(page?.items[0]).toMatchObject({
+          integrity: w.input().integrity,
+          distTags: ['latest'],
+          publishedBy: { kind: 'service', displayName: 'Publisher' },
+          approvedBy: { displayName: 'Approver', decidedAt: NOW },
+        });
+        await e.batch([
+          st("UPDATE user_account SET display_name=email WHERE id='approver'"),
+          st("UPDATE service_principal SET name='publisher@example.test'"),
+        ]);
+        const redacted = await w.admin.listVersions(ctx, {
+          packageId: h.result.packageId,
+          projectId: null,
+          limit: 10,
+        });
+        expect(redacted?.items[0]).toMatchObject({
+          publishedBy: { displayName: 'Service principal' },
+          approvedBy: { displayName: 'User' },
+        });
+        expect(JSON.stringify(redacted)).not.toContain('@');
+      }));
     it.each([
       ['pending', 'not_required', true],
       ['approved', 'not_required', false],
@@ -820,7 +1125,11 @@ export function describeNpmPublishWriterContract(
       }));
     it('resolves the package audit target inside the publication batch', () =>
       run(async (e, w) => {
-        const result = await w.writer.publishVersion(ctx, w.guard, w.input());
+        const input = w.input();
+        const result = await w.writer.publishVersion(ctx, w.guard, {
+          ...input,
+          event: { ...input.event, target: { type: 'package', id: ulid() } },
+        });
         expect(await e.all(st('SELECT target_id FROM audit_pending'))).toEqual([
           { target_id: result.packageId },
         ]);

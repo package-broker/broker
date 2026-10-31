@@ -10,6 +10,9 @@ export interface PackageListItem {
   readonly id: string;
   readonly ecosystem: NameEcosystem;
   readonly name: string;
+  readonly visibleToNewProjects?: boolean;
+  readonly newProjectAccessMode?: 'none' | 'request';
+  readonly revision?: number;
   readonly latestVersion: string | null;
   readonly status: PackageListStatus;
   readonly source: {
@@ -23,6 +26,13 @@ export interface PackageListItem {
 }
 
 export interface VersionListItem {
+  readonly integrity: string | null;
+  readonly distTags: readonly string[];
+  readonly publishedBy: {
+    readonly kind: 'user' | 'service' | 'system';
+    readonly displayName: string;
+  } | null;
+  readonly approvedBy: { readonly displayName: string; readonly decidedAt: string } | null;
   readonly id: string;
   readonly version: string;
   readonly stability: VersionStability;
@@ -81,4 +91,32 @@ export interface PackageAdminReader {
       readonly projectId: string | null;
     },
   ): Promise<ManagedVersion | null>;
+}
+
+export interface PackageAccessInput {
+  readonly packageId: string;
+  readonly visibleToNewProjects: boolean;
+  readonly newProjectAccessMode: 'none' | 'request';
+  readonly revision: number;
+  readonly audit: import('../audit/actions.js').AuditEvent;
+  readonly idempotency?: import('../api/idempotency.js').IdempotencyRecord;
+}
+
+export interface PackageDetailRepository {
+  packageName(ctx: OrgContext, packageId: string): Promise<string | null>;
+  readme(
+    ctx: OrgContext,
+    query: {
+      readonly packageId: string;
+      readonly projectId: string;
+      readonly version?: string;
+    },
+  ): Promise<{ filename: string; body: string } | null>;
+  setAccess(
+    ctx: OrgContext,
+    fence: import('../authz/fence.js').MutationFence,
+    input: PackageAccessInput,
+  ): Promise<
+    { ok: true } | { ok: false; error: 'not_found' | 'forbidden' | 'conflict' | 'unavailable' }
+  >;
 }

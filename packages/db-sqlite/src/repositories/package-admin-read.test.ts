@@ -105,6 +105,37 @@ beforeEach(async () => {
 afterEach(() => database.close());
 
 describe('package admin reader', () => {
+  it('uses the latest version-targeted publish audit without matching version text', async () => {
+    await pkg(10, 'widget');
+    await version(100, 10);
+    await run(
+      "INSERT INTO user_account (id,org_id,email,display_name) VALUES ('old','O','old@example.test','Old publisher'),('new','O','new@example.test','New publisher')",
+    );
+    for (const [auditId, actor, targetType, targetId] of [
+      [id(1), 'old', 'version', id(100)],
+      [id(2), 'new', 'version', id(100)],
+      [id(3), 'old', 'package', id(100)],
+      [id(4), 'old', 'version', id(101)],
+      [id(5), 'old', 'package', id(10)],
+    ]) {
+      await run(
+        "INSERT INTO audit_pending (id,org_id,created_at,actor_type,actor_id,action,target_type,target_id,payload_json) VALUES (?,'O',?,'user',?,'package.publish',?,?,?)",
+        auditId!,
+        time,
+        actor!,
+        targetType!,
+        targetId!,
+        JSON.stringify({ changes: { version: { new: 'unrelated-version-text' } } }),
+      );
+    }
+    const result = await reader.listVersions(ctx, {
+      packageId: id(10),
+      projectId: null,
+      limit: 10,
+    });
+    expect(result!.items[0]!.publishedBy).toEqual({ kind: 'user', displayName: 'New publisher' });
+  });
+
   it('matches catalogue winners over a fixed seeded catalogue', async () => {
     const config = randomCatalogueConfig(685, 8);
     await seedCatalogue(database.executor, config);
@@ -326,7 +357,7 @@ describe('package admin reader', () => {
     const raw = new DatabaseSync(':memory:');
     try {
       raw.exec(`
-        CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0);
+        CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0, visible_to_new_projects INTEGER DEFAULT 1, new_project_access_mode TEXT DEFAULT 'none', rev INTEGER DEFAULT 1);
         CREATE INDEX package_by_name ON package (org_id, ecosystem, name);
         CREATE TABLE source (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, type TEXT, project_id TEXT);
         CREATE TABLE publish_approval (org_id TEXT, version_id TEXT, approval_state TEXT, scan_state TEXT);
@@ -335,7 +366,7 @@ describe('package admin reader', () => {
         INSERT INTO source VALUES ('S', 'O', 'source', 'npm_registry', NULL);
       `);
       const insert = raw.prepare(
-        "INSERT INTO package VALUES (?, 'O', ?, ?, 'active', NULL, 'S', 0)",
+        "INSERT INTO package (id, org_id, ecosystem, name, status, last_synced_at, source_id, held_until_active) VALUES (?, 'O', ?, ?, 'active', NULL, 'S', 0)",
       );
       for (const eco of ['composer', 'npm']) {
         for (let i = 0; i < 600; i++)
@@ -385,7 +416,7 @@ describe('package admin reader', () => {
       const raw = new DatabaseSync(':memory:');
       try {
         raw.exec(`
-          CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0);
+          CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0, visible_to_new_projects INTEGER DEFAULT 1, new_project_access_mode TEXT DEFAULT 'none', rev INTEGER DEFAULT 1);
           CREATE INDEX package_by_name ON package (org_id, ecosystem, name);
           CREATE TABLE source (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, type TEXT, project_id TEXT);
           CREATE TABLE publish_approval (org_id TEXT, version_id TEXT, approval_state TEXT, scan_state TEXT);
@@ -394,7 +425,7 @@ describe('package admin reader', () => {
           INSERT INTO source VALUES ('S', 'O', 'source', 'npm_registry', NULL);
         `);
         const insert = raw.prepare(
-          "INSERT INTO package VALUES (?, 'O', ?, ?, 'active', NULL, 'S', 0)",
+          "INSERT INTO package (id, org_id, ecosystem, name, status, last_synced_at, source_id, held_until_active) VALUES (?, 'O', ?, ?, 'active', NULL, 'S', 0)",
         );
         for (const eco of ['composer', 'npm'])
           for (let i = 0; i < 1000; i++)
@@ -711,9 +742,12 @@ describe('package admin reader', () => {
       'lastSyncedAt',
       'latestVersion',
       'name',
+      'newProjectAccessMode',
+      'revision',
       'source',
       'status',
       'versionCount',
+      'visibleToNewProjects',
     ]);
     expect(Object.keys(item.source).sort()).toEqual(['id', 'name', 'projectId', 'type']);
     const versions = await reader.listVersions(ctx, {
@@ -722,8 +756,12 @@ describe('package admin reader', () => {
       limit: 10,
     });
     expect(Object.keys(versions!.items[0]!).sort()).toEqual([
+      'approvedBy',
+      'distTags',
       'id',
+      'integrity',
       'publishedAt',
+      'publishedBy',
       'removedUpstreamAt',
       'revision',
       'stability',
@@ -775,6 +813,15 @@ describe('package admin reader', () => {
       projectId: 'P',
     });
     expect(statements).toHaveLength(4);
+    const versionsPlan = await database.executor.all<{ detail: string }>({
+      sql: `EXPLAIN QUERY PLAN ${statements[2]!.sql}`,
+      params: statements[2]!.params,
+    });
+    expect(versionsPlan.some((row) => row.detail.includes('audit_event_target'))).toBe(true);
+    expect(versionsPlan.filter((row) => /SCAN audit_(event|pending)\b/.test(row.detail))).toEqual(
+      [],
+    );
+
     for (const statement of statements) expect(statement.params.length).toBeLessThanOrEqual(100);
     const plan = await database.executor.all<{ detail: string }>({
       sql: `EXPLAIN QUERY PLAN ${statements[0]!.sql}`,

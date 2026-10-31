@@ -537,6 +537,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/packages/{package}/access': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Change package access for new projects */
+    patch: operations['updatePackageAccess'];
+    trace?: never;
+  };
   '/_pb/packages/{package}/versions': {
     parameters: {
       query?: never;
@@ -737,6 +754,23 @@ export interface paths {
     };
     /** List packages */
     get: operations['listProjectPackages'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/packages/{package}/readme': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a visible package README */
+    get: operations['getProjectPackageReadme'];
     put?: never;
     post?: never;
     delete?: never;
@@ -4599,6 +4633,9 @@ export interface operations {
               lastSyncedAt: string | null;
               latestVersion: string | null;
               name: string;
+              /** @enum {string} */
+              newProjectAccessMode: 'none' | 'request';
+              revision: number;
               source: {
                 id: string;
                 name: string;
@@ -4615,6 +4652,7 @@ export interface operations {
               /** @enum {string} */
               status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
               versionCount: number;
+              visibleToNewProjects: boolean;
             }[];
             next: string | null;
           };
@@ -4649,6 +4687,96 @@ export interface operations {
       };
     };
   };
+  updatePackageAccess: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          newProjectAccessMode: 'none' | 'request';
+          revision: number;
+          visibleToNewProjects: boolean;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            newProjectAccessMode: 'none' | 'request';
+            revision: number;
+            visibleToNewProjects: boolean;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   listPackageVersions: {
     parameters: {
       query?: {
@@ -4671,8 +4799,19 @@ export interface operations {
         content: {
           'application/json': {
             items: {
+              approvedBy: {
+                decidedAt: string;
+                displayName: string;
+              } | null;
+              distTags: string[];
               id: string;
+              integrity: string | null;
               publishedAt: string;
+              publishedBy: {
+                displayName: string;
+                /** @enum {string} */
+                kind: 'user' | 'service' | 'system';
+              } | null;
               removedUpstreamAt: string | null;
               revision: number;
               /** @enum {string} */
@@ -6140,6 +6279,72 @@ export interface operations {
       };
     };
   };
+  getProjectPackageReadme: {
+    parameters: {
+      query?: {
+        version?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            body: string;
+            contentType: string;
+            filename: string;
+            sizeBytes: number;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   listProjectPackageVersions: {
     parameters: {
       query?: {
@@ -6163,8 +6368,19 @@ export interface operations {
         content: {
           'application/json': {
             items: {
+              approvedBy: {
+                decidedAt: string;
+                displayName: string;
+              } | null;
+              distTags: string[];
               id: string;
+              integrity: string | null;
               publishedAt: string;
+              publishedBy: {
+                displayName: string;
+                /** @enum {string} */
+                kind: 'user' | 'service' | 'system';
+              } | null;
               removedUpstreamAt: string | null;
               revision: number;
               /** @enum {string} */

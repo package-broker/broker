@@ -12,10 +12,17 @@ import type { RouteDefinition } from '../../plugin.js';
 import { apiRoute } from '../route.js';
 import { PACKAGE_API_SPECS } from './packages-schemas.js';
 
-function publicPackage(item: PackageListItem): PackageListItem {
+function publicPackage(item: PackageListItem, organization: boolean): PackageListItem {
   const { id, ecosystem, name, latestVersion, status, versionCount, lastSyncedAt } = item;
   return {
     id,
+    ...(organization
+      ? {
+          visibleToNewProjects: item.visibleToNewProjects,
+          newProjectAccessMode: item.newProjectAccessMode,
+          revision: item.revision,
+        }
+      : {}),
     ecosystem,
     name,
     latestVersion,
@@ -55,6 +62,16 @@ function publicVersion(item: VersionListItem, vulnerability: VulnerabilityStatus
     removedUpstreamAt,
     tombstonedAt,
     revision,
+    integrity: item.integrity,
+    distTags: item.distTags,
+    publishedBy:
+      item.publishedBy === null
+        ? null
+        : { kind: item.publishedBy.kind, displayName: item.publishedBy.displayName },
+    approvedBy:
+      item.approvedBy === null
+        ? null
+        : { displayName: item.approvedBy.displayName, decidedAt: item.approvedBy.decidedAt },
     vulnerability: {
       status: vulnerability.status,
       reason: vulnerability.reason,
@@ -113,7 +130,13 @@ export function packageRoutes(
                 ? { projectId: query.project }
                 : {}),
             });
-      return { status: 200, body: { items: page.items.map(publicPackage), next: page.next } };
+      return {
+        status: 200,
+        body: {
+          items: page.items.map((item) => publicPackage(item, spec.boundary === 'organization')),
+          next: page.next,
+        },
+      };
     }),
   );
   const versions = [projectVersions, orgVersions].map((spec) =>

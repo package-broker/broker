@@ -5,6 +5,7 @@ import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
   'package.publish',
+  'package.access_update',
   'publish.approve',
   'publish.reject',
   'publish.expire',
@@ -113,6 +114,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'token_id',
     'expires_at',
   ],
+  'package.access_update': ['visible_to_new_projects', 'new_project_access_mode'],
   'package.access_request': ['package', 'project_id', 'reason'],
   'package.access_decide': ['package', 'project_id', 'state', 'reason'],
   'session.login': [],

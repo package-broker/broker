@@ -154,7 +154,7 @@ type KernelEnv = {
     readonly waitUntil: (promise: Promise<unknown>) => void;
   };
 };
-type RegisteredRoute = Registration['routes'][number];
+type RegisteredRoute = Registration['routes'][number] & Pick<RouteDefinition, 'corePackageName'>;
 
 const CORE_PLUGIN = 'core';
 /** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated and self boundaries. */
@@ -692,7 +692,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       if (binding === undefined || packageActor === null || options.packageResolver === undefined) {
         throw new TypeError('package resolution is not configured');
       }
-      const name = binding.name(authorizationRequest.params);
+      const lookup = route.plugin === CORE_PLUGIN ? route.corePackageName : undefined;
+      const name =
+        lookup === undefined
+          ? binding.name(authorizationRequest.params)
+          : await lookup(org, authorizationRequest.params);
       const absent = (): Response => {
         guard.reason(engineStatusReason(404));
         return routeNotFound(requestId, format);

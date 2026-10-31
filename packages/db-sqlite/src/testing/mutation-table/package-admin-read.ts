@@ -195,6 +195,65 @@ function attachmentCase(foreignProject: boolean): ContractCase {
   };
 }
 
+function attributionCase(alias: 'pu' | 'sp' | 'au' | 'dt' | 'pending' | 'sealed'): ContractCase {
+  return {
+    name: `version attribution excludes foreign ${alias} rows`,
+    async run(context) {
+      const { own, foreign } = orgOf(context);
+      const seed = seeder(context.executor);
+      await seedSource(seed, 'S', own.orgId, 'hosted', 'npm');
+      await seedPackage(seed, 'K', own.orgId, 'S', 'widget', 'npm');
+      await seedVersion(seed, 'V', own.orgId, 'K', '1.0.0');
+      await seed(
+        "INSERT INTO user_account (id,org_id,email,display_name) VALUES ('U',?,'foreign@example.test','Foreign name')",
+        foreign.orgId,
+      );
+      if (alias === 'sp') {
+        await seed(
+          "INSERT INTO service_principal (id,org_id,name,created_by_user_id) VALUES ('SP',?,'Foreign service','U')",
+          foreign.orgId,
+        );
+      }
+      if (alias === 'dt') {
+        await seed.forged(
+          "INSERT INTO dist_tag (org_id,package_id,tag,version_id) VALUES (?,'K','foreign','V')",
+          foreign.orgId,
+        );
+      } else if (alias === 'pending' || alias === 'sealed') {
+        const fields = alias === 'sealed' ? ', seq, prev_hash, hash' : '';
+        const values =
+          alias === 'sealed' ? ", 1, '" + 'a'.repeat(64) + "', '" + 'b'.repeat(64) + "'" : '';
+        await seed.forged(
+          `INSERT INTO ${alias === 'pending' ? 'audit_pending' : 'audit_event'} (id,org_id,created_at,actor_type,actor_id,action,target_type,target_id,payload_json${fields}) VALUES ('A',?,'2026-01-01T00:00:00.000Z','system',NULL,'package.publish','version','V','{"changes":{"version":{"new":"1.0.0"}}}'${values})`,
+          foreign.orgId,
+        );
+      } else {
+        await seed.forged(
+          "INSERT INTO publish_approval (id,org_id,package_id,version_id,source_id,hold_approval,hold_scan,approval_state,scan_state,requested_by_type,requested_by_id,token_id,decided_by_user_id,decided_at,expires_at) VALUES ('PA',?,'K','V','S',1,0,'approved','not_required',?,?,'token','U','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z')",
+          own.orgId,
+          alias === 'sp' ? 'service' : 'user',
+          alias === 'sp' ? 'SP' : 'U',
+        );
+      }
+      const page = await createPackageAdminReader(executing(context)).listVersions(own, {
+        packageId: 'K',
+        projectId: null,
+        limit: 10,
+      });
+      const item = page!.items[0]!;
+      if (alias === 'dt') expect(item.distTags).toEqual([]);
+      else if (alias === 'pending' || alias === 'sealed') expect(item.publishedBy).toBeNull();
+      else if (alias === 'au') expect(item.approvedBy?.displayName).toBe('User');
+      else
+        expect(item.publishedBy?.displayName).toBe(alias === 'sp' ? 'Service principal' : 'User');
+    },
+  };
+}
+const attributionCases = (['pu', 'sp', 'au', 'dt', 'pending', 'sealed'] as const).map((alias) => ({
+  alias,
+  contract: attributionCase(alias),
+}));
+
 const boundaryCases = (['list', 'versions', 'manage'] as const).flatMap((operation) =>
   (['pkg', 'src', 'v'] as const).map((boundary) => ({
     operation,
@@ -212,12 +271,25 @@ export const entries: readonly MutationEntry[] = [
     file: 'repositories/package-admin-read.ts',
     builder: 'createPackageAdminReader',
     cases: [
+      ...attributionCases.map((item) => item.contract),
       ...boundaryCases.map((item) => item.contract),
       ...statusCases.map((item) => item.contract),
       ...attachments,
       ...projectCases.map((item) => item.contract),
     ],
     predicates: [
+      ...attributionCases.map(({ alias, contract }) => ({
+        name: contract.name,
+        caseName: contract.name,
+        locate:
+          alias === 'pending'
+            ? /org_id = \?(?= and target_type = 'version' and action = 'package.publish'\s+union)/
+            : alias === 'sealed'
+              ? /org_id = \?(?= and target_type = 'version' and action = 'package.publish'\s+\))/
+              : new RegExp(`\\b${alias}\\.org_id = \\?`),
+        neutral: NOT_NULL,
+        copies: 1,
+      })),
       ...boundaryCases.map(({ operation, boundary, contract }) => ({
         name: contract.name,
         caseName: contract.name,

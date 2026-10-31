@@ -1,3 +1,4 @@
+import { PlatformUnavailableError } from '../platform/errors.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import type { NameEcosystem } from '../catalogue/names.js';
 import type { PackageAccess } from '../catalogue/package-access.js';
@@ -69,6 +70,7 @@ export interface DistServiceDeps {
     target: DistTarget,
     observability?: Observability,
   ) => Promise<DistFetchPlan | null>;
+  readonly enqueueNpmVcsBuild?: (ctx: OrgContext, target: DistTarget) => Promise<boolean>;
   readonly recorder: Pick<AccessRecorder, 'record'>;
   readonly coalesce?: Pick<CoalesceOptions, 'waitBudgetMs' | 'pollMs'>;
 }
@@ -272,6 +274,19 @@ export function createDistService(deps: DistServiceDeps): DistService {
       const target = await resolve(actor, request, versionId, revision);
       if (target === null) return NOT_FOUND;
 
+      try {
+        if (
+          target.blob === null &&
+          request.ecosystem === 'npm' &&
+          (await deps.enqueueNpmVcsBuild?.(ctx, target))
+        )
+          return { kind: 'busy', retryAfterSeconds: 10 };
+      } catch (error) {
+        if (error instanceof SourceUnavailableError)
+          return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
+        if (error instanceof PlatformUnavailableError) return BUSY;
+        throw error;
+      }
       if (target.blob !== null) {
         const read = await readStored(deps.store, ctx, target.blob.sha256);
         if (typeof read !== 'string') return file(ctx, target, read);

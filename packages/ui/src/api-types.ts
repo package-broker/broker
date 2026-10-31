@@ -7416,7 +7416,14 @@ export interface operations {
                         | 'too_large'
                         | 'policy_denied'
                         | 'credential_unavailable'
-                        | 'internal';
+                        | 'internal'
+                        | 'name_mismatch'
+                        | 'version_mismatch'
+                        | 'invalid_manifest'
+                        | 'unsupported_files_pattern'
+                        | 'invalid_packlist'
+                        | 'invalid_tarball'
+                        | 'archive_changed';
                       count: number;
                     }[];
                     /** @description Terminal package failures. */
@@ -7515,7 +7522,14 @@ export interface operations {
                         | 'too_large'
                         | 'policy_denied'
                         | 'credential_unavailable'
-                        | 'internal';
+                        | 'internal'
+                        | 'name_mismatch'
+                        | 'version_mismatch'
+                        | 'invalid_manifest'
+                        | 'unsupported_files_pattern'
+                        | 'invalid_packlist'
+                        | 'invalid_tarball'
+                        | 'archive_changed';
                       count: number;
                     }[];
                     /** @description Terminal package failures. */
@@ -7699,6 +7713,41 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            conflictingClaims?: string[];
+            error: {
+              code: string;
+              details?: {
+                /** @enum {string} */
+                code:
+                  | 'invalid_type'
+                  | 'too_small'
+                  | 'too_big'
+                  | 'invalid_format'
+                  | 'invalid_value'
+                  | 'unrecognized_keys'
+                  | 'invalid_union'
+                  | 'invalid'
+                  | 'invalid_encoding'
+                  | 'too_deep'
+                  | 'invalid_json';
+                /** @enum {string} */
+                location?: 'params' | 'query' | 'body';
+                path: string;
+              }[];
+              message: string;
+              problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
+              requestId: string;
+            };
+          };
         };
       };
       /** @description Payload too large */
@@ -8023,6 +8072,41 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            conflictingClaims?: string[];
+            error: {
+              code: string;
+              details?: {
+                /** @enum {string} */
+                code:
+                  | 'invalid_type'
+                  | 'too_small'
+                  | 'too_big'
+                  | 'invalid_format'
+                  | 'invalid_value'
+                  | 'unrecognized_keys'
+                  | 'invalid_union'
+                  | 'invalid'
+                  | 'invalid_encoding'
+                  | 'too_deep'
+                  | 'invalid_json';
+                /** @enum {string} */
+                location?: 'params' | 'query' | 'body';
+                path: string;
+              }[];
+              message: string;
+              problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
+              requestId: string;
+            };
+          };
         };
       };
       /** @description Payload too large */
@@ -10625,7 +10709,14 @@ export interface operations {
                     | 'too_large'
                     | 'policy_denied'
                     | 'credential_unavailable'
-                    | 'internal';
+                    | 'internal'
+                    | 'name_mismatch'
+                    | 'version_mismatch'
+                    | 'invalid_manifest'
+                    | 'unsupported_files_pattern'
+                    | 'invalid_packlist'
+                    | 'invalid_tarball'
+                    | 'archive_changed';
                   count: number;
                 }[];
                 /** @description Terminal package failures. */
@@ -10788,6 +10879,41 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            conflictingClaims?: string[];
+            error: {
+              code: string;
+              details?: {
+                /** @enum {string} */
+                code:
+                  | 'invalid_type'
+                  | 'too_small'
+                  | 'too_big'
+                  | 'invalid_format'
+                  | 'invalid_value'
+                  | 'unrecognized_keys'
+                  | 'invalid_union'
+                  | 'invalid'
+                  | 'invalid_encoding'
+                  | 'too_deep'
+                  | 'invalid_json';
+                /** @enum {string} */
+                location?: 'params' | 'query' | 'body';
+                path: string;
+              }[];
+              message: string;
+              problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
+              requestId: string;
+            };
+          };
         };
       };
       /** @description Payload too large */

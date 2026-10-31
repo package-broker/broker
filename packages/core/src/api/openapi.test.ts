@@ -1,3 +1,5 @@
+import { SOURCE_API_SPECS } from './routes/sources-schemas.js';
+import { SOURCE_ATTACHMENT_API_SPECS } from './routes/source-attachment-schemas.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z } from 'zod';
 import { generateOpenApi } from './openapi.js';
@@ -677,5 +679,29 @@ it('declares the paused-source conflict for both source sync operations', async 
       '409.description',
       expect.stringContaining('Source is paused'),
     );
+  }
+});
+
+it('documents conflicting claims alongside the existing error envelope', () => {
+  const specs = [SOURCE_API_SPECS[1], SOURCE_ATTACHMENT_API_SPECS[0]];
+  const doc = generateOpenApi(specs, info);
+  expect(Object.keys(doc.paths)).toHaveLength(2);
+  for (const methods of Object.values(doc.paths)) {
+    expect(Object.keys(methods)).toHaveLength(1);
+    for (const operation of Object.values(methods)) {
+      const responses = operation.responses as Record<string, unknown>;
+      expect(responses['409']).toMatchObject({
+        content: {
+          'application/json': {
+            schema: {
+              properties: {
+                conflictingClaims: { type: 'array', items: { type: 'string' } },
+                error: { type: 'object' },
+              },
+            },
+          },
+        },
+      });
+    }
   }
 });

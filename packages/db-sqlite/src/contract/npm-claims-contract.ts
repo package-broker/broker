@@ -1,3 +1,8 @@
+import { proxyClaimsVerified } from '../repositories/proxy-claims.js';
+import { createVisibilityAttachRepository } from '../repositories/visibility-attach.js';
+import { checkProxyClaims } from '@package-broker/core/sources/proxy-claims';
+import { patternHits } from '@package-broker/core/catalogue/visibility';
+import { matchesPattern } from '@package-broker/core/catalogue/patterns';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import { createSourceRepository } from '../repositories/source.js';
 import { ulid } from '@package-broker/core/ids';
@@ -8,7 +13,7 @@ import type { AuditEvent } from '@package-broker/core/audit/actions';
 import { mutationFence, type AuthenticatedActor } from '@package-broker/core/authz/fence';
 import { compile, db } from '../kysely.js';
 import { coveredByRegisteredNames, isRegistrablePattern } from '../repositories/registered-name.js';
-import { proxyEligibleCondition } from '../repositories/catalogue-predicates.js';
+import { npmClaimCover, proxyEligibleCondition } from '../repositories/catalogue-predicates.js';
 import { createRegisteredNameRepository } from '../repositories/registered-name.js';
 import { seedTwoOrganizations } from './two-organizations.js';
 
@@ -19,6 +24,21 @@ export function describeNpmClaimsContract(
   open: () => Promise<{ executor: SqlExecutor; close(): Promise<void> }>,
 ) {
   describe(`npm claim admission: ${backend}`, () => {
+    it('refuses oversized proxy proof JSON on the database boundary', async () => {
+      const database = await open();
+      try {
+        const { a } = await seedTwoOrganizations(database.executor);
+        const proof = Array.from({ length: 230 }, () => 'a'.repeat(214));
+        const statement = compile(
+          db.selectNoFrom(sql<number>`${proxyClaimsVerified(a, proof)}`.as('verified')),
+        );
+        expect(statement.params).toEqual([]);
+        expect(await database.executor.all(statement)).toEqual([{ verified: 0 }]);
+      } finally {
+        await database.close();
+      }
+    });
+
     async function setup(ownerType = 'hosted') {
       const database = await open();
       const { executor } = database;
@@ -103,7 +123,7 @@ export function describeNpmClaimsContract(
         id: string,
         sourceId: string,
         pattern: string,
-        claimProbe: { proxyId: string } = { proxyId: 'P' },
+        claimProbe: { proxyId: string } | null = { proxyId: 'P' },
       ) =>
         names.add(a, fence, {
           id,
@@ -119,6 +139,253 @@ export function describeNpmClaimsContract(
         JSON.stringify(await executor.all(st('SELECT * FROM cache_epoch ORDER BY org_id')));
       return { ...database, a, b, names, fence, anchors, audit, add, snapshot };
     }
+
+    it.each(['create', 'attach'] as const)(
+      'accepts verified claims and rechecks late claims during proxy %s',
+      async (operation) => {
+        const f = await setup();
+        try {
+          expect(await f.add('C1', 'H', 'widget')).toBe('added');
+          await f.executor.batch([
+            st(
+              "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+              f.a.orgId,
+            ),
+          ]);
+          const write = async (executor: SqlExecutor) =>
+            operation === 'create'
+              ? createSourceRepository(executor).create(f.a, f.fence, {
+                  id: 'NEW',
+                  projectId: null,
+                  name: 'new proxy',
+                  type: 'npmjs_proxy',
+                  ecosystem: 'npm',
+                  url: 'https://registry.npmjs.org',
+                  configJson: '{}',
+                  credential: null,
+                  verifiedClaims: ['widget'],
+                  providerAnchors: f.anchors,
+                  audit: f.audit('NEW'),
+                })
+              : createVisibilityAttachRepository(executor, {
+                  providerAnchors: f.anchors,
+                }).attachSource(f.a, f.fence, {
+                  projectId: 'PR',
+                  sourceId: 'P',
+                  verifiedClaims: ['widget'],
+                  audit: f.audit('P'),
+                });
+          let raced = false;
+          const executor: SqlExecutor = {
+            driver: f.executor.driver,
+            all: (statement) => f.executor.all(statement),
+            async batch(statements) {
+              if (!raced) {
+                raced = true;
+                await f.executor.batch([
+                  st(
+                    "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('LATE', ?, 'H', 'npm', 'late')",
+                    f.a.orgId,
+                  ),
+                ]);
+              }
+              return f.executor.batch(statements);
+            },
+          };
+          expect(await write(executor)).toEqual(
+            operation === 'create' ? 'conflict' : { ok: false, reason: 'conflict' },
+          );
+          expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
+          expect(await f.executor.all(st("SELECT * FROM source WHERE id = 'NEW'"))).toEqual([]);
+          await f.executor.batch([
+            st("DELETE FROM registered_name WHERE org_id = ? AND id = 'LATE'", f.a.orgId),
+          ]);
+          const result = await write(f.executor);
+          if (operation === 'create') expect(result).toBe('created');
+          else expect(result).toMatchObject({ ok: true });
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each(['create', 'attach'] as const)(
+      'refuses unverified exact claims inside the proxy %s batch',
+      async (operation) => {
+        const f = await setup();
+        try {
+          expect(await f.add('C1', 'H', 'widget')).toBe('added');
+          const before = await f.snapshot();
+          if (operation === 'create') {
+            const result = await createSourceRepository(f.executor).create(f.a, f.fence, {
+              id: 'NEW',
+              projectId: null,
+              name: 'new proxy',
+              type: 'npmjs_proxy',
+              ecosystem: 'npm',
+              url: 'https://registry.npmjs.org',
+              configJson: '{}',
+              credential: null,
+              providerAnchors: f.anchors,
+              audit: f.audit('NEW'),
+            });
+            expect(result).toBe('conflict');
+            expect(await createSourceRepository(f.executor).get(f.a, 'NEW')).toBeNull();
+          } else {
+            await f.executor.batch([
+              st(
+                "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+                f.a.orgId,
+              ),
+            ]);
+            const result = await createVisibilityAttachRepository(f.executor, {
+              providerAnchors: f.anchors,
+            }).attachSource(f.a, f.fence, {
+              projectId: 'PR',
+              sourceId: 'P',
+              audit: f.audit('P'),
+            });
+            expect(result).toEqual({ ok: false, reason: 'conflict' });
+            expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
+          }
+          expect(await f.snapshot()).toBe(before);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each(['found', 'unavailable', 'not_found'] as const)(
+      'preflights existing exact claims for proxy create and attach: %s',
+      async (answer) => {
+        const f = await setup();
+        try {
+          await f.executor.batch([
+            st("DELETE FROM source WHERE org_id = ? AND id = 'P'", f.a.orgId),
+          ]);
+          expect(await f.add('C1', 'H', 'widget', null)).toBe('added');
+          expect(await f.add('C2', 'H', '@private/two', null)).toBe('added');
+          expect(await f.add('C3', 'H', '@scope/*')).toBe('added');
+          await f.executor.batch([
+            st(
+              "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('FC', ?, 'F', 'npm', 'foreign')",
+              f.b.orgId,
+            ),
+          ]);
+          const seen: string[] = [];
+          const deps = {
+            sources: createSourceRepository(f.executor),
+            registeredNames: f.names,
+            claimProbe: async (_ctx: unknown, _source: unknown, key: string) => {
+              seen.push(key);
+              return answer;
+            },
+          };
+          const before = await f.snapshot();
+          const expected = answer === 'not_found' ? [] : ['widget', '@private/two'];
+          expect(
+            await checkProxyClaims(deps, f.a, { type: 'new_npmjs_proxy', userAgent: null }),
+          ).toEqual(expected);
+          await f.executor.batch([
+            st(
+              "INSERT INTO source (id, org_id, name, type, ecosystem) VALUES ('P', ?, 'proxy', 'npmjs_proxy', 'npm')",
+              f.a.orgId,
+            ),
+          ]);
+          expect(await checkProxyClaims(deps, f.a, 'P')).toEqual(expected);
+          expect(seen).toEqual(['widget', '@private/two', 'widget', '@private/two']);
+          expect(await f.snapshot()).toBe(before);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each([
+      // pattern, key, claim coverage, registered coverage, proxy denial, generic glob
+      ['widget', 'widget', true, true, true, true],
+      ['widget', 'other', false, false, false, false],
+      ['@scope/*', '@scope/widget', true, true, true, true],
+      ['@scope/*', '@other/widget', false, false, false, false],
+      ['wid*', 'widget', false, true, true, true],
+      ['@sc*/widget', '@scope/widget', false, true, true, true],
+      ['a'.repeat(50), 'a'.repeat(50), true, true, true, true],
+      ['a'.repeat(51), 'other', false, false, false, false],
+      ['a'.repeat(214), 'a'.repeat(214), true, true, true, true],
+      [`@${'a'.repeat(211)}/*`, `@${'a'.repeat(211)}/x`, true, true, true, true],
+      ['a'.repeat(215), 'other', false, false, true, false],
+      ['@scope/pre*', '@scope/prefix', false, true, true, true],
+      ['@scope/*', '@scope/', true, true, true, true],
+      ['a****', 'abc', false, true, true, true],
+      ['a*****', 'abc', false, false, true, null],
+      ['a'.repeat(50) + '*', 'other', false, false, true, false],
+      ['!foo', '!foo', true, true, true, true],
+      ['bad?', 'unrelated', false, false, true, null],
+      ['é', 'é', false, false, true, null],
+      ['a\0b', 'a', false, false, true, null],
+    ] as const)(
+      'compares coverage predicates for %s and %s',
+      async (pattern, key, claim, registered, denial, glob) => {
+        const f = await setup();
+        try {
+          await f.executor.batch([
+            st(
+              "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('C1', ?, 'H', 'npm', ?)",
+              f.a.orgId,
+              pattern,
+            ),
+          ]);
+          const rows = await f.executor.all(
+            compile(
+              db.selectNoFrom([
+                sql<number>`${npmClaimCover(sql.lit('npm'), sql.val(pattern), sql.val(key))}`.as(
+                  'claim',
+                ),
+                sql<number>`${coveredByRegisteredNames(f.a, 'H', 'npm', key)}`.as('registered'),
+                sql<number>`${coveredByRegisteredNames(f.b, 'H', 'npm', key)}`.as('foreign'),
+              ]),
+            ),
+          );
+          expect(rows).toEqual([
+            { claim: Number(claim), registered: Number(registered), foreign: 0 },
+          ]);
+          expect(patternHits(pattern, key, 'npm')).toBe(denial);
+          if (glob === null) expect(() => matchesPattern(pattern, key)).toThrow();
+          else expect(matchesPattern(pattern, key)).toBe(glob);
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it.each([
+      ['widget', 'widget', true],
+      ['widget', 'other', false],
+      ['@scope/*', '@scope/widget', true],
+      ['@scope/*', '@other/widget', false],
+      ['@scope/widget', '@scope/*', true],
+      ['@sc*/widget', '@scope/*', true],
+      ['@scope/pre*', '@scope/prefix', true],
+      ['a'.repeat(214), 'other', false],
+      [`@${'a'.repeat(211)}/*`, `@${'a'.repeat(211)}/x`, true],
+    ] as const)(
+      'compares conservative overlap for %s then %s',
+      async (existing, incoming, overlaps) => {
+        const f = await setup();
+        try {
+          if (existing.length > 50)
+            await f.executor.batch([
+              st("UPDATE source SET type = 'hosted' WHERE org_id = ? AND id = 'N'", f.a.orgId),
+            ]);
+          expect(await f.add('C1', 'N', existing)).toBe('added');
+          expect(await f.add('C2', 'H', incoming)).toBe(
+            overlaps ? (existing === incoming ? 'pattern_taken' : 'claim_overlap') : 'added',
+          );
+        } finally {
+          await f.close();
+        }
+      },
+    );
 
     it.each(['npm_registry', 'vcs'])(
       'uses the appropriate npm claim grammar for %s',

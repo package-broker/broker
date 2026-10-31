@@ -224,6 +224,7 @@ export function createNodeGitProvider(options: NodeGitProviderOptions): SourcePr
     listPackages: git.listPackages!.bind(git),
     describe: git.describe.bind(git),
     async openDist(ctx, source, target) {
+      if (source.ecosystem === 'npm') return git.openDist(ctx, source, target);
       const repository = repositoryOf(source);
       const commit = target.sourceRef;
       if (commit === null || !COMMIT.test(commit)) throw new GitProviderError('invalid_request');

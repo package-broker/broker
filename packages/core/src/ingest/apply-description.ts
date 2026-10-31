@@ -369,7 +369,7 @@ export async function applyChunk(
     cursor: session.cursor,
     status,
     session,
-    skipped: extra.skipped ?? [],
+    skipped: extra.skipped ?? description.skippedMembers,
     refused,
     duplicates,
     tagsSkipped,
@@ -575,7 +575,7 @@ export async function applyChunk(
     if (window.exhausted && tookAll) tail = 'tags';
   }
 
-  const skipped: readonly SkippedMember[] = tail === null ? [] : description.skippedMembers;
+  const skipped: readonly SkippedMember[] = description.skippedMembers;
   if (tail === 'tags') {
     const tags = description.distTags;
     if (
@@ -641,14 +641,14 @@ export async function applyChunk(
     seenCount: progress.seenCount,
     pagesSoFar: progress.pagesSoFar,
   };
-  if (tail === null || tail === 'tags') return outcome('progress', false);
+  if (tail === null || tail === 'tags') return outcome('progress', false, { skipped });
 
   if (!description.upstreamComplete) {
-    skipped.forEach(() =>
+    skipped.forEach((skip) =>
       deps.observability?.log({
         level: 'info',
         event: 'ingest.version_skipped',
-        reason_code: 'member_too_large',
+        reason_code: skip.reason,
       }),
     );
     return abandon('incomplete', { skipped });
@@ -660,7 +660,7 @@ export async function applyChunk(
     });
   }
   if (used + finalizeCost + ABANDON_STATEMENTS > INVOCATION_BUDGET) {
-    return outcome('progress', false);
+    return outcome('progress', false, { skipped });
   }
 
   const result = await deps.finalizer.finalize(
@@ -677,7 +677,7 @@ export async function applyChunk(
     guard,
   );
   used += finalizeCost;
-  if (result.status === 'complete') return outcome('complete', true);
+  if (result.status === 'complete') return outcome('complete', true, { skipped });
   if (result.reason === 'superseded') return outcome('superseded', true);
   if (ABANDONING_REFUSALS.has(result.reason)) {
     return abandon('refused', { refusal: result.reason });

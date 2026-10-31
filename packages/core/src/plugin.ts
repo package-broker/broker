@@ -289,3 +289,6 @@ export function definePlugin<const T extends PluginDefinition>(
 ): T {
   return definition;
 }
+
+export { npmVcsDescription, parseNpmVcsManifest } from './ingest/vcs/npm-adapter.js';
+export { npmVersionsFromRefs } from './registry/npm/version-rules.js';

@@ -4,6 +4,12 @@ import {
   createPublishReads,
   createPublishWriteGuard,
 } from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
+import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
+import {
+  createNpmVcsBuildReader,
+  createNpmVcsBuildPendingReader,
+} from '@package-broker/db-sqlite/repositories/npm-vcs-build';
+import { createCatalogueWriteGuard } from '@package-broker/db-sqlite/repositories/catalogue-write-package';
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
 import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
 import { createPackageAccessExpiryJob } from '@package-broker/core/api/routes/package-access-requests-expiry';
@@ -836,6 +842,11 @@ function buildRegistryModule(input: {
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential,
       credentialUnavailable: (ctx, id) => registrySources.markCredentialUnavailable(ctx, id),
+    },
+    npmVcsBuild: {
+      target: createNpmVcsBuildReader(executor),
+      pending: createNpmVcsBuildPendingReader(executor),
+      writeGuard: createCatalogueWriteGuard,
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,
@@ -1828,7 +1839,7 @@ export function createWorker(
                 ...(db === undefined || registryConfig === undefined
                   ? []
                   : [
-                      ...[sourceSyncJob, sourcePollJob].map((definition) =>
+                      ...[sourceSyncJob, sourcePollJob, npmVcsBuildJob].map((definition) =>
                         registerObservedJob(
                           {
                             ...definition,

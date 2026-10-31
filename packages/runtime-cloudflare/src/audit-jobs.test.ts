@@ -192,6 +192,7 @@ describe.each([
         ['core:pat-offboarding-sweep:v1', { everySeconds: 86400 }],
         ['core:source-sync:v1', undefined],
         ['core:source-poll:v1', { everySeconds: 60 }],
+        ['core:npm-vcs-build:v1', undefined],
         ['core:package-sync:v1', undefined],
       ]);
       await executor.batch(

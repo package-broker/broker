@@ -25,7 +25,10 @@ import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import { JobError, type JobDefinition } from '@package-broker/core/platform/jobs';
 import type { Observability } from '@package-broker/core/platform/observability';
 import { systemClock, ulid } from '@package-broker/core/ids';
-import { classifyUrl, createOutboundPolicy } from '@package-broker/core/sources/url-policy';
+import {
+  auditAlertPathActive,
+  validAuditAlertDestination,
+} from '@package-broker/core/audit/destinations';
 import { createAuditEffectiveRepository } from '@package-broker/db-sqlite/repositories/audit-effective';
 import { createAuditNoneRepository } from '@package-broker/db-sqlite/repositories/audit-none';
 import { createAuditSinkRepository } from '@package-broker/db-sqlite/repositories/audit-sink';
@@ -82,28 +85,10 @@ export async function createWorkerAudit(input: {
   const sinks = createAuditSinkRepository(executor);
   const alertEndpoint = input.config.audit?.alerts?.webhookEnv;
   const alertUrl = alertEndpoint === undefined ? undefined : env(alertEndpoint);
-  const alertPolicy = createOutboundPolicy({
-    runtime: 'cloudflare',
-    allowPrivateHosts: [],
-    selfOrigins: [],
-  });
   const alertFetch: typeof fetch = (url, init) => nativeFetch(url, { ...init, redirect: 'manual' });
-  if (alertEndpoint !== undefined) {
-    try {
-      const url = new URL(alertUrl ?? '');
-      if (
-        !classifyUrl(url.href, alertPolicy).ok ||
-        url.username ||
-        url.password ||
-        url.search ||
-        url.hash
-      )
-        throw new Error();
-    } catch {
-      throw new KernelConfigError(['Audit alert destination is invalid']);
-    }
-  }
-  const alertPathActive = input.telemetryActive || alertUrl !== undefined;
+  if (alertEndpoint !== undefined && !validAuditAlertDestination(alertUrl))
+    throw new KernelConfigError(['Audit alert destination is invalid']);
+  const alertPathActive = auditAlertPathActive(input.telemetryActive, alertUrl);
   if (build.policy === 'required' && !alertPathActive)
     throw new KernelConfigError(['Audit alert path is unavailable']);
   const sendAlert = async (code: string): Promise<void> => {

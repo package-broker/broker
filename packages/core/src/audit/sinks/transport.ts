@@ -1,3 +1,4 @@
+import { auditDestinationNames, AUDIT_OTEL_ENDPOINTS } from '../destinations.js';
 import { isPrivateHost, isAuditDeniedHost } from '../../platform/private-host.js';
 import { classifyAddress } from '../../sources/url-policy.js';
 import { AuditSinkConfigError } from '../plugin-api.js';
@@ -225,7 +226,7 @@ export interface AuditOtelEnvironment {
   readonly timeoutMs: number;
 }
 
-const OTEL_ENDPOINTS = ['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', 'OTEL_EXPORTER_OTLP_ENDPOINT'];
+const OTEL_ENDPOINTS: readonly string[] = AUDIT_OTEL_ENDPOINTS;
 const OTEL_HEADERS = ['OTEL_EXPORTER_OTLP_LOGS_HEADERS', 'OTEL_EXPORTER_OTLP_HEADERS'];
 
 export function parseAuditOtelEnvironment(
@@ -235,16 +236,9 @@ export function parseAuditOtelEnvironment(
   },
 ): AuditOtelEnvironment | null {
   const value = (name: string): string | undefined => env(name) || undefined;
-  const endpointName = destination.endpointEnv ?? 'PB_AUDIT_OTLP_ENDPOINT';
+  const { endpoint: endpointName, headers: headersName } = auditDestinationNames(destination);
   const explicitOtel = OTEL_ENDPOINTS.includes(endpointName);
   const pairedOtelHeaders = endpointName.replace(/ENDPOINT$/, 'HEADERS');
-  const headersName =
-    destination.headersEnv ??
-    (endpointName === 'PB_AUDIT_OTLP_ENDPOINT'
-      ? 'PB_AUDIT_OTLP_HEADERS'
-      : explicitOtel
-        ? pairedOtelHeaders
-        : undefined);
   if (
     headersName !== undefined &&
     headersName.toUpperCase().startsWith('OTEL_EXPORTER_OTLP_') &&
@@ -340,9 +334,7 @@ export async function resolveAuditDestination(
     resolved = parseAuditOtelEnvironment(env, destination);
   } else {
     const raw = env(destination.urlEnv) || undefined;
-    const headersName =
-      destination.headersEnv ??
-      (destination.urlEnv === 'PB_AUDIT_WEBHOOK_URL' ? 'PB_AUDIT_WEBHOOK_HEADERS' : undefined);
+    const { headers: headersName } = auditDestinationNames(destination);
     const rawHeaders = headersName === undefined ? undefined : env(headersName) || undefined;
     if (raw === undefined && rawHeaders !== undefined) {
       throw new AuditSinkConfigError('invalid_endpoint');

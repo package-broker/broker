@@ -1,3 +1,4 @@
+import type { DeploymentAuditPlanEntry } from './deploy-audit.js';
 import type { BuildInfo } from '../../build-artifacts.js';
 
 export type ErrorCode =
@@ -148,7 +149,9 @@ export class GitWorktreeRequiredError extends CloudflareError {
   }
 }
 
-export interface PlanEntry {
+export type PlanEntry = ResourcePlanEntry | DeploymentAuditPlanEntry;
+
+interface ResourcePlanEntry {
   stage: string;
   action: string;
   kind?: string;

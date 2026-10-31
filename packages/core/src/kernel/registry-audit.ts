@@ -1,3 +1,5 @@
+import { auditDestinationNames, DEFAULT_AUDIT_DESTINATIONS } from '../audit/destinations.js';
+import type { AuditDestinationSpec } from '../audit/plugin-api.js';
 import { validateAuditSkipAfter } from '../audit/export-state.js';
 import type { AuditSinkDefinition, AuditTrailDefinition, PluginDefinition } from '../plugin.js';
 
@@ -6,12 +8,7 @@ const SINK_NAME = /^[a-z0-9-]{1,32}(?![\s\S])/;
 
 export const AUDIT_SINKS_AVAILABLE = true;
 
-const AUDIT_DESTINATIONS = new Set([
-  'PB_AUDIT_OTLP_ENDPOINT',
-  'PB_AUDIT_OTLP_HEADERS',
-  'PB_AUDIT_WEBHOOK_URL',
-  'PB_AUDIT_WEBHOOK_HEADERS',
-]);
+const AUDIT_DESTINATIONS = new Set<string>(Object.values(DEFAULT_AUDIT_DESTINATIONS));
 const CORE_ENV_NAMES = new Set([
   'DB',
   'STORAGE',
@@ -179,21 +176,9 @@ function snapshotSink(value: unknown): AuditSinkDefinition {
   } else if (destination.protocol === 'otlp-http-json') {
     if (Object.hasOwn(destination, 'urlEnv')) throw new Error();
   } else throw new Error();
-  const endpoint =
-    destination.protocol === 'otlp-http-json'
-      ? (destination.endpointEnv ?? 'PB_AUDIT_OTLP_ENDPOINT')
-      : destination.urlEnv;
-  const headers =
-    destination.headersEnv ??
-    (endpoint === 'PB_AUDIT_OTLP_ENDPOINT'
-      ? 'PB_AUDIT_OTLP_HEADERS'
-      : endpoint === 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'
-        ? 'OTEL_EXPORTER_OTLP_LOGS_HEADERS'
-        : endpoint === 'OTEL_EXPORTER_OTLP_ENDPOINT'
-          ? 'OTEL_EXPORTER_OTLP_HEADERS'
-          : endpoint === 'PB_AUDIT_WEBHOOK_URL'
-            ? 'PB_AUDIT_WEBHOOK_HEADERS'
-            : undefined);
+  const { endpoint, headers } = auditDestinationNames(
+    destination as unknown as AuditDestinationSpec,
+  );
   const names: string[] = [];
   for (const [role, name] of [
     ['url', endpoint],
@@ -221,18 +206,18 @@ function snapshotSink(value: unknown): AuditSinkDefinition {
         role === 'url' &&
         name !==
           (destination.protocol === 'otlp-http-json'
-            ? 'PB_AUDIT_OTLP_ENDPOINT'
-            : 'PB_AUDIT_WEBHOOK_URL')
+            ? DEFAULT_AUDIT_DESTINATIONS.otlpEndpoint
+            : DEFAULT_AUDIT_DESTINATIONS.webhookUrl)
       )
         throw new Error();
       if (
         role === 'headers' &&
         !(
-          (name === 'PB_AUDIT_OTLP_HEADERS' &&
-            endpoint === 'PB_AUDIT_OTLP_ENDPOINT' &&
+          (name === DEFAULT_AUDIT_DESTINATIONS.otlpHeaders &&
+            endpoint === DEFAULT_AUDIT_DESTINATIONS.otlpEndpoint &&
             destination.protocol === 'otlp-http-json') ||
-          (name === 'PB_AUDIT_WEBHOOK_HEADERS' &&
-            endpoint === 'PB_AUDIT_WEBHOOK_URL' &&
+          (name === DEFAULT_AUDIT_DESTINATIONS.webhookHeaders &&
+            endpoint === DEFAULT_AUDIT_DESTINATIONS.webhookUrl &&
             destination.protocol === 'https-json')
         )
       )

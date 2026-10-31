@@ -5747,3 +5747,470 @@ it('anchor preflight does not check a provider removed from the effective set', 
   expect(result.exitCode).toBe(0);
   expect(queriedProviders(queried)).toEqual(['test']);
 });
+
+async function auditManifest(overrides: Record<string, unknown> = {}) {
+  const path = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(path, 'utf8'));
+  manifest.audit = {
+    policy: 'availability',
+    trail: { plugin: 'audit-trail', toggleEnv: null },
+    sinks: [],
+    acceptNoDurableAudit: false,
+    maxJournalBytes: 67108864,
+    alerts: null,
+    egress: null,
+    build_generation: 1,
+    ...overrides,
+  };
+  await writeFile(path, JSON.stringify(manifest));
+}
+const webhookDeploymentSink = {
+  id: 'archive',
+  kind: 'webhook',
+  plugin: 'audit-webhook',
+  activation: 'build',
+  custody: 'durable',
+  envNames: ['ARCHIVE_KEY'],
+  destination: { protocol: 'https-json', urlEnv: 'ARCHIVE_URL', headersEnv: 'ARCHIVE_HEADERS' },
+};
+const auditDeploymentEnv = {
+  CLOUDFLARE_API_TOKEN: TOKEN,
+  CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
+  ARCHIVE_URL: 'https://archive.example.test/audit',
+  ARCHIVE_HEADERS: 'authorization=Bearer%20AUDIT_CREDENTIAL_SENTINEL',
+  ARCHIVE_KEY: 'AUDIT_KEY_SENTINEL',
+  ALERT_URL: 'https://alerts.example.test/audit',
+};
+
+it.each([false, true])(
+  'predicts the audit trail and Cloudflare budget before upload (dry-run %s)',
+  async (dryRun) => {
+    await auditManifest({ maxJournalBytes: null });
+    const h = harness();
+    const result = await deploy(options(h, { dryRun }));
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: {
+        audit: {
+          mode: 'trail',
+          policy: 'availability',
+          maxJournalBytes: 4294967296,
+          sinks: [],
+        },
+      },
+    });
+  },
+);
+
+it.each([false, true])(
+  'predicts required export with an authenticated active sink (dry-run %s)',
+  async (dryRun) => {
+    await auditManifest({
+      trail: null,
+      policy: 'required',
+      sinks: [webhookDeploymentSink],
+      alerts: { webhookEnv: 'ALERT_URL' },
+    });
+    const h = harness();
+    const result = await deploy(
+      options(h, {
+        dryRun,
+        env: auditDeploymentEnv,
+        secret: ['ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY', 'ALERT_URL'],
+      }),
+    );
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: {
+        audit: {
+          mode: 'export',
+          policy: 'required',
+          sinks: [{ id: 'archive', state: 'active' }],
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /AUDIT_CREDENTIAL_SENTINEL|AUDIT_KEY_SENTINEL|https:\/\/archive/,
+    );
+  },
+);
+
+it.each(['ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY', 'ALERT_URL'])(
+  'refuses missing active audit configuration %s before upload',
+  async (name) => {
+    await auditManifest({ sinks: [webhookDeploymentSink], alerts: { webhookEnv: 'ALERT_URL' } });
+    const h = harness();
+    const result = await deploy(
+      options(h, {
+        env: { ...auditDeploymentEnv, [name]: undefined },
+        secret: ['ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY', 'ALERT_URL'].filter(
+          (entry) => entry !== name,
+        ),
+      }),
+    );
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: { code: 'invalid_input', message: `Missing audit environment variable: ${name}` },
+      },
+    });
+    expect(h.calls.some((call) => call.path.includes('upload') || call.method === 'POST')).toBe(
+      false,
+    );
+    expect(JSON.stringify(result)).not.toMatch(
+      /AUDIT_CREDENTIAL_SENTINEL|AUDIT_KEY_SENTINEL|https:\/\/archive/,
+    );
+  },
+);
+
+it('requires the declared trail toggle to be delivered, then predicts accepted none', async () => {
+  await auditManifest({
+    trail: { plugin: 'audit-trail', toggleEnv: 'TRAIL_SWITCH' },
+    acceptNoDurableAudit: true,
+  });
+  const h = harness();
+  const env = { ...options(h).env, TRAIL_SWITCH: 'off' };
+  expect(await deploy(options(h, { dryRun: true, env }))).toMatchObject({
+    exitCode: 2,
+    output: { error: { message: 'Missing audit environment variable: TRAIL_SWITCH' } },
+  });
+  expect(await deploy(options(h, { dryRun: true, env, secret: ['TRAIL_SWITCH'] }))).toMatchObject({
+    exitCode: 0,
+    output: { audit: { mode: 'none' } },
+  });
+});
+
+it('ignores the trail switch under required policy using the core resolver', async () => {
+  await auditManifest({
+    policy: 'required',
+    trail: { plugin: 'audit-trail', toggleEnv: 'TRAIL_SWITCH' },
+    alerts: { webhookEnv: 'ALERT_URL' },
+  });
+  const h = harness();
+  expect(
+    await deploy(
+      options(h, {
+        dryRun: true,
+        env: { ...auditDeploymentEnv, TRAIL_SWITCH: 'off' },
+        secret: ['TRAIL_SWITCH', 'ALERT_URL'],
+      }),
+    ),
+  ).toMatchObject({ exitCode: 0, output: { audit: { mode: 'trail', policy: 'required' } } });
+});
+
+it.each(['PB_AUDIT_OTLP_HEADERS', 'PB_AUDIT_WEBHOOK_HEADERS'])(
+  'refuses supplied and inherited secrets for absent sinks: %s',
+  async (name) => {
+    await auditManifest();
+    const h = harness();
+    const selected = await deploy(
+      options(h, {
+        dryRun: true,
+        env: { ...options(h).env, [name]: 'AUDIT_CREDENTIAL_SENTINEL' },
+        secret: [name],
+      }),
+    );
+    expect(selected).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: { message: 'Audit secrets are configured for a sink absent from this build' },
+      },
+    });
+    h.installed.push(name);
+    expect(await deploy(options(h, { dryRun: true }))).toMatchObject({ exitCode: 2 });
+    expect(h.calls.some((call) => call.method !== 'GET')).toBe(false);
+  },
+);
+
+it.each([false, true])(
+  'retains installed audit secrets without reading local values (dry-run %s)',
+  async (dryRun) => {
+    await auditManifest({ sinks: [{ ...webhookDeploymentSink, activation: 'env' }] });
+    const h = harness();
+    h.installed.push('ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY');
+    const env = { ...options(h).env };
+    for (const name of ['ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY'])
+      Object.defineProperty(env, name, {
+        get: () => {
+          throw new Error('Installed values must not be read locally');
+        },
+      });
+    const result = await deploy(options(h, { dryRun, env }));
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: {
+        audit: {
+          scope: 'build-level',
+          mode: 'trail',
+          sinks: [{ id: 'archive', state: 'installed, not re-validated' }],
+        },
+      },
+    });
+  },
+);
+
+it('resolves re-delivered audit secrets using their delivered values', async () => {
+  await auditManifest({ sinks: [{ ...webhookDeploymentSink, activation: 'env' }] });
+  const h = harness();
+  h.installed.push('ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY');
+  const secret = ['ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY'];
+  const invalid = await deploy(
+    options(h, {
+      dryRun: true,
+      secret,
+      env: { ...auditDeploymentEnv, ARCHIVE_URL: 'INVALID_DELIVERED_SENTINEL' },
+    }),
+  );
+  expect(invalid).toMatchObject({
+    exitCode: 2,
+    output: { error: { message: 'Invalid audit deployment configuration' } },
+  });
+  expect(JSON.stringify(invalid)).not.toContain('INVALID_DELIVERED_SENTINEL');
+  expect(await deploy(options(h, { dryRun: true, secret, env: auditDeploymentEnv }))).toMatchObject(
+    {
+      exitCode: 0,
+      output: { audit: { sinks: [{ id: 'archive', state: 'active' }] } },
+    },
+  );
+});
+
+it('does not demand local copies of installed observability OTLP headers', async () => {
+  await auditManifest();
+  const file = join(out, 'generated/manifest.json');
+  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  manifest.platformPorts.observability.endpointEnv = 'OTEL_EXPORTER_OTLP_ENDPOINT';
+  manifest.platformPorts.observability.headersEnv = 'OTEL_EXPORTER_OTLP_HEADERS';
+  await writeFile(file, JSON.stringify(manifest));
+  const h = harness();
+  h.installed.push('OTEL_EXPORTER_OTLP_HEADERS');
+  expect(
+    await deploy(
+      options(h, {
+        dryRun: true,
+        env: { ...options(h).env, OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector.example.test' },
+      }),
+    ),
+  ).toMatchObject({
+    exitCode: 0,
+    output: { audit: { mode: 'trail', sinks: [] } },
+  });
+});
+
+it.each(['PB_AUDIT_OTLP_ENDPOINT', 'PB_AUDIT_OTLP_HEADERS'])(
+  'refuses stale default audit secrets with a custom OTLP endpoint: %s',
+  async (name) => {
+    await auditManifest({
+      sinks: [
+        {
+          ...webhookDeploymentSink,
+          envNames: [],
+          destination: {
+            protocol: 'otlp-http-json',
+            endpointEnv: 'CUSTOM_ENDPOINT',
+            headersEnv: 'CUSTOM_HEADERS',
+          },
+        },
+      ],
+    });
+    const h = harness();
+    h.installed.push(name);
+    expect(await deploy(options(h, { dryRun: true }))).toMatchObject({
+      exitCode: 2,
+      output: {
+        error: { message: 'Audit secrets are configured for a sink absent from this build' },
+      },
+    });
+    expect(mutations(h)).toEqual([]);
+  },
+);
+
+it.each([false, true])(
+  'warns about unaccepted none without refusing deployment (dry-run %s)',
+  async (dryRun) => {
+    await auditManifest({ trail: null });
+    const h = harness();
+    const diagnostic = vi.fn();
+    const result = await deploy(options(h, { dryRun, diagnostic }));
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: {
+        audit: {
+          scope: 'build-level',
+          mode: 'none',
+          policy: 'availability',
+          storedPolicy: 'A stored required policy is enforced at run time',
+          warnings: [expect.stringContaining('none_not_accepted')],
+        },
+      },
+    });
+    expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining('WARNING: none_not_accepted'));
+    expect(result.output.checks).toContainEqual({ name: 'audit_configuration', status: 'warning' });
+  },
+);
+
+it('includes the build-level audit prediction during interrupted preview cleanup', async () => {
+  const h = harness();
+  expect((await deploy(options(h, { rollout: 25 }))).exitCode).toBe(0);
+  await auditManifest({ sinks: [{ ...webhookDeploymentSink, activation: 'env' }] });
+  h.installed.push('ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY');
+  const j = (await store.read())!;
+  j.deployment!.attempt.preview = 'cleanup_pending';
+  await store.write(j);
+  const before = mutations(h).length;
+  const diagnostic = vi.fn();
+  const result = await deploy(options(h, { dryRun: true, diagnostic }));
+  expect(result).toMatchObject({
+    exitCode: 0,
+    output: {
+      audit: {
+        scope: 'build-level',
+        mode: 'trail',
+        sinks: [{ id: 'archive', state: 'installed, not re-validated' }],
+      },
+    },
+  });
+  expect(result.output.plan).toContainEqual({
+    stage: 'deploy',
+    action: 'predicted_audit',
+    audit: expect.objectContaining({ scope: 'build-level', mode: 'trail', policy: 'availability' }),
+  });
+  expect(diagnostic).toHaveBeenCalledWith(
+    expect.stringContaining('Build-level predicted audit mode: trail'),
+  );
+  expect(mutations(h)).toHaveLength(before);
+});
+
+it.each([
+  { policy: 'required', trail: null, alerts: { webhookEnv: 'ALERT_URL' } },
+  { maxJournalBytes: 1, policy: 'required', alerts: { webhookEnv: 'ALERT_URL' } },
+  { maxJournalBytes: 10000000000 },
+])(
+  'refuses an invalid audit durable path or budget with a fixed message',
+  async (configuration) => {
+    await auditManifest(configuration);
+    const h = harness();
+    expect(
+      await deploy(options(h, { dryRun: true, env: auditDeploymentEnv, secret: ['ALERT_URL'] })),
+    ).toMatchObject({
+      exitCode: 2,
+      output: { error: { message: 'Invalid audit deployment configuration' } },
+    });
+    expect(h.calls.some((call) => call.method !== 'GET')).toBe(false);
+  },
+);
+
+it('predicts inactive env sinks and refuses required policy without an active durable path', async () => {
+  await auditManifest({
+    trail: null,
+    acceptNoDurableAudit: true,
+    sinks: [{ ...webhookDeploymentSink, activation: 'env' }],
+  });
+  const h = harness();
+  expect(await deploy(options(h, { dryRun: true }))).toMatchObject({
+    exitCode: 0,
+    output: { audit: { mode: 'none', sinks: [{ id: 'archive', state: 'inactive' }] } },
+  });
+  await auditManifest({
+    trail: null,
+    policy: 'required',
+    sinks: [{ ...webhookDeploymentSink, activation: 'env' }],
+    alerts: { webhookEnv: 'ALERT_URL' },
+  });
+  expect(
+    await deploy(options(h, { dryRun: true, env: auditDeploymentEnv, secret: ['ALERT_URL'] })),
+  ).toMatchObject({ exitCode: 2 });
+});
+
+it('uses the OTLP fallback and rejects unsupported protocol without leaking credentials', async () => {
+  await auditManifest({
+    trail: null,
+    sinks: [
+      { ...webhookDeploymentSink, envNames: [], destination: { protocol: 'otlp-http-json' } },
+    ],
+  });
+  const h = harness();
+  const env = {
+    ...options(h).env,
+    OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector.example.test',
+    OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer%20AUDIT_CREDENTIAL_SENTINEL',
+    OTEL_EXPORTER_OTLP_PROTOCOL: 'grpc',
+  };
+  const secret = [
+    'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'OTEL_EXPORTER_OTLP_HEADERS',
+    'OTEL_EXPORTER_OTLP_PROTOCOL',
+  ];
+  const refused = await deploy(options(h, { dryRun: true, env, secret }));
+  expect(refused).toMatchObject({ exitCode: 2 });
+  expect(JSON.stringify(refused)).not.toContain('AUDIT_CREDENTIAL_SENTINEL');
+  env.OTEL_EXPORTER_OTLP_PROTOCOL = 'http/json';
+  expect(await deploy(options(h, { dryRun: true, env, secret }))).toMatchObject({
+    exitCode: 0,
+    output: { audit: { mode: 'export' } },
+  });
+});
+
+it('reports the predicted mode and policy before any upload', async () => {
+  await auditManifest();
+  const h = harness();
+  const diagnostic = vi.fn((message: string) => {
+    expect(
+      h.calls.some(
+        (call) =>
+          call.path.includes('upload') ||
+          (call.path === base + '/versions' && call.method === 'POST'),
+      ),
+    ).toBe(false);
+    expect(message).toBe(
+      'Build-level predicted audit mode: trail; policy: availability. A stored required policy is enforced at run time.',
+    );
+  });
+  expect(await deploy(options(h, { diagnostic }))).toMatchObject({ exitCode: 0 });
+  expect(diagnostic).toHaveBeenCalledOnce();
+});
+
+it.each(['PB_AUDIT_POLICY', 'PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT'])(
+  'validates delivered audit overrides: %s',
+  async (name) => {
+    await auditManifest();
+    const h = harness();
+    const result = await deploy(
+      options(h, {
+        dryRun: true,
+        env: { ...options(h).env, [name]: 'INVALID_SENTINEL' },
+        secret: [name],
+      }),
+    );
+    expect(result).toMatchObject({
+      exitCode: 2,
+      output: { error: { message: 'Invalid audit deployment configuration' } },
+    });
+    expect(JSON.stringify(result)).not.toContain('INVALID_SENTINEL');
+  },
+);
+
+it.each([
+  { ARCHIVE_URL: 'https://user:URL_CREDENTIAL_SENTINEL@archive.example.test' },
+  { ARCHIVE_URL: 'https://archive.example.test/?token=URL_CREDENTIAL_SENTINEL' },
+  { ARCHIVE_HEADERS: 'authorization=%zzHEADER_SENTINEL' },
+  { ALERT_URL: 'https://user:URL_CREDENTIAL_SENTINEL@alerts.example.test' },
+  { ALERT_URL: 'INVALID_URL_SENTINEL' },
+])('refuses invalid destinations and credentials with safe diagnostics', async (override) => {
+  await auditManifest({ sinks: [webhookDeploymentSink], alerts: { webhookEnv: 'ALERT_URL' } });
+  const h = harness();
+  const result = await deploy(
+    options(h, {
+      dryRun: true,
+      env: { ...auditDeploymentEnv, ...override },
+      secret: ['ARCHIVE_URL', 'ARCHIVE_HEADERS', 'ARCHIVE_KEY', 'ALERT_URL'],
+    }),
+  );
+  expect(result).toMatchObject({
+    exitCode: 2,
+    output: { error: { message: 'Invalid audit deployment configuration' } },
+  });
+  expect(JSON.stringify(result)).not.toMatch(
+    /URL_CREDENTIAL_SENTINEL|HEADER_SENTINEL|INVALID_URL_SENTINEL|AUDIT_CREDENTIAL_SENTINEL/,
+  );
+  expect(h.calls.some((call) => call.method !== 'GET')).toBe(false);
+});

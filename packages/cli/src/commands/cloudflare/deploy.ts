@@ -50,6 +50,7 @@ import {
 } from './api.js';
 import { resolveZone } from './zone.js';
 import { routeConflict } from './routes.js';
+import { deploymentAuditConfig, predictDeploymentAudit } from './deploy-audit.js';
 import {
   InventoryStore,
   InventoryTransaction,
@@ -394,6 +395,10 @@ export async function validateDeploymentArtifact(out: string) {
         ports.observability.adapter !== 'workers')
     )
       return invalid();
+    const audit = deploymentAuditConfig(
+      manifest.audit,
+      ports === null ? undefined : { cloudflare: ports },
+    );
     const entries = manifest.migrations;
     if (!Array.isArray(entries)) return invalid();
     for (const entry of entries) {
@@ -458,6 +463,7 @@ export async function validateDeploymentArtifact(out: string) {
       artifactHash,
       migrations,
       identity,
+      audit,
     };
   } catch {
     return invalid();
@@ -582,6 +588,7 @@ export interface DeployOptions {
   allowContract?: readonly string[];
   dryRun?: boolean;
   json?: boolean;
+  diagnostic?: (message: string) => void;
   env: Readonly<Record<string, string | undefined>>;
   fetch?: typeof fetch;
   now?: () => number;
@@ -1509,8 +1516,10 @@ export async function deploy(
   operations: { materializePrebuilt?: typeof materializePrebuilt } = {},
 ): Promise<CommandResult> {
   let prebuiltOut: string | undefined;
-  const output: CommandEnvelope & { identity?: ReturnType<typeof dryRunIdentity> } =
-    commandEnvelope('deploy', o.dryRun);
+  const output: CommandEnvelope & {
+    identity?: ReturnType<typeof dryRunIdentity>;
+    audit?: Awaited<ReturnType<typeof predictDeploymentAudit>>;
+  } = commandEnvelope('deploy', o.dryRun);
   const result: CommandResult = { exitCode: 1, output };
   const succeed = () => {
     result.exitCode = 0;
@@ -1691,9 +1700,45 @@ export async function deploy(
       )
         throw new CloudflareError('ownership_conflict', 8, false, 'deploy');
     }
+    const predictAudit = async (
+      values: readonly Record<string, unknown>[],
+      installed: readonly string[],
+    ) => {
+      const delivered = Object.fromEntries(
+        values
+          .filter((b) => b.type === 'plain_text' || b.type === 'secret_text')
+          .map((b) => [String(b.name), String(b.text)]),
+      );
+      output.audit = await predictDeploymentAudit(artifact.audit, delivered, installed);
+      if (output.audit) {
+        o.diagnostic?.(
+          `Build-level predicted audit mode: ${output.audit.mode}; policy: ${output.audit.policy}. ${output.audit.storedPolicy}.`,
+        );
+        for (const warning of output.audit.warnings) o.diagnostic?.(warning);
+        output.checks.push({
+          name: 'audit_configuration',
+          status: output.audit.warnings.length ? 'warning' : 'verified',
+        });
+        output.plan.push({ stage: 'deploy', action: 'predicted_audit', audit: output.audit });
+      }
+    };
     if (journal.deployment && journal.deployment.attempt.preview !== 'disabled') {
       if (o.dryRun) {
         output.plan.push({ stage: 'deploy', action: 'reconcile_preview_cleanup' });
+        const installed = exists ? await api.snapshot(`${base}/secrets`) : [];
+        const values = selectedSecrets.flatMap((name) =>
+          o.env[name] ? [{ type: 'secret_text', name, text: o.env[name] }] : [],
+        );
+        if (endpointEnv)
+          values.push({ type: 'plain_text', name: endpointEnv, text: telemetryEndpoint! });
+        try {
+          await predictAudit(values, [
+            ...installed.map((s) => String(s.name)),
+            ...journal.deployment.attempt.secret_names,
+          ]);
+        } catch (error) {
+          return invalid((error as Error).message);
+        }
         const known =
           o.providers?.kind === 'set'
             ? o.providers.value
@@ -1931,6 +1976,11 @@ export async function deploy(
       return invalid(
         `Worker environment variable count ${variableCount} exceeds limit ${variableLimit}`,
       );
+    try {
+      await predictAudit([...plainBindings, ...updates], allNames);
+    } catch (error) {
+      return invalid((error as Error).message);
+    }
     output.checks.push({ name: 'variable_budget', status: 'verified' });
     if (!allNames.includes('PB_MASTER_KEY')) return invalid();
     if (headersEnv && !allNames.includes(headersEnv)) return invalid();
@@ -2506,7 +2556,10 @@ async function activeOrAbsent(
   return { id: null, versions: [] };
 }
 export async function runCloudflareDeploy(o: DeployOptions): Promise<number> {
-  const result = await deploy(o);
+  const result = await deploy({
+    ...o,
+    ...(!o.json ? { diagnostic: o.diagnostic ?? ((message) => console.error(message)) } : {}),
+  });
   if (o.json || !result.output.error) console.log(JSON.stringify(result.output));
   else console.error(`${result.output.error.code}: ${result.output.error.message}`);
   return result.exitCode;

@@ -1,3 +1,4 @@
+import { auditTelemetryActive } from '@package-broker/core/audit/destinations';
 import { bindJobAdmission } from './job-admission.js';
 import { createWorkerAudit } from './audit.js';
 import { AuditSinkConfigError } from '@package-broker/core/audit/plugin-api';
@@ -2133,7 +2134,7 @@ export function createWorker(
           maxJournalBytes,
           telemetryActive:
             config?.observability.endpointEnv !== undefined &&
-            Boolean(read(env ?? {}, config.observability.endpointEnv)),
+            auditTelemetryActive(read(env ?? {}, config.observability.endpointEnv)),
           registration: () => kernel.registration,
         });
       }

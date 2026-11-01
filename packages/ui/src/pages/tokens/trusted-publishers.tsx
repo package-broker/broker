@@ -1,3 +1,4 @@
+import { MAX_NPM_NAME_LENGTH } from '../../package-limits.js';
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { Button } from '../../components/ui/button.js';
 import { Input } from '../../components/ui/input.js';
@@ -110,7 +111,12 @@ export function TrustedPublishers({
       ) : state.loadError ? (
         <ListState kind="error" title="Trusted publishers could not be loaded." />
       ) : state.items.length === 0 ? (
-        <ListState kind="empty" title="No trusted publishers yet." />
+        <ListState
+          kind="empty"
+          title={
+            state.hasPrevious ? 'No trusted publishers on this page.' : 'No trusted publishers yet.'
+          }
+        />
       ) : (
         <DataTable
           label="Organization trusted publishers"
@@ -187,6 +193,27 @@ export function TrustedPublishers({
           ]}
         />
       )}
+      <p>{state.items.length} trusted publishers on this page</p>
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          className="min-h-11"
+          variant="outline"
+          disabled={blocked || formOpen || !state.hasPrevious}
+          onClick={() => void controller.previousPage()}
+        >
+          Previous publishers
+        </Button>
+        <Button
+          type="button"
+          className="min-h-11"
+          variant="outline"
+          disabled={blocked || formOpen || state.next === null}
+          onClick={() => void controller.nextPage()}
+        >
+          Next publishers
+        </Button>
+      </div>
       {!canWrite ? (
         <p>
           Publishing and service identity management permissions are both required to manage
@@ -216,7 +243,9 @@ export function TrustedPublishers({
                 id={`publisher-${key}`}
                 value={state.draft[key]}
                 required={required}
-                maxLength={key === 'packageName' ? 214 : key === 'repository' ? 140 : 255}
+                maxLength={
+                  key === 'packageName' ? MAX_NPM_NAME_LENGTH : key === 'repository' ? 140 : 255
+                }
                 disabled={state.busy}
                 aria-describedby={
                   key === 'refPattern'

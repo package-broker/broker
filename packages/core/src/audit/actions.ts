@@ -80,6 +80,16 @@ export const AUDIT_ACTIONS = [
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
+const TRUSTED_PUBLISHER_FIELDS = [
+  'package',
+  'repository',
+  'workflow',
+  'environment',
+  'ref_pattern',
+  'repository_id',
+  'repository_owner_id',
+] as const;
+
 const GRANT_FIELDS = ['subject_kind', 'role_id'] as const;
 const IMPORT_RUN_FIELDS = ['state', 'plan_hash', 'count', 'external_ref_count'] as const;
 const IMPORT_ROLLBACK_FIELDS = [...IMPORT_RUN_FIELDS, 'restored', 'conflict', 'expired'] as const;
@@ -107,9 +117,9 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'publish.reject': ['package', 'version', 'reason', 'token_id'],
   'publish.expire': ['package', 'version'],
   'publish.scan': ['plugin', 'verdict', 'reason'],
-  'trusted_publisher.create': ['repository', 'workflow'],
-  'trusted_publisher.update': ['repository', 'workflow'],
-  'trusted_publisher.disable': ['repository', 'workflow'],
+  'trusted_publisher.create': TRUSTED_PUBLISHER_FIELDS,
+  'trusted_publisher.update': TRUSTED_PUBLISHER_FIELDS,
+  'trusted_publisher.disable': TRUSTED_PUBLISHER_FIELDS,
   'token.workload_issue': [
     'trusted_publisher_id',
     'repository_id',
@@ -251,6 +261,7 @@ const WORKLOAD_CLAIM_LIMITS: Readonly<Record<string, number>> = {
   repository: 140,
   environment: 255,
   ref: 1024,
+  ref_pattern: 255,
   repository_id: 20,
   repository_owner_id: 20,
   repository_visibility: 8,
@@ -266,7 +277,7 @@ function cleanWorkloadClaim(value: unknown, field: string, limit: number): Clean
         ? isWorkflowFilename(value)
         : field === 'environment'
           ? !/\p{Cc}/u.test(value)
-          : field === 'ref'
+          : field === 'ref' || field === 'ref_pattern'
             ? /^[^\s\p{Cc}]+$/u.test(value)
             : field === 'repository_visibility'
               ? ['public', 'private', 'internal'].includes(value)
@@ -442,7 +453,7 @@ function cleanChanges(
           ? WORKLOAD_CLAIM_LIMITS[field]
           : undefined;
       const cleaned =
-        workloadLimit !== undefined
+        workloadLimit !== undefined && !(value === null && action.startsWith('trusted_publisher.'))
           ? cleanWorkloadClaim(value, field, workloadLimit)
           : accessReason && typeof value === 'string'
             ? new TextEncoder().encode(value).length <= 1000

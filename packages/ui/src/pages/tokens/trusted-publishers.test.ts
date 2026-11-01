@@ -105,3 +105,21 @@ it('opens the disclosure and form for an existing publisher edit', () => {
   expect(html).toMatch(/<details[^>]*open/);
   expect(html).toContain('aria-label="Edit trusted publisher"');
 });
+
+it('navigates cursors, retries the same page after failure, and resets on clear', async () => {
+  const { c, request } = fixture();
+  request.mockResolvedValueOnce({ ok: true, data: { items: [], next: 'cursor-a' } });
+  await c.load();
+  request.mockResolvedValueOnce({ ok: false, status: 500 });
+  await c.nextPage();
+  expect(c.snapshot().loadError).toBe(true);
+  await c.load();
+  expect(request).toHaveBeenLastCalledWith('get', '/_pb/trusted-publishers', {
+    query: { cursor: 'cursor-a' },
+  });
+  await c.previousPage();
+  expect(request).toHaveBeenLastCalledWith('get', '/_pb/trusted-publishers', { query: {} });
+  c.clear();
+  expect(c.snapshot().next).toBeNull();
+  expect(c.snapshot().hasPrevious).toBe(false);
+});

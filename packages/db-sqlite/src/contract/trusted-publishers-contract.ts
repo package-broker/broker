@@ -4,6 +4,10 @@ import { trustedPublisherPrincipalName } from '@package-broker/core/api/routes/t
 import { ulid } from '@package-broker/core/ids';
 import { accessFixture } from './package-access-requests-fixture.js';
 import { ANCHORS } from '../testing/mutation-table/fixtures.js';
+import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
+import { createKeyring } from '@package-broker/core/secrets/keyring';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { createWorkloadTokenStore } from '../repositories/workload-token.js';
 import { createOidcRepository } from '../repositories/oidc.js';
 import {
   createTrustedPublisherStore,
@@ -39,7 +43,10 @@ export function describeTrustedPublishers(
       id: ulid(),
       principalId: ulid(),
       now: f.now,
-      event: f.event('package.access_request'),
+      event: {
+        ...f.event('package.access_request'),
+        payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+      },
       input: {
         packageName: 'widget',
         repository: 'owner/repo',
@@ -66,6 +73,193 @@ export function describeTrustedPublishers(
           params: [],
         }),
       ).toEqual([{ permission: 'org:packages:publish' }]);
+    });
+    it.each(['{', 'null', '{}'])(
+      'rejects malformed audit context with a fixed error and no writes: %s',
+      async (payloadJson) => {
+        const w = write();
+        await expect(
+          store.create(f.org, f.decideFence, { ...w, event: { ...w.event, payloadJson } }),
+        ).rejects.toMatchObject({ code: 'invalid_request', message: 'invalid_request' });
+        expect((await store.list(f.org)).items).toEqual([]);
+        expect(
+          await database.executor.all({ sql: 'SELECT id FROM audit_pending', params: [] }),
+        ).toEqual([]);
+      },
+    );
+    it('pages in id order with an organization-scoped cursor and validates bounds', async () => {
+      const rows = [];
+      for (let i = 0; i < 3; i++)
+        rows.push(
+          await store.create(f.org, f.decideFence, {
+            ...write(),
+            input: { ...write().input, environment: `env${i}` },
+          }),
+        );
+      rows.sort((a, b) => a.id.localeCompare(b.id));
+      const first = await store.list(f.org, { limit: 2 });
+      expect(first.items.map((row) => row.id)).toEqual(rows.slice(0, 2).map((row) => row.id));
+      expect(first.next).toBe(rows[1]!.id);
+      const last = await store.list(f.org, { limit: 2, cursor: first.next! });
+      expect(last.items.map((row) => row.id)).toEqual([rows[2]!.id]);
+      expect(last.next).toBeNull();
+      expect(await store.list(f.orgs.b, { limit: 2, cursor: first.next! })).toEqual({
+        items: [],
+        next: null,
+      });
+      for (const query of [{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { cursor: 'bad' }])
+        await expect(store.list(f.org, query)).rejects.toMatchObject({ code: 'invalid_request' });
+    });
+    it('audits every restriction before and after a fenced edit and refuses stale audit writes', async () => {
+      const a = await create();
+      await f.seed(
+        "INSERT INTO registered_name (id,org_id,source_id,ecosystem,pattern) VALUES ('claim-next',?, 'SOURCE', 'npm', 'next')",
+        f.org.orgId,
+      );
+      const edit = {
+        ...write(),
+        id: a.id,
+        expectedRevision: 1,
+        input: {
+          packageName: 'next',
+          repository: 'owner/next',
+          workflow: 'next.yml',
+          environment: 'Stage',
+          refPattern: 'refs/tags/v*',
+        },
+        identity: { repository: 'owner/next', repositoryId: '789', repositoryOwnerId: '987' },
+      };
+      await store.update(f.org, f.decideFence, edit);
+      const audits = await database.executor.all<{ payload_json: string }>({
+        sql: 'SELECT payload_json FROM audit_pending WHERE org_id = ? AND id = ?',
+        params: [f.org.orgId, edit.event.id],
+      });
+      expect(JSON.parse(audits[0]!.payload_json)).toEqual({
+        op_id: expect.any(String),
+        request_id: expect.any(String),
+        changes: {
+          package: { old: 'widget', new: 'next' },
+          repository: { old: 'owner/repo', new: 'owner/next' },
+          repository_id: { old: '123', new: '789' },
+          repository_owner_id: { old: '456', new: '987' },
+          workflow: { old: 'publish.yml', new: 'next.yml' },
+          environment: { old: 'prod', new: 'stage' },
+          ref_pattern: { old: null, new: 'refs/tags/v*' },
+        },
+      });
+      const stale = { ...edit, event: write().event };
+      await expect(store.update(f.org, f.decideFence, stale)).rejects.toMatchObject({
+        code: 'conflict',
+      });
+      expect(
+        await database.executor.all({
+          sql: 'SELECT id FROM audit_pending WHERE org_id = ? AND id = ?',
+          params: [f.org.orgId, stale.event.id],
+        }),
+      ).toEqual([]);
+    });
+    it('audits removal of optional restrictions without dropping their previous values', async () => {
+      const w = write();
+      const a = await store.create(f.org, f.decideFence, {
+        ...w,
+        input: { ...w.input, refPattern: 'refs/tags/v*' },
+      });
+      const edit = {
+        ...write(),
+        id: a.id,
+        expectedRevision: 1,
+        input: { ...w.input, environment: '' },
+      };
+      const updated = await store.update(f.org, f.decideFence, edit);
+      expect(updated).toMatchObject({ environment: '', refPattern: null, revision: 2 });
+      const [audit] = await database.executor.all<{ payload_json: string }>({
+        sql: 'SELECT payload_json FROM audit_pending WHERE org_id = ? AND id = ?',
+        params: [f.org.orgId, edit.event.id],
+      });
+      expect(JSON.parse(audit!.payload_json)).toMatchObject({
+        changes: {
+          environment: { old: 'prod', new: '' },
+          ref_pattern: { old: 'refs/tags/v*', new: null },
+        },
+      });
+    });
+    it('rolls back the audit when a concurrent edit wins after the snapshot read', async () => {
+      const a = await create();
+      let raced = false;
+      const racingStore = createTrustedPublisherStore(
+        {
+          ...database.executor,
+          batch: async (statements) => {
+            if (!raced) {
+              raced = true;
+              await f.seed(
+                "UPDATE trusted_publisher SET environment = 'concurrent', revision = revision + 1 WHERE org_id = ? AND id = ?",
+                f.org.orgId,
+                a.id,
+              );
+            }
+            return database.executor.batch(statements);
+          },
+        },
+        ANCHORS,
+      );
+      const edit = { ...write(), id: a.id, expectedRevision: 1 };
+      await expect(racingStore.update(f.org, f.decideFence, edit)).rejects.toMatchObject({
+        code: 'conflict',
+      });
+      expect(raced).toBe(true);
+      expect(await store.get(f.org, a.id)).toMatchObject({
+        revision: 2,
+        environment: 'concurrent',
+      });
+      expect(
+        await database.executor.all({
+          sql: 'SELECT id FROM audit_pending WHERE org_id = ? AND id = ?',
+          params: [f.org.orgId, edit.event.id],
+        }),
+      ).toEqual([]);
+    });
+    it('records complete normalized snapshots on create and disable', async () => {
+      const w = write();
+      const a = await store.create(f.org, f.decideFence, {
+        ...w,
+        identity: { ...w.identity, repository: 'Owner/Repo' },
+      });
+      const event = write().event;
+      await store.disable(f.org, f.decideFence, {
+        id: a.id,
+        expectedRevision: 1,
+        now: f.now,
+        event,
+      });
+      const audits = await database.executor.all<{ id: string; payload_json: string }>({
+        sql: 'SELECT id, payload_json FROM audit_pending WHERE org_id = ?',
+        params: [f.org.orgId],
+      });
+      const values = {
+        package: 'widget',
+        repository: 'owner/repo',
+        workflow: 'publish.yml',
+        environment: 'prod',
+        ref_pattern: null,
+        repository_id: '123',
+        repository_owner_id: '456',
+      };
+      for (const [id, creating] of [
+        [w.event.id, true],
+        [event.id, false],
+      ] as const) {
+        expect(JSON.parse(audits.find((row) => row.id === id)!.payload_json)).toEqual({
+          op_id: expect.any(String),
+          request_id: expect.any(String),
+          changes: Object.fromEntries(
+            Object.entries(values).map(([field, value]) => [
+              field,
+              { old: creating ? null : value, new: value },
+            ]),
+          ),
+        });
+      }
     });
     it('creates distinct principals for bindings sharing repository and workflow', async () => {
       const first = await create();
@@ -130,7 +324,10 @@ export function describeTrustedPublishers(
         id: a.id,
         expectedRevision: 1,
         now: f.now,
-        event: f.event('package.access_request'),
+        event: {
+          ...f.event('package.access_request'),
+          payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+        },
       });
       await expect(create()).rejects.toMatchObject({ code: 'ambiguous_trusted_publisher' });
       expect((await store.list(f.org)).items).toHaveLength(1);
@@ -177,24 +374,90 @@ export function describeTrustedPublishers(
         f.org.orgId,
         a.id,
       );
+      const stamp = new Date().toISOString();
+      const oidc = createOidcRepository(database.executor);
+      const publisher = (
+        await oidc.find(f.org, {
+          packageName: a.packageName,
+          repositoryId: a.repositoryId,
+          repositoryOwnerId: a.repositoryOwnerId,
+          workflow: a.workflow,
+          environment: a.environment,
+        })
+      )[0]!;
+      const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(1) }]);
+      const service = createWorkloadTokenService({
+        tokens: createWorkloadTokenStore(database.executor),
+        keyring,
+        clock: { now: () => new Date(stamp) },
+        ids: { ulid },
+      });
+      const issued = await service.issueWorkload(
+        f.org,
+        {
+          publisher,
+          replay: oidc.reserveStatements(f.org, {
+            issuer: 'https://token.actions.githubusercontent.com',
+            jti: 'issued',
+            trustedPublisherId: a.id,
+            expectedRevision: 1,
+            expiresAt: Math.floor(Date.now() / 1000) + 300,
+            now: stamp,
+          }),
+        },
+        { requestId: ulid(), changes: {} },
+      );
+      expect(issued.status).toBe('issued');
+      if (issued.status !== 'issued') throw new Error('token_fixture');
+      const [token] = await database.executor.all<{
+        id: string;
+        hash: string;
+        revoked_at: string | null;
+      }>({
+        sql: 'SELECT id, hash, revoked_at FROM token WHERE org_id = ? AND trusted_publisher_id = ?',
+        params: [f.org.orgId, a.id],
+      });
+      expect(token?.hash).toBe(await hashToken(keyring, 1, issued.token));
+      expect(token?.revoked_at).toBeNull();
       await expect(
         store.disable(f.org, f.decideFence, {
           id: a.id,
           expectedRevision: 2,
           now: f.now,
-          event: f.event('package.access_request'),
+          event: {
+            ...f.event('package.access_request'),
+            payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+          },
         }),
       ).rejects.toMatchObject({ code: 'conflict' });
+      expect(
+        await database.executor.all({
+          sql: 'SELECT revoked_at FROM token WHERE org_id = ? AND id = ?',
+          params: [f.org.orgId, token!.id],
+        }),
+      ).toEqual([{ revoked_at: null }]);
       await store.disable(f.org, f.decideFence, {
         id: a.id,
         expectedRevision: 1,
         now: f.now,
-        event: f.event('package.access_request'),
+        event: {
+          ...f.event('package.access_request'),
+          payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+        },
       });
+      expect(
+        await database.executor.all({
+          sql: 'SELECT revoked_at FROM token WHERE org_id = ? AND id = ?',
+          params: [f.org.orgId, token!.id],
+        }),
+      ).toEqual([{ revoked_at: f.now }]);
       expect(await store.get(f.org, a.id)).toMatchObject({ disabledAt: f.now, revision: 2 });
       expect(
-        await database.executor.all({ sql: 'SELECT jti FROM oidc_replay', params: [] }),
-      ).toEqual([{ jti: 'jti' }]);
+        await database.executor.all({
+          sql: 'SELECT jti FROM oidc_replay ORDER BY jti',
+          params: [],
+        }),
+      ).toEqual([{ jti: 'issued' }, { jti: 'jti' }]);
     });
     it('rolls back the principal, permission and binding if the audit insert fails', async () => {
       const first = write();

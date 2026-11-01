@@ -2025,6 +2025,11 @@ export interface components {
         servicePrincipalName: string;
         workflow: string;
       }[];
+      next: string | null;
+    };
+    TrustedPublisherListQuery: {
+      cursor?: string;
+      limit?: string;
     };
     VersionReadme: {
       body: string;
@@ -12508,7 +12513,10 @@ export interface operations {
   };
   listTrustedPublishers: {
     parameters: {
-      query?: never;
+      query?: {
+        cursor?: string;
+        limit?: string;
+      };
       header?: never;
       path?: never;
       cookie?: never;
@@ -12540,6 +12548,7 @@ export interface operations {
               servicePrincipalName: string;
               workflow: string;
             }[];
+            next: string | null;
           };
         };
       };

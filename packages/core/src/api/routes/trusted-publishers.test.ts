@@ -40,7 +40,7 @@ async function fixture(
   platform: 'node' | 'cloudflare' = 'node',
 ) {
   const store = {
-    list: vi.fn<TrustedPublisherStore['list']>().mockResolvedValue({ items: [row] }),
+    list: vi.fn<TrustedPublisherStore['list']>().mockResolvedValue({ items: [row], next: null }),
     get: vi.fn<TrustedPublisherStore['get']>().mockResolvedValue(row),
     create: vi.fn<TrustedPublisherStore['create']>().mockResolvedValue(row),
     update: vi.fn<TrustedPublisherStore['update']>().mockResolvedValue({ ...row, revision: 2 }),
@@ -198,5 +198,18 @@ it.each(['node', 'cloudflare'] as const)(
     expect(logs).not.toContain('person@example.test');
     expect(logs).not.toContain('prod\u200b');
     expect(logs).not.toContain('http.handler_error');
+  },
+);
+
+it.each(['node', 'cloudflare'] as const)(
+  'validates and forwards list paging on %s',
+  async (platform) => {
+    const f = await fixture(undefined, platform);
+    expect((await f.request(`/_pb/trusted-publishers?limit=2&cursor=${ID}`)).status).toBe(200);
+    expect(f.store.list).toHaveBeenLastCalledWith(orgContext('org-1'), { limit: 2, cursor: ID });
+    f.store.list.mockClear();
+    for (const query of ['limit=0', 'limit=51', 'limit=1.5', 'cursor=bad'])
+      expect((await f.request(`/_pb/trusted-publishers?${query}`)).status).toBe(400);
+    expect(f.store.list).not.toHaveBeenCalled();
   },
 );

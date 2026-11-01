@@ -10,6 +10,7 @@ export const TRUSTED_PUBLISHER_API_SPECS = [
     path: '/_pb/trusted-publishers',
     api: {
       operationId: 'listTrustedPublishers',
+      query: schemas.TrustedPublisherListQuery,
       summary: 'List trusted publishers for this organization',
       tags: ['tokens'],
       responses: { 200: schemas.TrustedPublisherList },

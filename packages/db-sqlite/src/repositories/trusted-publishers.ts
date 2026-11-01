@@ -1,3 +1,5 @@
+import { auditEvent } from '@package-broker/core/audit/actions';
+import { isUlid } from '@package-broker/core/ids';
 import { sql } from 'kysely';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import { fenceKind } from '@package-broker/core/authz/fence';
@@ -134,13 +136,90 @@ export function createTrustedPublisherStore(
       and other.workflow = ${input.workflow} and lower(other.environment) = ${input.environment})`;
     return { claim, unique };
   }
+  function snapshot(
+    item: Pick<
+      TrustedPublisher,
+      | 'packageName'
+      | 'repository'
+      | 'workflow'
+      | 'environment'
+      | 'refPattern'
+      | 'repositoryId'
+      | 'repositoryOwnerId'
+    >,
+  ) {
+    return {
+      package: item.packageName,
+      repository: item.repository,
+      workflow: item.workflow,
+      environment: item.environment,
+      ref_pattern: item.refPattern,
+      repository_id: item.repositoryId,
+      repository_owner_id: item.repositoryOwnerId,
+    };
+  }
+  function audited(
+    write: Pick<PublisherWrite, 'event'> & { id: string },
+    action: 'create' | 'update' | 'disable',
+    before: TrustedPublisher | null,
+    after: ReturnType<typeof snapshot>,
+  ) {
+    const event = write.event;
+    let payload: { op_id?: string; request_id?: string } | null;
+    try {
+      payload = JSON.parse(event.payloadJson) as typeof payload;
+    } catch {
+      throw new TrustedPublisherError('invalid_request');
+    }
+    if (
+      payload === null ||
+      typeof payload.op_id !== 'string' ||
+      typeof payload.request_id !== 'string'
+    )
+      throw new TrustedPublisherError('invalid_request');
+    const old = before === null ? null : snapshot(before);
+    const built = auditEvent({
+      id: event.id,
+      now: event.occurredAt,
+      action: `trusted_publisher.${action}`,
+      actor: event.actor,
+      context: {
+        opId: payload.op_id,
+        requestId: payload.request_id,
+        sourceIp: event.sourceIp,
+        tokenSelector: event.tokenSelector,
+      },
+      target: { type: 'trusted_publisher', id: write.id },
+      changes: Object.fromEntries(
+        Object.entries(after).map(([field, value]) => [
+          field,
+          { old: old === null ? null : old[field as keyof typeof old], new: value },
+        ]),
+      ),
+    });
+    if (!built.ok) throw new TrustedPublisherError('invalid_request');
+    return built.event;
+  }
   return {
     get,
-    async list(ctx) {
+    async list(ctx, query = {}) {
+      const limit = query.limit ?? 50;
+      if (
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > 50 ||
+        (query.cursor !== undefined && !isUlid(query.cursor))
+      )
+        throw new TrustedPublisherError('invalid_request');
+      let statement = read(ctx);
+      if (query.cursor !== undefined) statement = statement.where('tp.id', '>', query.cursor);
       const rows = await executor.all<Omit<TrustedPublisher, 'createdByName'>>(
-        compile(read(ctx).orderBy('tp.id')),
+        compile(statement.orderBy('tp.id').limit(limit + 1)),
       );
-      return { items: rows.map((item) => ({ ...item, createdByName: 'User' })) };
+      return {
+        items: rows.slice(0, limit).map((item) => ({ ...item, createdByName: 'User' })),
+        next: rows.length > limit ? rows[limit - 1]!.id : null,
+      };
     },
     async create(ctx, fence, write) {
       const { input, name } = await validated(write);
@@ -191,7 +270,15 @@ export function createTrustedPublisherStore(
               revision: 1,
             }),
           ),
-          auditPendingStatement(ctx, write.event),
+          auditPendingStatement(
+            ctx,
+            audited(
+              write,
+              'create',
+              null,
+              snapshot({ ...write.identity, ...input, refPattern: input.refPattern ?? null }),
+            ),
+          ),
         ],
         c,
       );
@@ -205,6 +292,9 @@ export function createTrustedPublisherStore(
       const c = checks(ctx, { ...write, input }, write.id);
       if (!Number.isSafeInteger(write.expectedRevision) || write.expectedRevision < 1)
         throw new TrustedPublisherError('invalid_request');
+      const before = await get(ctx, write.id);
+      if (before === null || before.revision !== write.expectedRevision)
+        throw new TrustedPublisherError('conflict');
       const ready = sql<boolean>`(${c.claim} and ${c.unique} and exists (select 1 from trusted_publisher tp where tp.org_id = ${ctx.orgId} and tp.id = ${write.id} and tp.disabled_at is null and tp.revision = ${write.expectedRevision}))`;
       await run(
         ctx,
@@ -246,7 +336,15 @@ export function createTrustedPublisherStore(
                   .where('id', '=', write.id),
               ),
           ),
-          auditPendingStatement(ctx, write.event),
+          auditPendingStatement(
+            ctx,
+            audited(
+              write,
+              'update',
+              before,
+              snapshot({ ...write.identity, ...input, refPattern: input.refPattern ?? null }),
+            ),
+          ),
         ],
         c,
       );
@@ -256,13 +354,19 @@ export function createTrustedPublisherStore(
     },
     async disable(ctx, fence, write) {
       const held = authority(ctx, fence);
+      const before = await get(ctx, write.id);
+      if (before === null || before.revision !== write.expectedRevision)
+        throw new TrustedPublisherError('conflict');
       const ready = sql<boolean>`exists (select 1 from trusted_publisher tp where tp.org_id = ${ctx.orgId} and tp.id = ${write.id} and tp.revision = ${write.expectedRevision} and tp.disabled_at is null)`;
       await run(
         ctx,
         fence,
         held,
         ready,
-        disableTrustedPublisherStatements(ctx, { ...write, audit: write.event }),
+        disableTrustedPublisherStatements(ctx, {
+          ...write,
+          audit: audited(write, 'disable', before, snapshot(before)),
+        }),
       );
     },
   };

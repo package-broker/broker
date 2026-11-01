@@ -53,10 +53,16 @@ export function trustedPublisherRoutes(
   }
   const [list, create, update, disable] = TRUSTED_PUBLISHER_API_SPECS;
   const routes = [
-    apiRoute(list, async ({ ctx }) =>
+    apiRoute(list, async ({ ctx, query }) =>
       result(async () => {
         const c = callContext(ctx, deps);
-        return { status: 200, body: await deps.store.list(c.org) };
+        return {
+          status: 200,
+          body: await deps.store.list(c.org, {
+            limit: Number(query.limit ?? 50),
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+          }),
+        };
       }),
     ),
     ...[create, update].map((spec) =>

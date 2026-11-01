@@ -143,12 +143,42 @@ For 401, check token placement, host/path, expiry and revocation. For 403, check
 <!-- source: packages/core/src/registry/registry-leak-contract.test.ts:544 -->
 <!-- source: packages/core/src/registry/registry-leak-contract.test.ts:813 -->
 
+## Web login
+
+For an interactive human login, use npm's browser flow with the project registry:
+
+```sh
+npm login --auth-type=web --registry=https://<broker-host>/<project>/npm/
+```
+
+Open the URL printed by npm, sign in to the broker, review the project and requested access, and approve. npm polls until approval and saves the issued personal token in your user npm configuration. Keep that file outside the repository. The token remains subject to your grants, expiry and revocation; login does not grant publishing permission. Legacy username/password registry login is unsupported.
+
+pnpm 12.5.1 does not support `login --auth-type=web`; **pnpm users log in with npm**, then use the user-level npm credential with pnpm as described above. Yarn 4.9.2 refuses `yarn npm login --web-login`; use a broker token in the Yarn configuration above. Yarn Classic users can also configure a broker token through `.npmrc`. Do not enter broker passwords into a client's legacy registry login prompt.
+
+<!-- source: scripts/client-matrix-login.mjs -->
+<!-- source: packages/core/src/api/routes/npm-login.ts -->
+
 ## Publishing
 
-This version serves npm installs but rejects npm package writes with HTTP 405 after access checks. Publishing through npm, pnpm, Yarn Classic or Yarn Berry is therefore unavailable. A token with scope `write` does not enable an unsupported registry operation. Do not use an install token for a publishing job; keep any publishing credentials separate when a supported publishing endpoint becomes available.
+An administrator must configure an npm hosted source, register a name or scope claim for it, and attach it to the project. Publishing requires `org:packages:publish` and a token with `write` scope that permits package writes. An install-only token cannot publish. Keep CI publishing credentials separate from read credentials.
 
-<!-- source: packages/core/src/registry/npm/routes.ts:363 -->
-<!-- source: packages/core/src/registry/npm/routes.ts:421 -->
-<!-- source: packages/core/src/authz/scope.ts:71 -->
+Set the package's `name` and `version` in `package.json` and run your build first. Configure the publishing token for the project registry with the client-specific placement above, then run one of:
 
-Continue with [GitHub Actions](../ci/github-actions.md) or [GitLab CI](../ci/gitlab-ci.md) for secret placement and client caches, or [Composer setup](composer.md) for PHP packages.
+```sh
+npm publish --registry=https://<broker-host>/<project>/npm/ --provenance=false
+pnpm publish --registry=https://<broker-host>/<project>/npm/ --provenance=false
+# Yarn Classic
+yarn publish --registry=https://<broker-host>/<project>/npm/
+# Yarn Berry: uses npmRegistryServer in .yarnrc.yml
+yarn npm publish
+```
+
+Disable any provenance setting inherited from your environment or client configuration. The broker rejects provenance attachments with `provenance_unsupported`; it does not verify or store them. For token-free GitHub Actions publishing, see [trusted publishing](../guides/npm-trusted-publishing.md).
+
+An immediately active publish returns HTTP **201**. A publish held for approval or policy scanning returns HTTP **202** with `ok: true`, `held` and a `status` URL. A successful CLI exit can therefore mean the package is held, not installable. Review it in the broker's Publishes view; the status URL is a management resource requiring authorized human access, not an unauthenticated polling link. Held versions remain unavailable to installs until all required approval and scan gates pass; rejection or expiry does not release them. Do not retry a held publish as a new upload of the same name/version. Existing name/version bytes are immutable.
+
+<!-- source: packages/core/src/registry/npm/publish-service.ts -->
+<!-- source: packages/core/src/registry/npm/publish-body.ts -->
+<!-- source: scripts/client-matrix-runtime.mjs -->
+
+For packages built from tagged repositories rather than published by a client, see [npm repository ingestion](../guides/npm-repository-ingest.md). Continue with [GitHub Actions](../ci/github-actions.md) or [GitLab CI](../ci/gitlab-ci.md) for secret placement and client caches, or [Composer setup](composer.md) for PHP packages.

@@ -1,8 +1,10 @@
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { orgContext } from '@package-broker/core/db/port';
+import { blobStorageKey, parseSha256 } from '@package-broker/core/platform/blob';
 import {
   BackupIntegrityError,
   RestoreTargetNotEmptyError,
@@ -36,7 +38,7 @@ describe.skipIf(!rehearsalBuildAvailable())('Node inventory (requires pnpm rehea
         'org-a',
         sha,
         bytes.length,
-        'org-a/' + sha,
+        blobStorageKey(orgContext('org-a').orgId, parseSha256(sha)),
       );
       db.exec("INSERT INTO committed VALUES ('in-WAL')");
       const object = source.blobObject('org-a', sha);
@@ -65,6 +67,46 @@ describe.skipIf(!rehearsalBuildAvailable())('Node inventory (requires pnpm rehea
     }
     expect(await checkInventory(target)).toEqual({ missing: [], corrupt: [] });
     process.stdout.write(`inventory restore duration: ${result.durationMs.toFixed(2)} ms\n`);
+  });
+  it('backs up and restores a promoted npm blob at its recorded storage key', async () => {
+    const source = deploymentPaths(join(root, 'promoted-source'));
+    await restoreDeployment(backup, source);
+    const storageKey = `npm-publish/${blobStorageKey(orgContext('org-a').orgId, parseSha256(sha))}/01ARZ3NDEKTSV4RRFFQ69G5FAV`;
+    const promoted = join(source.blobRoot, storageKey);
+    await mkdir(join(promoted, '..'), { recursive: true });
+    await rename(source.blobObject('org-a', sha), promoted);
+    await rename(source.blobObject('org-a', sha) + '.media', promoted + '.media');
+    const db = new Database(source.database);
+    try {
+      db.prepare('UPDATE blob SET storage_key = ? WHERE org_id = ? AND sha256 = ?').run(
+        storageKey,
+        'org-a',
+        sha,
+      );
+    } finally {
+      db.close();
+    }
+    const promotedBackup = join(root, 'promoted-backup');
+    const manifest = await backupDeployment(source, promotedBackup);
+    await destroyDeployment(source);
+    const target = deploymentPaths(join(root, 'promoted-target'));
+    const result = await restoreDeployment(promotedBackup, target);
+    expect(manifest.objects).toEqual([
+      {
+        orgId: 'org-a',
+        sha256: sha,
+        size: bytes.length,
+        storageKey,
+        mediaType: 'application/octet-stream',
+      },
+    ]);
+    expect(result.missingBlobs).toEqual([]);
+    expect(result.corruptBlobs).toEqual([]);
+    expect(await readFile(join(target.blobRoot, storageKey))).toEqual(Buffer.from(bytes));
+    expect(await readFile(join(target.blobRoot, storageKey) + '.media', 'utf8')).toBe(
+      'application/octet-stream',
+    );
+    expect(await checkInventory(target)).toEqual({ missing: [], corrupt: [] });
   });
   it.each(['database', 'secrets', 'blobs'] as const)(
     'refuses non-empty %s before changing any target bytes',

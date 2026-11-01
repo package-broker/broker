@@ -783,6 +783,7 @@ export function describeMigrationContract(
           'core:0001_init',
           'core:0002_npm_publish',
           'core:0003_npm_identity',
+          'core:0004_source_revision',
         ]);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
@@ -799,6 +800,7 @@ export function describeMigrationContract(
           'core:0001_init',
           'core:0002_npm_publish',
           'core:0003_npm_identity',
+          'core:0004_source_revision',
         ]);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
@@ -1106,6 +1108,7 @@ export function describeVulnerabilityMigrationContract(
           'core:0001_init',
           'core:0002_npm_publish',
           'core:0003_npm_identity',
+          'core:0004_source_revision',
         ]);
         expect(
           await executor.all({
@@ -1195,6 +1198,7 @@ export function describeSchemaEquivalenceContract(
         { id: 'core:0001_init', phase: 'expand' },
         { id: 'core:0002_npm_publish', phase: 'expand' },
         { id: 'core:0003_npm_identity', phase: 'expand' },
+        { id: 'core:0004_source_revision', phase: 'expand' },
       ]);
       const opened = await open();
       try {
@@ -1211,7 +1215,21 @@ export function describeSchemaEquivalenceContract(
                 ORDER BY s.name, i.seq`,
           params: [],
         });
-        expect(normalizedDump({ schema, indexes })).toBe(normalizedDump(oldChain));
+        const expected: SchemaDump = {
+          ...oldChain,
+          schema: oldChain.schema.map((row) =>
+            row.type === 'table' && row.name === 'source'
+              ? {
+                  ...row,
+                  sql: row.sql!.replace(
+                    ',\n  CHECK ((last_refusal_at',
+                    ', revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  CHECK ((last_refusal_at',
+                  ),
+                }
+              : row,
+          ),
+        };
+        expect(normalizedDump({ schema, indexes })).toBe(normalizedDump(expected));
         expect(await opened.executor.all({ sql: 'PRAGMA foreign_key_check', params: [] })).toEqual(
           [],
         );

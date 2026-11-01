@@ -518,14 +518,21 @@ export function createSourcesModel(
             : project === null
               ? await client.request('patch', '/_pb/sources/{source}', {
                   params: { source: editor.id },
+                  headers: { 'If-Match': `"r${editor.revision}"` },
                   body,
                 })
               : await client.request('patch', '/_pb/projects/{project}/sources/{source}', {
                   params: { project, source: editor.id },
+                  headers: { 'If-Match': `"r${editor.revision}"` },
                   body,
                 });
         if (!result.ok) {
           failure(result);
+          if (result.status === 412)
+            set({
+              error:
+                'This source changed while you were editing. Reload the latest settings before saving.',
+            });
           set({ fieldErrors: sourceFieldErrors(result.details), formError: state.error });
           return;
         }
@@ -775,14 +782,25 @@ export function createSourcesModel(
         set({ error: 'Polling interval must be a positive whole number.' });
         return Promise.resolve();
       }
+      const revision = state.items.find((item) => item.id === source)?.revision;
+      if (revision === undefined) {
+        set({ error: 'Reload sources before saving.' });
+        return Promise.resolve();
+      }
+      const headers = { 'If-Match': `"r${revision}"` };
       const body = { pollIntervalSeconds, removalPolicy };
       return mutate(
         () =>
           project === null
-            ? client.request('patch', '/_pb/sources/{source}', { params: { source }, body })
+            ? client.request('patch', '/_pb/sources/{source}', {
+                params: { source },
+                body,
+                headers,
+              })
             : client.request('patch', '/_pb/projects/{project}/sources/{source}', {
                 params: { project, source },
                 body,
+                headers,
               }),
         () => load(),
       );

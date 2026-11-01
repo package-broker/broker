@@ -45,6 +45,8 @@ export interface SourceSyncStatus {
 }
 
 export interface SourceRecord {
+  readonly revision: number;
+  readonly requirePublishApproval: boolean;
   readonly sync?: SourceSyncStatus;
   readonly id: string;
   readonly projectId: string | null;
@@ -74,6 +76,7 @@ export interface SourceRecord {
 }
 
 export interface NewSource {
+  readonly requirePublishApproval?: boolean;
   readonly verifiedClaims?: readonly string[];
   readonly id: string;
   /** Null for an organization-level source. */
@@ -105,6 +108,7 @@ export interface NewSource {
 }
 
 export interface SourceChanges {
+  readonly requirePublishApproval?: boolean;
   readonly url?: string | null;
   readonly configJson?: string;
   readonly credentialId?: string | null;
@@ -143,6 +147,7 @@ export interface SourceAttachmentCountQuery {
 }
 
 export interface SourceUpdate extends SourceTarget {
+  readonly expectedRevision?: number;
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
   readonly preparedCredential?: { readonly id: string; readonly statement: Statement };

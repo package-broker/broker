@@ -32,6 +32,8 @@ const sha = (parts: unknown[]) => createHash('sha256').update(JSON.stringify(par
 
 function record(over: Partial<SourceRecord> = {}): SourceRecord {
   return {
+    revision: 1,
+    requirePublishApproval: false,
     id: 'src',
     projectId: null,
     name: 'source',

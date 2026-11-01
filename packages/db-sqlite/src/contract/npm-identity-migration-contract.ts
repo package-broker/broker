@@ -69,6 +69,50 @@ export function describeNpmIdentityMigrationContract(
   }
 
   describe(`npm identity migration: ${name}`, () => {
+    it('0004 backfills source revisions and defaults new sources without changing approval', async () => {
+      const opened = await open();
+      try {
+        const sources = await discoveredMigrations();
+        await migrate(opened.executor, sources.slice(0, 3), { holder: 'source-baseline' });
+        await opened.executor.batch([
+          {
+            sql: "INSERT INTO organization (id, slug, name) VALUES ('revision-org', 'revision', 'Revision')",
+            params: [],
+          },
+          {
+            sql: "INSERT INTO source (id, org_id, name, ecosystem, type, require_publish_approval) VALUES ('old', 'revision-org', 'Old', 'npm', 'hosted', 1)",
+            params: [],
+          },
+        ]);
+        expect(
+          (await migrate(opened.executor, sources, { holder: 'source-upgrade' })).applied,
+        ).toEqual(['core:0004_source_revision']);
+        await opened.executor.all({
+          sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('new', 'revision-org', 'New', 'npm', 'hosted')",
+          params: [],
+        });
+        expect(
+          await opened.executor.all({
+            sql: "SELECT id, revision, require_publish_approval FROM source WHERE org_id = 'revision-org' ORDER BY id",
+            params: [],
+          }),
+        ).toEqual([
+          { id: 'new', revision: 1, require_publish_approval: 0 },
+          { id: 'old', revision: 1, require_publish_approval: 1 },
+        ]);
+        await expect(
+          opened.executor.all({
+            sql: "UPDATE source SET revision = 0 WHERE org_id = 'revision-org' AND id = 'old'",
+            params: [],
+          }),
+        ).rejects.toThrow();
+        expect(
+          (await migrate(opened.executor, sources, { holder: 'source-rerun' })).applied,
+        ).toEqual([]);
+      } finally {
+        await opened.close();
+      }
+    });
     for (const baseline of [1, 2]) {
       it(`upgrades baseline ${baseline} preserving existing token rows and migration checksums; rerun skips`, async () => {
         const opened = await open();
@@ -78,6 +122,7 @@ export function describeNpmIdentityMigrationContract(
             'core:0001_init',
             'core:0002_npm_publish',
             'core:0003_npm_identity',
+            'core:0004_source_revision',
           ]);
           await migrate(opened.executor, sources.slice(0, baseline), { holder: 'baseline' });
           await seed(opened.executor);

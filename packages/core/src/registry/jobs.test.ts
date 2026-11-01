@@ -34,6 +34,8 @@ const session: IngestSessionHandle = {
 
 function setup() {
   const source: SourceRecord = {
+    revision: 1,
+    requirePublishApproval: false,
     id: 'src',
     projectId: null,
     name: 'source',

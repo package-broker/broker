@@ -345,6 +345,7 @@ export type DistTagAction = 'set' | 'remove';
 
 /** Mirrors `source` in the core migrations. */
 export interface SourceTable {
+  revision: Generated<number>;
   require_publish_approval: Generated<number>;
   sync_generation: string | null;
   sync_counts: Generated<string>;

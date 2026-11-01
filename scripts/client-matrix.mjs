@@ -272,6 +272,12 @@ export async function fixtureReply(request, audits) {
     audits.push(body);
     return Response.json({});
   }
+  if (
+    request.method === 'HEAD' &&
+    url.origin === 'https://registry.npmjs.org' &&
+    PUBLISH_PACKAGES.some((name) => decodeURIComponent(url.pathname) === `/${name}`)
+  )
+    return new Response(null, { status: 404 });
   harnessAssert.ok(request.method === 'GET', 'Unexpected fixture method');
   const name = url.hostname === 'registry.npmjs.org' ? PACKAGES[0] : PACKAGES[1];
   const bytes = tarballs.get(name);

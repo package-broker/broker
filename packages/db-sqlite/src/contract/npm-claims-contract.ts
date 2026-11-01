@@ -149,6 +149,222 @@ export function describeNpmClaimsContract(
       return { ...database, a, b, names, fence, anchors, audit, add, snapshot };
     }
 
+    it.each([false, true])(
+      'creates and lists a hosted approval setting %s within its organization',
+      async (enabled) => {
+        const f = await setup();
+        try {
+          const repo = createSourceRepository(f.executor);
+          expect(
+            await repo.create(f.a, f.fence, {
+              id: 'approval-source',
+              projectId: null,
+              name: 'Approval source',
+              ecosystem: 'npm',
+              type: 'hosted',
+              url: null,
+              configJson: '{}',
+              credential: null,
+              requirePublishApproval: enabled,
+              providerAnchors: f.anchors,
+              audit: {
+                ...f.audit('approval-source'),
+                action: 'source.create',
+                target: { type: 'source', id: 'approval-source' },
+              },
+            }),
+          ).toBe('created');
+          expect(await repo.get(f.a, 'approval-source')).toMatchObject({
+            revision: 1,
+            requirePublishApproval: enabled,
+          });
+          expect(await repo.list(f.a, { projectId: null, after: null, limit: 100 })).toContainEqual(
+            expect.objectContaining({
+              id: 'approval-source',
+              revision: 1,
+              requirePublishApproval: enabled,
+            }),
+          );
+          expect(await repo.get(f.b, 'approval-source')).toBeNull();
+          expect(
+            await repo.list(f.b, { projectId: null, after: null, limit: 100 }),
+          ).not.toContainEqual(expect.objectContaining({ id: 'approval-source' }));
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
+    it('persists hosted approval with revision CAS and rejects stale, foreign and non-hosted writes', async () => {
+      const f = await setup();
+      try {
+        const repo = createSourceRepository(f.executor);
+        const write = (id: string, expectedRevision: number, enabled = true) =>
+          repo.update(f.a, f.fence, {
+            id,
+            expectedRevision,
+            changes: { requirePublishApproval: enabled },
+            providerAnchors: f.anchors,
+            audit: [{ ...f.audit(id), action: 'source.update', target: { type: 'source', id } }],
+          });
+        expect(await repo.get(f.a, 'H')).toMatchObject({
+          revision: 1,
+          requirePublishApproval: false,
+        });
+        expect(await write('H', 1)).toBe('updated');
+        expect(await repo.get(f.a, 'H')).toMatchObject({
+          revision: 2,
+          requirePublishApproval: true,
+        });
+        const before = await f.snapshot();
+        expect(await write('H', 1, false)).toBe('conflict');
+        expect(await write('F', 1)).toBe('not_found');
+        expect(await write('N', 1)).toBe('conflict');
+        expect(await f.snapshot()).toBe(before);
+        await f.executor.batch([
+          st(
+            "INSERT INTO package (id,org_id,source_id,ecosystem,name,held_until_active) VALUES ('held-package',?,'H','npm','held-widget',1)",
+            f.a.orgId,
+          ),
+          st(
+            "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json,status) VALUES ('held-version',?,'held-package','1.0.0','1.0.0','2026-11-01','release_date','{}','quarantined')",
+            f.a.orgId,
+          ),
+          st(
+            "INSERT INTO publish_approval (id,org_id,package_id,version_id,source_id,hold_approval,hold_scan,approval_state,scan_state,requested_by_type,requested_by_id,token_id,expires_at) VALUES ('held-approval',?,'held-package','held-version','H',1,0,'pending','not_required','user','U','token','2099-01-01')",
+            f.a.orgId,
+          ),
+        ]);
+        const holds = () =>
+          Promise.all([
+            f.executor.all(st('SELECT * FROM publish_approval WHERE org_id = ?', f.a.orgId)),
+            f.executor.all(st('SELECT * FROM version WHERE org_id = ?', f.a.orgId)),
+            f.executor.all(st('SELECT * FROM package WHERE org_id = ?', f.a.orgId)),
+          ]);
+        const heldBefore = await holds();
+        expect(await write('H', 2, false)).toBe('updated');
+        expect(await holds()).toEqual(heldBefore);
+        expect(await repo.get(f.a, 'H')).toMatchObject({
+          revision: 3,
+          requirePublishApproval: false,
+        });
+      } finally {
+        await f.close();
+      }
+    });
+
+    it('rechecks source revision inside the fenced batch after a concurrent edit', async () => {
+      const f = await setup();
+      try {
+        let raced = false;
+        const executor: SqlExecutor = {
+          driver: f.executor.driver,
+          all: f.executor.all.bind(f.executor),
+          batch: async (statements) => {
+            if (!raced) {
+              raced = true;
+              await f.executor.batch([
+                st(
+                  "UPDATE source SET revision = revision + 1 WHERE org_id = ? AND id = 'H'",
+                  f.a.orgId,
+                ),
+              ]);
+            }
+            return f.executor.batch(statements);
+          },
+        };
+        const repo = createSourceRepository(executor);
+        const before = await f.snapshot();
+        expect(
+          await repo.update(f.a, f.fence, {
+            id: 'H',
+            expectedRevision: 1,
+            changes: { requirePublishApproval: true },
+            providerAnchors: f.anchors,
+            audit: [
+              { ...f.audit('H'), action: 'source.update', target: { type: 'source', id: 'H' } },
+            ],
+          }),
+        ).toBe('conflict');
+        expect(await f.snapshot()).toBe(before);
+        expect(await repo.get(f.a, 'H')).toMatchObject({
+          revision: 2,
+          requirePublishApproval: false,
+        });
+      } finally {
+        await f.close();
+      }
+    });
+
+    it.each(['create', 'attach'] as const)(
+      'accepts verified claims and rechecks late claims during proxy %s',
+      async (operation) => {
+        const f = await setup();
+        try {
+          expect(await f.add('C1', 'H', 'widget')).toBe('added');
+          await f.executor.batch([
+            st(
+              "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+              f.a.orgId,
+            ),
+          ]);
+          const write = async (executor: SqlExecutor) =>
+            operation === 'create'
+              ? createSourceRepository(executor).create(f.a, f.fence, {
+                  id: 'NEW',
+                  projectId: null,
+                  name: 'new proxy',
+                  type: 'npmjs_proxy',
+                  ecosystem: 'npm',
+                  url: 'https://registry.npmjs.org',
+                  configJson: '{}',
+                  credential: null,
+                  verifiedClaims: ['widget'],
+                  providerAnchors: f.anchors,
+                  audit: f.audit('NEW'),
+                })
+              : createVisibilityAttachRepository(executor, {
+                  providerAnchors: f.anchors,
+                }).attachSource(f.a, f.fence, {
+                  projectId: 'PR',
+                  sourceId: 'P',
+                  verifiedClaims: ['widget'],
+                  audit: f.audit('P'),
+                });
+          let raced = false;
+          const executor: SqlExecutor = {
+            driver: f.executor.driver,
+            all: (statement) => f.executor.all(statement),
+            async batch(statements) {
+              if (!raced) {
+                raced = true;
+                await f.executor.batch([
+                  st(
+                    "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('LATE', ?, 'H', 'npm', 'late')",
+                    f.a.orgId,
+                  ),
+                ]);
+              }
+              return f.executor.batch(statements);
+            },
+          };
+          expect(await write(executor)).toEqual(
+            operation === 'create' ? 'conflict' : { ok: false, reason: 'conflict' },
+          );
+          expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
+          expect(await f.executor.all(st("SELECT * FROM source WHERE id = 'NEW'"))).toEqual([]);
+          await f.executor.batch([
+            st("DELETE FROM registered_name WHERE org_id = ? AND id = 'LATE'", f.a.orgId),
+          ]);
+          const result = await write(f.executor);
+          if (operation === 'create') expect(result).toBe('created');
+          else expect(result).toMatchObject({ ok: true });
+        } finally {
+          await f.close();
+        }
+      },
+    );
+
     describe.each(['hosted', 'vcs', 'npm_registry'])(
       'proxy addition with %s claims',
       (ownerType) => {

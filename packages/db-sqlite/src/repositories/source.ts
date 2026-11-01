@@ -57,6 +57,7 @@ const CHANGE_KEYS: ReadonlySet<string> = new Set([
   'removalPolicy',
   'retentionDaysOverride',
   'defaultVisibleToNewProjects',
+  'requirePublishApproval',
 ]);
 
 function positiveInteger(field: string, value: unknown): number {
@@ -141,6 +142,8 @@ function credentialOwnedBy(ctx: OrgContext, id: string, ownerProjectId: string |
 }
 
 interface SourceRow {
+  readonly revision: number;
+  readonly require_publish_approval: number;
   readonly id: string;
   readonly project_id: string | null;
   readonly name: string;
@@ -242,6 +245,8 @@ export function runtimeConfigJson(row: Pick<SourceRow, 'type' | 'config_json'>):
 
 function toRecord(row: SourceRow): SourceRecord {
   return {
+    revision: row.revision,
+    requirePublishApproval: row.require_publish_approval === 1,
     id: row.id,
     projectId: row.project_id,
     name: row.name,
@@ -276,6 +281,8 @@ function toRecord(row: SourceRow): SourceRecord {
 }
 
 const SOURCE_COLUMNS = [
+  'source.revision as revision',
+  'source.require_publish_approval as require_publish_approval',
   'id',
   'project_id',
   'name',
@@ -727,6 +734,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           url: input.url,
           credential_id: input.credential?.id ?? null,
           config_json: jsonConfig,
+          require_publish_approval: input.requirePublishApproval ? 1 : 0,
           user_agent: input.userAgent ?? null,
           status: isProxy(input.type) ? 'active' : 'paused',
           ...(interval === undefined ? {} : { poll_interval_seconds: interval }),
@@ -780,12 +788,21 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       }
       const changes = input.changes;
       if (
+        changes.requirePublishApproval !== undefined &&
+        typeof changes.requirePublishApproval !== 'boolean'
+      )
+        throw new TypeError('requirePublishApproval must be a boolean');
+      if (input.expectedRevision !== undefined)
+        positiveInteger('expectedRevision', input.expectedRevision);
+      if (
         input.preparedCredential !== undefined &&
         input.preparedCredential.id !== changes.credentialId
       ) {
         return 'credential_scope_mismatch';
       }
       const set: Record<string, string | number | null> = {};
+      if (changes.requirePublishApproval !== undefined)
+        set.require_publish_approval = changes.requirePublishApproval ? 1 : 0;
       if (changes.url !== undefined) set.url = nullableText('url', changes.url);
       if (changes.configJson !== undefined) set.config_json = jsonText(changes.configJson);
       if (changes.credentialId !== undefined) {
@@ -818,6 +835,13 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         typeof set.credential_id === 'string'
           ? credentialOwnedBy(ctx, set.credential_id, current.projectId)
           : null;
+      const revisionOk = sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId}
+        and id = ${input.id} and revision = ${input.expectedRevision ?? current.revision})`;
+      const approvalOk =
+        changes.requirePublishApproval === undefined
+          ? sql<SqlBool>`1`
+          : sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId} and id = ${input.id}
+            and type = 'hosted' and ecosystem = 'npm')`;
       const touchesCoverage =
         !isProxy(current.type) && (changes.configJson !== undefined || changes.url !== undefined);
       const statusBefore = compile(
@@ -832,6 +856,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           .updateTable('source')
           .set({
             ...set,
+            revision: sql<number>`revision + 1`,
             ...(touchesCoverage
               ? {
                   status: sql<SourceStatus>`case when status <> 'paused' then 'paused' else status end`,
@@ -848,6 +873,8 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         fence,
         assertGuard(allowed, ctx),
         [
+          ...assertCheck(revisionOk),
+          ...assertCheck(approvalOk),
           ...(input.preparedCredential === undefined ? [] : [input.preparedCredential.statement]),
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
           statusBefore,

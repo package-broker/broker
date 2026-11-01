@@ -27,6 +27,7 @@ const SOURCE = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const SECRET = 'credential-sentinel-DO-NOT-RETAIN';
 const NOW = '2026-10-22T10:00:00.000Z';
 const source: Source = {
+  revision: 1,
   id: SOURCE,
   projectId: null,
   name: 'Private packages',
@@ -348,11 +349,13 @@ describe('sources and registered names', () => {
     const { model, fetch } = setup(
       vi
         .fn()
+        .mockResolvedValueOnce(json({ items: [source], next: null }))
         .mockResolvedValueOnce(new Response(null, { status: 204 }))
         .mockResolvedValue(json({ items: [source], next: null })),
     );
+    await model.load();
     await model.edit(SOURCE, 600, 'exclude');
-    expect(fetch.mock.calls[0]).toMatchObject([
+    expect(fetch.mock.calls[1]).toMatchObject([
       `/_pb/sources/${SOURCE}`,
       {
         method: 'PATCH',
@@ -3015,4 +3018,27 @@ it.each([
   fetch.mockResolvedValueOnce(json({ items: [], next: null }));
   await model.names(SOURCE);
   expect(html()).toMatch(new RegExp(`id="registered-pattern"[^>]*maxLength="${limit}"`));
+});
+
+it('keeps the source draft open on a stale revision and sends the displayed revision', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(json({ items: [{ ...source, revision: 7 }], next: null }))
+    .mockResolvedValueOnce(
+      json({ error: { code: 'precondition_failed', message: 'Precondition failed' } }, 412),
+    );
+  const { model } = setup(fetch);
+  await model.load();
+  model.openEditor(model.snapshot().items[0]!);
+  await model.saveSource({ requirePublishApproval: true });
+  expect(fetch.mock.calls[1]).toMatchObject([
+    expect.any(String),
+    {
+      headers: expect.objectContaining({ 'If-Match': '"r7"' }),
+    },
+  ]);
+  expect(model.snapshot().editor).toMatchObject({ revision: 7 });
+  expect(model.snapshot().formError).toBe(
+    'This source changed while you were editing. Reload the latest settings before saving.',
+  );
 });

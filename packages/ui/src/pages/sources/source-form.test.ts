@@ -31,6 +31,7 @@ function data(fields: Record<string, string> = {}) {
 function savedSource(type: Source['type'], config: NonNullable<Source['config']>): Source {
   return {
     id: 'saved',
+    revision: 1,
     name: 'Saved source',
     projectId: null,
     ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
@@ -903,3 +904,24 @@ it.each(['npm', 'composer'] as const)(
     );
   },
 );
+
+it('round trips hosted approval and explains existing holds', () => {
+  const source = {
+    ...savedSource('hosted', {}),
+    ecosystem: 'npm' as const,
+    requirePublishApproval: true,
+    revision: 4,
+  };
+  const fields = sourceFormData(source);
+  expect(fields.has('requirePublishApproval')).toBe(true);
+  const html = renderForm(source);
+  expect(html).toContain('Require publish approval');
+  expect(html).toContain('Versions already held remain held');
+  fields.delete('requirePublishApproval');
+  expect(sourceSubmission(fields, 'npm', 'hosted', source)).toMatchObject({
+    requirePublishApproval: false,
+  });
+  expect(renderForm(savedSource('npm_registry', {}))).not.toContain(
+    'name="requirePublishApproval"',
+  );
+});

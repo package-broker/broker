@@ -113,6 +113,8 @@ async function fixture(
       ? { id: scopedProject.id }
       : null;
   const row = {
+    revision: 1,
+    requirePublishApproval: false,
     ...create,
     id: SOURCE,
     projectId: options.sourceProject ?? null,
@@ -292,8 +294,15 @@ async function fixture(
       providerAnchors: async () => [],
     }),
   });
-  const request = (method: string, path: string, body?: unknown, token = false) => {
+  const request = (
+    method: string,
+    path: string,
+    body?: unknown,
+    token = false,
+    match: string | null = '"r1"',
+  ) => {
     const headers = new Headers({ origin: ORIGIN, 'content-type': 'application/json' });
+    if (method === 'PATCH' && match !== null) headers.set('if-match', match);
     if (token) headers.set('authorization', `Bearer ${tokenBearer}`);
     else {
       headers.set('cookie', `${SESSION_COOKIE}=${SESSION}`);
@@ -553,12 +562,109 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
       ).toBe(400);
       expect(f.createSource).not.toHaveBeenCalled();
     });
-    it('updates without If-Match and maps config', async () => {
+    it('requires a valid revision before changing hosted approval', async () => {
+      const f = await setup();
+      for (const [match, status] of [
+        [null, 428],
+        ['invalid', 400],
+        ['"r0"', 400],
+      ] as const) {
+        expect(
+          (
+            await f.request(
+              'PATCH',
+              `${base}/${SOURCE}`,
+              { requirePublishApproval: true },
+              false,
+              match,
+            )
+          ).status,
+        ).toBe(status);
+      }
+      expect(f.sources.update).not.toHaveBeenCalled();
+    });
+    if (!project)
+      it.each([false, true])(
+        'creates hosted approval %s with an audited setting',
+        async (enabled) => {
+          const f = await setup();
+          const response = await f.request('POST', base, {
+            name: 'Hosted',
+            ecosystem: 'npm',
+            type: 'hosted',
+            requirePublishApproval: enabled,
+          });
+          expect(response.status).toBe(201);
+          expect(f.sources.create).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.anything(),
+            expect.objectContaining({
+              requirePublishApproval: enabled,
+              audit: expect.objectContaining({
+                payloadJson: expect.stringContaining('require_publish_approval'),
+              }),
+            }),
+          );
+        },
+      );
+    if (!project)
+      it('reads and writes hosted approval, audits it and refuses a stale revision', async () => {
+        const f = await setup();
+        const row = await f.sources.get();
+        Object.assign(row!, {
+          type: 'hosted',
+          ecosystem: 'npm',
+          requirePublishApproval: false,
+          url: null,
+          credentialId: null,
+        });
+        expect(
+          (await f.request('PATCH', `${base}/${SOURCE}`, { requirePublishApproval: true })).status,
+        ).toBe(204);
+        expect(f.sources.update).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({
+            expectedRevision: 1,
+            changes: { requirePublishApproval: true },
+            audit: [
+              expect.objectContaining({
+                action: 'source.update',
+                payloadJson: expect.stringContaining('require_publish_approval'),
+              }),
+            ],
+          }),
+        );
+        const page = await f.request('GET', base);
+        expect(page.status).toBe(200);
+        expect(await page.json()).toMatchObject({
+          items: [expect.objectContaining({ revision: 1, requirePublishApproval: false })],
+        });
+        f.sources.update.mockResolvedValueOnce('conflict' as 'updated');
+        expect(
+          (await f.request('PATCH', `${base}/${SOURCE}`, { requirePublishApproval: false })).status,
+        ).toBe(412);
+      });
+    it('rejects approval on a non-hosted source and non-boolean values', async () => {
+      const f = await setup();
+      expect(
+        (await f.request('PATCH', `${base}/${SOURCE}`, { requirePublishApproval: false })).status,
+      ).toBe(400);
+      expect(
+        (await f.request('PATCH', `${base}/${SOURCE}`, { requirePublishApproval: 'true' })).status,
+      ).toBe(400);
+      expect(f.sources.update).not.toHaveBeenCalled();
+    });
+    it('updates with If-Match and maps config', async () => {
       const f = await setup();
       expect(
         (await f.request('PATCH', `${base}/${SOURCE}`, { config: {}, userAgent: null })).status,
       ).toBe(204);
-      expect(f.update.mock.calls[0]?.[4]).toEqual({ configJson: '{}', userAgent: null });
+      expect(f.update.mock.calls[0]?.[4]).toEqual({
+        configJson: '{}',
+        userAgent: null,
+        expectedRevision: 1,
+      });
     });
     it('rejects an empty update', async () => {
       const f = await setup();
@@ -625,7 +731,11 @@ for (const base of ['/_pb/sources', '/_pb/projects/demo/sources']) {
     });
     it('uses 50 as the default list limit', async () => {
       const f = await setup();
-      expect((await f.request('GET', base)).status).toBe(200);
+      const page = await f.request('GET', base);
+      expect(page.status).toBe(200);
+      expect(await page.json()).toMatchObject({
+        items: [expect.objectContaining({ revision: 1, requirePublishApproval: false })],
+      });
       expect(f.sources.list.mock.calls[0]?.[1]).toMatchObject({ limit: 50 });
     });
     it.each(['0', '101', 'invalid'])('rejects list limit %s', async (limit) => {
@@ -1001,6 +1111,8 @@ describe('POST /_pb/sources/:source/accept-removal', () => {
 
 it('marks attachments using the complete attachment reader, preserving unattached owned sources', async () => {
   const row = {
+    revision: 1,
+    requirePublishApproval: false,
     ...create,
     id: SOURCE,
     projectId: PROJECT,

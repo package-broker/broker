@@ -165,7 +165,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'service_principal.permissions_set': ['permissions'],
   'service_principal.suspend': [],
   'service_principal.restore': [],
-  'source.create': ['name', 'type', 'ecosystem', 'project_id', 'url'],
+  'source.create': ['name', 'type', 'ecosystem', 'project_id', 'url', 'require_publish_approval'],
   'source.update': [
     'name',
     'url',
@@ -174,6 +174,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'poll_interval_seconds',
     'retention_days_override',
     'default_visible_to_new_projects',
+    'require_publish_approval',
   ],
   'source.pause': [],
   'source.sync_requested': [],

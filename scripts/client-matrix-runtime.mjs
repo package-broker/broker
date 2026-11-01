@@ -146,24 +146,6 @@ export async function seed(executor) {
       new Date(Date.now() + 3600000).toISOString(),
     ],
   );
-  for (const held of [false, true]) {
-    const sourceId = ulid();
-    await sql(
-      "INSERT INTO source (id, org_id, name, ecosystem, type, require_publish_approval, default_visible_to_new_projects) VALUES (?, ?, ?, 'npm', 'hosted', ?, 1)",
-      [sourceId, orgId, held ? 'Held publishes' : 'Active publishes', Number(held)],
-    );
-    await sql('INSERT INTO project_source (org_id, project_id, source_id) VALUES (?, ?, ?)', [
-      orgId,
-      projectId,
-      sourceId,
-    ]);
-    for (const name of PUBLISH_PACKAGES.filter((name) => name.endsWith(held ? 'held' : 'active'))) {
-      await sql(
-        "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, 'npm', ?)",
-        [ulid(), orgId, sourceId, name],
-      );
-    }
-  }
   const oidcPublisherId = ulid();
   const oidcPrincipal = ulid();
   await sql('INSERT INTO service_principal (id,org_id,name,created_by_user_id) VALUES (?,?,?,?)', [
@@ -199,6 +181,7 @@ export async function seed(executor) {
     'org:service-principals:write',
     'org:sources:read',
     'org:sources:write',
+    'project:sources:write',
     'org:packages:manage',
     'project:packages:manage',
   ])
@@ -444,6 +427,46 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
         boot(directory, front.origin, audits, cleanup, { debug }),
       );
       front.bind(broker.dispatch);
+      await step('configure hosted publishing through API', async () => {
+        const call = async (method, path, body, expected, extraHeaders = {}) => {
+          const response = await broker.dispatch(
+            new Request(front.origin + path, {
+              method,
+              headers: { ...broker.browserHeaders(front.origin), ...extraHeaders },
+              ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            }),
+          );
+          assert.equal(response.status, expected, 'Hosted source setup failed');
+          return expected === 204 ? null : response.json();
+        };
+        for (const held of [false, true]) {
+          const { id } = await call(
+            'POST',
+            '/_pb/sources',
+            {
+              name: held ? 'Held publishes' : 'Active publishes',
+              ecosystem: 'npm',
+              type: 'hosted',
+              requirePublishApproval: false,
+              defaultVisibleToNewProjects: true,
+            },
+            201,
+          );
+          const page = await call('GET', '/_pb/sources', undefined, 200);
+          const source = page.items.find((item) => item.id === id);
+          assert.equal(source.requirePublishApproval, false, 'Hosted approval default differs');
+          await call('PATCH', `/_pb/sources/${id}`, { requirePublishApproval: held }, 204, {
+            'If-Match': `"r${source.revision}"`,
+          });
+          for (const name of PUBLISH_PACKAGES.filter((name) =>
+            name.endsWith(held ? 'held' : 'active'),
+          ))
+            await call('POST', `/_pb/sources/${id}/names`, { pattern: name }, 201);
+          await call('POST', `/_pb/sources/${id}/enable`, undefined, 204);
+          await call('PUT', `/_pb/projects/alpha/sources/${id}/attachment`, {}, 204);
+        }
+      });
+
       const { project, env } = await step('prepare client', () =>
         prepareClient(directory, client, `${front.origin}/alpha/npm/`, broker.token),
       );

@@ -1,5 +1,45 @@
 # Changelog
 
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/db-sqlite-v2.0.0-rc.3...db-sqlite-v2.0.0-rc.4) (2026-11-01)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **api:** publish approval setting for hosted npm sources ([#1029](https://github.com/package-broker/broker/issues/1029)) ([7aae24f](https://github.com/package-broker/broker/commit/7aae24fd06e9d4d6f77ebcfe1cdf8dd5bc6d072b))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **blob:** staged writes for streamed npm publishes ([#996](https://github.com/package-broker/broker/issues/996)) ([e04b746](https://github.com/package-broker/broker/commit/e04b74640be5bbfe1fa30dd757cc5fb49d45a36d))
+* **catalogue:** publishVersion writer, tag patch mode and held-version invisibility ([#1002](https://github.com/package-broker/broker/issues/1002)) ([f790eb4](https://github.com/package-broker/broker/commit/f790eb48d3a20fb28b8d208d8dc4d54a99820a37))
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **db:** migration 0002 for npm publish approval, access requests and readmes ([#1000](https://github.com/package-broker/broker/issues/1000)) ([afdea50](https://github.com/package-broker/broker/commit/afdea5017d5309a9593e6a2abd2e2f8336c15da0))
+* **db:** migration 0003 for npm web login and trusted publishing ([#1001](https://github.com/package-broker/broker/issues/1001)) ([f0afd07](https://github.com/package-broker/broker/commit/f0afd076d4cefaef70f31ad9a0e8dcd8ccf7766e))
+* **registry:** npm publishing with scan gate, trusted publishing and integration gate ([#1022](https://github.com/package-broker/broker/issues/1022)) ([cbd6e80](https://github.com/package-broker/broker/commit/cbd6e80418b26b01f27d61252437967d1067ead7))
+* **registry:** npm token list and revoke on the npm path ([#1036](https://github.com/package-broker/broker/issues/1036)) ([b100ce9](https://github.com/package-broker/broker/commit/b100ce970a17f4e877c1e6e3ff859671025e7126))
+* **registry:** npm unpublish, deprecate and dist-tag writes for hosted packages ([#1038](https://github.com/package-broker/broker/issues/1038)) ([d60e6db](https://github.com/package-broker/broker/commit/d60e6db21fecba89c09b6437c1070207366b0e18))
+* **registry:** npm web login with browser approval ([#1012](https://github.com/package-broker/broker/issues/1012)) ([f39fa8e](https://github.com/package-broker/broker/commit/f39fa8e2ac7673a4685de1b4e0aa308cb0b2d71a))
+* **registry:** verify GitHub Actions OIDC tokens for npm trusted publishing ([#1011](https://github.com/package-broker/broker/issues/1011)) ([783e2ea](https://github.com/package-broker/broker/commit/783e2ea9011ccba6fd7b27329308c3d36133984e))
+* **sources:** build npm packages from GitHub and Git repository tags ([#1015](https://github.com/package-broker/broker/issues/1015)) ([403f684](https://github.com/package-broker/broker/commit/403f68463ff041faab588a295f2ef4e9f2fd5eed))
+* **sources:** hosted claims follow-ups and copy before publishing ([#1006](https://github.com/package-broker/broker/issues/1006)) ([c72ca04](https://github.com/package-broker/broker/commit/c72ca04d047143465a9f74bc8bc435c7c47b1143))
+* **sources:** hosted npm sources with claim admission ([#997](https://github.com/package-broker/broker/issues/997)) ([6af51fb](https://github.com/package-broker/broker/commit/6af51fb3c53de6a0b0c76dfabe35a622581589d8))
+* **sources:** npm packages from GitHub repositories with claim admission ([#1013](https://github.com/package-broker/broker/issues/1013)) ([a712143](https://github.com/package-broker/broker/commit/a7121436e0ef57595561a7fd31192cba28f0ef88))
+
+
+### Bug Fixes
+
+* **core:** recheck every admitted npm claim when a proxy source is added ([#1032](https://github.com/package-broker/broker/issues/1032)) ([9011da5](https://github.com/package-broker/broker/commit/9011da53fd653bd328ca59ec0d7f78532b47d156))
+* **core:** scoped package detail reads and settings revisions ([#1037](https://github.com/package-broker/broker/issues/1037)) ([46b85d4](https://github.com/package-broker/broker/commit/46b85d48ba6d252d05adbe3e53c451f6a8ea6261))
+* **core:** trusted publisher audit, paging and shared constants ([#1027](https://github.com/package-broker/broker/issues/1027)) ([0fd7f0c](https://github.com/package-broker/broker/commit/0fd7f0ce9961b2906844caf158b5a76caea9a916))
+* **core:** validate access request reasons and final audit payloads ([#1031](https://github.com/package-broker/broker/issues/1031)) ([4abc718](https://github.com/package-broker/broker/commit/4abc7183d4ddf5bc69d18c05d3bd85bb50c0c913))
+* **ui:** actionable scan holds with rescan and audited disposal ([#1028](https://github.com/package-broker/broker/issues/1028)) ([60832bf](https://github.com/package-broker/broker/commit/60832bfb87092d3f5e07e254b4b811bc5030d572))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+
 ## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/db-sqlite-v2.0.0-rc.2...db-sqlite-v2.0.0-rc.3) (2026-10-28)
 
 

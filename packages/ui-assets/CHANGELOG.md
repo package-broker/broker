@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.0-rc.4](https://github.com/package-broker/broker/compare/ui-assets-v0.1.0-rc.3...ui-assets-v0.1.0-rc.4) (2026-11-01)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/ui bumped to 2.0.0-rc.4
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+
 ## [0.1.0-rc.3](https://github.com/package-broker/broker/compare/ui-assets-v0.1.0-rc.2...ui-assets-v0.1.0-rc.3) (2026-10-28)
 
 

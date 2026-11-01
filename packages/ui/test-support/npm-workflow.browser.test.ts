@@ -6,6 +6,8 @@ let fixture: Awaited<ReturnType<typeof createBrowserFixture>>;
 let script: string;
 let conflict = false;
 let readOnly = false;
+let projectManager = false;
+let sourceName = 'Internal releases';
 let readmeStatus = 200;
 let readmeType = 'text/markdown';
 let ecosystem = 'npm';
@@ -33,7 +35,7 @@ beforeAll(async () => {
   script = (
     await build({
       stdin: {
-        contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {createApiClient} from '../src/api'; import {PackageWorkflow} from '../src/pages/packages/npm-workflow'; import {PackageDetail} from '../src/pages/packages/package-detail'; import {PackagesPage} from '../src/pages/packages'; import {ServicesContext} from '../src/auth'; const services={client:createApiClient({fetch:window.fetch.bind(window),readCookie:()=>undefined}),requireReauth:()=>{}}; createRoot(document.getElementById('root')).render(globalThis.filters ? <ServicesContext.Provider value={services}><PackagesPage /></ServicesContext.Provider> : <><h1 id="page-heading" tabIndex={-1}>Packages</h1>{globalThis.detail ? <PackageDetail services={services} id="01AAAAAAAAAAAAAAAAAAAAAAAA" project={globalThis.project ?? null} /> : <PackageWorkflow services={services} project={globalThis.project ?? null}/>}</>);`,
+        contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {createApiClient} from '../src/api'; import {PackageWorkflow} from '../src/pages/packages/npm-workflow'; import {PackageDetail} from '../src/pages/packages/package-detail'; import {PackagesPage} from '../src/pages/packages'; import {ServicesContext} from '../src/auth'; const services={client:createApiClient({fetch:window.fetch.bind(window),readCookie:()=>undefined}),requireReauth:()=>{}, subscribeReplay:(listener)=>{ const handler=(event)=>listener(event.detail); window.addEventListener("test-replay", handler); return ()=>window.removeEventListener("test-replay", handler); }}; createRoot(document.getElementById('root')).render(globalThis.filters ? <ServicesContext.Provider value={services}><PackagesPage /></ServicesContext.Provider> : <><h1 id="page-heading" tabIndex={-1}>Packages</h1>{globalThis.detail ? <PackageDetail services={services} id="01AAAAAAAAAAAAAAAAAAAAAAAA" project={globalThis.project ?? null} /> : <PackageWorkflow services={services} project={globalThis.project ?? null}/>}</>);`,
         loader: 'tsx',
         resolveDir: fileURLToPath(new URL('.', import.meta.url)),
       },
@@ -48,6 +50,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   conflict = false;
   readOnly = false;
+  projectManager = false;
+  sourceName = 'Internal releases';
   readmeStatus = 200;
   readmeType = 'text/markdown';
   ecosystem = 'npm';
@@ -74,16 +78,20 @@ beforeEach(async () => {
       }
       if (path.endsWith('/permissions'))
         return Response.json({
-          organization: readOnly
-            ? ['org:packages:read']
-            : [
-                'org:packages:read',
-                'org:packages:approve',
-                'org:packages:manage',
-                'org:sources:write',
-                'org:projects:read',
-              ],
-          project: ['project:packages:manage'],
+          organization: projectManager
+            ? []
+            : readOnly
+              ? ['org:packages:read']
+              : [
+                  'org:packages:read',
+                  'org:packages:approve',
+                  'org:packages:manage',
+                  'org:sources:write',
+                  'org:projects:read',
+                ],
+          project: projectManager
+            ? ['project:packages:read', 'project:sources:write']
+            : ['project:packages:manage'],
         });
       if (path.endsWith('/sources')) {
         const project = /^\/_pb\/projects\/(demo|other)\/sources$/.exec(path)?.[1];
@@ -95,7 +103,7 @@ beforeEach(async () => {
                   id: `${project}-source`,
                   name: project === 'demo' ? 'Checkout releases' : 'Other releases',
                 }
-              : item.source,
+              : { ...item.source, name: sourceName },
           ],
           next: null,
         });
@@ -117,6 +125,12 @@ beforeEach(async () => {
           body: '<script>danger()</script>\n# Library',
         });
       }
+      if (/\/packages\/01AAAAAAAAAAAAAAAAAAAAAAAA$/.test(path))
+        return Response.json({
+          ...item,
+          ecosystem,
+          source: { ...item.source, projectId: projectManager ? 'project' : null },
+        });
       if (path.endsWith('/versions')) return Response.json({ items: [], next: null });
       if (path.endsWith('/packages'))
         return Response.json({ items: [{ ...item, ecosystem }], next: null });
@@ -149,8 +163,6 @@ afterEach(async () => {
 });
 it('reviews pending publishes with a reason and a revision, at 360 px', async (context) => {
   if (!fixture) return context.skip();
-  writes.length = 0;
-  conflict = false;
   await fixture.page.setViewportSize({ width: 360, height: 800 });
   await fixture.mount(script);
   await fixture.page.getByRole('heading', { name: 'Pending publishes', exact: true }).waitFor();
@@ -174,7 +186,6 @@ it('reviews pending publishes with a reason and a revision, at 360 px', async (c
 });
 it('approves access requests for named projects', async (context) => {
   if (!fixture) return context.skip();
-  writes.length = 0;
   await fixture.mount(script);
   await fixture.page.getByRole('button', { name: /Approve access/ }).click();
   await fixture.page.getByRole('button', { name: 'Confirm approval' }).click();
@@ -187,7 +198,6 @@ it('approves access requests for named projects', async (context) => {
 });
 it('requests project access and explains source attachment', async (context) => {
   if (!fixture) return context.skip();
-  writes.length = 0;
   await fixture.mount(script, { project: 'demo' });
   await fixture.page.getByRole('button', { name: /Request access/ }).click();
   await fixture.page.getByLabel('Reason (optional)').fill('For our checkout');
@@ -201,7 +211,6 @@ it('requests project access and explains source attachment', async (context) => 
 });
 it('renders README as text and blocks stale access edits until reload', async (context) => {
   if (!fixture) return context.skip();
-  writes.length = 0;
   conflict = true;
   await fixture.mount(script, { detail: true });
   await fixture.page.getByLabel('Project for README and install instructions').selectOption('demo');
@@ -228,9 +237,6 @@ it('renders README as text and blocks stale access edits until reload', async (c
 
 it('approves a publish without claiming its scan completed', async (context) => {
   if (!fixture) return context.skip();
-  conflict = false;
-  readOnly = false;
-  writes.length = 0;
   await fixture.mount(script);
   await fixture.page.getByRole('button', { name: /Approve publish/ }).click();
   await fixture.page.getByRole('button', { name: 'Confirm approval' }).click();
@@ -242,8 +248,6 @@ it('approves a publish without claiming its scan completed', async (context) => 
 it('retains rejection drafts on conflicts and requires renewed review', async (context) => {
   if (!fixture) return context.skip();
   conflict = true;
-  readOnly = false;
-  writes.length = 0;
   await fixture.mount(script);
   await fixture.page.getByRole('button', { name: /More actions for .*Checkout/ }).click();
   await fixture.page.getByRole('menuitem', { name: /Reject access/ }).click();
@@ -260,8 +264,6 @@ it('retains rejection drafts on conflicts and requires renewed review', async (c
 });
 it('supports keyboard dismissal and restores focus to the decision opener', async (context) => {
   if (!fixture) return context.skip();
-  conflict = false;
-  readOnly = false;
   await fixture.mount(script);
   const opener = fixture.page.getByRole('button', { name: /Approve access/ });
   await opener.focus();
@@ -281,13 +283,10 @@ it('hides decisions when the caller has read authority only', async (context) =>
   await fixture
     .browserExpect(fixture.page.getByRole('button', { name: /More actions for/ }))
     .toHaveCount(0);
-  readOnly = false;
 });
 
 it('prevents a second submit while a decision is busy and restores focus after success', async (context) => {
   if (!fixture) return context.skip();
-  conflict = false;
-  writes.length = 0;
   holdWrites = true;
   await fixture.mount(script);
   const opener = fixture.page.getByRole('button', { name: /Approve access/ });
@@ -317,7 +316,6 @@ it('renders project detail at 360 px with exact snippets and README metadata for
   if (!fixture) return context.skip();
   await fixture.page.setViewportSize({ width: 360, height: 800 });
   readmeType = 'text/plain';
-  reads.length = 0;
   for (const kind of ['npm', 'composer']) {
     ecosystem = kind;
     await fixture.mount(script, { detail: true, project: 'demo' });
@@ -327,8 +325,8 @@ it('renders project detail at 360 px with exact snippets and README metadata for
       .browserExpect(fixture.page.locator('pre').first())
       .toHaveText(
         kind === 'npm'
-          ? `npm install @team/library\n# Registry: ${origin}/demo/npm/`
-          : `composer require @team/library\n# Repository: ${origin}/demo`,
+          ? `registry=${origin}/demo/npm/`
+          : `composer config repositories.demo composer ${origin}/demo\ncomposer require @team/library`,
       );
     await fixture
       .browserExpect(fixture.page.getByText('README.md · 38 bytes', { exact: true }))
@@ -341,8 +339,6 @@ it('renders project detail at 360 px with exact snippets and README metadata for
     ).toBe(true);
   }
   expect(reads).toContain('/_pb/projects/demo/packages/01AAAAAAAAAAAAAAAAAAAAAAAA/readme');
-  ecosystem = 'npm';
-  readmeType = 'text/markdown';
 });
 
 it('explains denied README access without retry and offers retry for server and network failures', async (context) => {
@@ -371,8 +367,24 @@ it('explains denied README access without retry and offers retry for server and 
     .toBeVisible();
   await fixture.page.unroute('**/readme');
   readmeStatus = 200;
+  await fixture.page.getByLabel('Access for new projects').selectOption('available');
+  const before = reads.filter((path) => !path.endsWith('/readme')).length;
   await fixture.page.getByRole('button', { name: 'Try again', exact: true }).click();
+  await fixture.browserExpect(fixture.page.locator('p[tabindex="-1"][role=status]')).toBeFocused();
   await fixture.page.getByText('<script>danger()</script>', { exact: false }).waitFor();
+  expect(reads.filter((path) => !path.endsWith('/readme')).length).toBe(before);
+  await fixture
+    .browserExpect(fixture.page.getByLabel('Access for new projects'))
+    .toHaveValue('available');
+  await fixture
+    .browserExpect(
+      fixture.page
+        .locator('section')
+        .filter({ has: fixture.page.getByRole('heading', { name: 'README', exact: true }) })
+        .last()
+        .getByRole('status'),
+    )
+    .toBeFocused();
 });
 
 it('focuses the required reason on an empty rejection', async (context) => {
@@ -412,14 +424,10 @@ it('keeps each pagination action inside its matching section', async (context) =
   await fixture
     .browserExpect(fixture.page.getByRole('button', { name: 'Next access requests', exact: true }))
     .toHaveCount(0);
-  paginated = false;
-  publishState = 'pending';
-  scanState = 'queued';
 });
 
 it('preserves filter controls and cached named choices across hash navigation per scope', async (context) => {
   if (!fixture) return context.skip();
-  reads.length = 0;
   await fixture.mount(script, { filters: true });
   const source = fixture.page.getByLabel('Source', { exact: true });
   await fixture.browserExpect(source).toBeEnabled();
@@ -554,4 +562,48 @@ it('hides failed-scan recovery controls from readers', async (context) => {
     await fixture.page.getByRole('button', { name: /More actions for .*1\.0\.0/ }).count(),
   ).toBe(0);
   expect(writes).toHaveLength(0);
+});
+
+it('lets a project-only source manager edit access using one scoped detail read', async (context) => {
+  if (!fixture) return context.skip();
+  projectManager = true;
+  await fixture.mount(script, { detail: true, project: 'demo' });
+  await fixture.page.getByLabel('Access for new projects').selectOption('available');
+  await fixture.page.getByRole('button', { name: 'Save access policy' }).click();
+  await fixture
+    .browserExpect(fixture.page.getByRole('status').filter({ hasText: 'Access policy saved' }))
+    .toBeVisible();
+  expect(writes[0]?.body).toEqual({
+    visibleToNewProjects: true,
+    newProjectAccessMode: 'none',
+    revision: 3,
+  });
+  expect(reads).toContain('/_pb/projects/demo/packages/01AAAAAAAAAAAAAAAAAAAAAAAA');
+  expect(reads).not.toContain('/_pb/packages');
+  expect(reads).not.toContain('/_pb/projects/demo/packages');
+});
+
+it('reloads named filter choices after a successful source mutation on the same page', async (context) => {
+  if (!fixture) return context.skip();
+  await fixture.mount(script, { filters: true });
+  const choices = fixture.page.getByLabel('Source', { exact: true }).locator('option');
+  await fixture.browserExpect(choices).toHaveText(['All sources', 'Internal releases']);
+  sourceName = 'New source';
+  await fixture.page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent('test-replay', {
+        detail: { ok: true, path: '/_pb/sources/source', method: 'delete' },
+      }),
+    ),
+  );
+  await fixture.browserExpect(choices).toHaveText(['All sources', 'New source']);
+  sourceName = 'Replacement source';
+  await fixture.page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent('test-replay', {
+        detail: { ok: true, path: '/_pb/sources', method: 'post' },
+      }),
+    ),
+  );
+  await fixture.browserExpect(choices).toHaveText(['All sources', 'Replacement source']);
 });

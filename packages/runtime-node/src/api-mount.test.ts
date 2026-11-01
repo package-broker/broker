@@ -102,6 +102,8 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     dependency: 'packageDetail',
     constructed: 'SQLite package detail repository and idempotency repository',
     routes: [
+      'GET /_pb/packages/:package',
+      'GET /_pb/projects/:project/packages/:package',
       'GET /_pb/projects/:project/packages/:package/readme',
       'PATCH /_pb/packages/:package/access',
     ],

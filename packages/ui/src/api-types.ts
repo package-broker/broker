@@ -537,6 +537,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/packages/{package}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read package details and access settings */
+    get: operations['getPackage'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/packages/{package}/access': {
     parameters: {
       query?: never;
@@ -754,6 +771,23 @@ export interface paths {
     };
     /** List packages */
     get: operations['listProjectPackages'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/packages/{package}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read package details and access settings */
+    get: operations['getProjectPackage'];
     put?: never;
     post?: never;
     delete?: never;
@@ -4747,6 +4781,91 @@ export interface operations {
       };
     };
   };
+  getPackage: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            ecosystem: 'composer' | 'npm';
+            id: string;
+            lastSyncedAt: string | null;
+            latestVersion: string | null;
+            name: string;
+            /** @enum {string} */
+            newProjectAccessMode: 'none' | 'request';
+            revision: number;
+            source: {
+              id: string;
+              name: string;
+              projectId: string | null;
+              /** @enum {string} */
+              type:
+                | 'vcs'
+                | 'composer_repository'
+                | 'npm_registry'
+                | 'packagist_proxy'
+                | 'npmjs_proxy'
+                | 'hosted';
+            };
+            /** @enum {string} */
+            status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+            versionCount: number;
+            visibleToNewProjects: boolean;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   updatePackageAccess: {
     parameters: {
       query?: never;
@@ -6298,6 +6417,92 @@ export interface operations {
               versionCount: number;
             }[];
             next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getProjectPackage: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            ecosystem: 'composer' | 'npm';
+            id: string;
+            lastSyncedAt: string | null;
+            latestVersion: string | null;
+            name: string;
+            /** @enum {string} */
+            newProjectAccessMode: 'none' | 'request';
+            revision: number;
+            source: {
+              id: string;
+              name: string;
+              projectId: string | null;
+              /** @enum {string} */
+              type:
+                | 'vcs'
+                | 'composer_repository'
+                | 'npm_registry'
+                | 'packagist_proxy'
+                | 'npmjs_proxy'
+                | 'hosted';
+            };
+            /** @enum {string} */
+            status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+            versionCount: number;
+            visibleToNewProjects: boolean;
           };
         };
       };

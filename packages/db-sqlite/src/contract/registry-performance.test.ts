@@ -162,7 +162,7 @@ describe('large registry package on node:sqlite', () => {
 describe('release migration contract', () => {
   it('ships contiguous core migrations starting at 0001', async () => {
     const core = (await discoveredMigrations()).filter((source) => source.owner === 'core');
-    expect(core.length).toBe(4);
+    expect(core.length).toBe(5);
     expect(core.map((source) => source.sequence)).toEqual(core.map((_, index) => index + 1));
   });
 

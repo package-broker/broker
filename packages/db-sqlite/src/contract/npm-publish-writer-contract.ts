@@ -2015,7 +2015,7 @@ export function describeNpmPublishWriterContract(
           packageId: h.result.packageId,
           visibleToNewProjects: false,
           newProjectAccessMode: 'request' as const,
-          revision: 2,
+          revision: 1,
           audit: {
             ...w.input().event,
             id: ulid(),
@@ -2073,7 +2073,7 @@ export function describeNpmPublishWriterContract(
             },
           ]).setAccess(ctx, h.fence, {
             ...input,
-            revision: 3,
+            revision: 2,
             audit: { ...input.audit, id: ulid() },
           }),
         ).toEqual({ ok: false, error: 'conflict' });
@@ -2097,7 +2097,7 @@ export function describeNpmPublishWriterContract(
           packageId: h.result.packageId,
           visibleToNewProjects: false,
           newProjectAccessMode: 'request' as const,
-          revision: 2,
+          revision: 1,
           idempotency: {
             principalKey: 'user:approver',
             key: 'access',
@@ -2123,9 +2123,18 @@ export function describeNpmPublishWriterContract(
         ).toEqual([{ n: 1 }]);
         expect(
           await e.all(
-            st('SELECT visible_to_new_projects, new_project_access_mode, rev FROM package'),
+            st(
+              'SELECT visible_to_new_projects, new_project_access_mode, rev, settings_revision FROM package',
+            ),
           ),
-        ).toEqual([{ visible_to_new_projects: 0, new_project_access_mode: 'request', rev: 3 }]);
+        ).toEqual([
+          {
+            visible_to_new_projects: 0,
+            new_project_access_mode: 'request',
+            rev: 2,
+            settings_revision: 2,
+          },
+        ]);
         expect(
           await e.all(
             st("SELECT count(*) n FROM audit_pending WHERE action='package.access_update'"),
@@ -2162,12 +2171,14 @@ export function describeNpmPublishWriterContract(
         expect(
           await repo.setAccess(ctx, h.fence, {
             ...input,
-            revision: 3,
+            revision: 2,
             idempotency: { ...input.idempotency, key: 'rollback' },
             audit: { ...input.audit, id: ulid() },
           }),
         ).toEqual({ ok: false, error: 'unavailable' });
-        expect(await e.all(st('SELECT rev FROM package'))).toEqual([{ rev: 3 }]);
+        expect(await e.all(st('SELECT rev, settings_revision FROM package'))).toEqual([
+          { rev: 2, settings_revision: 2 },
+        ]);
         expect(
           await e.all(st("SELECT count(*) n FROM api_idempotency WHERE key='rollback'")),
         ).toEqual([{ n: 0 }]);
@@ -2176,7 +2187,7 @@ export function describeNpmPublishWriterContract(
         expect(
           await repo.setAccess(ctx, h.fence, {
             ...input,
-            revision: 3,
+            revision: 2,
             idempotency: { ...input.idempotency, key: 'revoked' },
             audit: { ...input.audit, id: ulid() },
           }),

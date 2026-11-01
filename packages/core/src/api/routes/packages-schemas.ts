@@ -25,7 +25,7 @@ const filters = {
   ecosystem: ecosystem.optional(),
   q: z.string().min(1).max(100).optional(),
 };
-const packageItem = z.strictObject({
+export const packageItem = z.strictObject({
   id: ulid,
   ecosystem,
   name: z.string(),

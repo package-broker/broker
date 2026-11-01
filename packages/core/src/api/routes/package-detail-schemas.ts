@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { packageItem } from './packages-schemas.js';
 import { PROJECT_SLUG_PATTERN } from '../../authz/project-path.js';
 import type { ApiRouteSpec } from '../route.js';
 
@@ -50,4 +51,30 @@ export const PACKAGE_DETAIL_API_SPECS = [
       },
     },
   },
+  ...(['organization', 'project'] as const).map((boundary) => ({
+    method: 'GET' as const,
+    path:
+      boundary === 'project'
+        ? '/_pb/projects/:project/packages/:package'
+        : '/_pb/packages/:package',
+    boundary,
+    permission:
+      boundary === 'project' ? ('project:packages:read' as const) : ('org:sources:read' as const),
+    api: {
+      operationId: boundary === 'project' ? 'getProjectPackage' : 'getPackage',
+      summary: 'Read package details and access settings',
+      tags: ['packages'],
+      params:
+        boundary === 'project'
+          ? z.strictObject({ project: z.string().regex(PROJECT_SLUG_PATTERN), package: id })
+          : z.strictObject({ package: id }),
+      responses: {
+        200: packageItem.extend({
+          visibleToNewProjects: z.boolean(),
+          newProjectAccessMode: z.enum(['none', 'request']),
+          revision: z.number().int().positive(),
+        }),
+      },
+    },
+  })),
 ] as const satisfies readonly ApiRouteSpec[];

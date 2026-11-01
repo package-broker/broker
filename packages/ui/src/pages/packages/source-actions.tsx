@@ -320,12 +320,21 @@ export function AddChoices({
 export function PackageSourceControls({
   services,
   project,
+  onSourcesChanged,
 }: {
   services: ShellServices;
   project: string | null;
+  onSourcesChanged?: (scope: string | null, signature: string) => void;
 }) {
   const model = useMemo(() => createSourceActions(services, project), [services, project]);
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
+  const sourceSignature = state.loading
+    ? null
+    : JSON.stringify(state.sources.map((source) => [source.id, source.name]));
+  useEffect(() => {
+    if (sourceSignature !== null)
+      onSourcesChanged?.(state.project?.slug ?? project, sourceSignature);
+  }, [sourceSignature, onSourcesChanged, state.project?.slug, project]);
   const [mode, setMode] = useState<'choices' | 'mirror' | 'sync' | null>(null);
   const [ecosystem, setEcosystem] = useState('composer');
   const [sourceId, setSource] = useState('');

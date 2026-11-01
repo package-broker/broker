@@ -5,6 +5,7 @@ import { fenceKind } from '@package-broker/core/authz/fence';
 import type { PackageDetailRepository } from '@package-broker/core/db/package-admin';
 import type { ScalarStatement, SqlExecutor } from '@package-broker/core/db/port';
 import { assertGuard, compile, db, runOrgFenced, type ProtectedHolderProvider } from '../kysely.js';
+import { readPackageDetail } from './package-admin-read.js';
 import { visibleWinner } from './catalogue-read.js';
 import { actorHolds } from './actor-authority.js';
 import { visibilityAuditStatements } from './visibility-audit.js';
@@ -18,6 +19,7 @@ export function createPackageDetailRepository(
   providerAnchors: readonly ProtectedHolderProvider[] = [],
 ): PackageDetailRepository {
   return {
+    detail: (ctx, query) => readPackageDetail(executor, ctx, query),
     async packageName(ctx, packageId) {
       const [pkg] = await executor.all<{ name: string }>(
         statement(
@@ -72,7 +74,7 @@ export function createPackageDetailRepository(
         projectId: pkg.project_id,
         providerAnchors,
       });
-      const state = sql<SqlBool>`exists (select 1 from package join source on source.id = package.source_id where package.org_id = ${ctx.orgId} and source.org_id = ${ctx.orgId} and source.project_id is ${pkg.project_id} and package.id = ${input.packageId} and package.rev = ${input.revision})`;
+      const state = sql<SqlBool>`exists (select 1 from package join source on source.id = package.source_id where package.org_id = ${ctx.orgId} and source.org_id = ${ctx.orgId} and source.project_id is ${pkg.project_id} and package.id = ${input.packageId} and package.settings_revision = ${input.revision})`;
       const both = sql<SqlBool>`((${authority}) and (${state}))`;
       const outcome = await runOrgFenced(
         executor,
@@ -81,9 +83,9 @@ export function createPackageDetailRepository(
         assertGuard(both, ctx),
         [
           statement(sql`update package set visible_to_new_projects = ${input.visibleToNewProjects ? 1 : 0},
-          new_project_access_mode = ${input.newProjectAccessMode}, rev = rev + 1,
+          new_project_access_mode = ${input.newProjectAccessMode}, settings_revision = settings_revision + 1,
           modified_at = ${monotonicNow}
-          where org_id = ${ctx.orgId} and id = ${input.packageId} and rev = ${input.revision}`),
+          where org_id = ${ctx.orgId} and id = ${input.packageId} and settings_revision = ${input.revision}`),
           ...visibilityAuditStatements(ctx, {
             ...input,
             audit: validateAuditEvent({

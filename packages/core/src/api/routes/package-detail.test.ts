@@ -20,6 +20,7 @@ async function fixture(
   permissions = ['project:read', 'project:packages:read', 'org:sources:write'],
 ) {
   const repository = {
+    detail: vi.fn<PackageDetailRepository['detail']>().mockResolvedValue(null),
     packageName: vi.fn<PackageDetailRepository['packageName']>().mockResolvedValue('widget'),
     readme: vi
       .fn<PackageDetailRepository['readme']>()
@@ -204,3 +205,52 @@ it('replays committed results and rejects a reused key with different input', as
   );
   expect(f.repository.setAccess).not.toHaveBeenCalled();
 });
+
+it('reads settings directly for a project-only manager and masks absent targets', async () => {
+  const f = await fixture(['project:read', 'project:packages:read', 'project:sources:write']);
+  const path = `/_pb/projects/demo/packages/${PACKAGE}`;
+  expect((await f.request(path)).status).toBe(404);
+  expect(f.repository.detail).toHaveBeenCalledWith(orgContext('org-1'), {
+    packageId: PACKAGE,
+    projectId: ID,
+  });
+  expect(f.repository.packageName).not.toHaveBeenCalled();
+  expect((await f.request(`/_pb/packages/${PACKAGE}`)).status).toBe(403);
+});
+it('requires project catalogue authority before the direct read', async () => {
+  const f = await fixture(['project:read']);
+  expect((await f.request(`/_pb/projects/demo/packages/${PACKAGE}`)).status).toBe(403);
+  expect(f.repository.detail).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['/_pb/packages/', ['org:sources:read']],
+  [
+    '/_pb/projects/demo/packages/',
+    ['project:read', 'project:packages:read', 'project:sources:write'],
+  ],
+])(
+  'returns settings and revision from %s without catalogue paging',
+  async (prefix, permissions) => {
+    const f = await fixture(permissions);
+    const item = {
+      id: PACKAGE,
+      ecosystem: 'npm' as const,
+      name: 'widget',
+      visibleToNewProjects: false,
+      newProjectAccessMode: 'request' as const,
+      revision: 7,
+      latestVersion: null,
+      status: 'active' as const,
+      source: { id: ID, name: 'Releases', type: 'hosted' as const, projectId: ID },
+      versionCount: 0,
+      lastSyncedAt: null,
+    };
+    f.repository.detail.mockResolvedValue(item);
+    const result = await f.request(prefix + PACKAGE);
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual(item);
+    expect(result.headers.get('cache-control')).toBe('no-store');
+    expect(f.repository.detail).toHaveBeenCalledTimes(1);
+  },
+);

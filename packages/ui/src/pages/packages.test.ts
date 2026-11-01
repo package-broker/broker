@@ -249,6 +249,34 @@ describe('filter reset', () => {
   );
 });
 
+it('waits for named filter choices before rendering Source and Project chips', () => {
+  vi.stubGlobal('window', {
+    location: { hash: `#/packages?source=${sourceId}&projectId=${projectId}&q=widget` },
+  });
+  try {
+    const html = renderToString(
+      createElement(
+        ServicesContext.Provider,
+        {
+          value: {
+            client: createApiClient<paths>({ fetch: vi.fn(), readCookie: () => undefined }),
+            requireReauth: vi.fn(),
+          },
+        },
+        createElement(PackagesPage),
+      ),
+    );
+    expect(html).toContain('Remove Name prefix filter');
+    expect(html).not.toContain('Remove Source filter');
+    expect(html).not.toContain('Remove Project filter');
+    const chips = html.match(/<div aria-label="Active filters"[\s\S]*?<\/div>/)?.[0];
+    expect(chips).toBeDefined();
+    expect(chips).not.toContain('Name unavailable');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 describe('page requests and actions', () => {
   it.each([false, true])(
     'describes the mutation route scope (organization admin: %s)',

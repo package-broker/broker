@@ -613,7 +613,7 @@ export function describeMigrationContract(
         expect(await readLock(executor)).toEqual(lockBefore);
       });
     });
-    it('8. fresh schema with foreign keys on: three bookkeeping rows, all tables, lock free', async () => {
+    it('8. fresh schema with foreign keys on: five bookkeeping rows, all tables, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         await enableForeignKeys(executor);
         const sources = await discoveredMigrations();
@@ -784,6 +784,7 @@ export function describeMigrationContract(
           'core:0002_npm_publish',
           'core:0003_npm_identity',
           'core:0004_source_revision',
+          'core:0005_package_settings_revision',
         ]);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
@@ -801,6 +802,7 @@ export function describeMigrationContract(
           'core:0002_npm_publish',
           'core:0003_npm_identity',
           'core:0004_source_revision',
+          'core:0005_package_settings_revision',
         ]);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
@@ -1109,6 +1111,7 @@ export function describeVulnerabilityMigrationContract(
           'core:0002_npm_publish',
           'core:0003_npm_identity',
           'core:0004_source_revision',
+          'core:0005_package_settings_revision',
         ]);
         expect(
           await executor.all({
@@ -1193,7 +1196,7 @@ export function describeSchemaEquivalenceContract(
       const oldChain = JSON.parse(
         readFileSync(new URL('../migrations/old-chain-schema.json', import.meta.url), 'utf8'),
       ) as SchemaDump;
-      const sources = await discoveredMigrations();
+      const sources = (await discoveredMigrations()).filter((source) => source.sequence <= 4);
       expect(sources.map(({ id, phase }) => ({ id, phase }))).toEqual([
         { id: 'core:0001_init', phase: 'expand' },
         { id: 'core:0002_npm_publish', phase: 'expand' },

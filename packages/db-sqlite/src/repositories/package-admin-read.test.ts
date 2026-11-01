@@ -357,7 +357,7 @@ describe('package admin reader', () => {
     const raw = new DatabaseSync(':memory:');
     try {
       raw.exec(`
-        CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0, visible_to_new_projects INTEGER DEFAULT 1, new_project_access_mode TEXT DEFAULT 'none', rev INTEGER DEFAULT 1);
+        CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0, visible_to_new_projects INTEGER DEFAULT 1, new_project_access_mode TEXT DEFAULT 'none', rev INTEGER DEFAULT 1, settings_revision INTEGER NOT NULL DEFAULT 1);
         CREATE INDEX package_by_name ON package (org_id, ecosystem, name);
         CREATE TABLE source (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, type TEXT, project_id TEXT);
         CREATE TABLE publish_approval (org_id TEXT, version_id TEXT, approval_state TEXT, scan_state TEXT);
@@ -416,7 +416,7 @@ describe('package admin reader', () => {
       const raw = new DatabaseSync(':memory:');
       try {
         raw.exec(`
-          CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0, visible_to_new_projects INTEGER DEFAULT 1, new_project_access_mode TEXT DEFAULT 'none', rev INTEGER DEFAULT 1);
+          CREATE TABLE package (id TEXT PRIMARY KEY, org_id TEXT, ecosystem TEXT, name TEXT, status TEXT, last_synced_at TEXT, source_id TEXT, held_until_active INTEGER DEFAULT 0, visible_to_new_projects INTEGER DEFAULT 1, new_project_access_mode TEXT DEFAULT 'none', rev INTEGER DEFAULT 1, settings_revision INTEGER NOT NULL DEFAULT 1);
           CREATE INDEX package_by_name ON package (org_id, ecosystem, name);
           CREATE TABLE source (id TEXT PRIMARY KEY, org_id TEXT, name TEXT, type TEXT, project_id TEXT);
           CREATE TABLE publish_approval (org_id TEXT, version_id TEXT, approval_state TEXT, scan_state TEXT);

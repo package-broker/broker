@@ -1,4 +1,3 @@
-import type { ApiResult } from '../../api.js';
 import { useEffect, useRef, useState } from 'react';
 import type { operations } from '../../api-types.js';
 import type { ShellServices } from '../../auth.js';
@@ -20,12 +19,11 @@ import {
 export function installSnippet(ecosystem: string, name: string, origin: string, project: string) {
   const repository = `${origin}/${encodeURIComponent(project)}`;
   return ecosystem === 'npm'
-    ? `npm install ${name}\n# Registry: ${repository}/npm/`
-    : `composer require ${name}\n# Repository: ${repository}`;
+    ? `registry=${repository}/npm/`
+    : `composer config repositories.${project} composer ${repository}\ncomposer require ${name}`;
 }
 
-type OrganizationPackage =
-  operations['listPackages']['responses'][200]['content']['application/json']['items'][number];
+type PackageDetailItem = operations['getPackage']['responses'][200]['content']['application/json'];
 type ResultReadme =
   operations['getProjectPackageReadme']['responses'][200]['content']['application/json'];
 type Project = { id: string; name: string; slug: string };
@@ -41,7 +39,7 @@ export function PackageDetail({
   back?: string;
 }) {
   const [item, setItem] = useState<PackageItem | null>(null);
-  const [settings, setSettings] = useState<OrganizationPackage | null>(null);
+  const [settings, setSettings] = useState<PackageDetailItem | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState(project ?? '');
   const [projectName, setProjectName] = useState('');
@@ -53,6 +51,8 @@ export function PackageDetail({
   const [next, setNext] = useState<string | null>(null);
   const [versionError, setVersionError] = useState(false);
   const [readme, setReadme] = useState<ResultReadme | null>(null);
+  const [readmeAttempt, setReadmeAttempt] = useState(0);
+  const readmeStatus = useRef<HTMLParagraphElement>(null);
   const [readmeRetry, setReadmeRetry] = useState(false);
   const [readmeState, setReadmeState] = useState('');
   const [loading, setLoading] = useState(true);
@@ -87,40 +87,17 @@ export function PackageDetail({
           ? services.client.request('get', '/_pb/projects/{project}', { params: { project } })
           : null,
       ]);
-      let found: PackageItem | null = null;
-      let orgItem: OrganizationPackage | null = null;
-      let cursor: string | undefined;
-      do {
-        const result = project
-          ? await services.client.request('get', '/_pb/projects/{project}/packages', {
-              params: { project },
-              query: { after: cursor },
-            })
-          : await services.client.request('get', '/_pb/packages', { query: { after: cursor } });
-        if (!active) return;
-        if (!result.ok) {
-          setFailed(true);
-          break;
-        }
-        found = result.data.items.find((entry) => entry.id === id) ?? null;
-        if (project === null && found && 'revision' in found)
-          orgItem = found as OrganizationPackage;
-        cursor = result.data.next ?? undefined;
-      } while (!found && cursor);
-      if (project && found && org.ok && org.data.organization.includes('org:sources:read')) {
-        cursor = undefined;
-        do {
-          const result: ApiResult<{ items: OrganizationPackage[]; next: string | null }> =
-            await services.client.request('get', '/_pb/packages', {
-              query: { after: cursor },
-            });
-          if (!active) return;
-          if (!result.ok) break;
-          orgItem = result.data.items.find((entry) => entry.id === id) ?? null;
-          cursor = result.data.next ?? undefined;
-        } while (!orgItem && cursor);
-      }
+      const result = project
+        ? await services.client.request('get', '/_pb/projects/{project}/packages/{package}', {
+            params: { project, package: id },
+          })
+        : await services.client.request('get', '/_pb/packages/{package}', {
+            params: { package: id },
+          });
+      const found = result.ok ? result.data : null;
+      const orgItem = found;
       if (!active) return;
+      if (!result.ok) setFailed(true);
       setItem(found);
       setSettings(orgItem);
       setChoice(
@@ -213,7 +190,7 @@ export function PackageDetail({
         setReadmeRetry(!result.ok && (result.status === 0 || result.status >= 500));
         setReadmeState(
           result.ok
-            ? ''
+            ? 'README loaded.'
             : result.status === 403
               ? 'This project cannot read this package.'
               : result.status === 404
@@ -226,7 +203,7 @@ export function PackageDetail({
     return () => {
       active = false;
     };
-  }, [services, id, selected, refresh]);
+  }, [services, id, selected, refresh, readmeAttempt]);
   useEffect(
     () =>
       services.subscribeReplay?.((result) => {
@@ -398,6 +375,9 @@ export function PackageDetail({
           </div>
           <section>
             <h2 className="text-lg font-semibold">Install</h2>
+            {item.ecosystem === 'npm' && selected && (
+              <p>Add this line to .npmrc, then run npm install {item.name}.</p>
+            )}
             {selected ? (
               <pre className="whitespace-pre-wrap break-all rounded border p-4">
                 {installSnippet(item.ecosystem, item.name, window.location.origin, selected)}
@@ -411,7 +391,9 @@ export function PackageDetail({
           </section>
           <section>
             <h2 className="text-lg font-semibold">README</h2>
-            <p role="status">{readmeState}</p>
+            <p ref={readmeStatus} tabIndex={-1} role="status">
+              {readmeState}
+            </p>
             {readme && (
               <>
                 <p>
@@ -427,7 +409,10 @@ export function PackageDetail({
                 type="button"
                 className="min-h-11"
                 variant="outline"
-                onClick={() => setRefresh((value) => value + 1)}
+                onClick={() => {
+                  readmeStatus.current?.focus();
+                  setReadmeAttempt((value) => value + 1);
+                }}
               >
                 Try again
               </Button>

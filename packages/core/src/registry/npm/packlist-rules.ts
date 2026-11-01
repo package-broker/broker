@@ -429,6 +429,7 @@ interface Directory {
   exact: boolean;
   rules: Rule[];
   groups: RuleGroup[];
+  excludePrefixes?: ReadonlySet<string>;
   required: string[];
   cacheKey?: string;
   cacheResult?: boolean;
@@ -512,7 +513,6 @@ export function* selectPacklist(
   const seenBundles = new Set<string>();
   const subtrees = new Map<string, string[]>();
   const directoryPaths = new Set<string>();
-  const parentPaths = new Map<string, { parent: string; base: string }>();
   for (const path of paths) {
     spend(path.length);
     if (path.split('/').length > 64) fail('path_too_deep');
@@ -526,14 +526,9 @@ export function* selectPacklist(
       subtree.push(path);
     }
     let at = path.indexOf('/');
-    let parent = '';
-    let start = 0;
     while (at >= 0) {
       const directory = path.slice(0, at);
       directoryPaths.add(directory);
-      parentPaths.set(directory, { parent, base: path.slice(start, at) });
-      parent = directory;
-      start = at + 1;
       at = path.indexOf('/', at + 1);
     }
   }
@@ -593,14 +588,21 @@ export function* selectPacklist(
     const directories = new Map<string, Directory>();
     const ruleSets = new Map<
       string,
-      { rules: Rule[]; groups: RuleGroup[]; partialCache: Map<string, Set<Rule>> }
+      {
+        rules: Rule[];
+        groups: RuleGroup[];
+        excludePrefixes?: ReadonlySet<string>;
+        partialCache: Map<string, Set<Rule>>;
+      }
     >();
     function* directory(path: string): Generator<string, Directory, string | undefined> {
       const cached = directories.get(path);
       if (cached) return cached;
-      const parts = path ? parentPaths.get(prefix + path)! : { parent: '', base: '' };
-      const parent = path ? yield* directory(parts.parent.slice(prefix.length)) : undefined;
-      const base = parts.base;
+      const separator = path.lastIndexOf('/');
+      const parent = path
+        ? yield* directory(separator < 0 ? '' : path.slice(0, separator))
+        : undefined;
+      const base = path.slice(separator + 1);
       const exact = parent ? filter(parent, base) || filter(parent, base + '/') : false;
       let localRules: string[] = [];
       if (path === '' && manifest.files !== undefined) localRules = ['*', ...includes];
@@ -660,6 +662,9 @@ export function* selectPacklist(
           if (excludes.every((r) => r.requiredText))
             group.excludePrefixes = [...new Set(excludes.map((r) => r.requiredText[0]!))].join('');
         }
+        const excludes = ruleSet.rules.filter((r) => !r.include);
+        if (excludes.every((r) => r.requiredText))
+          ruleSet.excludePrefixes = new Set(excludes.map((r) => r.requiredText[0]!));
         ruleSets.set(ruleKey, ruleSet);
       }
       const node: Directory = {
@@ -693,18 +698,31 @@ export function* selectPacklist(
           return false;
         }
       }
+      if (included && node.excludePrefixes !== undefined) {
+        const possible = (value: string) => {
+          spend(value.length);
+          for (let i = 0; i < value.length; i++)
+            if (node.excludePrefixes!.has(value[i]!)) return true;
+          return false;
+        };
+        if (
+          !possible(entry) &&
+          !(partial && entryBasename !== undefined && possible(entryBasename))
+        ) {
+          node.cacheKey = key;
+          node.cacheResult = true;
+          return true;
+        }
+      }
       const trimmed = entry.replace(/\/+$/, '');
       const basename = trimmed.slice(trimmed.lastIndexOf('/') + 1);
-      const anchored = '/' + entry;
-      const trailing = entry + '/';
-      const both = anchored + '/';
-      const baseAnchored = '/' + entryBasename;
-      const baseTrailing = entryBasename + '/';
-      const baseBoth = baseAnchored + '/';
       let baseMatches: Set<Rule> | undefined;
       if (partial && entryBasename !== undefined) {
         baseMatches = node.partialCache.get(entryBasename);
         if (!baseMatches) {
+          const baseAnchored = '/' + entryBasename;
+          const baseTrailing = entryBasename + '/';
+          const baseBoth = baseAnchored + '/';
           baseMatches = new Set();
           spend(node.rules.length * 256);
           for (const r of node.rules) {
@@ -765,6 +783,9 @@ export function* selectPacklist(
           included = old;
           continue;
         }
+        const anchored = '/' + entry;
+        const trailing = entry + '/';
+        const both = anchored + '/';
         if (partial) spend(group.rules.length * 256);
         for (const r of group.rules) {
           if (r.include === included) continue;

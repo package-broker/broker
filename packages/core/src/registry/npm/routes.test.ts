@@ -85,6 +85,8 @@ const actor: ProjectActor = {
 };
 
 interface Setup {
+  requestOrigin?: string;
+  tokens?: NpmRouteDeps['tokens'];
   publisher?: 'project' | 'organization';
   publish?: NpmRouteDeps['publish'];
   outcome?: PackageVisibility;
@@ -124,6 +126,7 @@ async function harness(setup: Setup = {}) {
       setup.outcome ?? visible({ key: packageKey(name, { ecosystem: 'npm', legacyCase: true }) }),
   );
   const deps: NpmRouteDeps = {
+    ...(setup.tokens === undefined ? {} : { tokens: setup.tokens }),
     ...(setup.publish === undefined ? {} : { publish: setup.publish }),
     access: access as unknown as PackageAccess,
     dist: { serve },
@@ -212,7 +215,7 @@ async function harness(setup: Setup = {}) {
   });
   const call = (path: string, init: RequestInit = {}) =>
     kernel.fetch(
-      new Request(`https://broker.test/demo/npm${path}`, {
+      new Request(`${setup.requestOrigin ?? 'https://broker.test'}/demo/npm${path}`, {
         ...init,
         headers: { authorization: `Bearer ${token}`, ...init.headers },
       }),
@@ -950,4 +953,152 @@ describe('npm publish routing', () => {
       expect(publish).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('npm token adapters', () => {
+  it('uses the public origin for token pagination behind a TLS-terminating proxy', async () => {
+    const listOwn = vi.fn(async () => ({ items: [], next: 'id/next+page' }));
+    const { call } = await harness({
+      requestOrigin: 'http://node.internal:3000',
+      tokens: { reader: { listOwn } as never, revokeOwn: vi.fn() },
+    });
+    const response = await call('/-/npm/v1/tokens?after=previous&internal=ignored');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      objects: [],
+      urls: {
+        next: 'https://broker.test/demo/npm/-/npm/v1/tokens?after=id%2Fnext%2Bpage',
+      },
+    });
+  });
+
+  it('lists active own tokens with npm pagination and safe fields', async () => {
+    const listOwn = vi.fn(async () => ({
+      items: [{ id: 'id-only', createdAt: '2026-01-01', readOnly: true }],
+      next: 'id-only',
+    }));
+    const revokeOwn = vi.fn();
+    const { call } = await harness({ tokens: { reader: { listOwn } as never, revokeOwn } });
+    const response = await call('/-/npm/v1/tokens');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({
+      objects: [
+        {
+          key: 'id-only',
+          token: 'id-only',
+          created: '2026-01-01',
+          readonly: true,
+          cidr_whitelist: [],
+        },
+      ],
+      urls: { next: 'https://broker.test/demo/npm/-/npm/v1/tokens?after=id-only' },
+    });
+    expect(listOwn).toHaveBeenCalledWith(
+      org,
+      'user-1',
+      expect.objectContaining({ after: null, limit: 100, status: 'active' }),
+    );
+    await call('/-/npm/v1/tokens?after=id-only');
+    expect(listOwn).toHaveBeenLastCalledWith(
+      org,
+      'user-1',
+      expect.objectContaining({ after: 'id-only' }),
+    );
+  });
+  it('revokes by id through the caller PAT and returns a fixed missing response', async () => {
+    const revokeOwn = vi.fn(async () => false);
+    const { call } = await harness({ tokens: { reader: {} as never, revokeOwn } });
+    const response = await call('/-/npm/v1/tokens/token/other-secret', { method: 'DELETE' });
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain('other-secret');
+    expect(revokeOwn).toHaveBeenCalledWith(
+      org,
+      expect.objectContaining({
+        tokenId: 'token-1',
+        userId: 'user-1',
+        targetId: 'other-secret',
+        projectId: 'proj-1',
+        projectSlug: 'demo',
+      }),
+    );
+    revokeOwn.mockResolvedValue(true);
+    expect((await call('/-/npm/v1/tokens/token/own', { method: 'DELETE' })).status).toBe(200);
+  });
+  it('refuses creation with a fixed web login instruction', async () => {
+    const { call } = await harness();
+    const response = await call('/-/npm/v1/tokens', {
+      method: 'POST',
+      body: '{"password":"secret"}',
+    });
+    expect(response.status).toBe(405);
+    expect(response.headers.get('allow')).toBe('GET');
+    expect(await response.json()).toMatchObject({
+      error: 'Use npm login --auth-type=web or the UI to create a token',
+    });
+  });
+});
+
+describe('npm token adapter refusals', () => {
+  it('refuses unauthenticated requests before reading tokens', async () => {
+    const listOwn = vi.fn();
+    const revokeOwn = vi.fn();
+    const { call } = await harness({ tokens: { reader: { listOwn }, revokeOwn } });
+    expect((await call('/-/npm/v1/tokens', { headers: { authorization: '' } })).status).toBe(401);
+    expect(listOwn).not.toHaveBeenCalled();
+    expect(revokeOwn).not.toHaveBeenCalled();
+  });
+  it('refuses sessions and service principals at the adapter boundary', async () => {
+    const listOwn = vi.fn();
+    const revokeOwn = vi.fn();
+    const { deps } = await harness({ tokens: { reader: { listOwn }, revokeOwn } });
+    const route = npmRoutes(deps).find(
+      (r) => r.path === '/:project/npm/-/npm/v1/tokens' && r.method === 'GET',
+    )!;
+    for (const service of [false, true]) {
+      const ctx = {
+        org,
+        projectId: 'proj-1',
+        principal: { kind: service ? 'service' : 'user', id: 'owner' },
+        requestId: 'request',
+        request: new Request('https://broker.test/demo/npm/-/npm/v1/tokens'),
+      } as RequestContext;
+      setAccessContext(ctx, {
+        principal: ctx.principal,
+        projectId: 'proj-1',
+        boundary: 'project',
+        sessionId: service ? null : 'session',
+        actor: null,
+        token: service ? { id: 'svc', kind: 'svc', scope: 'full', readOnly: false } : null,
+        rateKey: {
+          stage: 'authenticated',
+          principalId: 'owner',
+          routeClass: 'project',
+          tokenSelector: service ? 'abcdefghijkl' : null,
+        },
+      });
+      expect((await route.handler(ctx)).status).toBe(403);
+    }
+    expect(listOwn).not.toHaveBeenCalled();
+    expect(revokeOwn).not.toHaveBeenCalled();
+  });
+  it('rejects empty and oversized cursors before reading', async () => {
+    const listOwn = vi.fn();
+    const { call } = await harness({ tokens: { reader: { listOwn }, revokeOwn: vi.fn() } });
+    for (const after of ['', 'a'.repeat(201)])
+      expect((await call(`/-/npm/v1/tokens?after=${after}`)).status).toBe(400);
+    expect(listOwn).not.toHaveBeenCalled();
+  });
+  it('terminates pagination with a null next URL', async () => {
+    const { call } = await harness({
+      tokens: {
+        reader: { listOwn: vi.fn(async () => ({ items: [], next: null })) },
+        revokeOwn: vi.fn(),
+      },
+    });
+    expect(await (await call('/-/npm/v1/tokens')).json()).toEqual({
+      objects: [],
+      urls: { next: null },
+    });
+  });
 });

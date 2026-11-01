@@ -1,4 +1,5 @@
 import { withNpmVcsBuildEnqueue } from './npm-build-apply.js';
+import type { NpmTokenAdapters } from '../authz/token-read.js';
 import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
 import { createOidcVerifier } from './npm/oidc/verify.js';
 import { createPublishService, type PublishDependencies } from './npm/publish-service.js';
@@ -152,6 +153,7 @@ export function createNpmHandleOf(
 }
 
 export interface RegistryModuleDeps {
+  readonly npmTokens?: NpmTokenAdapters;
   readonly npmOidc?: Omit<OidcExchangeDependencies, 'verify' | 'clock'>;
   readonly npmPublish?: PublishDependencies;
   readonly runtime: Platform;
@@ -740,6 +742,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       cache: scopedCache,
     }),
     ...npmRoutes({
+      ...(deps.npmTokens === undefined ? {} : { tokens: deps.npmTokens }),
       access: packageAccess,
       ...(deps.npmPublish === undefined
         ? {}

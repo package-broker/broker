@@ -21,7 +21,7 @@ import { parseNpmPath, type NpmPath } from './paths.js';
 import { renderPackument, renderVersionDocument, type NpmRenderOptions } from './render.js';
 import type { NpmAuditEntries } from './audit.js';
 
-export const NPM_RENDER_VERSION = 1;
+export const NPM_RENDER_VERSION = 2;
 const ABBREVIATED_TYPE = 'application/vnd.npm.install-v1+json';
 const VARY = 'Accept, Authorization';
 const REVALIDATE = 'private, no-cache';
@@ -34,6 +34,13 @@ const NOT_FOUND = { status: 404, code: 'not_found', message: 'Route not found' }
 
 export interface NpmRouteDeps {
   readonly tokens?: NpmTokenAdapters;
+  readonly unpublish?: (
+    ctx: RequestContext,
+    name: string,
+    revision: string,
+    file?: string,
+  ) => Promise<Response>;
+  readonly distTagWrite?: (ctx: RequestContext, name: string, tag: string) => Promise<Response>;
   readonly publish?: (ctx: RequestContext, name: string) => Promise<Response>;
   readonly access: PackageAccess;
   readonly dist: Pick<DistService, 'serve'>;
@@ -568,6 +575,35 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       handler: serveDistTags,
     },
   ];
+
+  for (const scoped of [false, true]) {
+    const packagePath = scoped ? '/:a/:b' : '/:a';
+    for (const tarball of [false, true]) {
+      for (const method of (tarball ? ['DELETE'] : ['PUT', 'DELETE']) as readonly (
+        'PUT' | 'DELETE'
+      )[]) {
+        routes.push({
+          method,
+          path: `/:project/npm${packagePath}${tarball ? '/-/:file' : ''}/-rev/:rev`,
+          permission: 'project:packages:manage',
+          boundary: 'project',
+          handler: (ctx) => {
+            const name = nameFrom(ctx.params, scoped ? ['a', 'b'] : ['a']);
+            return name === null
+              ? notFound(ctx)
+              : deps.unpublish === undefined
+                ? publishError(ctx, 503, 'unavailable')
+                : deps.unpublish(
+                    ctx,
+                    name,
+                    ctx.params['rev'] ?? '',
+                    tarball ? ctx.params['file'] : undefined,
+                  );
+          },
+        });
+      }
+    }
+  }
   for (const method of ['PUT', 'POST', 'DELETE'] as const) {
     for (const path of [
       '/:project/npm/-/package/:a/dist-tags/:tag',
@@ -576,9 +612,19 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       routes.push({
         method,
         path,
-        permission: READ,
+        permission: path.endsWith('/:tag') && method !== 'POST' ? 'project:packages:manage' : READ,
         boundary: 'project',
-        handler: methodNotAllowed,
+        handler:
+          path.endsWith('/:tag') && (method === 'PUT' || method === 'DELETE')
+            ? (ctx) => {
+                const name = distTagsName(ctx.params);
+                return name === null
+                  ? notFound(ctx)
+                  : deps.distTagWrite === undefined
+                    ? publishError(ctx, 503, 'unavailable')
+                    : deps.distTagWrite(ctx, name, ctx.params['tag'] ?? '');
+              }
+            : methodNotAllowed,
       });
   }
   for (const names of shapes) {

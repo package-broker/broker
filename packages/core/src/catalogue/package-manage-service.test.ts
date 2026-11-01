@@ -389,3 +389,26 @@ describe('package version management', () => {
     expect(store.quarantineVersion).toHaveBeenCalledTimes(1);
   });
 });
+
+it('requires a reason and organization authority for hosted npm tombstones', async () => {
+  const { call, store } = setup({ ...managed, hostedNpm: true, revision: 3 });
+  expect(await call({ ...input, action: 'tombstone' })).toEqual({
+    ok: false,
+    error: 'invalid_input',
+  });
+  expect(
+    await call({
+      ...input,
+      action: 'tombstone',
+      reason: 'retired',
+      scope: { kind: 'project', projectId },
+    }),
+  ).toEqual({ ok: false, error: 'forbidden' });
+  expect(store.tombstoneVersion).not.toHaveBeenCalled();
+  expect((await call({ ...input, action: 'tombstone', reason: 'retired' })).ok).toBe(true);
+  expect(store.tombstoneVersion).toHaveBeenCalledWith(
+    ctx,
+    fence,
+    expect.objectContaining({ expectedRevision: 3, tombstoneReason: 'retired' }),
+  );
+});

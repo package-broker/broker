@@ -7,12 +7,8 @@ const INSERT = `INSERT INTO audit_pending
   (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip,
    action, target_type, target_id, project_id, payload_json)`;
 
-/** The optional condition is trusted repository SQL, never request input. */
-export function auditPendingStatement(
-  ctx: OrgContext,
-  event: AuditEvent,
-  when?: { sql: string; params: readonly SqlValue[] },
-): Statement {
+/** Refuses an event the audit_pending insert would refuse, for callers that insert it in bulk. */
+export function assertAuditPendingEvent(event: AuditEvent): void {
   if (typeof event.id !== 'string' || !isUlid(event.id)) {
     throw new TypeError('id must be a ULID');
   }
@@ -31,6 +27,15 @@ export function auditPendingStatement(
   ) {
     throw new TypeError('payloadJson must be at most 4096 bytes');
   }
+}
+
+/** The optional condition is trusted repository SQL, never request input. */
+export function auditPendingStatement(
+  ctx: OrgContext,
+  event: AuditEvent,
+  when?: { sql: string; params: readonly SqlValue[] },
+): Statement {
+  assertAuditPendingEvent(event);
   const params: SqlValue[] = [
     event.id,
     ctx.orgId,

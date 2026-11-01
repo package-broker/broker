@@ -700,6 +700,7 @@ describe('package admin reader', () => {
     ).toEqual({
       packageId: id(20),
       versionId: id(200),
+      revision: 1,
       ecosystem: 'npm',
       packageName: 'shared',
       version: '200.0.0',

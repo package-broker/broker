@@ -83,6 +83,18 @@ export const API_ERROR_CODES = {
     message:
       'Configure a GitHub App installation or GitHub token before creating a trusted publisher',
   },
+  invalid_unpublish: { status: 400, message: 'Invalid unpublish request' },
+  unpublish_window: {
+    status: 409,
+    message: 'Unpublish window expired; an organization admin must tombstone with a reason',
+  },
+  invalid_dist_tag: { status: 400, message: 'Invalid dist-tag mutation' },
+  invalid_deprecation: { status: 400, message: 'Only deprecated may change' },
+  deprecation_too_long: { status: 400, message: 'Deprecation message is too long' },
+  unpublish_blocked: {
+    status: 409,
+    message: 'A version that is not active blocks removal of the whole package',
+  },
 } as const;
 
 export type ApiErrorCode = keyof typeof API_ERROR_CODES;

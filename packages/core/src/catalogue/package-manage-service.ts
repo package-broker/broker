@@ -14,6 +14,7 @@ export type { PackageManageScope } from '../db/catalogue.js';
 export type PackageVersionAction = 'quarantine' | 'tombstone' | 'release';
 
 export interface PackageManageInput {
+  readonly reason?: string;
   readonly packageId: string;
   readonly versionId: string;
   readonly action: PackageVersionAction;
@@ -106,6 +107,15 @@ export function createPackageManageService(deps: {
       });
       if (version === null) return fail('not_found');
       if (version.publishGate) return fail('publish_gate');
+      if (version.hostedNpm && input.action === 'tombstone') {
+        if (input.scope.kind !== 'organization') return fail('forbidden');
+        if (
+          typeof input.reason !== 'string' ||
+          !input.reason.trim() ||
+          new TextEncoder().encode(input.reason).length > 1000
+        )
+          return fail('invalid_input');
+      }
       const transition = {
         quarantine: { status: 'quarantined', reason: 'admin_quarantine' },
         tombstone: { status: 'tombstoned', reason: 'admin_tombstone' },
@@ -122,6 +132,9 @@ export function createPackageManageService(deps: {
         projectId: version.sourceProjectId,
         context: call.audit,
         changes: {
+          ...(version.hostedNpm && input.action === 'tombstone'
+            ? { reason: { new: input.reason! } }
+            : {}),
           from_status: { old: version.status },
           to_status: { new: to.status },
           package_name: { new: version.packageName },
@@ -133,6 +146,9 @@ export function createPackageManageService(deps: {
         packageId: input.packageId,
         versionId: input.versionId,
         expectedStatus: version.status,
+        ...(version.hostedNpm && input.action === 'tombstone'
+          ? { tombstoneReason: input.reason!, expectedRevision: version.revision! }
+          : {}),
         manage: input.scope,
         audit: audit.event,
         ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),

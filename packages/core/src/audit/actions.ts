@@ -6,6 +6,9 @@ import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
   'package.publish',
+  'package.deprecate',
+  'package.dist_tag',
+  'package.unpublish',
   'package.access_update',
   'publish.approve',
   'publish.reject',
@@ -103,6 +106,9 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
+  'package.deprecate': ['version', 'deprecated'],
+  'package.dist_tag': ['tag', 'version'],
+  'package.unpublish': ['versions'],
   'package.publish': [
     'authority',
     'package',
@@ -189,7 +195,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'registered_name.add': REGISTERED_NAME_FIELDS,
   'registered_name.update': REGISTERED_NAME_FIELDS,
   'registered_name.remove': REGISTERED_NAME_FIELDS,
-  'version.state_change': ['from_status', 'to_status', 'package_name', 'version'],
+  'version.state_change': ['reason', 'from_status', 'to_status', 'package_name', 'version'],
   'version.rebuilt': ['package_name', 'version', 'sha256_old', 'sha256_new'],
   'version.published_at_set': ['package_name', 'version', 'published_at', 'published_at_basis'],
   'import_run.create': IMPORT_RUN_FIELDS,
@@ -453,8 +459,14 @@ function cleanChanges(
         action === 'token.workload_issue' || action.startsWith('trusted_publisher.')
           ? WORKLOAD_CLAIM_LIMITS[field]
           : undefined;
-      const cleaned =
-        workloadLimit !== undefined && !(value === null && action.startsWith('trusted_publisher.'))
+      const publicDeprecation =
+        action === 'package.deprecate' &&
+        field === 'deprecated' &&
+        (value === null || typeof value === 'string');
+      const cleaned = publicDeprecation
+        ? { ok: true as const, value: value as string | null }
+        : workloadLimit !== undefined &&
+            !(value === null && action.startsWith('trusted_publisher.'))
           ? cleanWorkloadClaim(value, field, workloadLimit)
           : accessReason && typeof value === 'string'
             ? new TextEncoder().encode(value).length <= 1000

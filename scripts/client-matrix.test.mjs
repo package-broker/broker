@@ -724,3 +724,87 @@ test('independent publisher roots pack identical bytes without local config or c
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('republish evidence requires the version_exists refusal code', async () => {
+  const { observeResponse } = await import('./client-matrix.mjs');
+  const request = () =>
+    new Request('http://broker.test/alpha/npm/matrix-publish-active', { method: 'PUT' });
+  const routes = [];
+  await observeResponse(
+    routes,
+    request(),
+    Response.json({ code: 'version_exists' }, { status: 409 }),
+    200,
+  );
+  assert.deepEqual(routes, ['republish:matrix-publish-active:409']);
+  await assert.rejects(() =>
+    observeResponse(
+      [],
+      request(),
+      Response.json({ code: 'version_conflict' }, { status: 409 }),
+      200,
+    ),
+  );
+});
+
+test('seed keeps a write publish token and a separate full management token', async () => {
+  const { seed } = await import('./client-matrix-runtime.mjs');
+  const { openMigratedDatabase } =
+    await import('../packages/db-sqlite/dist/testing/migrated-database.js');
+  const db = await openMigratedDatabase();
+  try {
+    const seeded = await seed(db.executor);
+    assert.notEqual(seeded.publishToken, seeded.manageToken);
+    const scopes = await db.executor.all({
+      sql: "SELECT selector, scopes_json FROM token WHERE org_id=? AND selector IN ('publishabcde','manageabcdef') ORDER BY selector",
+      params: [seeded.orgId],
+    });
+    assert.deepEqual(scopes, [
+      { selector: 'manageabcdef', scopes_json: '["full"]' },
+      { selector: 'publishabcde', scopes_json: '["write"]' },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+test('management preparation restores the package to the alpha project', async () => {
+  const { seed } = await import('./client-matrix-runtime.mjs');
+  const { openMigratedDatabase } =
+    await import('../packages/db-sqlite/dist/testing/migrated-database.js');
+  const db = await openMigratedDatabase();
+  try {
+    const seeded = await seed(db.executor);
+    await db.executor.batch([
+      {
+        sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('01J0ACME000000000000000008', ?, 'Active publishes', 'npm', 'hosted')",
+        params: [seeded.orgId],
+      },
+      {
+        sql: "INSERT INTO package (id, org_id, source_id, ecosystem, name, visible_to_new_projects) SELECT '01J0ACME000000000000000009', org_id, id, 'npm', 'matrix-publish-active', 0 FROM source WHERE org_id=? AND name='Active publishes'",
+        params: [seeded.orgId],
+      },
+    ]);
+    await seeded.prepareManagement('matrix-publish-active');
+    await seeded.prepareManagement('matrix-publish-active');
+    assert.deepEqual(
+      await db.executor.all({
+        sql: 'SELECT project_id FROM project_package WHERE org_id=? AND name=?',
+        params: [seeded.orgId, 'matrix-publish-active'],
+      }),
+      [{ project_id: seeded.projectId }],
+    );
+    const rev = async () =>
+      (
+        await db.executor.all({
+          sql: 'SELECT rev FROM package WHERE org_id=? AND name=?',
+          params: [seeded.orgId, 'matrix-publish-active'],
+        })
+      )[0].rev;
+    const before = await rev();
+    await seeded.agePublish('matrix-publish-active', true);
+    assert.equal(await rev(), before + 1);
+  } finally {
+    db.close();
+  }
+});

@@ -1,3 +1,4 @@
+import { npmManagementIssuance } from './npm-management.js';
 import type { OidcReplayBatch, TrustedPublisherBinding } from '../db/oidc.js';
 import type { ApiCall, IdempotencyRecord } from '../api/idempotency.js';
 import { auditEvent, type AuditEvent } from '../audit/actions.js';
@@ -502,8 +503,12 @@ export function createServiceTokenService(deps: ServiceTokenServiceDeps): Servic
     if (requirement.organizationAdmin && actor.isOrganizationAdmin !== true) {
       return deny(ctx, session.userId);
     }
-    const covers = conferred(target, scope.level);
-    if (covers === null) return deny(ctx, session.userId);
+    const conferredCovers = conferred(target, scope.level);
+    if (conferredCovers === null) return deny(ctx, session.userId);
+    const covers = [
+      ...conferredCovers,
+      ...npmManagementIssuance(scope.level, target.permissions),
+    ].sort();
     const live = await authority.livePermissions(ctx, fence, target.projectId);
     if (
       !live.has(requirement.permission) ||

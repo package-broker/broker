@@ -162,10 +162,27 @@ export async function observeResponse(routes, request, response, auditStatus) {
   if (request.method === 'PUT' && PUBLISH_PACKAGES.some((name) => path === `/alpha/npm/${name}`)) {
     const name = path.slice('/alpha/npm/'.length);
     const held = name.endsWith('held');
+    if (response.status === 200) {
+      harnessAssert.equal((await response.clone().json()).ok, true, 'Manifest update failed');
+      routes.push(`management:${name}:200`);
+      return;
+    }
+    if (response.status === 409) {
+      harnessAssert.equal(
+        (await response.clone().json()).code,
+        'version_exists',
+        'Republish must refuse the tombstone',
+      );
+      routes.push(`republish:${name}:409`);
+      return;
+    }
     harnessAssert.equal(response.status, held ? 202 : 201, 'Unexpected publish status');
     const body = await response.clone().json();
     harnessAssert.equal(body.ok, true, 'Publish was not accepted');
-    harnessAssert.equal(body.id, `${name}@1.0.0`, 'Unexpected publish identity');
+    harnessAssert.ok(
+      body.id === `${name}@1.0.0` || body.id === `${name}@1.1.0`,
+      'Unexpected publish identity',
+    );
     if (held)
       harnessAssert.ok(
         body.held?.approval === true && body.held?.scan === false,

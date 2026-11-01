@@ -501,6 +501,8 @@ export type PackageManageScope =
   { readonly kind: 'organization' } | { readonly kind: 'project'; readonly projectId: string };
 
 interface PackageManageWrite {
+  readonly tombstoneReason?: string;
+  readonly expectedRevision?: number;
   readonly packageId: string;
   readonly expectedStatus: VersionStatus;
   readonly manage: PackageManageScope;

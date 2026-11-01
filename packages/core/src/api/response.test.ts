@@ -17,6 +17,12 @@ import {
 } from './response.js';
 
 const statuses = {
+  invalid_unpublish: 400,
+  unpublish_window: 409,
+  invalid_dist_tag: 400,
+  invalid_deprecation: 400,
+  deprecation_too_long: 400,
+  unpublish_blocked: 409,
   github_credentials_required: 409,
   source_not_attached: 409,
   invalid_version: 400,

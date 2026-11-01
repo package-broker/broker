@@ -1,3 +1,7 @@
+import { deprecationChanges, ManifestUpdate, type DeprecationStore } from './deprecate.js';
+import { manifest } from './render.js';
+import { removedVersions, type UnpublishStore } from './unpublish.js';
+import { validDistTag } from './dist-tags.js';
 import { normalizeVersionMetadata, MetadataTooLargeError } from '../../catalogue/metadata.js';
 import { parseAuthorization } from '../../auth/credential-parser.js';
 import { API_ERROR_CODES, jsonResponse } from '../../api/response.js';
@@ -32,8 +36,12 @@ export interface PublishGuardInput {
   readonly routeProjectId: string;
   readonly sourceId: string;
   readonly key: string;
+  readonly permission?: 'project:packages:manage';
 }
 export interface PublishDependencies {
+  readonly unpublish?: UnpublishStore;
+  readonly deprecations?: DeprecationStore;
+  readonly distTags?: import('./dist-tags.js').DistTagStore;
   readonly reads: {
     source(
       ctx: OrgContext,
@@ -116,6 +124,7 @@ export function createPublishService(deps: PublishServiceDeps) {
         selector,
         providerAnchors: anchors,
         organizationAlternative: 'org:packages:publish',
+        npmManagement: true,
       });
       if (
         !found ||
@@ -130,7 +139,9 @@ export function createPublishService(deps: PublishServiceDeps) {
         return publishError(ctx, 403, 'forbidden');
       const projectAuthority = found.projectPermissions.includes('project:packages:write');
       const organizationAuthority = found.organizationPermissions.includes('org:packages:publish');
-      if (!projectAuthority && !organizationAuthority) return publishError(ctx, 403, 'forbidden');
+      const manageAuthority = found.projectPermissions.includes('project:packages:manage');
+      if (!projectAuthority && !organizationAuthority && !manageAuthority)
+        return publishError(ctx, 403, 'forbidden');
       const claims = await deps.reads.source(org, key);
       if (claims.length !== 1) return publishError(ctx, 409, 'name_not_claimed');
       const source = claims[0]!;
@@ -172,10 +183,13 @@ export function createPublishService(deps: PublishServiceDeps) {
       );
       const sink = pipe.writable.getWriter();
       const scannerAbort = new AbortController();
-      const staging = deps.blob.stage(org, pipe.readable, {
-        maxBytes: Math.floor((contentLength * 3) / 4),
-        mediaType: 'application/gzip',
-      });
+      const publishAuthority = projectAuthority || organizationAuthority;
+      const staging: Promise<StagedBlob | undefined> = publishAuthority
+        ? deps.blob.stage(org, pipe.readable, {
+            maxBytes: Math.floor((contentLength * 3) / 4),
+            mediaType: 'application/gzip',
+          })
+        : Promise.resolve(undefined);
       void staging.catch((error: unknown) => {
         stagingFailure = error;
         scannerAbort.abort(error);
@@ -202,6 +216,7 @@ export function createPublishService(deps: PublishServiceDeps) {
           },
           tarballUrl,
           requireLicense: deps.registry.publish.requireLicense,
+          refuseAttachments: !publishAuthority,
           signal: AbortSignal.any([ctx.request.signal, scannerAbort.signal]),
           onTarballChunk: (bytes) => sink.write(bytes),
         });
@@ -210,8 +225,92 @@ export function createPublishService(deps: PublishServiceDeps) {
       } catch (error) {
         await sink.abort(error).catch(() => undefined);
         staged = await staging.catch(() => undefined);
+        if (error instanceof ManifestUpdate) {
+          if (!manageAuthority) return publishError(ctx, 403, 'forbidden');
+          if (!deps.deprecations) return publishError(ctx, 503, 'unavailable');
+          const snapshot = await deps.deprecations.snapshot(org, source.id, key);
+          if (!snapshot) return publishError(ctx, 404, 'not_found');
+          const before = {
+            _id: name,
+            _rev: String(snapshot.rev),
+            name,
+            'dist-tags': snapshot.tags,
+            versions: Object.fromEntries(
+              snapshot.versions.map((v) => [
+                v.version,
+                manifest(
+                  { publicUrl: deps.publicUrl, projectSlug: ctx.params['project'] ?? '' },
+                  v,
+                  name,
+                ),
+              ]),
+            ),
+            time: {
+              created: snapshot.createdAt,
+              modified: snapshot.modifiedAt,
+              ...Object.fromEntries(snapshot.versions.map((v) => [v.version, v.publishedAt])),
+            },
+          };
+          const changes = deprecationChanges(before, error.metadata).map((change) => {
+            const version = snapshot.versions.find((v) => v.version === change.version)!;
+            const event = auditEvent({
+              id: ulid(),
+              now,
+              action: 'package.deprecate',
+              actor: {
+                type: ctx.principal!.kind === 'service' ? 'service_principal' : 'user',
+                id: ctx.principal!.id,
+              },
+              context: {
+                opId: ulid(),
+                requestId: ctx.requestId,
+                sourceIp: null,
+                tokenSelector: selector,
+              },
+              target: { type: 'version', id: version.id },
+              projectId: ctx.projectId,
+              changes: {
+                version: { new: change.version },
+                deprecated: { old: change.old, new: change.message },
+              },
+            });
+            if (!event.ok) throw new PublishValidationError('invalid_deprecation');
+            return { ...change, event: event.event };
+          });
+          try {
+            await deps.deprecations.update(
+              org,
+              deps.writeGuard(
+                org,
+                { ...guardInput, permission: 'project:packages:manage' },
+                anchors,
+              ),
+              {
+                tokenId: token.id,
+                routeProjectId: ctx.projectId,
+                sourceId: source.id,
+                key,
+                snapshot,
+                edits: changes,
+              },
+            );
+          } catch (failure) {
+            if (
+              failure instanceof DbError &&
+              failure.kind === 'unique' &&
+              failure.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+            )
+              return publishError(ctx, 409, 'conflict');
+            throw failure;
+          }
+          const response = jsonResponse(200, { ok: true });
+          response.headers.set('Cache-Control', 'no-store');
+          response.headers.set('x-request-id', ctx.requestId);
+          return response;
+        }
         throw error;
       }
+      if (!publishAuthority || staged === undefined) return publishError(ctx, 403, 'forbidden');
       const tags = (validated.metadata['dist-tags'] ?? {}) as Record<string, string>;
       const metadata = JSON.parse(validated.input.metadata.json) as Record<string, unknown>;
       const principal = { id: ctx.principal.id, kind: ctx.principal.kind };
@@ -370,5 +469,291 @@ export function createPublishService(deps: PublishServiceDeps) {
       if (staged && !promoted && ctx.org)
         await deps.blob.discard(ctx.org, staged).catch(() => undefined);
     }
+  };
+}
+
+export function createDistTagService(deps: PublishServiceDeps) {
+  return async (ctx: RequestContext, name: string, tag: string): Promise<Response> => {
+    const invalid = () => publishError(ctx, 400, 'invalid_dist_tag');
+    if (!validDistTag(tag) || (ctx.request.method === 'DELETE' && tag === 'latest'))
+      return invalid();
+    const access = accessContextOf(ctx);
+    const token = access?.token;
+    const selector =
+      access?.rateKey.stage === 'authenticated' ? access.rateKey.tokenSelector : null;
+    if (!ctx.org || !ctx.projectId || !ctx.principal || !token || !selector)
+      return publishError(ctx, 401, 'token_required');
+    if (token.scope !== 'full' || token.readOnly) return publishError(ctx, 403, 'forbidden');
+    const anchors = await deps.anchors(ctx.org);
+    const found = await deps.lookupToken(ctx.org, {
+      boundary: 'project',
+      projectSlug: ctx.params['project'] ?? '',
+      selector,
+      providerAnchors: anchors,
+      npmManagement: true,
+    });
+    if (
+      !found ||
+      found.token.id !== token.id ||
+      found.project?.id !== ctx.projectId ||
+      !found.projectPermissions.includes('project:packages:manage')
+    )
+      return publishError(ctx, 403, 'forbidden');
+    let key;
+    try {
+      key = packageKey(name, { ecosystem: 'npm' });
+    } catch {
+      return invalid();
+    }
+    const sources = await deps.reads.source(ctx.org, key);
+    if (sources.length !== 1) return publishError(ctx, 405, 'write_unsupported');
+    const sourceId = sources[0]!.id;
+    if (!deps.deprecations || !deps.distTags) return publishError(ctx, 503, 'unavailable');
+    const snapshot = await deps.deprecations.snapshot(ctx.org, sourceId, key);
+    if (!snapshot) return publishError(ctx, 404, 'not_found');
+    if (ctx.request.method === 'DELETE' && !Object.hasOwn(snapshot.tags, tag)) return invalid();
+    let version: string | null = null;
+    if (ctx.request.method === 'PUT') {
+      if (ctx.request.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json')
+        return publishError(ctx, 415, 'unsupported_media_type');
+      const reader = ctx.request.body?.getReader();
+      if (!reader) return invalid();
+      try {
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        for (;;) {
+          const part = await reader.read();
+          if (part.done) break;
+          length += part.value.byteLength;
+          if (length > 1024) return invalid();
+          chunks.push(part.value);
+        }
+        const value: unknown = JSON.parse(await new Blob(chunks).text());
+        if (typeof value !== 'string') return invalid();
+        version = value;
+      } catch {
+        return invalid();
+      } finally {
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
+      if (!snapshot.versions.some((v) => v.version === version)) return invalid();
+    }
+    const input = {
+      tokenId: token.id,
+      selector,
+      projectSlug: ctx.params['project'] ?? '',
+      routeProjectId: ctx.projectId,
+      sourceId,
+      key,
+      permission: 'project:packages:manage' as const,
+    };
+    if (!(await deps.admitted(ctx.org, input))) return publishError(ctx, 403, 'not_admitted');
+    const event = auditEvent({
+      id: ulid(),
+      now: deps.clock.now().toISOString(),
+      action: 'package.dist_tag',
+      actor: {
+        type: ctx.principal.kind === 'service' ? 'service_principal' : 'user',
+        id: ctx.principal.id,
+      },
+      target: { type: 'package', id: snapshot.packageId },
+      projectId: ctx.projectId,
+      context: { opId: ulid(), requestId: ctx.requestId, sourceIp: null, tokenSelector: selector },
+      changes: { tag: { new: tag }, version: { old: snapshot.tags[tag] ?? null, new: version } },
+    });
+    if (!event.ok) return invalid();
+    try {
+      await deps.distTags.update(ctx.org, deps.writeGuard(ctx.org, input, anchors), {
+        ...input,
+        snapshot,
+        tag,
+        version,
+        event: event.event,
+      });
+    } catch (error) {
+      if (
+        error instanceof DbError &&
+        error.kind === 'unique' &&
+        error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+      )
+        return publishError(ctx, 409, 'conflict');
+      return publishError(ctx, 503, 'unavailable');
+    }
+    const response = jsonResponse(200, { ok: true });
+    response.headers.set('Cache-Control', 'no-store');
+    return response;
+  };
+}
+
+export function createUnpublishService(deps: PublishServiceDeps) {
+  return async (
+    ctx: RequestContext,
+    name: string,
+    revision: string,
+    file?: string,
+  ): Promise<Response> => {
+    const invalid = () => publishError(ctx, 400, 'invalid_unpublish');
+    if (!/^[1-9]\d{0,15}$/.test(revision) || !Number.isSafeInteger(Number(revision)))
+      return invalid();
+    const access = accessContextOf(ctx);
+    const token = access?.token;
+    const selector =
+      access?.rateKey.stage === 'authenticated' ? access.rateKey.tokenSelector : null;
+    if (!ctx.org || !ctx.projectId || !ctx.principal || !token || !selector)
+      return publishError(ctx, 401, 'token_required');
+    if (token.scope !== 'full' || token.readOnly) return publishError(ctx, 403, 'forbidden');
+    const anchors = await deps.anchors(ctx.org);
+    const found = await deps.lookupToken(ctx.org, {
+      boundary: 'project',
+      projectSlug: ctx.params['project'] ?? '',
+      selector,
+      providerAnchors: anchors,
+      npmManagement: true,
+    });
+    if (
+      !found ||
+      found.token.id !== token.id ||
+      found.project?.id !== ctx.projectId ||
+      !found.projectPermissions.includes('project:packages:manage')
+    )
+      return publishError(ctx, 403, 'forbidden');
+    let key;
+    try {
+      key = packageKey(name, { ecosystem: 'npm' });
+    } catch {
+      return invalid();
+    }
+    const sources = await deps.reads.source(ctx.org, key);
+    if (sources.length !== 1) return publishError(ctx, 405, 'write_unsupported');
+    const sourceId = sources[0]!.id;
+    if (!deps.deprecations || !deps.unpublish) return publishError(ctx, 503, 'unavailable');
+    const input = {
+      tokenId: token.id,
+      selector,
+      projectSlug: ctx.params['project'] ?? '',
+      routeProjectId: ctx.projectId,
+      sourceId,
+      key,
+      permission: 'project:packages:manage' as const,
+    };
+    if (!(await deps.admitted(ctx.org, input))) return publishError(ctx, 403, 'not_admitted');
+    const success = () => {
+      const response = jsonResponse(200, { ok: true });
+      response.headers.set('Cache-Control', 'no-store');
+      return response;
+    };
+    const snapshot = await deps.deprecations.snapshot(ctx.org, sourceId, key);
+    if (
+      file &&
+      (await deps.unpublish.tarballRemoved(ctx.org, sourceId, key, file, Number(revision)))
+    )
+      return success();
+    if (!snapshot) return publishError(ctx, 404, 'not_found');
+    if (String(snapshot.rev) !== revision) return publishError(ctx, 409, 'conflict');
+    let versions: readonly string[] = snapshot.versions.map((v) => v.version);
+    const whole = !file && ctx.request.method === 'DELETE';
+    if (file) {
+      const base = name.slice(name.lastIndexOf('/') + 1);
+      versions = snapshot.versions
+        .filter((v) => `${base}-${v.version}.tgz` === file)
+        .map((v) => v.version);
+      if (!versions.length) return publishError(ctx, 404, 'not_found');
+    } else if (!whole) {
+      if (ctx.request.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json')
+        return publishError(ctx, 415, 'unsupported_media_type');
+      const reader = ctx.request.body?.getReader();
+      if (!reader) return invalid();
+      try {
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        for (;;) {
+          const part = await reader.read();
+          if (part.done) break;
+          length += part.value.byteLength;
+          if (length > deps.registry.caps.publishMetadataBytes)
+            return publishError(ctx, 413, 'publish_body_too_large');
+          chunks.push(part.value);
+        }
+        const body: unknown = JSON.parse(await new Blob(chunks).text());
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return invalid();
+        const value = body as Record<string, unknown>;
+        if (value._rev !== revision || value.name !== name) return invalid();
+        const before = Object.fromEntries(
+          snapshot.versions.map((v) => [
+            v.version,
+            manifest(
+              { publicUrl: deps.publicUrl, projectSlug: ctx.params['project'] ?? '' },
+              v,
+              name,
+            ),
+          ]),
+        );
+        versions = removedVersions(before, value.versions);
+        deprecationChanges(
+          {
+            _id: name,
+            name,
+            _rev: revision,
+            'dist-tags': snapshot.tags,
+            versions: before,
+            time: {
+              created: snapshot.createdAt,
+              modified: snapshot.modifiedAt,
+              ...Object.fromEntries(snapshot.versions.map((v) => [v.version, v.publishedAt])),
+            },
+          },
+          { ...value, versions: before, 'dist-tags': snapshot.tags },
+        );
+      } catch {
+        return invalid();
+      } finally {
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
+    }
+    if (whole && snapshot.inactive > 0) return publishError(ctx, 409, 'unpublish_blocked');
+    const now = deps.clock.now();
+    if (
+      snapshot.versions.some(
+        (v) =>
+          versions.includes(v.version) &&
+          (Date.parse(v.publishedAt) < now.getTime() - 259200000 ||
+            Date.parse(v.publishedAt) > now.getTime()),
+      )
+    )
+      return publishError(ctx, 409, 'unpublish_window');
+    const event = auditEvent({
+      id: ulid(),
+      now: now.toISOString(),
+      action: 'package.unpublish',
+      actor: {
+        type: ctx.principal.kind === 'service' ? 'service_principal' : 'user',
+        id: ctx.principal.id,
+      },
+      target: { type: 'package', id: snapshot.packageId },
+      projectId: ctx.projectId,
+      context: { opId: ulid(), requestId: ctx.requestId, sourceIp: null, tokenSelector: selector },
+      changes: { versions: { old: versions } },
+    });
+    if (!event.ok) return invalid();
+    try {
+      await deps.unpublish.remove(ctx.org, deps.writeGuard(ctx.org, input, anchors), {
+        ...input,
+        snapshot,
+        versions,
+        whole,
+        event: event.event,
+      });
+    } catch (error) {
+      if (
+        error instanceof DbError &&
+        error.kind === 'unique' &&
+        error.constraint === ACCESS_MUTATION_GUARD_CONSTRAINT
+      )
+        return publishError(ctx, 409, 'conflict');
+      return publishError(ctx, 503, 'unavailable');
+    }
+    return success();
   };
 }

@@ -1,3 +1,4 @@
+import { npmManagementIssuance } from '@package-broker/core/authz/npm-management';
 import { createWorkloadTokenStore } from './workload-token.js';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
@@ -572,7 +573,7 @@ function validateServiceInput(input: IssueServiceTokenInput): void {
   if (new Set(covers).size !== covers.length) {
     throw new TypeError('covered permissions must be distinct');
   }
-  const mask = new Set(scopeMask(input));
+  const mask = new Set(issuanceCoverage(input));
   if (!covers.every((name) => mask.has(name))) {
     throw new TypeError('covered permissions must fit the scope at the principal boundary');
   }
@@ -586,6 +587,11 @@ function scopeMask(input: IssueServiceTokenInput): string[] {
   );
 }
 
+/** The scope mask plus the permissions the npm management issuance check adds to coverage. */
+function issuanceCoverage(input: IssueServiceTokenInput): string[] {
+  return [...scopeMask(input), ...npmManagementIssuance(input.scope, ['project:packages:manage'])];
+}
+
 function serviceIssuance(
   ctx: OrgContext,
   fence: MutationFence,
@@ -597,7 +603,7 @@ function serviceIssuance(
     with ip(org_id, session_id, user_id, principal_id, project_id, expires_at, read_only, covers, mask) as (
       select ${ctx.orgId}, ${fence.sessionId}, ${fence.userId}, ${input.servicePrincipalId},
         ${input.projectId}, ${input.expiresAt}, ${input.readOnly ? 1 : 0},
-        ${JSON.stringify(input.authority.covers)}, ${JSON.stringify(scopeMask(input))}
+        ${JSON.stringify(input.authority.covers)}, ${JSON.stringify(issuanceCoverage(input))}
     )
     select 1 from ip
     join session as issuing_session

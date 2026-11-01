@@ -1,5 +1,6 @@
 import { clearPackageActor, setPackageActor } from '../internal/package-actor.js';
 import type { ActorAccessSnapshot } from './actor.js';
+import { npmManagementPermits, npmManagementRoute } from './npm-management.js';
 import { catalogueTokenEligible } from './catalogue.js';
 import { assertCsrfToken, assertSameOrigin, UNSAFE_METHODS } from '../auth/csrf.js';
 import { SESSION_COOKIE, readCookie } from '../auth/cookies.js';
@@ -83,6 +84,7 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
 export type EngineBoundary = 'organization' | 'project';
 
 export interface EngineLookupInput {
+  readonly npmManagement?: true;
   readonly boundary: EngineBoundary;
   readonly organizationAlternative?: string;
   readonly projectSlug: string | null;
@@ -379,6 +381,18 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       if (projectAccess?.project == null) return NOT_FOUND;
     }
     const effective = tokenEffective(found, input.boundary);
+    const npmManage =
+      npmManagementPermits(request.route, permission) &&
+      input.boundary === 'project' &&
+      found.token.bindingOk &&
+      found.token.scope?.level === 'full' &&
+      !found.token.scope.readOnly &&
+      found.project !== null &&
+      (found.token.projectMode === 'all' ||
+        (found.token.projectMode === 'selected' &&
+          (found.token.boundProjectIds?.includes(found.project.id) === true ||
+            found.token.boundProjectId === found.project.id))) &&
+      effective.has('project:packages:manage');
     let decision = decideFrom(
       {
         principal,
@@ -412,8 +426,11 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     ) {
       decision = { allow: true, principal, projectId: found.project.id };
     }
+    if (!decision.allow && npmManage && slugValid && found.project !== null) {
+      decision = { allow: true, principal, projectId: found.project.id };
+    }
     if (!decision.allow) return decision;
-    if (permission !== null && !catalogueTokenEligible(permission)) return FORBIDDEN;
+    if (permission !== null && !catalogueTokenEligible(permission) && !npmManage) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
     setPackageActor(request, decision, effective, true);
     grants.set(
@@ -510,6 +527,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       }
       const alternative = request.route.organizationAlternative;
       const input: EngineLookupInput = {
+        ...(npmManagementRoute(request.route) ? { npmManagement: true as const } : {}),
         boundary,
         projectSlug: boundary === 'project' && isValidProjectSlug(slug) ? slug : null,
         ...(boundary === 'project' && request.route.allowArchived === true

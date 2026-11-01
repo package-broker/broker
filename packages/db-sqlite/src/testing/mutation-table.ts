@@ -1,3 +1,4 @@
+import { entries as npmTokensEntries } from './mutation-table/npm-tokens.js';
 import { entries as trustedPublisherEntries } from './mutation-table/trusted-publishers.js';
 import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
 import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
@@ -131,6 +132,7 @@ export { builderAllowlist, exportedBuilders, builderNames } from './mutation-tab
 export const mutationTable: readonly MutationEntry[] = [
   ...trustedPublisherEntries,
   ...npmLoginEntries,
+  ...npmTokensEntries,
   ...npmVcsBuildEntries,
   ...publishGuardEntries,
   ...publishesEntries,

@@ -1,3 +1,4 @@
+import type { NpmTokenAdapters } from '../../authz/token-read.js';
 import { API_ERROR_CODES, jsonResponse } from '../../api/response.js';
 import { accessContextOf } from '../../authz/access-context.js';
 import { contextPackageActorOf } from '../../internal/package-actor.js';
@@ -32,6 +33,7 @@ const READ = 'project:packages:read';
 const NOT_FOUND = { status: 404, code: 'not_found', message: 'Route not found' };
 
 export interface NpmRouteDeps {
+  readonly tokens?: NpmTokenAdapters;
   readonly publish?: (ctx: RequestContext, name: string) => Promise<Response>;
   readonly access: PackageAccess;
   readonly dist: Pick<DistService, 'serve'>;
@@ -279,6 +281,67 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     return ok(tags.tags);
   }
 
+  function tokenResponse(body: unknown): Response {
+    const response = jsonResponse(200, body);
+    response.headers.set('Cache-Control', 'private, no-store');
+    return response;
+  }
+
+  async function tokens(ctx: RequestContext): Promise<Response> {
+    const snapshot = accessContextOf(ctx);
+    const token = snapshot?.token;
+    const selector =
+      snapshot?.rateKey.stage === 'authenticated' ? snapshot.rateKey.tokenSelector : null;
+    if (
+      ctx.org === null ||
+      ctx.projectId === null ||
+      ctx.principal?.kind !== 'user' ||
+      token?.kind !== 'pat' ||
+      !token.id ||
+      !selector
+    ) {
+      return fail(ctx, 403, 'forbidden', 'Personal token required', AUDIT_HEADERS);
+    }
+    if (deps.tokens === undefined) return unavailable(ctx, 10);
+    if (ctx.request.method === 'DELETE') {
+      const revoked = await deps.tokens.revokeOwn(ctx.org, {
+        tokenId: token.id,
+        selector,
+        userId: ctx.principal.id,
+        targetId: ctx.params['key'] ?? '',
+        projectId: ctx.projectId,
+        projectSlug: ctx.params['project'] ?? '',
+        requestId: ctx.requestId,
+      });
+      return revoked
+        ? tokenResponse({})
+        : fail(ctx, 404, 'not_found', 'Token not found', AUDIT_HEADERS);
+    }
+    const after = new URL(ctx.request.url).searchParams.get('after');
+    if (after !== null && (after.length === 0 || after.length > 200))
+      return fail(ctx, 400, 'invalid_request', 'Invalid token cursor', AUDIT_HEADERS);
+    const page = await deps.tokens.reader.listOwn(ctx.org, ctx.principal.id, {
+      after,
+      limit: 100,
+      status: 'active',
+      now: ctx.ports.clock.now().toISOString(),
+    });
+    const next = new URL(
+      `${deps.publicUrl.replace(/\/+$/, '')}/${encodeURIComponent(ctx.params['project'] ?? '')}/npm/-/npm/v1/tokens`,
+    );
+    if (page.next !== null) next.searchParams.set('after', page.next);
+    return tokenResponse({
+      objects: page.items.map((item) => ({
+        key: item.id,
+        token: item.id,
+        created: item.createdAt,
+        readonly: item.readOnly,
+        cidr_whitelist: [],
+      })),
+      urls: { next: page.next === null ? null : next.href },
+    });
+  }
+
   async function whoami(ctx: RequestContext): Promise<Response> {
     const handle = await deps.handleOf(ctx);
     return handle === null || handle.includes('@') ? notFound(ctx) : ok({ username: handle });
@@ -437,6 +500,30 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   const pathOf = (names: readonly string[]) =>
     `/:project/npm/${names.map((n) => `:${n}`).join('/')}`;
   const routes: RouteDefinition[] = [
+    ...(['GET', 'POST'] as const).map((method): RouteDefinition => ({
+      method,
+      path: '/:project/npm/-/npm/v1/tokens',
+      permission: 'project:read',
+      boundary: 'project',
+      handler:
+        method === 'GET'
+          ? tokens
+          : (ctx) =>
+              fail(
+                ctx,
+                405,
+                'write_unsupported',
+                'Use npm login --auth-type=web or the UI to create a token',
+                { ...AUDIT_HEADERS, Allow: 'GET' },
+              ),
+    })),
+    {
+      method: 'DELETE',
+      path: '/:project/npm/-/npm/v1/tokens/token/:key',
+      permission: 'project:read',
+      boundary: 'project',
+      handler: tokens,
+    },
     {
       method: 'GET',
       path: '/:project/npm/-/whoami',

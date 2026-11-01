@@ -1,3 +1,4 @@
+import { createNpmTokenAdapters } from '@package-broker/db-sqlite/repositories/npm-tokens';
 import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
 import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
 import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
@@ -786,6 +787,7 @@ function buildRegistryModule(input: {
         return org === null ? null : orgContext(org.id);
       },
     },
+    npmTokens: createNpmTokenAdapters(executor, (ctx) => input.anchors.anchors(ctx)),
     npmPublish: {
       reads: createPublishReads(executor),
       lookupToken: createAccessRepository(executor).lookupToken,

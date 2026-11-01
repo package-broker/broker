@@ -9,6 +9,8 @@ import {
   type AuditAction,
   type AuditContext,
   auditEvent,
+  validateAuditEvent,
+  withPackageAuditName,
 } from './actions.js';
 
 const ACTION_PATTERN = /^[a-z][a-z_]*\.[a-z][a-z_]*$/;
@@ -1459,5 +1461,58 @@ it('preserves complete publisher restriction snapshots including absent and long
   expect(build('token.workload_issue', { repository_id: { new: null } })).toEqual({
     ok: false,
     reason: 'bad_value',
+  });
+});
+
+describe('final audit validation', () => {
+  it('validates package names after enrichment and preserves a valid event', () => {
+    const result = build('package.access_request', { package: { new: 'widget' } });
+    if (!result.ok) throw new Error('invalid fixture');
+    expect(withPackageAuditName(result.event, '@scope/widget')).toMatchObject({
+      payloadJson: expect.stringContaining('@scope/widget'),
+    });
+    expect(validateAuditEvent(result.event)).toEqual(result.event);
+    for (const name of ['person@example.test', 'https://user:password@example.test/path'])
+      expect(() => withPackageAuditName(result.event, name)).toThrow('invalid audit event');
+  });
+  it('enforces the final payload byte budget', () => {
+    const result = build('role.rename');
+    if (!result.ok) throw new Error('invalid fixture');
+    const payloadJson = JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { name: { new: Array.from({ length: 50 }, () => 'x'.repeat(90)) } },
+    });
+    expect(new TextEncoder().encode(payloadJson).length).toBeGreaterThan(4096);
+    expect(() => validateAuditEvent({ ...result.event, payloadJson })).toThrow(
+      'invalid audit event',
+    );
+  });
+  it.each([
+    '{',
+    'null',
+    '[]',
+    JSON.stringify({ op_id: context.opId, request_id: context.requestId, extra: 'private' }),
+    JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { unknown: { new: true } },
+    }),
+    JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { reason: { new: 'https://example.test/path?private=value' } },
+    }),
+    JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { reason: { new: 'x'.repeat(4096) } },
+    }),
+  ])('rejects malformed, unsafe or oversized final payloads', (payloadJson) => {
+    const result = build('package.access_request');
+    if (!result.ok) throw new Error('invalid fixture');
+    expect(() => validateAuditEvent({ ...result.event, payloadJson })).toThrow(
+      'invalid audit event',
+    );
   });
 });

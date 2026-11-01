@@ -295,3 +295,29 @@ it('exports the same reason constraints in components and served operations', ()
     );
   }
 });
+
+it.each([
+  'https://user:password@example.test/path',
+  'https://example.test/path?token=private',
+  ' https://example.test/path ',
+  'person@example.test',
+])('rejects unsafe or transformed reasons in create and decision responses: %s', async (reason) => {
+  const f = await fixture();
+  for (const path of [
+    '/_pb/projects/demo/package-access-requests',
+    `/_pb/package-access-requests/${ID}/approve`,
+    `/_pb/package-access-requests/${ID}/reject`,
+  ]) {
+    const response = await f.request(
+      path,
+      'POST',
+      { reason, ...(path.includes('/projects/') ? { packageId: PACKAGE } : {}) },
+      '"r1"',
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).not.toContain(reason);
+  }
+  expect(f.repository.request).not.toHaveBeenCalled();
+  expect(f.repository.decide).not.toHaveBeenCalled();
+  expect(JSON.stringify(f.log.mock.calls)).not.toContain(reason);
+});

@@ -1,3 +1,4 @@
+import { validateAuditEvent } from '@package-broker/core/audit/actions';
 import { monotonicNow } from '../internal/catalogue-write-guard.js';
 import { sql, type RawBuilder, type SqlBool } from 'kysely';
 import { fenceKind } from '@package-broker/core/authz/fence';
@@ -85,10 +86,10 @@ export function createPackageDetailRepository(
           where org_id = ${ctx.orgId} and id = ${input.packageId} and rev = ${input.revision}`),
           ...visibilityAuditStatements(ctx, {
             ...input,
-            audit: {
+            audit: validateAuditEvent({
               ...input.audit,
               payloadJson: JSON.stringify({
-                ...JSON.parse(input.audit.payloadJson),
+                ...JSON.parse(validateAuditEvent(input.audit).payloadJson),
                 changes: {
                   visible_to_new_projects: {
                     old: pkg.visible_to_new_projects === 1,
@@ -100,7 +101,7 @@ export function createPackageDetailRepository(
                   },
                 },
               }),
-            },
+            }),
           }),
           ...rederiveStatements(ctx, { kind: 'package', packageId: input.packageId }),
         ],

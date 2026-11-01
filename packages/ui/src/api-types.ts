@@ -7456,7 +7456,9 @@ export interface operations {
                   removalAcceptanceArmed: boolean;
                   /** @enum {string} */
                   removalPolicy: 'flag' | 'exclude';
+                  requirePublishApproval?: boolean;
                   retentionDaysOverride?: number | null;
+                  revision: number;
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
                   sync?: {
@@ -7562,7 +7564,9 @@ export interface operations {
                   removalAcceptanceArmed: boolean;
                   /** @enum {string} */
                   removalPolicy: 'flag' | 'exclude';
+                  requirePublishApproval?: boolean;
                   retentionDaysOverride?: number | null;
+                  revision: number;
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
                   sync?: {
@@ -7713,6 +7717,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           /** @enum {string} */
           type:
@@ -7951,7 +7956,9 @@ export interface operations {
   updateProjectSource: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        'If-Match': string;
+      };
       path: {
         project: string;
         source: string;
@@ -7994,6 +8001,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           url?: string | null;
           userAgent?: string | null;
@@ -8044,6 +8052,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
       /** @description Payload too large */
       413: {
         headers: {
@@ -8055,6 +8072,15 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };
@@ -10901,7 +10927,9 @@ export interface operations {
               removalAcceptanceArmed: boolean;
               /** @enum {string} */
               removalPolicy: 'flag' | 'exclude';
+              requirePublishApproval?: boolean;
               retentionDaysOverride?: number | null;
+              revision: number;
               /** @enum {string} */
               status: 'active' | 'degraded' | 'failing' | 'paused';
               sync?: {
@@ -11040,6 +11068,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           /** @enum {string} */
           type:
@@ -11160,7 +11189,9 @@ export interface operations {
   updateOrganizationSource: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        'If-Match': string;
+      };
       path: {
         source: string;
       };
@@ -11202,6 +11233,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           url?: string | null;
           userAgent?: string | null;
@@ -11252,6 +11284,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
       /** @description Payload too large */
       413: {
         headers: {
@@ -11263,6 +11304,15 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };

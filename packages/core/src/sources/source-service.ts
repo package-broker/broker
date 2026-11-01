@@ -58,6 +58,7 @@ export type SourceCreateInput = Omit<
 };
 export type SourceUpdateInput = Omit<SourceChanges, 'credentialId'> & {
   readonly credential?: SourceCredentialInput | null;
+  readonly expectedRevision?: number;
 };
 
 export type SourceError =
@@ -95,6 +96,8 @@ type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: MutationFence];
 export type SourceDto = Pick<
   SourceRecord,
   | 'id'
+  | 'revision'
+  | 'requirePublishApproval'
   | 'projectId'
   | 'name'
   | 'ecosystem'
@@ -356,6 +359,8 @@ function publicSourceConfig(source: SourceRecord) {
 function sourceDto(source: SourceRecord, editable: boolean): SourceDto {
   return {
     id: source.id,
+    revision: source.revision,
+    requirePublishApproval: source.requirePublishApproval,
     projectId: source.projectId,
     name: source.name,
     ecosystem: source.ecosystem,
@@ -695,6 +700,9 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       type: { new: input.type },
       ecosystem: { new: input.ecosystem },
       project_id: { new: input.projectId },
+      ...(input.type === 'hosted'
+        ? { require_publish_approval: { new: input.requirePublishApproval ?? false } }
+        : {}),
     };
     const named = auditEvent({ ...base, changes: { name: { new: input.name }, ...fields } });
     if (named.ok) return named.event;
@@ -714,6 +722,11 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     const record = (field: string, value: AuditValue | undefined) => {
       if (value !== undefined) changes[field] = { new: value };
     };
+    if (input.requirePublishApproval !== undefined)
+      changes.require_publish_approval = {
+        old: source.requirePublishApproval,
+        new: input.requirePublishApproval,
+      };
     record('removal_policy', input.removalPolicy);
     record('poll_interval_seconds', input.pollIntervalSeconds);
     record('retention_days_override', input.retentionDaysOverride);
@@ -934,6 +947,16 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     async create(ctx, who, fence, input, call) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       requireFence(who, fence);
+      if (
+        input.requirePublishApproval !== undefined &&
+        (typeof input.requirePublishApproval !== 'boolean' ||
+          input.type !== 'hosted' ||
+          input.ecosystem !== 'npm')
+      )
+        return invalid(
+          'requirePublishApproval',
+          'only hosted npm sources support publish approval',
+        );
       const bounds = validateBounds(input);
       if (bounds !== null) return bounds;
       const retention = await validateRetention(ctx, input);
@@ -1004,14 +1027,34 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
+      if (
+        input.requirePublishApproval !== undefined &&
+        typeof input.requirePublishApproval !== 'boolean'
+      )
+        return invalid(
+          'requirePublishApproval',
+          'only hosted npm sources support publish approval',
+        );
       const bounds = validateBounds(input);
       if (bounds !== null) return bounds;
       const retention = await validateRetention(ctx, input);
       if (retention !== null) return retention;
       const source = await owned(ctx, who, id);
       if (source === null) return fail('not_found');
-      if (!Object.values(input).some((value) => value !== undefined))
+      if (
+        !Object.entries(input).some(
+          ([key, value]) => key !== 'expectedRevision' && value !== undefined,
+        )
+      )
         return invalid('changes', 'must name one or more updatable source fields');
+      if (
+        input.requirePublishApproval !== undefined &&
+        (source.type !== 'hosted' || source.ecosystem !== 'npm')
+      )
+        return invalid(
+          'requirePublishApproval',
+          'only hosted npm sources support publish approval',
+        );
       const merged = { ...source, ...input };
       let existingKind: string | undefined;
       if (
@@ -1055,9 +1098,11 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       }
       const changes = { ...input };
       delete changes.credential;
+      delete changes.expectedRevision;
       const audit = updateAudits(call, who, source, input);
       const answer = await deps.sources.update(ctx, fence, {
         id,
+        expectedRevision: input.expectedRevision ?? source.revision,
         changes: {
           ...changes,
           ...(input.url === undefined ? {} : { url: validated.value.url }),

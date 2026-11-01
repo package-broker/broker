@@ -177,12 +177,26 @@ describe('Node management API personal access token lifecycle', () => {
   it('stages a write-only Packagist bearer credential before enabling token mode', async () => {
     const base = await start();
     const { cookie, csrf } = await login(base);
-    const send = (route: string, method: string, body?: unknown) =>
-      fetch(`${base}${route}`, {
+    const send = async (route: string, method: string, body?: unknown): Promise<Response> => {
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        origin: base,
+        cookie,
+        'x-csrf-token': csrf,
+      };
+      if (method === 'PATCH') {
+        const listed = await send('/_pb/sources', 'GET');
+        expect(listed.status).toBe(200);
+        const { items } = (await listed.json()) as { items: { id: string; revision: number }[] };
+        headers['If-Match'] =
+          `"r${items.find((item) => route === `/_pb/sources/${item.id}`)!.revision}"`;
+      }
+      return fetch(`${base}${route}`, {
         method,
-        headers: { 'content-type': 'application/json', origin: base, cookie, 'x-csrf-token': csrf },
+        headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
+    };
 
     const created = await send('/_pb/sources', 'POST', {
       name: 'Packagist',

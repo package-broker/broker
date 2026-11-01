@@ -63,6 +63,7 @@ function changes(body: Changes): SourceUpdateInput {
 }
 
 const problemPaths: Readonly<Record<string, string>> = {
+  requirePublishApproval: '/body/requirePublishApproval',
   url: '/body/url',
   name: '/body/name',
   ecosystem: '/body/ecosystem',
@@ -283,7 +284,7 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
         );
         return result.ok ? { status: 201, body: { id: result.value.id } } : failure(result);
       }),
-      apiRoute(update, async ({ ctx, params, body }) => {
+      apiRoute(update, async ({ ctx, params, body, expectedRevision }) => {
         const denied = await mutationPreflight(ctx, params.source);
         if (denied !== null) return denied;
         if (unserved(deps, body.config)) return UNSERVED_PROVIDER;
@@ -293,10 +294,14 @@ export function sourceRoutes(deps: SourceRouteDeps): readonly RouteDefinition[] 
           c.actor,
           c.fence,
           params.source,
-          changes(body),
+          { ...changes(body), expectedRevision: expectedRevision! },
           c.call,
         );
-        return result.ok ? { status: 204 } : failure(result);
+        return result.ok
+          ? { status: 204 }
+          : result.error === 'conflict'
+            ? { error: 'precondition_failed' }
+            : failure(result);
       }),
       apiRoute(pause, async ({ ctx, params }) => {
         const denied = await mutationPreflight(ctx, params.source);

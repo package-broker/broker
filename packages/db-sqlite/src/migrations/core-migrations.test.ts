@@ -161,13 +161,18 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 62 tables, three expand migrations', async () => {
+  it('1: a fresh database gets every core migration: 62 tables, four expand migrations', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
-    expect(ids).toEqual(['core:0001_init', 'core:0002_npm_publish', 'core:0003_npm_identity']);
+    expect(ids).toEqual([
+      'core:0001_init',
+      'core:0002_npm_publish',
+      'core:0003_npm_identity',
+      'core:0004_source_revision',
+    ]);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))
       .sort();

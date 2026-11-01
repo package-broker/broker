@@ -49,6 +49,7 @@ const changes = {
   pollIntervalSeconds: z.number().int().positive().optional(),
   removalPolicy: removalPolicy.optional(),
   retentionDaysOverride: z.number().int().nonnegative().nullable().optional(),
+  requirePublishApproval: z.boolean().optional(),
   defaultVisibleToNewProjects: z.boolean().optional(),
 };
 const createBody = z.strictObject({ name: z.string().min(1), ecosystem, type, ...changes });
@@ -65,6 +66,7 @@ const listQuery = z.strictObject({
   after: ulid.optional(),
 });
 const source = z.strictObject({
+  revision: z.number().int().positive(),
   id: ulid,
   projectId: ulid.nullable(),
   name: z.string(),
@@ -75,6 +77,7 @@ const source = z.strictObject({
   configComplete: z.boolean().optional(),
   userAgent: z.string().nullable().optional(),
   retentionDaysOverride: z.number().int().nonnegative().nullable().optional(),
+  requirePublishApproval: z.boolean().optional(),
   defaultVisibleToNewProjects: z.boolean().optional(),
   status: z.enum(['active', 'degraded', 'failing', 'paused']),
   removalPolicy,
@@ -184,6 +187,7 @@ function scopeSpecs(boundary: 'organization' | 'project') {
     },
     {
       method: 'PATCH',
+      concurrency: 'if-match',
       path: `${path}/:source`,
       boundary,
       permission: `${scope}:sources:write`,

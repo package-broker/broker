@@ -53,6 +53,8 @@ type Reply = { status: number; body?: string };
 function harness(ecosystem: 'npm' | 'composer' = 'npm') {
   const key = ecosystem === 'npm' ? 'widget' : 'acme/widget';
   const source: SourceRecord = {
+    revision: 1,
+    requirePublishApproval: false,
     id: 'src-1',
     projectId: null,
     name: 'upstream',

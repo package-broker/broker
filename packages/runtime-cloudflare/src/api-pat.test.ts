@@ -145,14 +145,17 @@ async function boot(binding: string) {
 describe('Workers management API personal access token lifecycle', () => {
   it('stages a write-only Packagist bearer credential before enabling token mode', async () => {
     const { call, executor, cookie, csrf, orgId } = await boot('APDB3');
-    const send = (route: string, method: string, body?: unknown) =>
-      call(
-        request(route, {
-          method,
-          body,
-          headers: { cookie, 'x-csrf-token': csrf },
-        }),
-      );
+    const send = async (route: string, method: string, body?: unknown): Promise<Response> => {
+      const headers: Record<string, string> = { cookie, 'x-csrf-token': csrf };
+      if (method === 'PATCH') {
+        const listed = await send('/_pb/sources', 'GET');
+        expect(listed.status).toBe(200);
+        const { items } = (await listed.json()) as { items: { id: string; revision: number }[] };
+        headers['If-Match'] =
+          `"r${items.find((item) => route === `/_pb/sources/${item.id}`)!.revision}"`;
+      }
+      return call(request(route, { method, body, headers }));
+    };
 
     const created = await send('/_pb/sources', 'POST', {
       name: 'Packagist',

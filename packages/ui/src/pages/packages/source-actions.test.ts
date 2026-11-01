@@ -16,6 +16,7 @@ import {
 } from './source-actions.js';
 
 const source: Source = {
+  revision: 1,
   id: 'source',
   name: 'Packagist',
   type: 'packagist_proxy',

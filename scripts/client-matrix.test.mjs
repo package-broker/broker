@@ -8,6 +8,7 @@ import {
   checkResult,
   checkTraffic,
   fixtureReply,
+  PUBLISH_PACKAGES,
 } from './client-matrix.mjs';
 
 test('requires a supported client and an exact approved version', () => {
@@ -245,6 +246,26 @@ test('does not give pnpm npm-only install or ping options', () => {
   const commands = clientCommands('pnpm');
   assert.deepEqual(commands.install.args, ['install', '--ignore-scripts', '--no-frozen-lockfile']);
   assert.deepEqual(commands.ping.args, ['ping']);
+});
+
+test('fixture answers public-name admission probes for every hosted publish fixture', async () => {
+  for (const name of PUBLISH_PACKAGES) {
+    const path = name.startsWith('@')
+      ? `@${encodeURIComponent(name.slice(1))}`
+      : encodeURIComponent(name);
+    const response = await fixtureReply(
+      new Request(`https://registry.npmjs.org/${path}`, { method: 'HEAD' }),
+      [],
+    );
+    assert.equal(response.status, 404);
+    assert.equal(await response.text(), '');
+  }
+  for (const url of [
+    'https://registry.npmjs.org/matrix-public',
+    'https://npm.matrix.test/matrix-publish-active',
+    'https://registry.npmjs.org/missing',
+  ])
+    await assert.rejects(() => fixtureReply(new Request(url, { method: 'HEAD' }), []));
 });
 
 test('fixture returns 404 for names and tarballs absent from each origin', async () => {

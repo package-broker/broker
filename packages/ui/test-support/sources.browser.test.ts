@@ -9,15 +9,18 @@ let sources: (typeof source)[] = [];
 let projectFails = false;
 let organizationFails = false;
 let packageStatus = 202;
-const requests: { path: string; method: string; body: unknown }[] = [];
+const requests: { path: string; method: string; body: unknown; ifMatch?: string | null }[] = [];
 const timeout = 5_000;
 const source = {
+  revision: 1,
+  requirePublishApproval: false,
+  config: {},
   id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
   projectId: 'project-id' as string | null,
   name: 'Private npm',
   ecosystem: 'npm',
   type: 'npm_registry',
-  url: 'https://registry.example',
+  url: 'https://registry.example' as string | null,
   status: 'active',
   removalPolicy: 'flag',
   pollIntervalSeconds: 300,
@@ -59,9 +62,15 @@ beforeAll(async () => {
   fixture = await createBrowserFixture({
     api: async (request) => {
       const path = new URL(request.url).pathname;
-      const body: unknown =
-        request.method === 'POST' ? await request.json().catch(() => null) : null;
-      requests.push({ path, method: request.method, body });
+      const body: unknown = ['POST', 'PATCH'].includes(request.method)
+        ? await request.json().catch(() => null)
+        : null;
+      requests.push({
+        path,
+        method: request.method,
+        body,
+        ...(request.method === 'PATCH' ? { ifMatch: request.headers.get('if-match') } : {}),
+      });
       if (path === '/_pb/me/permissions')
         return Response.json({ organization: ['org:sources:write'] });
       if (path.endsWith('/permissions'))
@@ -122,6 +131,34 @@ async function selectMore(name: string, label: string) {
 }
 
 describe('Sources browser workflows', () => {
+  it(
+    'saves hosted approval with the displayed revision and explains existing holds',
+    { timeout: 30_000 },
+    async (context) => {
+      if (!fixture) context.skip('Chromium cannot start in this environment');
+      const { page, browserExpect } = fixture!;
+      sources = [{ ...source, type: 'hosted', projectId: null, url: null, name: 'Hosted npm' }];
+      await mount(null);
+      await page.getByRole('button', { name: 'Edit Hosted npm', exact: true }).click();
+      const checkbox = page.getByRole('checkbox', {
+        name: 'Require publish approval',
+        exact: true,
+      });
+      await browserExpect(checkbox).toBeVisible();
+      await browserExpect(
+        page.getByText('Versions already held remain held', { exact: false }),
+      ).toBeVisible();
+      await checkbox.check();
+      await page.getByRole('button', { name: 'Save source', exact: true }).click();
+      await browserExpect(page.getByRole('dialog')).not.toBeVisible();
+      expect(requests.find((request) => request.method === 'PATCH')).toMatchObject({
+        path: `/_pb/sources/${source.id}`,
+        ifMatch: '"r1"',
+        body: { requirePublishApproval: true },
+      });
+    },
+  );
+
   it.for([390, 1280])(
     'keeps row metrics and menu confirmations working at %i px',
     { timeout: 30_000 },

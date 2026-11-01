@@ -431,6 +431,8 @@ async function attempt(work: Promise<unknown>): Promise<unknown> {
 
 function sourceRecord(over: Partial<SourceRecord> = {}): SourceRecord {
   return {
+    revision: 1,
+    requirePublishApproval: false,
     id: SRC,
     projectId: null,
     name: 'source',

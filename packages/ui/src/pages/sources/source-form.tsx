@@ -64,6 +64,7 @@ const TYPE_DESCRIPTIONS: Partial<Record<CreateSource['type'], string>> = {
   hosted: 'Reserve private npm package names and publish packages to this broker.',
 };
 const FIELD_LABELS: Record<string, string> = {
+  requirePublishApproval: 'Require publish approval',
   name: 'Source name',
   ecosystem: 'Ecosystem',
   type: 'Source type',
@@ -89,6 +90,7 @@ const FIELD_LABELS: Record<string, string> = {
   'config/githubToken': 'Use GitHub token',
 };
 const FIELD_MESSAGES: Record<string, string> = {
+  requirePublishApproval: 'Choose whether new publishes require approval.',
   name: 'Enter a source name.',
   ecosystem: 'Choose an ecosystem.',
   type: 'Choose a source type.',
@@ -117,6 +119,8 @@ const FIELD_MESSAGES: Record<string, string> = {
   'config/githubToken': 'Save a bearer credential before enabling the GitHub token option.',
 };
 const HELP: Record<string, string> = {
+  requirePublishApproval:
+    'New versions wait for approval before installation. Versions already held remain held when this setting is turned off.',
   pollIntervalSeconds: 'How often to check for upstream changes. 300 seconds = 5 minutes.',
   retentionDaysOverride:
     'Leave blank to use the organization setting. An override can only lengthen retention.',
@@ -238,6 +242,7 @@ function sourceChanges(
     pollIntervalSeconds: integer(value('pollIntervalSeconds'), 1),
     removalPolicy: value('removalPolicy') as Source['removalPolicy'],
   };
+  if (type === 'hosted') changes.requirePublishApproval = checked('requirePublishApproval');
   changes.defaultVisibleToNewProjects = checked('defaultVisibleToNewProjects');
   changes.retentionDaysOverride =
     value('retentionDaysOverride').trim() === ''
@@ -894,6 +899,7 @@ export function SourceForm({
                         : 'After adding this source, save its credentials to finish setup.'}
                 </p>
               ) : null}
+              {type === 'hosted' && ecosystem === 'npm' ? check('requirePublishApproval') : null}
               <details className="min-w-0">
                 <summary className="min-h-11 cursor-pointer py-3 text-sm font-medium">
                   Advanced settings

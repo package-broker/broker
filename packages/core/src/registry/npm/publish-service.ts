@@ -13,6 +13,7 @@ import { ulid, type Clock } from '../../ids.js';
 import {
   BlobAdmissionError,
   BlobBusyError,
+  BlobTooLargeError,
   type CoreBlobStore,
   type StagedBlob,
 } from '../../platform/blob.js';
@@ -66,7 +67,9 @@ export interface PublishServiceDeps extends PublishDependencies {
 
 export const PUBLISH_DOCS = 'https://package.broker/docs/clients/npm-pnpm-yarn';
 export function publishError(ctx: RequestContext, status: number, code: string): Response {
-  const messages: Readonly<Record<string, { readonly message: string }>> = API_ERROR_CODES;
+  const messages: Readonly<Record<string, { readonly message: string; readonly status: number }>> =
+    API_ERROR_CODES;
+  if (Object.hasOwn(messages, code)) status = messages[code]!.status;
   const message = Object.hasOwn(messages, code)
     ? messages[code]!.message
     : 'Publish request refused';
@@ -158,8 +161,8 @@ export function createPublishService(deps: PublishServiceDeps) {
       if (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)))
         return publishError(ctx, 400, 'invalid_publish_body');
       const contentLength = Number(length);
-      if (Math.floor((contentLength * 3) / 4) > deps.registry.caps.publishTarballBytes)
-        return publishError(ctx, 413, 'tarball_too_large');
+      if (contentLength > deps.registry.caps.publishBodyBytes)
+        return publishError(ctx, 413, 'publish_body_too_large');
       const now = deps.clock.now().toISOString();
       const credential = parseAuthorization(ctx.request.headers.get('authorization'));
       const pipe = new TransformStream<Uint8Array, Uint8Array>(
@@ -168,15 +171,14 @@ export function createPublishService(deps: PublishServiceDeps) {
         { highWaterMark: 262144, size: (chunk) => chunk.byteLength },
       );
       const sink = pipe.writable.getWriter();
+      const scannerAbort = new AbortController();
       const staging = deps.blob.stage(org, pipe.readable, {
-        maxBytes: Math.min(
-          deps.registry.caps.publishTarballBytes,
-          Math.floor((contentLength * 3) / 4),
-        ),
+        maxBytes: Math.floor((contentLength * 3) / 4),
         mediaType: 'application/gzip',
       });
       void staging.catch((error: unknown) => {
         stagingFailure = error;
+        scannerAbort.abort(error);
         return sink.abort(error).catch(() => undefined);
       });
       const packagePath = name.split('/').map(encodeURIComponent).join('/').replace(/^%40/, '@');
@@ -200,7 +202,7 @@ export function createPublishService(deps: PublishServiceDeps) {
           },
           tarballUrl,
           requireLicense: deps.registry.publish.requireLicense,
-          signal: ctx.request.signal,
+          signal: AbortSignal.any([ctx.request.signal, scannerAbort.signal]),
           onTarballChunk: (bytes) => sink.write(bytes),
         });
         await sink.close();
@@ -334,6 +336,8 @@ export function createPublishService(deps: PublishServiceDeps) {
       response.headers.set('x-request-id', ctx.requestId);
       return response;
     } catch (error) {
+      if (stagingFailure instanceof BlobTooLargeError || error instanceof BlobTooLargeError)
+        return publishError(ctx, 413, 'tarball_too_large');
       if (
         stagingFailure instanceof BlobAdmissionError ||
         stagingFailure instanceof BlobBusyError ||
@@ -343,8 +347,13 @@ export function createPublishService(deps: PublishServiceDeps) {
         return publishError(ctx, 503, 'busy');
       if (error instanceof MetadataTooLargeError)
         return publishError(ctx, 413, 'manifest_too_large');
-      if (error instanceof PublishValidationError)
+      if (error instanceof PublishValidationError) {
+        if (error.code === 'publish_cancelled' && stagingFailure !== undefined)
+          return stagingFailure instanceof PublishValidationError
+            ? publishError(ctx, stagingFailure.status, stagingFailure.code)
+            : publishError(ctx, 503, 'staging_failed');
         return publishError(ctx, error.status, error.code);
+      }
       if (
         error instanceof DbError &&
         error.kind === 'unique' &&

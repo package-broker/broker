@@ -468,3 +468,7 @@ For Workers, stream live logs using the deployment's Wrangler configuration. App
 ```sh
 wrangler tail --config "${WRANGLER_CONFIG:?}"
 ```
+
+## npm login handoff migration
+
+Migration `0006_npm_login_handoff.sql` rebuilds `npm_login_session` to add the `delivering` state. It is a contract-phase migration. On Cloudflare, apply it with `pb cloudflare migrate --allow-contract` before deploying the new build. Cloudflare deployment tooling refuses code rollback across the recorded contract migration. On Node, the migration applies at startup unless migrations are disabled. Take a backup before applying it; returning to the previous schema requires restoring that backup.

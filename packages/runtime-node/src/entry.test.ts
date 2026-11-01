@@ -205,6 +205,7 @@ describe('runEntry', () => {
         'core:0003_npm_identity',
         'core:0004_source_revision',
         'core:0005_package_settings_revision',
+        'core:0006_npm_login_handoff',
       ]);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
@@ -232,6 +233,12 @@ describe('runEntry', () => {
           level: 'info',
           message: 'applied core:0005_package_settings_revision',
           id: 'core:0005_package_settings_revision',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0006_npm_login_handoff',
+          id: 'core:0006_npm_login_handoff',
           holder,
         },
       ]);

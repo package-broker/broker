@@ -691,6 +691,14 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
   const trustedProxy = parseTrustedProxy(options.env['PB_TRUSTED_PROXY']);
   if (trustedProxy === null) throw new StartupConfigError('PB_TRUSTED_PROXY', TRUSTED_PROXY_RULE);
   if (trustedProxy.kind === 'legacy') options.log?.(TRUSTED_PROXY_DEPRECATION);
+  if (options.env['PB_TRUSTED_PROXY'] === undefined)
+    options.log?.({
+      level: 'info',
+      event: 'config.proxy_unset',
+      key: 'PB_TRUSTED_PROXY',
+      message:
+        'Set PB_TRUSTED_PROXY behind a reverse proxy so anonymous admission uses client addresses.',
+    });
 
   const log = options.log;
   const path = options.env['PB_SQLITE_PATH'] ?? DEFAULT_DATABASE_PATH;

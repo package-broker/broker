@@ -1,3 +1,4 @@
+import { createAnonymousAdmission } from '../../../api/anonymous-admission.js';
 import { jsonResponse } from '../../../api/response.js';
 import type { createWorkloadTokenService } from '../../../authz/service-token-service.js';
 import { packageKey } from '../../../catalogue/names.js';
@@ -9,6 +10,7 @@ import { findTrustedPublisher } from './publisher.js';
 import { OidcError, type VerifiedOidcClaims } from './verify.js';
 
 export interface OidcExchangeDependencies {
+  readonly clientIp: (request: Request) => string | null;
   readonly verify: (jwt: string, now: number) => Promise<VerifiedOidcClaims>;
   readonly repository: Pick<OidcRepository, 'find' | 'reserveStatements'>;
   readonly tokens: ReturnType<typeof createWorkloadTokenService>;
@@ -25,6 +27,7 @@ function refused(ctx: RequestContext, status: number, code: string): Response {
   return response(ctx, status, { error: 'OIDC exchange refused', code, requestId: ctx.requestId });
 }
 export function createOidcExchangeRoute(deps: OidcExchangeDependencies): RouteDefinition {
+  const admit = createAnonymousAdmission(() => deps.clock.now().getTime());
   return {
     method: 'POST',
     path: '/-/npm/v1/oidc/token/exchange/package/:name',
@@ -33,6 +36,14 @@ export function createOidcExchangeRoute(deps: OidcExchangeDependencies): RouteDe
     needsOrg: false,
     async handler(ctx) {
       try {
+        const org = await deps.organization();
+        if (!org) return refused(ctx, 404, 'not_found');
+        const retry = admit(org.orgId, 'oidc-exchange', deps.clientIp(ctx.request));
+        if (retry > 0) {
+          const result = refused(ctx, 429, 'rate_limited');
+          result.headers.set('Retry-After', String(retry));
+          return result;
+        }
         const name = ctx.params['name'] ?? '';
         try {
           packageKey(name, { ecosystem: 'npm' });
@@ -47,8 +58,6 @@ export function createOidcExchangeRoute(deps: OidcExchangeDependencies): RouteDe
         )
           return refused(ctx, 401, 'invalid_oidc_token');
         const claims = await deps.verify(authorization.slice(7), deps.clock.now().getTime());
-        const org = await deps.organization();
-        if (!org) return refused(ctx, 404, 'not_found');
         const publisher = await findTrustedPublisher(deps.repository, org, name, claims);
         const replay = deps.repository.reserveStatements(org, {
           issuer: claims.issuer,

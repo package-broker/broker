@@ -504,6 +504,7 @@ export function describeOidcContract(
             ids: { ulid },
           });
           const route = createOidcExchangeRoute({
+            clientIp: () => '192.0.2.1',
             repository: db.repo,
             tokens,
             clock,

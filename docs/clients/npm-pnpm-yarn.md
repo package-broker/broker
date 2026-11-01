@@ -49,6 +49,10 @@ npm install '@<scope>/<package>'
 npm ci
 ```
 
+### Web login recovery
+
+During collection, the session enters `delivering` before the broker decrypts the token and builds the response. It becomes `consumed` after the response body is built. If delivery remains unconfirmed in `delivering` for more than five minutes, the expiry job revokes the PAT and records `login_delivery_unconfirmed`; the job runs every 60 seconds. If the `consumed` write commits but the response never reaches the client, the token stays valid. Revoke that token in the UI before trying login again.
+
 ## pnpm
 
 Keep only the scope mapping in the application's `.npmrc`. pnpm 12 ignores repository-controlled auth settings, including an `_authToken` containing an environment placeholder:

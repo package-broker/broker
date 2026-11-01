@@ -13,6 +13,8 @@ import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { createSecretCipher } from '@package-broker/core/secrets/cipher';
 import { base64urlEncode } from '@package-broker/core/auth/primitives';
 import { createNpmLoginRepository } from '../repositories/npm-login.js';
+import { createJobRepository, JOB_UNREGISTERED_GRACE_SECONDS } from '../repositories/job.js';
+import { createJobScheduleRepository } from '../repositories/job-schedule.js';
 const keys = () => createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(1) }]);
 export function describeNpmLoginContract(
   name: string,
@@ -80,9 +82,16 @@ export function describeNpmLoginContract(
           }),
         ).toBe(false);
         expect(
-          await repo.poll(orgContext('other'), 'project', (100).toString(16).padStart(64, '0')),
+          await repo.poll(
+            orgContext('other'),
+            'project',
+            (100).toString(16).padStart(64, '0'),
+            () => {},
+          ),
         ).toEqual({ status: 'not_found' });
-        expect(await repo.poll(ctx, 'wrong', (100).toString(16).padStart(64, '0'))).toEqual({
+        expect(
+          await repo.poll(ctx, 'wrong', (100).toString(16).padStart(64, '0'), () => {}),
+        ).toEqual({
           status: 'not_found',
         });
       }));
@@ -111,6 +120,67 @@ export function describeNpmLoginContract(
           }
         }
       }));
+    it('upgrades the hourly expiry schedule to v2 every minute and disables v1', () =>
+      run(async (executor) => {
+        const ctx = orgContext('org');
+        const schedules = createJobScheduleRepository(executor);
+        await schedules.sync(ctx, [{ name: 'core:npm-login-expire:v1', everySeconds: 3600 }]);
+        const job = createNpmLoginExpiryJob(executor, { enqueue: vi.fn() });
+        expect(job.definition.schedule).toEqual({ everySeconds: 60 });
+        await schedules.sync(ctx, [{ name: job.qualifiedName, everySeconds: 60 }]);
+        expect(
+          await executor.all({
+            sql: 'SELECT name, every_seconds, enabled FROM job_schedule WHERE org_id = ? ORDER BY name',
+            params: [ctx.orgId],
+          }),
+        ).toEqual([
+          { name: 'core:npm-login-expire:v1', every_seconds: 3600, enabled: 0 },
+          { name: 'core:npm-login-expire:v2', every_seconds: 60, enabled: 1 },
+        ]);
+      }));
+    it('buries orphaned v1 expiry rows without retries and keeps the v2 schedule claimable', () =>
+      run(async (executor) => {
+        const ctx = orgContext('org');
+        const repository = createJobRepository(executor);
+        const schedules = createJobScheduleRepository(executor);
+        await schedules.sync(ctx, [{ name: 'core:npm-login-expire:v1', everySeconds: 3600 }]);
+        await schedules.tick(ctx);
+        await executor.batch([
+          {
+            sql: "INSERT INTO job (id, org_id, type, payload_json, idempotency_key, run_at, max_attempts) VALUES ('orphan', ?, 'core:npm-login-expire:v1', '{}', 'orphan', '2000-01-01T00:00:00.000Z', 5)",
+            params: [ctx.orgId],
+          },
+        ]);
+        const job = createNpmLoginExpiryJob(executor, { enqueue: vi.fn() });
+        await schedules.sync(ctx, [{ name: job.qualifiedName, everySeconds: 60 }]);
+        await executor.batch([
+          {
+            sql: 'UPDATE job_schedule SET next_run_at = ? WHERE org_id = ? AND name = ?',
+            params: ['2000-01-01T00:00:00.000Z', ctx.orgId, job.qualifiedName],
+          },
+        ]);
+        const fired = await schedules.tick(ctx);
+        expect(fired).toHaveLength(1);
+        expect(fired[0]!.name).toBe(job.qualifiedName);
+        const cleanup = () =>
+          repository.buryUnregistered(ctx, {
+            types: [job.qualifiedName],
+            graceSeconds: JOB_UNREGISTERED_GRACE_SECONDS,
+            limit: 50,
+          });
+        expect(await cleanup()).toBe(1);
+        expect(await cleanup()).toBe(0);
+        expect(await repository.status(ctx, 'orphan')).toMatchObject({
+          state: 'dead',
+          attempts: 0,
+          lastErrorCode: 'unknown_job_type',
+          history: [],
+        });
+        expect(await repository.listDue(ctx, { types: [job.qualifiedName], limit: 50 })).toEqual([
+          fired[0]!.jobId,
+        ]);
+        expect(await repository.status(orgContext('other'), 'orphan')).toBeNull();
+      }));
     it('bounds each expiry pass to 50 sessions for the D1 invocation budget', () =>
       run(async (executor) => {
         for (let n = 0; n < 51; n++)
@@ -132,7 +202,7 @@ export function describeNpmLoginContract(
         } as JobContext);
         expect(enqueue).toHaveBeenCalledWith(
           orgContext('org'),
-          'core:npm-login-expire:v1',
+          'core:npm-login-expire:v2',
           {},
           { idempotencyKey: 'npm-login-expire:expiry-job' },
         );
@@ -372,7 +442,9 @@ export function describeNpmLoginContract(
         });
         expect((await issue('f'.repeat(64), repo, 'mnopqrstuvwx')).status).toBe('refused');
         expect(await repo.confirmation(ctx, 'f'.repeat(64))).toBeNull();
-        expect(await repo.poll(ctx, 'project', '1'.repeat(64))).toEqual({ status: 'not_found' });
+        expect(await repo.poll(ctx, 'project', '1'.repeat(64), () => {})).toEqual({
+          status: 'not_found',
+        });
         await executor.all({
           sql: "INSERT INTO user_account (id,org_id,email) VALUES ('other','org','other@example.test')",
           params: [],
@@ -457,7 +529,22 @@ export function describeNpmLoginContract(
       run(async (executor) => {
         const keyring = keys();
         const ctx = orgContext('org');
-        const repo = createNpmLoginRepository(executor, keyring);
+        const built = vi.fn();
+        const repo = createNpmLoginRepository(
+          {
+            driver: executor.driver,
+            all: (statement) => executor.all(statement),
+            async batch(statements) {
+              if (
+                statements.some((statement) => statement.sql.includes("SET state = 'consumed'"))
+              ) {
+                expect(built).toHaveBeenCalledTimes(1);
+              }
+              return executor.batch(statements);
+            },
+          },
+          keyring,
+        );
         await repo.start(ctx, {
           id: 'login',
           projectId: 'project',
@@ -484,9 +571,13 @@ export function describeNpmLoginContract(
           sql: "UPDATE npm_login_session SET state='approved', user_id='user', token_id='token', token_ciphertext=?,token_nonce=?,token_key_version=? WHERE org_id='org'",
           params: [base64urlEncode(box.ciphertext), base64urlEncode(box.nonce), box.keyVersion],
         });
+        expect(await repo.poll(orgContext('other'), 'project', 'b'.repeat(64), () => {})).toEqual({
+          status: 'not_found',
+        });
         const results = await Promise.all(
-          Array.from({ length: 8 }, () => repo.poll(ctx, 'project', 'b'.repeat(64))),
+          Array.from({ length: 8 }, () => repo.poll(ctx, 'project', 'b'.repeat(64), built)),
         );
+        expect(built).toHaveBeenCalledTimes(1);
         expect(results.filter((r) => r.status === 'token')).toEqual([
           { status: 'token', token: 'synthetic-token' },
         ]);
@@ -510,6 +601,170 @@ export function describeNpmLoginContract(
             params: [],
           }),
         ).toEqual([{ revoked_at: null }]);
+      }));
+    it('recovers a process stop after claiming a token, with an org-scoped audited sweep', () =>
+      run(async (executor) => {
+        const ctx = orgContext('org');
+        await executor.batch([
+          {
+            sql: "INSERT INTO user_account (id,org_id,email) VALUES ('user','org','test@example.test')",
+            params: [],
+          },
+          {
+            sql: "INSERT INTO token (id,org_id,kind,selector,hash,pepper_version,name,scopes_json,user_id,expires_at) VALUES ('token','org','pat','abcdefghijkl',?,1,'test','[]','user','2099-01-01T00:00:00.000Z')",
+            params: ['c'.repeat(64)],
+          },
+          {
+            sql: "INSERT INTO npm_login_session (id,org_id,project_id,selector_hash,done_hash,expires_at,state,user_id,token_id,token_ciphertext,token_nonce,token_key_version) VALUES ('login','org','project',?,?,'2099-01-01T00:00:00.000Z','approved','user','token','invalid','invalid',1)",
+            params: ['a'.repeat(64), 'b'.repeat(64)],
+          },
+        ]);
+        const stopped: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          async batch(statements) {
+            if (statements.some((s) => s.sql.includes('UPDATE token SET revoked_at')))
+              throw new Error('Injected process stop');
+            return executor.batch(statements);
+          },
+        };
+        await expect(
+          createNpmLoginRepository(stopped, keys()).poll(ctx, 'project', 'b'.repeat(64), () => {}),
+        ).rejects.toThrow('Injected process stop');
+        expect(
+          await executor.all({
+            sql: "SELECT state FROM npm_login_session WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ state: 'delivering' }]);
+        const sweep = createNpmLoginExpiryRepository(executor);
+        const freshBatch = vi.fn(executor.batch);
+        expect(
+          await createNpmLoginExpiryRepository({ ...executor, batch: freshBatch }).expire(ctx),
+        ).toBe(0);
+        expect(freshBatch).not.toHaveBeenCalled();
+        await executor.all({
+          sql: "UPDATE npm_login_session SET delivering_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-6 minutes') WHERE org_id='org'",
+          params: [],
+        });
+        const foreignBatch = vi.fn(executor.batch);
+        expect(
+          await createNpmLoginExpiryRepository({ ...executor, batch: foreignBatch }).expire(
+            orgContext('other'),
+          ),
+        ).toBe(0);
+        expect(foreignBatch).not.toHaveBeenCalled();
+        expect(await sweep.expire(ctx)).toBe(1);
+        expect(await sweep.expire(ctx)).toBe(0);
+        expect(
+          await executor.all({
+            sql: "SELECT revoked_at IS NOT NULL AS revoked FROM token WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ revoked: 1 }]);
+        expect(
+          await executor.all({
+            sql: "SELECT action, json_extract(payload_json, '$.changes.cause.new') AS cause FROM audit_pending WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ action: 'token.revoke', cause: 'login_delivery_unconfirmed' }]);
+      }));
+    it('recovers a stop on the consumed write after building a valid token response', () =>
+      run(async (executor) => {
+        const ctx = orgContext('org');
+        const keyring = keys();
+        const built = vi.fn();
+        await executor.batch([
+          {
+            sql: "INSERT INTO user_account (id,org_id,email) VALUES ('user','org','test@example.test')",
+            params: [],
+          },
+          {
+            sql: "INSERT INTO token (id,org_id,kind,selector,hash,pepper_version,name,scopes_json,user_id,expires_at) VALUES ('token','org','pat','abcdefghijkl',?,1,'test','[]','user','2099-01-01T00:00:00.000Z')",
+            params: ['c'.repeat(64)],
+          },
+          {
+            sql: "INSERT INTO npm_login_session (id,org_id,project_id,selector_hash,done_hash,expires_at,state,user_id,token_id,token_ciphertext,token_nonce,token_key_version) VALUES ('login','org','project',?,?,'2099-01-01T00:00:00.000Z','approved','user','token','invalid','invalid',1)",
+            params: ['a'.repeat(64), 'b'.repeat(64)],
+          },
+        ]);
+        const box = await createSecretCipher(keyring, 'npm-login').seal(
+          new TextEncoder().encode('synthetic-token'),
+          `npm-login/org/${'a'.repeat(64)}`,
+        );
+        await executor.all({
+          sql: "UPDATE npm_login_session SET token_ciphertext=?, token_nonce=?, token_key_version=? WHERE org_id='org' AND id='login'",
+          params: [base64urlEncode(box.ciphertext), base64urlEncode(box.nonce), box.keyVersion],
+        });
+        const stopped: SqlExecutor = {
+          driver: executor.driver,
+          all: (statement) => executor.all(statement),
+          async batch(statements) {
+            if (statements.some((s) => s.sql.includes("SET state = 'consumed'")))
+              throw new Error('Injected process stop');
+            return executor.batch(statements);
+          },
+        };
+        await expect(
+          createNpmLoginRepository(stopped, keyring).poll(ctx, 'project', 'b'.repeat(64), built),
+        ).rejects.toThrow('Injected process stop');
+        expect(
+          await executor.all({
+            sql: "SELECT state FROM npm_login_session WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ state: 'delivering' }]);
+        expect(built).toHaveBeenCalledExactlyOnceWith('synthetic-token');
+        expect(
+          await executor.all({
+            sql: "SELECT revoked_at FROM token WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ revoked_at: null }]);
+        const sweep = createNpmLoginExpiryRepository(executor);
+        const freshBatch = vi.fn(executor.batch);
+        expect(
+          await createNpmLoginExpiryRepository({ ...executor, batch: freshBatch }).expire(ctx),
+        ).toBe(0);
+        expect(freshBatch).not.toHaveBeenCalled();
+        expect(
+          await executor.all({
+            sql: "SELECT revoked_at FROM token WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ revoked_at: null }]);
+        expect(
+          await executor.all({
+            sql: "SELECT action FROM audit_pending WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([]);
+
+        await executor.all({
+          sql: "UPDATE npm_login_session SET delivering_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-6 minutes') WHERE org_id='org'",
+          params: [],
+        });
+        const foreignBatch = vi.fn(executor.batch);
+        expect(
+          await createNpmLoginExpiryRepository({ ...executor, batch: foreignBatch }).expire(
+            orgContext('other'),
+          ),
+        ).toBe(0);
+        expect(foreignBatch).not.toHaveBeenCalled();
+        expect(await sweep.expire(ctx)).toBe(1);
+        expect(await sweep.expire(ctx)).toBe(0);
+        expect(
+          await executor.all({
+            sql: "SELECT revoked_at IS NOT NULL AS revoked FROM token WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ revoked: 1 }]);
+        expect(
+          await executor.all({
+            sql: "SELECT action, json_extract(payload_json, '$.changes.cause.new') AS cause FROM audit_pending WHERE org_id='org'",
+            params: [],
+          }),
+        ).toEqual([{ action: 'token.revoke', cause: 'login_delivery_unconfirmed' }]);
       }));
     it('revokes an undeliverable PAT with an audit in the same batch and returns not_found', () =>
       run(async (executor) => {
@@ -547,7 +802,7 @@ export function describeNpmLoginContract(
           ],
         });
         const results = await Promise.all(
-          Array.from({ length: 8 }, () => repo.poll(ctx, 'project', 'b'.repeat(64))),
+          Array.from({ length: 8 }, () => repo.poll(ctx, 'project', 'b'.repeat(64), () => {})),
         );
         expect(results).toEqual(Array.from({ length: 8 }, () => ({ status: 'not_found' })));
         expect(
@@ -562,7 +817,12 @@ export function describeNpmLoginContract(
             params: [],
           }),
         ).toEqual([
-          { state: 'consumed', token_ciphertext: null, token_nonce: null, token_key_version: null },
+          {
+            state: 'delivering',
+            token_ciphertext: null,
+            token_nonce: null,
+            token_key_version: null,
+          },
         ]);
         await executor.all({
           sql: "UPDATE npm_login_session SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 second') WHERE org_id='org'",

@@ -9,6 +9,7 @@ const packagesRoot = fileURLToPath(new URL('../../', import.meta.url));
 const EXPECTED_MATCHES: Record<string, number> = {
   'db-sqlite/migrations/0001_init.sql': 8,
   'db-sqlite/migrations/0003_npm_identity.sql': 4,
+  'db-sqlite/migrations/0006_npm_login_handoff.sql': 2,
   'db-sqlite/src/contract/auth-contract.ts': 2,
   'db-sqlite/src/contract/migration-contract.ts': 5,
   'db-sqlite/src/contract/migration-lock-contract.ts': 1,

@@ -190,7 +190,7 @@ describe.each([
         ['core:import-apply:v1', undefined],
         ['core:import-rollback:v1', undefined],
         ['core:oidc-replay-expire:v1', { everySeconds: 3600 }],
-        ['core:npm-login-expire:v1', { everySeconds: 3600 }],
+        ['core:npm-login-expire:v2', { everySeconds: 60 }],
         ['core:pat-offboarding:v1', undefined],
         ['core:pat-offboarding-sweep:v1', { everySeconds: 86400 }],
         ['core:source-sync:v1', undefined],

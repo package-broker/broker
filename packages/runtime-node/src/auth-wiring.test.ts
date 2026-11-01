@@ -570,6 +570,19 @@ describe('node auth wiring', () => {
         log: (entry) => records.push(entry),
       });
       running.push(broker);
+      expect(records.filter((entry) => entry['event'] === 'config.proxy_unset')).toEqual(
+        setting === undefined
+          ? [
+              {
+                level: 'info',
+                event: 'config.proxy_unset',
+                key: 'PB_TRUSTED_PROXY',
+                message:
+                  'Set PB_TRUSTED_PROXY behind a reverse proxy so anonymous admission uses client addresses.',
+              },
+            ]
+          : [],
+      );
       const deprecations = records.filter((entry) => entry['event'] === 'config.deprecated');
       expect(deprecations).toEqual(
         warns ? [{ level: 'warn', event: 'config.deprecated', key: 'PB_TRUSTED_PROXY' }] : [],

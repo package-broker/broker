@@ -28,6 +28,8 @@ import {
 } from '@package-broker/core/platform/observability';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { createNpmLoginExpiryJob } from '@package-broker/db-sqlite/repositories/npm-login-expire';
+import { createJobScheduleRepository } from '@package-broker/db-sqlite/repositories/job-schedule';
 import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
 import { openBetterSqliteExecutor } from '../db/better-sqlite3-executor.js';
 import {
@@ -185,6 +187,52 @@ const PAST = '2000-01-01T00:00:00.000Z';
 const WAIT = { timeout: 8000, interval: 20 };
 
 describe('createJobLoop', () => {
+  it('buries orphaned npm-login v1 jobs without attempts while the v2 schedule keeps running', async () => {
+    const h = await harness();
+    const schedules = createJobScheduleRepository(h.executor);
+    await schedules.sync(ORG, [{ name: 'core:npm-login-expire:v1', everySeconds: 3600 }]);
+    const orphan = await h.enqueue('core:npm-login-expire:v1', 'orphan');
+    await h.set('run_at', orphan, PAST);
+    const current = createNpmLoginExpiryJob(h.executor, { enqueue: vi.fn() });
+    await schedules.sync(ORG, [{ name: current.qualifiedName, everySeconds: 60 }]);
+    await h.executor.batch([
+      {
+        sql: 'UPDATE job_schedule SET next_run_at = ? WHERE org_id = ? AND name = ?',
+        params: [PAST, ORG.orgId, current.qualifiedName],
+      },
+    ]);
+    const loop = h.loop([current]);
+    loop.start();
+    await vi.waitFor(async () => {
+      expect(await h.status(orphan)).toMatchObject({
+        state: 'dead',
+        attempts: 0,
+        lastErrorCode: 'unknown_job_type',
+        history: [],
+      });
+      const rows = await h.executor.all({
+        sql: 'SELECT state FROM job WHERE org_id = ? AND type = ?',
+        params: [ORG.orgId, current.qualifiedName],
+      });
+      expect(rows).toEqual([{ state: 'succeeded' }]);
+    }, WAIT);
+    await loop.stop();
+    const again = h.loop([current]);
+    again.start();
+    await vi.waitFor(async () => {
+      expect(
+        await h.executor.all({
+          sql: 'SELECT name, enabled FROM job_schedule WHERE org_id = ? ORDER BY name',
+          params: [ORG.orgId],
+        }),
+      ).toEqual([
+        { name: 'core:npm-login-expire:v1', enabled: 0 },
+        { name: 'core:npm-login-expire:v2', enabled: 1 },
+      ]);
+      expect(await h.status(orphan)).toMatchObject({ state: 'dead', attempts: 0, history: [] });
+    }, WAIT);
+  });
+
   it('takes handler ports and observability from each registered job scope', async () => {
     const h = await harness();
     const seen = new Map<string, JobContext>();

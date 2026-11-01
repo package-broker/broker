@@ -775,6 +775,7 @@ function buildRegistryModule(input: {
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
     npmOidc: {
+      clientIp: clientIpOf,
       repository: createOidcRepository(executor),
       tokens: createWorkloadTokenService({
         tokens: createWorkloadTokenStore(executor),

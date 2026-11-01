@@ -146,6 +146,68 @@ describe.each([
         ).rejects.toMatchObject({ code: 'invalid_attachments' });
       },
     );
+    it.each(['?WJj', 'YW-j', 'YW_j', 'YWJ=', '=WJj', 'YW=J', 'YQ=A', 'YQ==YWJj', 'YQ==Y', 'YQ='])(
+      'rejects alphabet and padding errors across byte chunks: %s',
+      async (encoded) => {
+        const raw = JSON.stringify(
+          body({ _attachments: { 'test-package-1.0.0.tgz': { data: encoded } } }),
+        );
+        await expect(
+          scanPublishBody(stream(enc.encode(raw), 1), {
+            ...options,
+            onTarballChunk: async () => {},
+          }),
+        ).rejects.toMatchObject({ code: 'invalid_attachments' });
+      },
+    );
+    it.each([1, 2, 3, 4, 5, 16383, 16384, 16385])(
+      'decodes split quanta and terminal padding with chunks of %s bytes',
+      async (chunkSize) => {
+        const bytes = Uint8Array.from({ length: 20003 }, (_, i) => i % 256);
+        const encoded = Buffer.from(bytes).toString('base64');
+        const raw = JSON.stringify(
+          body({
+            _attachments: { 'test-package-1.0.0.tgz': { data: encoded, length: bytes.length } },
+          }),
+        );
+        const received: Uint8Array[] = [];
+        await scanPublishBody(stream(enc.encode(raw), chunkSize), {
+          ...options,
+          onTarballChunk: async (part) => {
+            received.push(part);
+          },
+        });
+        expect(join(...received)).toEqual(bytes);
+      },
+    );
+    it.each(['a', 'ab', 'abc'])(
+      'accepts canonical terminal padding for %s across byte chunks',
+      async (text) => {
+        const encoded = Buffer.from(text).toString('base64');
+        const received: Uint8Array[] = [];
+        await scanPublishBody(
+          stream(
+            enc.encode(
+              JSON.stringify(
+                body({
+                  _attachments: {
+                    'test-package-1.0.0.tgz': { data: encoded, length: text.length },
+                  },
+                }),
+              ),
+            ),
+            1,
+          ),
+          {
+            ...options,
+            onTarballChunk: async (part) => {
+              received.push(part);
+            },
+          },
+        );
+        expect(join(...received)).toEqual(enc.encode(text));
+      },
+    );
     it('accepts escaped base64 characters', async () => {
       expect(await scan(JSON.stringify(body()).replace('YWJj', '\\u0059WJj'))).toMatchObject({
         tarballBytes: 3,

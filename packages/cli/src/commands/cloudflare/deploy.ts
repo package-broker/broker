@@ -689,6 +689,7 @@ export const cloudflareDeployContract: DeployProviderContract = {
 };
 
 export interface DeployOptions {
+  cpuMs?: number;
   localAuth?: LocalAuthMode;
   providers?: ProvidersOption;
   workerName: string;
@@ -1657,6 +1658,8 @@ export async function deploy(
   let uploadSent = false;
   let creatingWorker = false;
   try {
+    const cpuMs = o.cpuMs ?? 120000;
+    if (!Number.isSafeInteger(cpuMs) || cpuMs < 1) return invalid();
     if (o.prebuilt)
       await assertPrebuiltConfiguration(
         resolve(o.project ?? dirname(resolve(o.configPath ?? 'broker.config.ts'))),
@@ -2375,6 +2378,7 @@ export async function deploy(
             JSON.stringify({
               ...COMPATIBILITY,
               main_module: 'worker.js',
+              limits: { cpu_ms: cpuMs },
               bindings: [...plainBindings, ...updates],
               ...(installedNames.length ? { keep_bindings: ['secret_text'] } : {}),
               assets: { jwt: token, config: ASSET_CONFIG },

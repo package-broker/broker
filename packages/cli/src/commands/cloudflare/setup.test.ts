@@ -3043,3 +3043,18 @@ it.each([
     expect(ops.deploy).toHaveBeenCalledOnce();
   }
 });
+
+it('forwards a CPU override to deployment', async () => {
+  expect((await setup({ ...options, cpuMs: 45000 }, ops)).exitCode).toBe(0);
+  expect(ops.deploy).toHaveBeenCalledWith(expect.objectContaining({ cpuMs: 45000 }));
+});
+it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid CPU override %s before setup operations',
+  async (cpuMs) => {
+    expect(await setup({ ...options, cpuMs }, ops)).toMatchObject({
+      exitCode: 2,
+      output: { error: { code: 'invalid_input' } },
+    });
+    for (const operation of Object.values(ops)) expect(operation).not.toHaveBeenCalled();
+  },
+);

@@ -36,9 +36,9 @@ const USAGE =
   'Usage: pb build [--config <file>] [--target cloudflare|node] [--out <dir>]\n' +
   '       pb migrate --sqlite <file> [--out <dir> (default .pb/node)] [--dry-run]\n' +
   '       pb bootstrap --sqlite <file> --slug <slug> --name <name>\n' +
-  '       pb cloudflare setup [--workers-paid] [--prebuilt] [--providers <file|none>] [--local-auth enabled|disabled] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
+  '       pb cloudflare setup [--workers-paid] [--cpu-ms <milliseconds>] [--prebuilt] [--providers <file|none>] [--local-auth enabled|disabled] --worker-name <slug> --org-slug <slug> --org-name <name> --admin-email <email> [--key-file <path> | --master-key-env <name>] [--token-file <path>] [--non-interactive] [--yes] [--refresh-setup-token] [--json] [--dry-run]\n' +
   '       pb cloudflare provision [--prebuilt] --worker-name <slug> [--config <file>] [--environment <slug>] [--jurisdiction eu|default] [--inventory <file>] [--out <dir>] [--adopt-resource <kind:id>] [--abandon-intent <op-id>] [--domain <hostname>] [--yes] [--json] [--dry-run]\n' +
-  '       pb cloudflare deploy [--workers-paid] [--prebuilt] [--providers <file|none>] [--local-auth enabled|disabled] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
+  '       pb cloudflare deploy [--workers-paid] [--cpu-ms <milliseconds>] [--prebuilt] [--providers <file|none>] [--local-auth enabled|disabled] --worker-name <slug> [--out <dir>] [--rollout <1..100>] [--domain <hostname>] [--public-url <https-origin>] [--routes <zone:pattern\n...>] [--secret <ENV_NAME>] [--secrets <ENV_NAMES>] [--json] [--dry-run]\n' +
   '       pb cloudflare smoke --worker-name <slug> [--project <slug>] [--smoke-token-env <name>] [--deadline-seconds <1..300>] [--no-rollback] [--json] [--dry-run]\n' +
   '       pb cloudflare teardown --inventory <file> [--config <file>] [--project <dir>] [--inventory-id <owner_digest> --i-understand-this-deletes] [--json] [--dry-run]\n' +
   '       pb cloudflare janitor --repository-id <numeric-id> [--inventory <file>] [--config <file>] [--project <dir>] [--json] [--dry-run]\n' +
@@ -64,6 +64,7 @@ const USAGE =
   'Exit codes: 0 success; 1 error; 2 usage, invalid slug or invalid build configuration; 3 checksum mismatch; 4 migration locked; 5 already bootstrapped with another slug; 6 outcome unknown (response lost after the request was sent)\n' +
   '--providers <file|none>: none removes the definitions; pass a file named none as ./none.\n' +
   '--local-auth enabled|disabled: preserve the live setting when omitted; re-enabling requires --local-auth enabled. PB_AUTH_LOCAL must agree when both are supplied.\n' +
+  '--cpu-ms: set Worker limits.cpu_ms for cloudflare deploy/setup (default 120000); requires Workers Paid.\n' +
   '--workers-paid: use the Paid Workers environment variable limit (128; default 64) for cloudflare deploy/setup.\n' +
   'Exit codes for pb cloudflare smoke: 8 concurrent deployment or ownership conflict; 9 smoke failed on an existing deployment; 10 rollback failed or unknown; 11 contract migration blocks rollback; 12 first-deployment smoke failed with no prior release\n' +
   'Exit codes for pb cloudflare teardown/janitor: 0 cleaned or skipped; 1 cleanup failed; 2 invalid inventory, wrong inventory id or missing destructive confirmation; 4 inventory locked; 6 unresolved resource or deletion outcome; 8 ownership conflict. Production confirmation uses identity.owner_digest as --inventory-id. Adopted D1 and R2 resources always require --i-understand-this-deletes; janitor retains them. Inventory schema version 2 records deployment history and lifecycle baselines. Janitor requires run_identity pb-e2e-<repository-id>-<epoch-seconds> (optional run suffix) and a matching worker_name stem; Worker stems may encode both numbers in lowercase base 36 to fit name limits. Both the run and inventory update must be older than 6 hours. Deleting a Worker removes its versions.\n' +
@@ -161,6 +162,7 @@ function parseCliArgs(argv: string[]) {
         secret: { type: 'string', multiple: true },
         secrets: { type: 'string' },
         'workers-paid': { type: 'boolean' },
+        'cpu-ms': { type: 'string' },
         yes: { type: 'boolean' },
         json: { type: 'boolean' },
         project: { type: 'string' },
@@ -204,6 +206,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'secret',
     'secrets',
     'workers-paid',
+    'cpu-ms',
     'org-slug',
     'org-name',
     'admin-email',
@@ -255,6 +258,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'secret',
     'secrets',
     'workers-paid',
+    'cpu-ms',
     'allow-contract',
     'json',
     'dry-run',
@@ -636,6 +640,16 @@ export async function run(argv: readonly string[]): Promise<number> {
     });
   }
 
+  if (
+    command === 'cloudflare' &&
+    ['setup', 'deploy'].includes(subcommand ?? '') &&
+    values['cpu-ms'] !== undefined
+  ) {
+    const cpuMs = Number(values['cpu-ms']);
+    if (!/^[0-9]+$/.test(values['cpu-ms']) || !Number.isSafeInteger(cpuMs) || cpuMs < 1)
+      return usageError();
+  }
+
   if (command === 'cloudflare' && subcommand === 'setup') {
     if (
       (values.migrate !== undefined && !['true', 'false'].includes(values.migrate)) ||
@@ -648,6 +662,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         ? {}
         : { localAuth: values['local-auth'] as 'enabled' | 'disabled' }),
       ...(values['workers-paid'] === undefined ? {} : { workersPaid: values['workers-paid'] }),
+      ...(values['cpu-ms'] === undefined ? {} : { cpuMs: Number(values['cpu-ms']) }),
       prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'] ?? '',
       env: process.env,
@@ -743,6 +758,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         ? {}
         : { localAuth: values['local-auth'] as 'enabled' | 'disabled' }),
       ...(values['workers-paid'] === undefined ? {} : { workersPaid: values['workers-paid'] }),
+      ...(values['cpu-ms'] === undefined ? {} : { cpuMs: Number(values['cpu-ms']) }),
       prebuilt: values.prebuilt ?? false,
       workerName: values['worker-name'],
       env: process.env,

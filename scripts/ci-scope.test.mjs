@@ -373,6 +373,22 @@ test('scoped command construction keeps filters and shard arguments, skips distr
   );
 });
 
+test('scoped unit builds first for the cli tests unless the e2e project builds the bundles itself', () => {
+  const calls = [];
+  const spawn = (_command, args) => {
+    calls.push(args);
+    return { status: 0 };
+  };
+  runCheck('unit', ['cli'], { spawn });
+  assert.deepEqual(calls, [['build'], ['vitest', 'run', '--project', 'cli']]);
+  calls.length = 0;
+  runCheck('unit', ['cli', 'e2e'], { spawn });
+  assert.deepEqual(calls, [['vitest', 'run', '--project', 'cli', '--project', 'e2e']]);
+  calls.length = 0;
+  runCheck('unit', ['core'], { spawn });
+  assert.deepEqual(calls, [['vitest', 'run', '--project', 'core']]);
+});
+
 test('workflow gates every expensive job and preserves metadata checks on pull requests', () => {
   const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
   const jobs = Object.fromEntries(

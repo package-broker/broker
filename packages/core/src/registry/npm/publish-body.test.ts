@@ -626,10 +626,10 @@ describe.each([
   });
 
   describe('absent attachment', () => {
-    it('refuses an omitted attachments object', async () => {
+    it('dispatches an omitted attachments object as a manifest update', async () => {
       const value: Record<string, unknown> = body();
       delete value._attachments;
-      await expect(scan(value)).rejects.toMatchObject({ code: 'write_unsupported', status: 405 });
+      await expect(scan(value)).rejects.toMatchObject({ code: 'manifest_update', status: 400 });
     });
     it('does not read a stalled source for an already aborted request', async () => {
       let pulled = false;

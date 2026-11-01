@@ -1,4 +1,7 @@
 import { entries as npmTokensEntries } from './mutation-table/npm-tokens.js';
+import { entries as npmDistTagEntries } from './mutation-table/npm-dist-tags.js';
+import { entries as npmUnpublishEntries } from './mutation-table/npm-unpublish.js';
+import { entries as npmDeprecateEntries } from './mutation-table/npm-deprecate.js';
 import { entries as trustedPublisherEntries } from './mutation-table/trusted-publishers.js';
 import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
 import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
@@ -226,6 +229,9 @@ export const mutationTable: readonly MutationEntry[] = [
   ...catalogueWriteVersionUpdateEntries,
   ...cacheEpochEntries,
   ...catalogueEpochEntries,
+  ...npmDistTagEntries,
+  ...npmUnpublishEntries,
+  ...npmDeprecateEntries,
   ...sourceEntries,
   ...attachedProxyEntries,
   ...projectSourceReadEntries,

@@ -1,3 +1,4 @@
+import { runManagement } from './client-matrix-management.mjs';
 import { runApiGate, assertRuntimeParity } from './client-matrix-api.mjs';
 import { runLogin, saveLoginCapture } from './client-matrix-login.mjs';
 import { hashPassword } from '../packages/core/dist/auth/password.js';
@@ -131,6 +132,11 @@ export async function seed(executor) {
     "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, 'org:packages:publish')",
     [orgId, publishPrincipal],
   );
+  for (const permission of ['project:packages:read', 'project:packages:manage'])
+    await sql(
+      'INSERT INTO service_principal_permission (org_id,service_principal_id,permission) VALUES (?,?,?)',
+      [orgId, publishPrincipal, permission],
+    );
   const publishToken = formatToken(
     'svc',
     'publishabcde',
@@ -142,6 +148,21 @@ export async function seed(executor) {
       ulid(),
       orgId,
       await hashToken(keyring, 1, publishToken),
+      publishPrincipal,
+      new Date(Date.now() + 3600000).toISOString(),
+    ],
+  );
+  const manageToken = formatToken(
+    'svc',
+    'manageabcdef',
+    crypto.getRandomValues(new Uint8Array(32)),
+  );
+  await sql(
+    `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, read_only, service_principal_id, expires_at, project_mode) VALUES (?, ?, 'svc', 'manageabcdef', ?, 1, 'manage', '["full"]', 0, ?, ?, 'all')`,
+    [
+      ulid(),
+      orgId,
+      await hashToken(keyring, 1, manageToken),
       publishPrincipal,
       new Date(Date.now() + 3600000).toISOString(),
     ],
@@ -209,6 +230,7 @@ export async function seed(executor) {
   return {
     token,
     publishToken,
+    manageToken,
     orgId,
     projectId,
     oidcPublisherId,
@@ -234,6 +256,39 @@ export async function seed(executor) {
         sql: `SELECT t.project_mode, p.project_id, l.state, l.token_ciphertext FROM npm_login_session l JOIN token t ON t.org_id=l.org_id AND t.id=l.token_id JOIN token_project p ON p.org_id=t.org_id AND p.token_id=t.id WHERE l.org_id=?`,
         params: [orgId],
       }),
+    // The API gate narrows these packages to request-only access, which removes alpha's
+    // default membership; management runs as alpha again.
+    prepareManagement: (name) =>
+      executor.batch([
+        {
+          sql: "UPDATE package SET visible_to_new_projects=1,new_project_access_mode='none',rev=rev+1 WHERE org_id=? AND name=? AND ecosystem='npm'",
+          params: [orgId, name],
+        },
+        {
+          sql: "INSERT INTO project_package (org_id,project_id,package_id,origin,ecosystem,name) SELECT org_id,?,id,'explicit',ecosystem,name FROM package WHERE org_id=? AND name=? AND ecosystem='npm' ON CONFLICT DO NOTHING",
+          params: [projectId, orgId, name],
+        },
+        {
+          sql: 'UPDATE cache_epoch SET version=hex(randomblob(16)) WHERE org_id=?',
+          params: [orgId],
+        },
+      ]),
+    // Clients revalidate the packument; a changed publish time must change its validators.
+    agePublish: (name, old) =>
+      executor.batch([
+        {
+          sql: "UPDATE version SET published_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?) WHERE org_id=? AND package_id IN (SELECT id FROM package WHERE org_id=? AND name=?)",
+          params: [old ? '-73 hours' : '-1 minute', orgId, orgId, name],
+        },
+        {
+          sql: "UPDATE package SET rev=rev+1 WHERE org_id=? AND name=? AND ecosystem='npm'",
+          params: [orgId, name],
+        },
+        {
+          sql: 'UPDATE cache_epoch SET version=hex(randomblob(16)) WHERE org_id=?',
+          params: [orgId],
+        },
+      ]),
     inspectPublish: async (name) =>
       executor.all({
         sql: `SELECT v.status, b.refetchable FROM version v JOIN package p ON p.id = v.package_id AND p.org_id = v.org_id JOIN blob b ON b.id = v.blob_id AND b.org_id = v.org_id WHERE v.org_id = ? AND p.name = ?`,
@@ -525,6 +580,7 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
           );
         }
       });
+      const management = [];
       for (const name of PUBLISH_PACKAGES) {
         await step(`publish ${name}`, async () => {
           const publishRoot = join(directory, 'publish-' + PUBLISH_PACKAGES.indexOf(name));
@@ -566,6 +622,7 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
           );
           assert.equal(read.status, held ? 404 : 200, 'Incorrect published visibility');
           await read.body?.cancel();
+          if (!held) management.push({ publisher, name });
         });
       }
       await step('npm API routes', async () => {
@@ -573,6 +630,12 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
         if (target === 'node') nodeEvidence = evidence;
         else assertRuntimeParity(nodeEvidence, evidence, { debug });
       });
+      for (const entry of management)
+        await step(`management ${entry.name}`, async () => {
+          await broker.prepareManagement(entry.name);
+          await runManagement({ broker, origin: front.origin, client, directory, debug, ...entry });
+          front.assertHealthy();
+        });
       const forwardedBeforeRefusal = audits.length;
       await step('detach proxy', () => broker.detach());
       front.expectAudit(501);

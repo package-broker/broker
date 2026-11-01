@@ -72,7 +72,14 @@ function unavailable(status: 404 | 503, options: NpmRenderOptions): Response {
   return response;
 }
 
-function manifest(options: NpmRenderOptions, version: CatalogueVersion, name: string): Json {
+export function manifest(
+  options: Pick<NpmRenderOptions, 'publicUrl' | 'projectSlug' | 'abbreviated'>,
+  version: Pick<
+    CatalogueVersion,
+    'metadataJson' | 'version' | 'npmIntegrity' | 'deprecatedMessage'
+  >,
+  name: string,
+): Json {
   const stored = JSON.parse(version.metadataJson) as Json;
   const dist = stored.dist as Json | undefined;
   const unscoped = name.slice(name.lastIndexOf('/') + 1);
@@ -123,7 +130,7 @@ async function* chunks(options: NpmRenderOptions): AsyncGenerator<Uint8Array> {
   const display = displayName(pkg.key);
   const head = options.abbreviated
     ? { name: display, modified: pkg.modifiedAt, 'dist-tags': tags.tags }
-    : { _id: display, name: display, 'dist-tags': tags.tags };
+    : { _id: display, _rev: String(pkg.rev), name: display, 'dist-tags': tags.tags };
   yield encoder.encode(`${JSON.stringify(head).slice(0, -1)},"versions":{`);
   const times: string[] = [];
   let first = true;

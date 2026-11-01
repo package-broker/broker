@@ -456,6 +456,11 @@ describe('createRegistryModule assembly', () => {
           `${method} /:project/npm/-/package/:a/dist-tags`,
           `${method} /:project/npm/-/package/:a/dist-tags/:tag`,
         ]),
+        ...['/:project/npm/:a', '/:project/npm/:a/:b'].flatMap((path) => [
+          `PUT ${path}/-rev/:rev`,
+          `DELETE ${path}/-rev/:rev`,
+          `DELETE ${path}/-/:file/-rev/:rev`,
+        ]),
         ...shapes.flatMap((path) => ['GET', 'PUT', 'POST', 'DELETE'].map((m) => `${m} ${path}`)),
       ].sort(),
     );

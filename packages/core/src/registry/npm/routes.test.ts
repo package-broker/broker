@@ -87,8 +87,11 @@ const actor: ProjectActor = {
 interface Setup {
   requestOrigin?: string;
   tokens?: NpmRouteDeps['tokens'];
+  management?: boolean;
+  unpublish?: NpmRouteDeps['unpublish'];
   publisher?: 'project' | 'organization';
   publish?: NpmRouteDeps['publish'];
+  distTagWrite?: NpmRouteDeps['distTagWrite'];
   outcome?: PackageVisibility;
   reresolved?: PackageVisibility;
   ensure?: OnDemandResult;
@@ -127,6 +130,8 @@ async function harness(setup: Setup = {}) {
   );
   const deps: NpmRouteDeps = {
     ...(setup.tokens === undefined ? {} : { tokens: setup.tokens }),
+    ...(setup.unpublish === undefined ? {} : { unpublish: setup.unpublish }),
+    ...(setup.distTagWrite === undefined ? {} : { distTagWrite: setup.distTagWrite }),
     ...(setup.publish === undefined ? {} : { publish: setup.publish }),
     access: access as unknown as PackageAccess,
     dist: { serve },
@@ -154,6 +159,7 @@ async function harness(setup: Setup = {}) {
     projectPermissions: [
       'project:read',
       'project:packages:read',
+      ...(setup.management ? ['project:packages:manage'] : []),
       ...(setup.publisher === 'project' ? ['project:packages:write'] : []),
     ],
   };
@@ -168,9 +174,13 @@ async function harness(setup: Setup = {}) {
         lastUsedAt: null,
         userId: 'user-1',
         servicePrincipalId: null,
-        ...(setup.publisher === undefined
+        ...(!setup.management && setup.publisher === undefined
           ? {}
-          : { bindingOk: true, projectMode: 'all', scope: { level: 'write', readOnly: false } }),
+          : {
+              bindingOk: true,
+              projectMode: 'all',
+              scope: { level: setup.management ? 'full' : 'write', readOnly: false },
+            }),
       },
       principalStatus: 'active',
       validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
@@ -329,20 +339,23 @@ describe('npm route precedence and path hygiene', () => {
     expect((await call('/x?write=true&a=%2570')).status).toBe(200);
   });
 
-  it.each(['PUT', 'POST', 'DELETE'])('answers %s on package paths with 405', async (method) => {
-    const { call, access } = await harness();
-    for (const path of ['/x', '/x/1.0.0', '/%40s%2Fn', '/x/-/x-1.0.0.tgz']) {
-      const response = await call(path, { method, body: method === 'DELETE' ? null : '{}' });
-      if (method === 'PUT' && !path.includes('/-/')) {
-        expect(response.status).toBe(403);
-      } else {
-        expect(response.status).toBe(405);
-        expect(response.headers.get('allow')).toBe('GET, HEAD');
-        expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+  it.each(['PUT', 'POST', 'DELETE'])(
+    'checks permissions before refusing unsupported %s package writes',
+    async (method) => {
+      const { call, access } = await harness();
+      for (const path of ['/x', '/x/1.0.0', '/%40s%2Fn', '/x/-/x-1.0.0.tgz']) {
+        const response = await call(path, { method, body: method === 'DELETE' ? null : '{}' });
+        if (method === 'PUT' && !path.includes('/-/')) {
+          expect(response.status).toBe(403);
+        } else {
+          expect(response.status).toBe(405);
+          expect(response.headers.get('allow')).toBe('GET, HEAD');
+          expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+        }
       }
-    }
-    expect(access.versions).not.toHaveBeenCalled();
-  });
+      expect(access.versions).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('npm tarballs', () => {
@@ -935,7 +948,7 @@ describe('npm publish routing', () => {
     },
   );
   it.each(['PUT', 'POST', 'DELETE'])(
-    'returns the write refusal for %s revision and dist-tag writes',
+    'denies write-only %s management requests and refuses unsupported POST',
     async (method) => {
       const publish = vi.fn(async () => new Response(null, { status: 201 }));
       const h = await harness({ publisher: 'project', publish });
@@ -945,6 +958,11 @@ describe('npm publish routing', () => {
         '/-/package/%40s%2Fn/dist-tags/latest',
       ]) {
         const response = await h.call(path, { method, body: '{}' });
+        if (method !== 'POST') {
+          expect(response.status).toBe(403);
+          expect(await response.text()).not.toContain('write_unsupported');
+          continue;
+        }
         expect(response.status).toBe(405);
         expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
         expect(response.headers.get('allow')).toBe('GET, HEAD');
@@ -1101,4 +1119,43 @@ describe('npm token adapter refusals', () => {
       urls: { next: null },
     });
   });
+});
+
+describe('npm dist-tag adapter dispatch', () => {
+  it.each(['PUT', 'DELETE'])('dispatches %s scoped and unscoped names', async (method) => {
+    const distTagWrite = vi.fn(async () => new Response(null, { status: 200 }));
+    const h = await harness({ distTagWrite, management: true });
+    for (const [encoded, name] of [
+      ['widget', 'widget'],
+      ['%40s%2Fn', '@s/n'],
+    ]) {
+      expect(
+        (await h.call('/-/package/' + encoded + '/dist-tags/beta', { method, body: '"1.0.0"' }))
+          .status,
+      ).toBe(200);
+      expect(distTagWrite).toHaveBeenLastCalledWith(expect.anything(), name, 'beta');
+    }
+  });
+});
+
+it('dispatches npm unpublish revision and tarball routes for encoded scoped and unscoped packages', async () => {
+  const unpublish = vi.fn(async () => new Response(null, { status: 200 }));
+  const h = await harness({ unpublish, management: true });
+  for (const [path, name, file] of [
+    ['/widget/-rev/1', 'widget', undefined],
+    ['/%40s%2Fn/-rev/1', '@s/n', undefined],
+    ['/@s/n/-rev/1', '@s/n', undefined],
+    ['/widget/-/widget-1.0.0.tgz/-rev/1', 'widget', 'widget-1.0.0.tgz'],
+    ['/@s/n/-/n-1.0.0.tgz/-rev/1', '@s/n', 'n-1.0.0.tgz'],
+  ] as const) {
+    expect((await h.call(path, { method: 'DELETE' })).status).toBe(200);
+    expect(unpublish).toHaveBeenLastCalledWith(expect.anything(), name, '1', file);
+  }
+  unpublish.mockClear();
+  for (const path of ['/widget/-/widget-1.0.0.tgz', '/@s/n/-/n-1.0.0.tgz']) {
+    const response = await h.call(path, { method: 'DELETE' });
+    expect(response.status).toBe(405);
+    expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+  }
+  expect(unpublish).not.toHaveBeenCalled();
 });

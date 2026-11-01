@@ -2,7 +2,8 @@ import {
   D1_STATEMENTS_PER_BATCH,
   D1_STATEMENTS_PER_INVOCATION,
 } from '@package-broker/core/db/port';
-import { sql } from 'kysely';
+import { sql, type RawBuilder } from 'kysely';
+import { compareNpmVersions } from '@package-broker/core/catalogue/versions';
 import { publishVersion } from './catalogue-publish.js';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
@@ -26,6 +27,7 @@ import {
   db,
   newOpId,
   runOrgFenced,
+  protectedHolder,
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
@@ -478,6 +480,73 @@ export function createVisibilityStore(
       select 1 from version as release_version where release_version.id = ${versionId}
         and release_version.org_id = ${ctx.orgId} and ${leaseCondition})`;
     const plan = versionStatusStatements(ctx, { versionId, to, reason });
+    const raw = (query: RawBuilder<unknown>): Statement =>
+      compile({ compile: () => query.compile(db) });
+    const npmChanges: Statement[] = [];
+    const npmAuthorityChecks: Guard[] = [];
+    let npmRevisionCheck: Guard | undefined;
+    if (to === 'tombstoned') {
+      const hosted = sql<boolean>`exists (select 1 from package np join source ns on ns.id=np.source_id and ns.org_id=${ctx.orgId}
+        where np.org_id=${ctx.orgId} and np.id=${packageId} and np.ecosystem='npm' and ns.type='hosted')`;
+      const freshAdmin = actorHolds(ctx, fence, {
+        permission: 'org:packages:manage',
+        projectId: null,
+        providerAnchors: options.providerAnchors,
+        sessionCondition: (alias) =>
+          sql<boolean>`unixepoch(${sql.ref(alias + '.reauth_at')},'subsec') between unixepoch('now','subsec')-600 and unixepoch('now','subsec')`,
+      });
+      const admin = db
+        .selectFrom('user_account as npm_admin')
+        .select('npm_admin.id')
+        .where('npm_admin.org_id', '=', ctx.orgId)
+        .where('npm_admin.id', '=', fence.userId)
+        .where((eb) =>
+          protectedHolder(ctx, eb.ref('npm_admin.id'), {
+            kind: 'fresh',
+            providers: options.providerAnchors,
+          }),
+        );
+      npmAuthorityChecks.push(
+        sql<boolean>`(not (${hosted}) or ${manage.kind === 'organization' && typeof input.tombstoneReason === 'string' && input.tombstoneReason.trim().length > 0 && input.tombstoneReason.length <= 1000 ? sql`1` : sql`0`})`,
+        sql<boolean>`(not (${hosted}) or ${freshAdmin})`,
+        sql<boolean>`(not (${hosted}) or exists ${admin})`,
+      );
+      npmRevisionCheck = sql<boolean>`(not (${hosted}) or exists (select 1 from version nv where nv.org_id=${ctx.orgId} and nv.id=${versionId} and nv.revision=${input.expectedRevision ?? -1}))`;
+      for (const condition of [...npmAuthorityChecks, npmRevisionCheck])
+        npmChanges.push(...assertCheck(condition));
+      if (input.tombstoneReason !== undefined) {
+        const rows = await bounded.all<{ id: string; version: string; rev: number }>(
+          raw(sql`select v.id,v.version,p.rev from version v
+          join package p on p.id=v.package_id and p.org_id=${ctx.orgId}
+          where v.org_id=${ctx.orgId} and v.package_id=${packageId} and v.status='active'`),
+        );
+        const next = rows
+          .filter((v) => v.id !== versionId)
+          .sort((a, b) => compareNpmVersions(b.version, a.version))[0];
+        const packageRev = rows[0]?.rev;
+        if (packageRev !== undefined)
+          npmChanges.push(
+            ...assertCheck(
+              sql<boolean>`exists (select 1 from package where org_id=${ctx.orgId} and id=${packageId} and rev=${packageRev})`,
+            ),
+          );
+        npmChanges.push(
+          raw(sql`insert into dist_tag_history (id,org_id,package_id,tag,version_id,previous_version_id,action,actor_type,actor_id,op_id)
+          select ${plan.opId} || '-' || tag,org_id,package_id,tag,${next?.id ?? null},version_id,${next ? 'set' : 'remove'},'user',${fence.userId},${plan.opId}
+          from dist_tag where org_id=${ctx.orgId} and package_id=${packageId} and version_id=${versionId}`),
+        );
+        npmChanges.push(
+          next
+            ? raw(
+                sql`update dist_tag set version_id=${next.id} where org_id=${ctx.orgId} and package_id=${packageId} and version_id=${versionId}`,
+              )
+            : raw(
+                sql`delete from dist_tag where org_id=${ctx.orgId} and package_id=${packageId} and version_id=${versionId}`,
+              ),
+        );
+      }
+    }
+
     const outcome = await runOrgFenced(
       bounded,
       ctx,
@@ -488,7 +557,14 @@ export function createVisibilityStore(
       ),
       [
         ...assertCheck(authority),
+        ...npmChanges,
         ...plan.statements,
+        ...(to === 'tombstoned' && input.tombstoneReason !== undefined
+          ? [
+              raw(sql`update version set tombstone_reason=${input.tombstoneReason},purge_after=strftime('%Y-%m-%dT%H:%M:%fZ','now','+' || (select max(o.retention_removed_upstream_days,coalesce(s.retention_days_override,0)) from organization o join source s on s.org_id=o.id join package p on p.source_id=s.id and p.org_id=${ctx.orgId} where o.id=${ctx.orgId} and p.id=${packageId}) || ' days')
+          where org_id=${ctx.orgId} and id=${versionId} and last_op_id=${plan.opId}`),
+            ]
+          : []),
         auditPendingStatement(ctx, input.audit),
         ...(input.idempotency === undefined
           ? []
@@ -509,6 +585,10 @@ export function createVisibilityStore(
       if (!(await holds(publishGateClear))) return { ok: false, reason: 'publish_gate' };
       if (!(await holds(statusMatches))) return { ok: false, reason: 'conflict' };
       if (!(await holds(authority))) return { ok: false, reason: 'authority' };
+      for (const condition of npmAuthorityChecks)
+        if (!(await holds(condition))) return { ok: false, reason: 'authority' };
+      if (npmRevisionCheck !== undefined && !(await holds(npmRevisionCheck)))
+        return { ok: false, reason: 'conflict' };
       if (!(await holds(blobReady))) return { ok: false, reason: 'conflict' };
       if (
         input.idempotency !== undefined &&

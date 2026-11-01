@@ -682,6 +682,16 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Management fixtures load the existing Node codec and index contract-case names; unpublish enumerates public dist-tags to record history. These operations do not inspect SQL affected-row counts.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n          new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n        ) #1",
+        'db-sqlite/src/repositories/npm-unpublish.ts:opaque object access: Object.entries(snapshot.tags) #1',
+        'db-sqlite/src/testing/mutation-table/npm-management-cases.ts:unresolved computed access: writeCases[index] #1',
+        "db-sqlite/src/testing/mutation-table/npm-management-cases.ts:unresolved computed access: ['p', 's', 'v'][index] #1",
+      ],
+    },
+    {
+      reason:
         'Publisher snapshot traversal pairs validated audit restriction values with their prior values; the contract traverses expected restrictions. None reads executor affected-row counts.',
       sites: [
         'db-sqlite/src/contract/trusted-publishers-contract.ts:opaque object access: Object.entries(values) #1',
@@ -728,7 +738,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'The contract dispatches three named status writers and asserts their typed outcomes; the imported purge constant is a numeric retention interval. Neither site reads executor change counts.',
       sites: [
-        "db-sqlite/src/contract/npm-publish-writer-contract.ts:computed builder call: store[method](ctx, h.fence, {\n              ...base,\n              audit: { ...h.input.event, id: ulid() },\n              expectedStatus,\n              reason: method === 'quarantineVersion' ? 'admin_quarantine' : 'admin_tombstone',\n            } as never) #1",
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:computed builder call: store[method](ctx, h.fence, {\n              ...base,\n              ...(method === 'tombstoneVersion'\n                ? { tombstoneReason: 'retired', expectedRevision: current!.revision }\n                : {}),\n              audit: { ...h.input.event, id: ulid() },\n              expectedStatus,\n              reason: method === 'quarantineVersion' ? 'admin_quarantine' : 'admin_tombstone',\n            } as never) #1",
         "db-sqlite/src/repositories/blob-references.ts:opaque dependency: import { PUBLISH_PURGE_WINDOW_DAYS } from '@package-broker/core/db/publishes'; #1",
       ],
     },
@@ -1581,7 +1591,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${orphanSql(blobRef)}\n    AND (${blobRef}.refetchable = 1 OR (${blobRef}.refetchable = 0 AND ${blobRef}.storage_key LIKE 'npm-publish/%'))\n    AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')\n    AND NOT EXISTS (\n      SELECT 1 FROM ingest_session bref_ing\n      WHERE bref_ing.org_id = ${blobRef}.org_id AND bref_ing.snapshot_blob_sha256 = ${blobRef}.sha256)\n    AND NOT EXISTS (\n      SELECT 1 FROM upstream_state bref_up\n      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256))` #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `EXISTS (SELECT 1 FROM (${references(blobRef, columns, () => '')}) bref_rel\n    WHERE bref_rel.rel <> ''\n    AND ${blobRef}.purge_after < COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', bref_rel.rel, '+' || CASE WHEN bref_rel.rejected_hosted THEN ${PUBLISH_PURGE_WINDOW_DAYS} ELSE max((SELECT o.retention_removed_upstream_days FROM organization o WHERE o.id = ${blobRef}.org_id), bref_rel.ov) END || ' days'), '${NEVER}'))` #1",
-        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${blobRef}.org_id = ?\n  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted' AND NOT (${REJECTED_HOSTED})`)}))\n  OR ${orphan.sql})\n  AND NOT EXISTS (\n    SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external\n      ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id\n    WHERE bref_ru.org_id = ${blobRef}.org_id\n      AND (bref_ru.before_image_expires_at IS NULL OR bref_ru.before_image_expires_at > ${NOW})\n      AND bref_ir.entity_type = 'version'\n      AND json_extract(bref_ir.before_image_json, '$.blob_id') = ${blobRef}.id))` #1",
+        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${blobRef}.org_id = ?\n  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted' AND NOT ((${REJECTED_HOSTED}) OR (${UNPUBLISHED_HOSTED}))`)}))\n  OR ${orphan.sql})\n  AND NOT EXISTS (\n    SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external\n      ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id\n    WHERE bref_ru.org_id = ${blobRef}.org_id\n      AND (bref_ru.before_image_expires_at IS NULL OR bref_ru.before_image_expires_at > ${NOW})\n      AND bref_ir.entity_type = 'version'\n      AND json_extract(bref_ir.before_image_json, '$.blob_id') = ${blobRef}.id))` #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: '' #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: 'AND (b.created_at, b.id) > (?, ?)' #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `SELECT b.id, b.sha256, b.created_at, ${overrideSql('b')} AS override_days, ${orphanSql('b')} AS orphan\nFROM blob b\nWHERE ${eligible.sql} AND NOT ${missingReleaseStampSql('b')} AND b.purge_after IS NULL AND b.deleted_at IS NULL ${cursor.sql}\nORDER BY b.created_at, b.id\nLIMIT ?` #1",

@@ -2237,3 +2237,114 @@ describe('explicit organization publish alternative', () => {
     expect(hook).toHaveBeenCalledOnce();
   });
 });
+
+describe('DEC-NPM-35 route-limited management tokens', () => {
+  const routes = [
+    ['PUT', '/:project/npm/:a'],
+    ['PUT', '/:project/npm/:a/-rev/:rev'],
+    ['DELETE', '/:project/npm/:a/-rev/:rev'],
+    ['DELETE', '/:project/npm/:a/-/:file/-rev/:rev'],
+    ['PUT', '/:project/npm/-/package/:a/dist-tags/:tag'],
+    ['DELETE', '/:project/npm/-/package/:a/dist-tags/:tag'],
+    ['DELETE', '/:project/npm/:a/:b/-rev/:rev'],
+    ['PUT', '/:project/npm/:a/:b/-rev/:rev'],
+  ] as const;
+  it.each(routes)('%s %s admits full holders only', async (method, path) => {
+    for (const kind of ['pat', 'svc'] as const) {
+      for (const level of ['read', 'write', 'full'] as const) {
+        for (const manage of [false, true]) {
+          const state = freshState();
+          state.token.kind = kind;
+          state.token.hashOf = kind === 'pat' ? PAT : SVC;
+          state.token.scope = { level, readOnly: level === 'read' };
+          state.token.projectPermissions = manage ? ['project:packages:manage'] : ['project:read'];
+          const base = req({
+            headers: bearer(state.token.hashOf),
+            method,
+            permission: 'project:packages:manage',
+          });
+          const request = { ...base, route: { ...base.route, path } };
+          const engine = createAuthorizationEngine(deps(state));
+          expect((await engine.authorize(request)).allow).toBe(level === 'full' && manage);
+          const admin = req({
+            headers: bearer(state.token.hashOf),
+            method: 'POST',
+            permission: 'project:packages:manage',
+          });
+          expect(
+            (
+              await engine.authorize({
+                ...admin,
+                route: {
+                  ...admin.route,
+                  path: '/_pb/projects/:project/packages/:package/versions/:version/tombstone',
+                },
+              })
+            ).allow,
+          ).toBe(false);
+        }
+      }
+    }
+  });
+});
+
+describe('DEC-NPM-35 exception grants only the manage permission', () => {
+  const route = (method: string, path: string, permission: string, state: State) => {
+    const base = req({ headers: bearer(state.token.hashOf), method, permission });
+    return { ...base, route: { ...base.route, path } };
+  };
+  const manageOnly = () => {
+    const state = freshState();
+    state.token.kind = 'svc';
+    state.token.hashOf = SVC;
+    state.token.scope = { level: 'full', readOnly: false };
+    state.token.projectPermissions = ['project:read', 'project:packages:manage'];
+    return state;
+  };
+
+  it.each([
+    ['PUT', '/:project/npm/:a/-rev/:rev', 'project:packages:write'],
+    ['DELETE', '/:project/npm/:a/-rev/:rev', 'project:packages:write'],
+    ['PUT', '/:project/npm/-/package/:a/dist-tags/:tag', 'project:packages:read'],
+    ['DELETE', '/:project/npm/:a/-/:file/-rev/:rev', 'project:packages:read'],
+  ])('%s %s does not lend a manage holder %s', async (method, path, permission) => {
+    const state = manageOnly();
+    const engine = createAuthorizationEngine(deps(state));
+    expect((await engine.authorize(route(method, path, permission, state))).allow).toBe(false);
+  });
+
+  it('admits a manage-only full token on the shared manifest route as a manage request only', async () => {
+    const state = manageOnly();
+    const engine = createAuthorizationEngine(deps(state));
+    for (const path of ['/:project/npm/:a', '/:project/npm/:a/:b']) {
+      expect(
+        (await engine.authorize(route('PUT', path, 'project:packages:write', state))).allow,
+      ).toBe(true);
+      state.token.projectPermissions = ['project:read', 'project:packages:read'];
+      expect(
+        (await engine.authorize(route('PUT', path, 'project:packages:write', state))).allow,
+      ).toBe(false);
+      state.token.projectPermissions = ['project:read', 'project:packages:manage'];
+    }
+  });
+
+  it.each([
+    ['PUT', '/:project/npm/:a', 'project:packages:write'],
+    ['PUT', '/:project/npm/-/package/:a/dist-tags/:tag', 'project:packages:manage'],
+    ['DELETE', '/:project/npm/-/package/:a/dist-tags/:tag', 'project:packages:manage'],
+    ['PUT', '/:project/npm/:a/-rev/:rev', 'project:packages:manage'],
+    ['DELETE', '/:project/npm/:a/-rev/:rev', 'project:packages:manage'],
+    ['DELETE', '/:project/npm/:a/-/:file/-rev/:rev', 'project:packages:manage'],
+  ])(
+    '%s %s refuses a selected full token bound to another project',
+    async (method, path, permission) => {
+      const state = manageOnly();
+      state.token.projectMode = 'selected';
+      state.token.boundProjectIds = ['proj-2'];
+      const engine = createAuthorizationEngine(deps(state));
+      expect((await engine.authorize(route(method, path, permission, state))).allow).toBe(false);
+      state.token.boundProjectIds = ['proj-1'];
+      expect((await engine.authorize(route(method, path, permission, state))).allow).toBe(true);
+    },
+  );
+});

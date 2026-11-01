@@ -955,6 +955,11 @@ export const entries: readonly MutationEntry[] = [
     })),
     waivers: [
       {
+        locate: /(?:np|ns|nv)\.org_id\s*=\s*\?|"npm_admin"\."org_id" = \?/,
+        reason:
+          'Hosted npm tombstone guards repeat the existing target package/version organization checks. Live protected-holder evidence delegates to the independently mutation-tested protectedHolder guard; admin tombstone contracts test freshness, role protection, and revision loss.',
+      },
+      {
         locate: /(?:pa\.)?org_id = \?(?= and (?:pa\.)?version_id = )/,
         reason:
           'The publish gate repeats the independently scoped version identity. Its composite organization/version FK prevents an approval in another organization from referring to the target; publish-gate behavioral contracts verify the refusal.',

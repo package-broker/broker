@@ -1,4 +1,7 @@
 import { createNpmTokenAdapters } from '@package-broker/db-sqlite/repositories/npm-tokens';
+import { createUnpublishStore } from '@package-broker/db-sqlite/repositories/npm-unpublish';
+import { createDistTagStore } from '@package-broker/db-sqlite/repositories/npm-dist-tags';
+import { createDeprecationStore } from '@package-broker/db-sqlite/repositories/npm-deprecate';
 import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
 import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
 import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
@@ -789,6 +792,9 @@ function buildRegistryModule(input: {
     },
     npmTokens: createNpmTokenAdapters(executor, (ctx) => input.anchors.anchors(ctx)),
     npmPublish: {
+      deprecations: createDeprecationStore(executor),
+      distTags: createDistTagStore(executor),
+      unpublish: createUnpublishStore(executor),
       reads: createPublishReads(executor),
       lookupToken: createAccessRepository(executor).lookupToken,
       anchors: (ctx) => input.anchors.anchors(ctx),

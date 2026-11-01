@@ -13,6 +13,7 @@ interface PublishGuardInput {
   readonly routeProjectId: string;
   readonly sourceId: string;
   readonly key: string;
+  readonly permission?: 'project:packages:manage';
 }
 const issued = new WeakMap<CatalogueWriteGuard, { orgId: string; input: PublishGuardInput }>();
 
@@ -63,10 +64,11 @@ export function createPublishWriteGuard(
     and pa.read_only = 0 and json_array_length(pa.scopes_json) = 1
     and json_extract(pa.scopes_json,'$[0]') in ('write','full')
     and ${admitted}
-    and ((pa.project_mode = 'all' and pa.token_project_id is null and pa.principal_project_id is null
+    and ${input.permission === undefined ? sql.lit(true) : sql<boolean>`json_extract(pa.scopes_json,'$[0]') = 'full' and pa.project_token_max_scope = 'full'`}
+    and ((${input.permission === undefined ? sql.lit(true) : sql.lit(false)} and pa.project_mode = 'all' and pa.token_project_id is null and pa.principal_project_id is null
       and ${permission('org:packages:publish', 'organization')})
       or (pa.project_id = ${input.routeProjectId} and pa.project_token_max_scope in ('write','full')
-        and (${permission('project:packages:write', 'project')} or ${permission('org:packages:publish', 'organization')})))`,
+        and (${permission(input.permission ?? 'project:packages:write', 'project')} or (${input.permission === undefined ? sql.lit(true) : sql.lit(false)} and ${permission('org:packages:publish', 'organization')}))))`,
   );
   const guard = registerCatalogueWriteGuard(ctx, assertCheck(condition));
   issued.set(guard, {
@@ -78,6 +80,7 @@ export function createPublishWriteGuard(
       routeProjectId: input.routeProjectId,
       sourceId: input.sourceId,
       key: input.key,
+      ...(input.permission === undefined ? {} : { permission: input.permission }),
     },
   });
   return guard;
@@ -86,11 +89,15 @@ export function createPublishWriteGuard(
 export function assertPublishBinding(
   ctx: OrgContext,
   guard: CatalogueWriteGuard,
-  input: PublishVersionInput,
+  input: Pick<PublishVersionInput, 'tokenId' | 'routeProjectId' | 'sourceId' | 'key'>,
+  manage = false,
 ): void {
   const bound = issued.get(guard);
   if (
     bound?.orgId !== ctx.orgId ||
+    (manage
+      ? bound.input.permission !== 'project:packages:manage'
+      : bound.input.permission !== undefined) ||
     bound.input.tokenId !== input.tokenId ||
     bound.input.routeProjectId !== input.routeProjectId ||
     bound.input.sourceId !== input.sourceId ||

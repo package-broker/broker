@@ -1,3 +1,4 @@
+import { ManifestUpdate } from './deprecate.js';
 import { REGISTRY_DEFAULTS } from '../registry-config.js';
 import { packageKey } from '../../catalogue/names.js';
 import { validateVersion } from '../../catalogue/versions.js';
@@ -22,6 +23,8 @@ export interface PublishBodyOptions {
   readonly caps?: PublishBodyCaps;
   readonly onTarballChunk: (bytes: Uint8Array, signal?: AbortSignal) => Promise<void>;
   readonly signal?: AbortSignal;
+  /** Refuse with 403 as soon as the top-level `_attachments` key is read. */
+  readonly refuseAttachments?: boolean;
 }
 export interface PublishBodyResult {
   readonly metadata: Record<string, unknown>;
@@ -286,6 +289,8 @@ class JsonInput {
           if (++keys > 10_000) fail('publish_metadata_too_large', 413);
           this.countNode();
           const key = this.inlineString() ?? (await this.string());
+          if (depth === 0 && key === '_attachments' && this.options.refuseAttachments)
+            fail('forbidden', 403);
           if (Object.hasOwn(result, key))
             fail(
               kind === 'attachments' ||
@@ -429,7 +434,8 @@ export async function scanPublishBody(
     await input.whitespace();
     if ((await input.peek()) !== -1) fail();
     if (!object(metadata)) fail();
-    if (!object(metadata._attachments)) fail('write_unsupported', 405);
+    if (!Object.hasOwn(metadata, '_attachments')) throw new ManifestUpdate(metadata);
+    if (!object(metadata._attachments)) fail('invalid_attachments');
     if (!object(metadata.versions) || Object.keys(metadata.versions).length !== 1)
       fail('invalid_version');
     const version = Object.keys(metadata.versions)[0]!;

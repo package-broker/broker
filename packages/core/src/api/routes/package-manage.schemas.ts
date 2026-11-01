@@ -27,7 +27,10 @@ export function packageManageSpec(
       params: scoped
         ? z.strictObject({ project, package: id, version: id })
         : z.strictObject({ package: id, version: id }),
-      body: z.strictObject({}).optional(),
+      body:
+        action === 'tombstone'
+          ? z.strictObject({ reason: z.string().min(1).max(1000).optional() }).optional()
+          : z.strictObject({}).optional(),
       responses: {
         200:
           action === 'rebuild'

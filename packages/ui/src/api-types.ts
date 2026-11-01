@@ -4927,7 +4927,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -5258,7 +5258,9 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': Record<string, never>;
+        'application/json': {
+          reason?: string;
+        };
       };
     };
     responses: {
@@ -6338,7 +6340,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -6916,7 +6918,9 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': Record<string, never>;
+        'application/json': {
+          reason?: string;
+        };
       };
     };
     responses: {
@@ -7985,7 +7989,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8365,7 +8369,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8669,7 +8673,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8903,7 +8907,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -9334,7 +9338,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10600,7 +10604,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11327,7 +11331,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11590,7 +11594,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11911,7 +11915,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12093,7 +12097,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12315,7 +12319,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12722,7 +12726,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -12911,7 +12915,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -13025,7 +13029,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -13128,7 +13132,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher */
+      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;

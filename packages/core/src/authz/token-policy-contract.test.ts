@@ -743,3 +743,35 @@ describe('service token issuance: refuse, never narrow', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+it('full service-token issuance covers the npm management exception without widening other session-only capabilities', async () => {
+  const principal = servicePrincipal({
+    permissions: [
+      'project:read',
+      'project:packages:read',
+      'project:packages:manage',
+      'project:tokens:create',
+    ],
+  });
+  const denied = svcRig({ principal });
+  const call = {
+    audit: {
+      opId: '01K00000000000000000000001',
+      requestId: '01K00000000000000000000002',
+      sourceIp: null,
+      tokenSelector: null,
+    },
+  };
+  expect(
+    (await denied.service.issue(ctx, session(), actor, fence(), svcInput({ scope: 'full' }), call))
+      .ok,
+  ).toBe(false);
+  expect(denied.calls).toHaveLength(0);
+  const allowed = svcRig({ principal, live: [...ISSUER, 'project:packages:manage'] });
+  expect(
+    (await allowed.service.issue(ctx, session(), actor, fence(), svcInput({ scope: 'full' }), call))
+      .ok,
+  ).toBe(true);
+  expect(allowed.calls[0]?.input.authority.covers).toContain('project:packages:manage');
+  expect(allowed.calls[0]?.input.authority.covers).not.toContain('project:tokens:create');
+});

@@ -362,10 +362,14 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
     async findManagedVersion(ctx, query) {
       const access = query.projectId === null ? sql`1 = 1` : owner(ctx, query.projectId);
       const rows = await executor.all<
-        Omit<ManagedVersion, 'publishGate'> & { publishGate: number }
+        Omit<ManagedVersion, 'publishGate' | 'hostedNpm'> & {
+          publishGate: number;
+          hostedNpm: number;
+        }
       >(
         statement(sql`select pkg.id as "packageId", v.id as "versionId",
-        pkg.ecosystem, pkg.name as "packageName", v.version, v.status,
+        pkg.ecosystem, pkg.name as "packageName", v.version, v.status, v.revision,
+        (pkg.ecosystem='npm' and src.type='hosted') as "hostedNpm",
         src.id as "sourceId", src.project_id as "sourceProjectId",
         exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id and (pa.approval_state = 'pending' or pa.scan_state in ('queued', 'running', 'failed'))) as "publishGate"
         from package as pkg join source as src on src.id = pkg.source_id
@@ -375,8 +379,12 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
       );
       const row = rows[0];
       if (!row) return null;
-      const { publishGate, ...version } = row;
-      return { ...version, ...(publishGate === 1 ? { publishGate: true } : {}) };
+      const { publishGate, hostedNpm, ...version } = row;
+      return {
+        ...version,
+        ...(hostedNpm === 1 ? { hostedNpm: true as const } : {}),
+        ...(publishGate === 1 ? { publishGate: true } : {}),
+      };
     },
   };
 }

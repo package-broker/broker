@@ -2,7 +2,12 @@ import { withNpmVcsBuildEnqueue } from './npm-build-apply.js';
 import type { NpmTokenAdapters } from '../authz/token-read.js';
 import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
 import { createOidcVerifier } from './npm/oidc/verify.js';
-import { createPublishService, type PublishDependencies } from './npm/publish-service.js';
+import {
+  createUnpublishService,
+  createDistTagService,
+  createPublishService,
+  type PublishDependencies,
+} from './npm/publish-service.js';
 export { createPublishService } from './npm/publish-service.js';
 import {
   createNpmVcsBuildJob,
@@ -747,6 +752,22 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       ...(deps.npmPublish === undefined
         ? {}
         : {
+            unpublish: createUnpublishService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
+            distTagWrite: createDistTagService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
             publish: createPublishService({
               ...deps.npmPublish,
               blob: blob as import('../platform/blob.js').CoreBlobStore,

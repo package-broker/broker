@@ -110,6 +110,8 @@ export function blobOrphanCondition(_ctx: OrgContext, blobRef: string): Eligible
 }
 
 const NEVER = '9999-12-31T23:59:59.999Z';
+const UNPUBLISHED_HOSTED =
+  "COALESCE(bref_s.type = 'hosted' AND bref_p.ecosystem = 'npm' AND bref_v.status = 'tombstoned' AND bref_v.purge_after IS NOT NULL, 0)";
 const REJECTED_HOSTED =
   "COALESCE(bref_s.type = 'hosted' AND bref_v.status = 'tombstoned' AND bref_v.tombstone_reason IN ('rejected', 'expired', 'scan_denied'), 0)";
 
@@ -136,7 +138,7 @@ export function blobEligibleCondition(ctx: OrgContext, blobRef: string): Eligibl
     sql: `(${blobRef}.org_id = ?
   AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})
   AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})
-  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted' AND NOT (${REJECTED_HOSTED})`)}))
+  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted' AND NOT ((${REJECTED_HOSTED}) OR (${UNPUBLISHED_HOSTED}))`)}))
   OR ${orphan.sql})
   AND NOT EXISTS (
     SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external

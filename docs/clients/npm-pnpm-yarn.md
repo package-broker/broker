@@ -181,4 +181,27 @@ An immediately active publish returns HTTP **201**. A publish held for approval 
 <!-- source: packages/core/src/registry/npm/publish-body.ts -->
 <!-- source: scripts/client-matrix-runtime.mjs -->
 
+## Package management
+
+Deprecation, dist-tag writes and unpublish require a PAT or service token with `full` scope, a project whose token ceiling is `full`, and `project:packages:manage` for the token holder. The exception applies to these npm operations; administrative API management stays session-only. Proxied and repository-built packages cannot be changed with these commands.
+
+```sh
+npm deprecate 'pkg@<2' 'Use version 2'
+npm install pkg@1
+npm deprecate pkg@1 ''
+npm dist-tag add pkg@1.1.0 beta
+npm dist-tag ls pkg
+npm dist-tag rm pkg beta
+```
+
+An empty deprecation message clears the warning; a message may be at most 1024 bytes. Dist-tags must point to an active version; semver ranges cannot be tag names, `latest` cannot be deleted, and removing a tag that does not exist is refused. pnpm supports the equivalent `pnpm dist-tag add`, `pnpm dist-tag ls` and `pnpm dist-tag rm` commands. Yarn Berry uses `yarn npm tag add`, `yarn npm tag list` and `yarn npm tag remove`.
+
+A project package manager may unpublish within 72 hours of publication:
+
+```sh
+npm unpublish pkg@1.0.0 --force
+```
+
+Whole-package unpublish requires every remaining version to be active and inside that window; a held or quarantined version blocks it with a 409. Older versions require the organization tombstone API, `POST /_pb/packages/:package/versions/:version/tombstone`, called from an organization admin's freshly reauthenticated browser session. `:package` and `:version` are the package and version IDs that the packages API returns, not the package name or version string. For hosted npm packages the JSON body must carry a reason of 1 to 1000 characters, for example `{"reason":"Retired release"}`; the optional `Idempotency-Key` header makes a retry safe. A project-scoped tombstone route or a token cannot tombstone a hosted npm version. Unpublish and tombstone reserve the version string permanently; republishing it returns 409. Blobs remain subject to the organization/source retention policy, and tags pointing at a removed version move to the highest remaining active version or disappear when none remains.
+
 For packages built from tagged repositories rather than published by a client, see [npm repository ingestion](../guides/npm-repository-ingest.md). Continue with [GitHub Actions](../ci/github-actions.md) or [GitLab CI](../ci/gitlab-ci.md) for secret placement and client caches, or [Composer setup](composer.md) for PHP packages.

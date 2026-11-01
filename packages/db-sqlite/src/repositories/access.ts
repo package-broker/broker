@@ -100,6 +100,7 @@ export interface SessionAccess {
 }
 
 export interface TokenLookupInput {
+  readonly npmManagement?: true;
   readonly organizationAlternative?: string;
   readonly selector: string;
   readonly boundary: AccessBoundary;
@@ -945,6 +946,7 @@ function toTokenAccess(
   boundary: AccessBoundary,
   orgId: string,
   organizationAlternative?: string,
+  npmManagement?: true,
 ): TokenAccess {
   const scope = parsedScope(row);
   const projectMode = tokenProjectMode(row.kind, row.project_mode, row.principal_project_id);
@@ -1028,6 +1030,15 @@ function toTokenAccess(
             tokenMaxScope: maxScope.level,
           }),
         ].sort();
+        if (
+          npmManagement === true &&
+          scope.level === 'full' &&
+          !scope.readOnly &&
+          maxScope.level === 'full' &&
+          (isService ? service : [...orgRows, ...projectRows]).includes('project:packages:manage')
+        ) {
+          projectPermissions.push('project:packages:manage');
+        }
       }
     }
   }
@@ -1093,7 +1104,13 @@ export function createAccessRepository(
       const row = rows[0];
       return row === undefined
         ? null
-        : toTokenAccess(row, input.boundary, ctx.orgId, input.organizationAlternative);
+        : toTokenAccess(
+            row,
+            input.boundary,
+            ctx.orgId,
+            input.organizationAlternative,
+            input.npmManagement,
+          );
     },
 
     async touchSession(ctx, sessionId) {

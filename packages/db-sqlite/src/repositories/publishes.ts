@@ -25,6 +25,7 @@ import { compile as compiled, newOpId, type ProtectedHolderProvider } from '../k
 import { compareNpmVersions } from '@package-broker/core/catalogue/versions';
 import {
   PUBLISH_APPROVAL_STATES,
+  PUBLISH_SCAN_RECOVERY_BATCH_SIZE,
   PUBLISH_APPROVAL_EXPIRY_BATCH_SIZE,
   PUBLISH_PURGE_WINDOW_DAYS,
   type PublishApproval,
@@ -178,7 +179,7 @@ export function createPublishesRepository(
         revision=revision+1, updated_at=${input.now}
         where org_id=${ctx.orgId} and id=${input.id} and revision=${input.expectedRevision}
         and approval_state=${input.expectedApprovalState} and scan_state=${input.expectedScanState}
-        and ${scan || rescan ? sql<boolean>`hold_scan=1 and approval_state in ('not_required','pending','approved')` : decision?.decision === 'rejected' ? sql<boolean>`(approval_state='pending' or (approval_state='not_required' and hold_scan=1))` : sql<boolean>`approval_state='pending'`}
+        and ${scan || rescan ? sql<boolean>`hold_scan=1 and approval_state in ('not_required','pending','approved')` : decision?.decision === 'rejected' ? sql<boolean>`(approval_state='pending' or (hold_scan=1 and (approval_state='not_required' or (approval_state='approved' and scan_state='failed'))))` : sql<boolean>`approval_state='pending'`}
         and ${rescan ? sql<boolean>`scan_state='failed'` : sql<boolean>`1`}
         and ${scan?.scanState === 'running' ? sql<boolean>`scan_attempts<3` : sql<boolean>`1`}
         and ${ready} and ${authority}
@@ -330,10 +331,10 @@ export function createPublishesRepository(
     expire: (ctx, fence, input) => transition(ctx, fence, input),
     scan: (ctx, fence, input) => transition(ctx, fence, input, undefined, input),
     rescan: (ctx, fence, input) => transition(ctx, fence, input, undefined, undefined, true),
-    async listScanQueued(ctx, before, runningBefore = before) {
+    async listScanQueued(ctx, before, runningBefore = before, after) {
       const rows = await executor.all<InspectionRow>(
         statement(
-          sql`${inspection} where pa.org_id=${ctx.orgId} and pa.hold_scan=1 and ((pa.scan_state='queued' and pa.updated_at<=${before}) or (pa.scan_state='running' and pa.updated_at<=${runningBefore} and not exists (select 1 from job j where j.org_id=pa.org_id and j.resource_key='publish:' || pa.version_id and j.state='running' and j.lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')))) and pa.approval_state in ('not_required','pending','approved') and (pa.approval_state<>'pending' or pa.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) and v.status='quarantined' order by pa.id limit 50`,
+          sql`${inspection} where pa.org_id=${ctx.orgId} and pa.hold_scan=1 and ((pa.scan_state='queued' and pa.updated_at<=${before}) or (pa.scan_state='running' and pa.updated_at<=${runningBefore} and not exists (select 1 from job j where j.org_id=pa.org_id and j.resource_key='publish:' || pa.version_id and j.state='running' and j.lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')))) and pa.approval_state in ('not_required','pending','approved') and (pa.approval_state<>'pending' or pa.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) and v.status='quarantined' and ${after === undefined ? sql`1` : sql`pa.id > ${after}`} order by pa.id limit ${PUBLISH_SCAN_RECOVERY_BATCH_SIZE}`,
         ),
       );
       return rows.map(inspect);
@@ -374,6 +375,7 @@ export function createPublishesRepository(
       const rows = await executor.all<InspectionRow>(
         statement(sql`${inspection}
         where pa.org_id=${ctx.orgId}
+        and ${query.actionable ? sql`v.status='quarantined' and pa.scan_state<>'denied' and (pa.approval_state='pending' or (pa.hold_scan=1 and pa.approval_state in ('not_required','approved') and pa.scan_state in ('queued','running','failed')))` : sql`1`}
         and ${query.state === undefined ? sql`1` : sql`pa.approval_state=${query.state}`}
         and ${query.state === 'pending' ? sql`pa.scan_state<>'denied'` : sql`1`}
         and ${query.cursor === undefined ? sql`1` : sql`pa.id > ${query.cursor}`}

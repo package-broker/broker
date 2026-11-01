@@ -1266,6 +1266,137 @@ export function describeNpmPublishWriterContract(
           await e.all(st("SELECT status,tombstone_reason FROM version WHERE org_id='org'")),
         ).toEqual([{ status: 'tombstoned', tombstone_reason: 'rejected' }]);
       }));
+    it('filters actionable holds before pagination for every approval and scan state', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        for (const approval of ['not_required', 'pending', 'approved', 'rejected', 'expired']) {
+          for (const scan of ['not_required', 'queued', 'running', 'allowed', 'failed', 'denied']) {
+            await e.all(
+              st(
+                "UPDATE publish_approval SET approval_state=?,hold_approval=?,scan_state=?,hold_scan=?,decided_at=?,decided_by_user_id=? WHERE org_id='org'",
+                approval,
+                approval === 'not_required' ? 0 : 1,
+                scan,
+                scan === 'not_required' ? 0 : 1,
+                ['approved', 'rejected', 'expired'].includes(approval) ? NOW : null,
+                ['approved', 'rejected'].includes(approval) ? 'approver' : null,
+              ),
+            );
+            const page = await h.repo.list(ctx, { actionable: true, limit: 1 });
+            const actionable =
+              scan !== 'denied' &&
+              (approval === 'pending' ||
+                (['not_required', 'approved'].includes(approval) &&
+                  ['queued', 'running', 'failed'].includes(scan)));
+            expect(page.items.length, `${approval}/${scan}`).toBe(actionable ? 1 : 0);
+          }
+        }
+        await w.writer.publishVersion(ctx, w.guard, w.input(true, '1.0.1'));
+        await w.writer.publishVersion(ctx, w.guard, w.input(true, '1.0.2'));
+        const first = await h.repo.list(ctx, { actionable: true, limit: 1 });
+        expect(first.items).toHaveLength(1);
+        expect(first.next).not.toBeNull();
+        const second = await h.repo.list(ctx, { actionable: true, limit: 1, cursor: first.next! });
+        expect(second.items).toHaveLength(1);
+        expect(second.items[0]!.id).not.toBe(first.items[0]!.id);
+        expect(second.next).toBeNull();
+      }));
+    it.each(['not_required', 'pending', 'approved'] as const)(
+      'lists actionable %s failed scans and disposes them with audit and no activation',
+      (state) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(
+            st(
+              "UPDATE publish_approval SET approval_state=?,hold_approval=?,hold_scan=1,scan_state='failed',decided_by_user_id=?,decided_at=? WHERE org_id='org'",
+              state,
+              state === 'not_required' ? 0 : 1,
+              state === 'approved' ? 'approver' : null,
+              state === 'approved' ? NOW : null,
+            ),
+          );
+          expect(
+            (await h.repo.list(ctx, { actionable: true, limit: 1 })).items.map((x) => x.id),
+          ).toEqual([h.input.id]);
+          expect(
+            (await h.repo.list(orgContext('foreign'), { actionable: true, limit: 1 })).items,
+          ).toEqual([]);
+          const input = {
+            ...h.input,
+            expectedApprovalState: state,
+            expectedScanState: 'failed' as const,
+            decision: 'rejected' as const,
+            reason: 'Dispose failed scan',
+            event: { ...h.input.event, action: 'publish.reject' as const },
+          };
+          expect(
+            (await h.repo.decide(ctx, h.fence, { ...input, expectedRevision: 99 })).changed,
+          ).toBe(false);
+          expect((await h.repo.decide(orgContext('foreign'), h.fence, input)).changed).toBe(false);
+          await e.all(
+            st("DELETE FROM role_permission WHERE org_id='org' AND role_id='approver-role'"),
+          );
+          expect((await h.repo.decide(ctx, h.fence, input)).changed).toBe(false);
+          await e.all(
+            st("INSERT INTO role_permission VALUES ('org','approver-role','org:packages:approve')"),
+          );
+          expect((await h.repo.decide(ctx, h.fence, input)).changed).toBe(true);
+          expect((await h.repo.decide(ctx, h.fence, input)).changed).toBe(false);
+          expect((await h.repo.list(ctx, { actionable: true, limit: 1 })).items).toEqual([]);
+          expect(
+            await e.all(st("SELECT status,tombstone_reason FROM version WHERE org_id='org'")),
+          ).toEqual([{ status: 'tombstoned', tombstone_reason: 'rejected' }]);
+          expect(
+            await e.all(
+              st(
+                "SELECT count(*) n FROM audit_pending WHERE org_id='org' AND action='publish.reject'",
+              ),
+            ),
+          ).toEqual([{ n: 1 }]);
+          expect(await e.all(st("SELECT count(*) n FROM dist_tag WHERE org_id='org'"))).toEqual([
+            { n: 0 },
+          ]);
+          const item = (await h.repo.get(ctx, h.input.id))!;
+          expect(
+            (
+              await h.repo.rescan(ctx, h.fence, {
+                ...input,
+                expectedRevision: item.revision,
+                expectedApprovalState: 'rejected',
+              })
+            ).changed,
+          ).toBe(false);
+        }),
+    );
+    it.each(['queued', 'running', 'allowed', 'denied', 'not_required'] as const)(
+      'cannot dispose approved scan state %s',
+      (scanState) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(
+            st(
+              "UPDATE publish_approval SET approval_state='approved',decided_by_user_id='approver',decided_at=?,hold_scan=case when ?='not_required' then 0 else 1 end,scan_state=? WHERE org_id='org'",
+              NOW,
+              scanState,
+              scanState,
+            ),
+          );
+          expect(
+            (
+              await h.repo.decide(ctx, h.fence, {
+                ...h.input,
+                expectedApprovalState: 'approved',
+                expectedScanState: scanState,
+                decision: 'rejected',
+                reason: 'Dispose',
+              })
+            ).changed,
+          ).toBe(false);
+          expect((await h.repo.list(ctx, { actionable: true, limit: 1 })).items.length).toBe(
+            ['queued', 'running'].includes(scanState) ? 1 : 0,
+          );
+        }),
+    );
     it.each(['scan-first', 'approval-first'] as const)(
       'scan activation requires both gates: %s',
       (order) =>
@@ -1431,6 +1562,119 @@ export function describeNpmPublishWriterContract(
           ),
         ).toEqual([{ n: 1 }]);
       }));
+    it.each([0, 1, 3])(
+      'counts full recovery pages and continuation within one invocation budget (%i attempts)',
+      (attempts) =>
+        run(async (e, w) => {
+          await held(e, w);
+          for (let i = 1; i < 60; i++)
+            await w.writer.publishVersion(ctx, w.guard, w.input(true, `1.0.${i}`));
+          await e.all(
+            st(
+              "UPDATE publish_approval SET hold_scan=1,scan_state=?,scan_attempts=?,updated_at='2000-01-01T00:00:00.000Z',required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+              attempts === 0 ? 'queued' : 'running',
+              attempts,
+            ),
+          );
+          let count = 0;
+          const counted: SqlExecutor = {
+            driver: e.driver,
+            all: <R>(statement: Statement) => {
+              count++;
+              return e.all<R>(statement);
+            },
+            batch: (statements) => {
+              count += statements.length;
+              return e.batch(statements);
+            },
+          };
+          const repo = createPublishesRepository(counted);
+          const sweep = createPublishScanSweepJob({ publishes: repo });
+          const store = createJobRepository(counted);
+          const jobs = createRepositoryJobs({
+            store,
+            clock: fixedClock(NOW),
+            ids: { ulid },
+            jobs: [
+              {
+                qualifiedName: 'core:publish-scan-sweep:v1',
+                definition: sweep as import('@package-broker/core/platform/jobs').JobDefinition,
+              },
+              {
+                qualifiedName: 'core:publish-scan:v1',
+                definition: createPublishScanJob({
+                  publishes: repo,
+                  scanners: [],
+                  blob: { get: async () => null },
+                }) as import('@package-broker/core/platform/jobs').JobDefinition,
+              },
+            ],
+          })('core', { projectId: null, tokenId: null });
+          let sweepId = (
+            await jobs.enqueue(
+              ctx,
+              'core:publish-scan-sweep:v1',
+              {},
+              { idempotencyKey: 'budget-root' },
+            )
+          ).id;
+          let after: string | undefined;
+          const counts: number[] = [];
+          for (let invocation = 0; invocation < 3; invocation++) {
+            count = 0;
+            expect(sweepId).not.toBe('');
+            const claim = await store.claim(ctx, ulid(), {
+              id: sweepId,
+              types: ['core:publish-scan-sweep:v1'],
+              leaseSeconds: 60,
+              maxRunning: 100,
+            });
+            expect(claim).not.toBeNull();
+            await store.heartbeat(ctx, claim!);
+            await sweep.handler(after ? { after } : {}, {
+              org: ctx,
+              jobId: sweepId,
+              attempt: 1,
+              signal: new AbortController().signal,
+              fences: jobFences(claim!),
+              ports: { clock: fixedClock(NOW), ids: { ulid }, platform: { jobs } },
+            } as never);
+            await store.settle(ctx, claim!, { outcome: 'succeeded' });
+            counts.push(count);
+            expect(count + 50).toBeLessThanOrEqual(500);
+            const next = await e.all<{ id: string; payload_json: string }>(
+              st(
+                "SELECT id,payload_json FROM job WHERE org_id='org' AND type='core:publish-scan-sweep:v1' AND state='queued' ORDER BY id DESC LIMIT 1",
+              ),
+            );
+            sweepId = next[0]?.id ?? '';
+            after = next[0]
+              ? (JSON.parse(next[0].payload_json) as { after: string }).after
+              : undefined;
+          }
+          expect(counts).toHaveLength(3);
+          expect(counts[0]).toBeGreaterThan(attempts === 0 ? 100 : 250);
+          expect(
+            await e.all(
+              st(
+                "SELECT count(*) n FROM publish_approval WHERE org_id='org' AND scan_state='running'",
+              ),
+            ),
+          ).toEqual([{ n: 0 }]);
+          expect(
+            await e.all(
+              st(
+                "SELECT count(*) n FROM audit_pending WHERE org_id='org' AND action='publish.scan'",
+              ),
+            ),
+          ).toEqual([{ n: attempts === 0 ? 0 : 60 }]);
+          expect(
+            await e.all(
+              st("SELECT count(*) n FROM job WHERE org_id='org' AND type='core:publish-scan:v1'"),
+            ),
+          ).toEqual([{ n: attempts === 3 ? 0 : 60 }]);
+        }),
+    );
     it.each([1, 3])('sweeper recovers a crashed running scan with %i attempts', (attempts) =>
       run(async (e, w) => {
         const h = await held(e, w);

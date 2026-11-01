@@ -342,6 +342,7 @@ describe('publish scan job', () => {
       f.context.org,
       '2026-10-30T23:50:00.000Z',
       '2026-10-30T23:59:00.000Z',
+      undefined,
     );
     expect(f.enqueue).toHaveBeenCalledWith(
       f.context.org,

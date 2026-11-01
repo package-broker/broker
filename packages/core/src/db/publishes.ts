@@ -6,6 +6,8 @@ export const PUBLISH_PURGE_WINDOW_DAYS = 7;
 export const PUBLISH_APPROVAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 export const PUBLISH_APPROVAL_EXPIRY_BATCH_SIZE = 10;
+/** 25 * 15 recovery statements + page read + continuation enqueue, with 50 for the runner. */
+export const PUBLISH_SCAN_RECOVERY_BATCH_SIZE = 25;
 
 export const PUBLISH_APPROVAL_STATES = [
   'not_required',
@@ -115,6 +117,7 @@ export interface PublishesRepository {
     ctx: OrgContext,
     before: string,
     runningBefore?: string,
+    after?: string,
   ): Promise<readonly PublishInspection[]>;
   scanInput(
     ctx: OrgContext,
@@ -131,6 +134,7 @@ export interface PublishesRepository {
     ctx: OrgContext,
     query: {
       readonly state?: PublishApprovalState;
+      readonly actionable?: boolean;
       readonly cursor?: string;
       readonly limit: number;
     },

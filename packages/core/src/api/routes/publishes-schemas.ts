@@ -15,6 +15,7 @@ export const publishApproveBody = z.strictObject({ reason: decisionReason.option
 export const publishRejectBody = z.strictObject({ reason: decisionReason.min(1) });
 export const publishListQuery = z.strictObject({
   state: publishApprovalState.optional(),
+  actionable: z.enum(['true']).optional(),
   cursor: z.string().max(512).optional(),
   limit: z
     .string()

@@ -180,9 +180,11 @@ describe('Sources browser workflows', () => {
         await browserExpect(
           page.getByRole('button', { name: `Sync now ${name}`, exact: true }),
         ).toBeDisabled();
-        expect(requests.filter((request) => request.method === 'POST').slice(before)).toEqual([
-          { path: `/_pb/projects/demo/sources/${target.id}/pause`, method: 'POST', body: null },
-        ]);
+        await expect
+          .poll(() => requests.filter((request) => request.method === 'POST').slice(before))
+          .toEqual([
+            { path: `/_pb/projects/demo/sources/${target.id}/pause`, method: 'POST', body: null },
+          ]);
       }
       for (const label of ['Refresh sources', 'Save source order']) {
         const button = page.getByRole('button', { name: label, exact: true });

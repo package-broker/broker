@@ -3,7 +3,7 @@ import { orgContext } from '../db/port.js';
 import { checkProxyClaims } from './proxy-claims.js';
 
 it.each(['found', 'unavailable', 'throw', 'not_found'] as const)(
-  'probes every exact hosted claim fail-closed: %s',
+  'probes every exact npm claim fail-closed: %s',
   async (answer) => {
     const ctx = orgContext('org');
     const probe = vi.fn(async () => {
@@ -29,10 +29,10 @@ it.each(['found', 'unavailable', 'throw', 'not_found'] as const)(
     };
     expect(
       await checkProxyClaims({ sources, registeredNames, claimProbe: probe }, ctx, 'proxy'),
-    ).toEqual(answer === 'not_found' ? [] : ['one', '@scope/two']);
-    expect(probe.mock.calls).toHaveLength(2);
+    ).toEqual(answer === 'not_found' ? [] : ['one', '@scope/two', 'other-source']);
+    expect(probe.mock.calls).toHaveLength(3);
     expect(probe).toHaveBeenCalledWith(ctx, 'proxy', 'one', expect.any(AbortSignal), 'claim');
-    expect(registeredNames.list).toHaveBeenLastCalledWith(ctx, {
+    expect(registeredNames.list).toHaveBeenCalledWith(ctx, {
       sourceId: 'host',
       after: 'next',
       limit: 100,
@@ -57,8 +57,13 @@ it('scans every source page and refuses exact claims when the probe is absent', 
     ctx,
     'proxy',
   );
-  expect(result).toEqual(rows.map(({ id }) => `claim-${id}`));
-  expect(list).toHaveBeenLastCalledWith(ctx, { projectId: null, after: '99', limit: 100 });
+  expect(result).toEqual(rows.slice(0, 100).map(({ id }) => `claim-${id}`));
+  expect(list).toHaveBeenLastCalledWith(ctx, {
+    projectId: null,
+    after: '99',
+    limit: 100,
+    ownership: 'all',
+  });
   expect(names).toHaveBeenCalledTimes(101);
 });
 
@@ -168,4 +173,85 @@ it('keeps at most four probes in flight even when a probe ignores cancellation',
   } finally {
     vi.useRealTimers();
   }
+});
+
+it.each(['hosted', 'vcs', 'npm_registry'])(
+  'enumerates all ownership scopes for %s claims',
+  async (type) => {
+    const deps = manyClaims(1);
+    deps.sources.list.mockResolvedValue([{ id: 'owner', type, ecosystem: 'npm' }]);
+    const verified: string[] = [];
+    expect(await checkProxyClaims(deps, orgContext('org'), 'proxy', verified)).toEqual(['claim-0']);
+    expect(deps.sources.list).toHaveBeenCalledWith(orgContext('org'), {
+      projectId: null,
+      ownership: 'all',
+      after: null,
+      limit: 100,
+    });
+  },
+);
+
+it('caps returned conflicts at 100 without skipping the rest of the proof', async () => {
+  const verified: string[] = [];
+  const claimProbe = vi.fn(async (_ctx, _target, key) =>
+    key === 'claim-149' ? ('not_found' as const) : ('found' as const),
+  );
+  expect(
+    await checkProxyClaims(
+      { ...manyClaims(150), claimProbe },
+      orgContext('org'),
+      'proxy',
+      verified,
+    ),
+  ).toHaveLength(100);
+  expect(claimProbe).toHaveBeenCalledTimes(150);
+  expect(verified).toEqual(['claim-149']);
+});
+
+it('fails closed without publishing proof when claim enumeration exceeds 1000 rows', async () => {
+  const deps = manyClaims(100);
+  deps.registeredNames.list.mockImplementation(async () => {
+    if (deps.registeredNames.list.mock.calls.length > 11)
+      throw new Error('Enumeration exceeded budget');
+    return {
+      items: Array.from({ length: 100 }, () => ({ pattern: '@scope/*' })),
+      next: 'repeated',
+    };
+  });
+  const verified: string[] = [];
+  const claimProbe = vi.fn().mockResolvedValue('not_found');
+  expect(
+    await checkProxyClaims({ ...deps, claimProbe }, orgContext('org'), 'proxy', verified),
+  ).toBeNull();
+  expect(deps.registeredNames.list).toHaveBeenCalledTimes(11);
+  expect(verified).toEqual([]);
+  expect(claimProbe).not.toHaveBeenCalled();
+});
+
+it('fails closed when source enumeration exceeds 1000 rows', async () => {
+  const deps = manyClaims(0);
+  deps.sources.list.mockImplementation(async () => {
+    if (deps.sources.list.mock.calls.length > 11) throw new Error('Enumeration exceeded budget');
+    return Array.from({ length: 101 }, (_, i) => ({
+      id: String(i),
+      type: 'hosted',
+      ecosystem: 'composer',
+    }));
+  });
+  expect(await checkProxyClaims(deps, orgContext('org'), 'proxy')).toBeNull();
+  expect(deps.sources.list).toHaveBeenCalledTimes(11);
+});
+
+it('accepts a complete enumeration at the 1000 claim limit', async () => {
+  const verified: string[] = [];
+  const claimProbe = vi.fn().mockResolvedValue('not_found');
+  expect(
+    await checkProxyClaims(
+      { ...manyClaims(1000), claimProbe },
+      orgContext('org'),
+      'proxy',
+      verified,
+    ),
+  ).toEqual([]);
+  expect(verified).toHaveLength(1000);
 });

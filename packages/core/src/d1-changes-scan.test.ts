@@ -753,7 +753,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/proxy-claims.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
         "db-sqlite/src/repositories/proxy-claims.ts:opaque dependency: import { MAX_VERIFIED_CLAIMS_BYTES } from '@package-broker/core/sources/proxy-claims'; #1",
         'db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`0` #1',
-        "db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`not exists (\n    select 1 from registered_name as proxy_claim\n    join source as claim_owner on claim_owner.id = proxy_claim.source_id\n      and claim_owner.org_id = ${ctx.orgId}\n    where proxy_claim.org_id = ${ctx.orgId}\n      and claim_owner.type = 'hosted' and claim_owner.ecosystem = 'npm'\n      and proxy_claim.ecosystem = 'npm' and instr(proxy_claim.pattern, '*') = 0\n      and proxy_claim.pattern not in (select value from json_each(${proof})))` #1",
+        "db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`not exists (\n    select 1 from registered_name as proxy_claim\n    join source as claim_owner on claim_owner.id = proxy_claim.source_id\n      and claim_owner.org_id = ${ctx.orgId}\n    where proxy_claim.org_id = ${ctx.orgId}\n      and claim_owner.ecosystem = 'npm'\n      and proxy_claim.ecosystem = 'npm' and instr(proxy_claim.pattern, '*') = 0\n      and proxy_claim.pattern not in (select value from json_each(${proof})))` #1",
         'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`1` #1',
       ],
     },

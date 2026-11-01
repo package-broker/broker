@@ -11,7 +11,7 @@ export function proxyClaimsVerified(ctx: OrgContext, verified: readonly string[]
     join source as claim_owner on claim_owner.id = proxy_claim.source_id
       and claim_owner.org_id = ${ctx.orgId}
     where proxy_claim.org_id = ${ctx.orgId}
-      and claim_owner.type = 'hosted' and claim_owner.ecosystem = 'npm'
+      and claim_owner.ecosystem = 'npm'
       and proxy_claim.ecosystem = 'npm' and instr(proxy_claim.pattern, '*') = 0
       and proxy_claim.pattern not in (select value from json_each(${proof})))`;
 }

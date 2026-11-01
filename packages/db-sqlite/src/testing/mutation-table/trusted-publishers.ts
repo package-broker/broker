@@ -1,4 +1,6 @@
 import { expect } from 'vitest';
+import { ulid } from '@package-broker/core/ids';
+import type { Statement } from '@package-broker/core/db/port';
 import {
   createTrustedPublisherLookup,
   createTrustedPublisherStore,
@@ -31,6 +33,40 @@ const readCase: ContractCase = {
     expect((await store.list(own)).items).toEqual([]);
   },
 };
+const pagingCase: ContractCase = {
+  name: 'publisher paging excludes ids before the cursor and bounds the SQL read',
+  async run(context) {
+    const { own } = orgOf(context);
+    const seed = seeder(context.executor);
+    await seedUser(seed, 'publisher-user', own.orgId);
+    await seed(
+      "INSERT INTO service_principal (id,org_id,name,created_by_user_id) VALUES ('principal',?,'Publisher','publisher-user')",
+      own.orgId,
+    );
+    const ids = Array.from({ length: 4 }, () => ulid()).sort();
+    for (const id of ids)
+      await seed(
+        "INSERT INTO trusted_publisher (id,org_id,package_name,repository_id,repository_owner_id,repository,workflow,environment,service_principal_id,created_by_user_id) VALUES (?,?,'widget','123','456','owner/repo','publish.yml',?,'principal','publisher-user')",
+        id,
+        own.orgId,
+        id,
+      );
+    const store = createTrustedPublisherStore(
+      {
+        ...context.executor,
+        async all<R>(statement: Statement): Promise<R[]> {
+          const rows = await context.executor.all<R>(context.mutate(statement));
+          expect(rows.length).toBeLessThanOrEqual(2);
+          return rows;
+        },
+      },
+      [],
+    );
+    const page = await store.list(own, { cursor: ids[0]!, limit: 1 });
+    expect(page.items.map((item) => item.id)).toEqual([ids[1]]);
+    expect(page.next).toBe(ids[1]);
+  },
+};
 const lookupCase: ContractCase = {
   name: 'publisher repository identity lookup excludes foreign source credentials',
   async run(context) {
@@ -60,6 +96,22 @@ export const entries: readonly MutationEntry[] = [
     file: 'repositories/trusted-publishers.ts',
     builder: 'createTrustedPublisherStore',
     cases: [readCase],
+    sqlDecisions: [
+      {
+        name: 'publisher list applies the cursor',
+        pattern: /"tp"\."id" > \?/,
+        replacement: '? is not null',
+        expected: 1,
+        case: pagingCase,
+      },
+      {
+        name: 'publisher list bounds its database read',
+        pattern: /limit \?/,
+        replacement: 'limit (? + 100)',
+        expected: 1,
+        case: pagingCase,
+      },
+    ],
     predicates: [
       {
         name: 'publisher reads scope bindings by organization',

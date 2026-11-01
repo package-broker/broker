@@ -32,7 +32,10 @@ export interface PublisherWrite {
   readonly event: AuditEvent;
 }
 export interface TrustedPublisherStore {
-  list(ctx: OrgContext): Promise<{ items: TrustedPublisher[] }>;
+  list(
+    ctx: OrgContext,
+    query?: { cursor?: string; limit?: number },
+  ): Promise<{ items: TrustedPublisher[]; next: string | null }>;
   get(ctx: OrgContext, id: string): Promise<TrustedPublisher | null>;
   create(
     ctx: OrgContext,

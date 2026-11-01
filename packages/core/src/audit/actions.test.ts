@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_NPM_NAME_LENGTH } from '../catalogue/names.js';
 import { formatToken } from '../secrets/token-format.js';
 import { redactValue } from './redact.js';
 import { FAKE, githubWithSentinel } from '../test-support/credential-fixtures.js';
@@ -1375,7 +1376,7 @@ describe('npm audit values', () => {
     'package.access_request',
     'package.access_decide',
   ])('bounds npm package names in %s', (action) => {
-    expect(build(action, { package: { new: 'a'.repeat(214) } }).ok).toBe(true);
+    expect(build(action, { package: { new: 'a'.repeat(MAX_NPM_NAME_LENGTH) } }).ok).toBe(true);
     expect(build(action, { package: { new: 'a'.repeat(215) } }).ok).toBe(false);
     expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(false);
   });
@@ -1439,5 +1440,24 @@ describe('verified workload claim audit values', () => {
       ok: false,
       reason: 'credential_value',
     });
+  });
+});
+
+it('preserves complete publisher restriction snapshots including absent and long values', () => {
+  const changes = {
+    package: { old: 'a'.repeat(MAX_NPM_NAME_LENGTH), new: 'widget' },
+    environment: { old: '', new: 'prod' },
+    ref_pattern: { old: null, new: 'refs/tags/v*' },
+    repository_id: { old: '123', new: '789' },
+    repository_owner_id: { old: '456', new: '987' },
+    repository: { old: 'owner/repo', new: 'owner/next' },
+    workflow: { old: 'p'.repeat(240) + '.yml', new: 'publish.yml' },
+  };
+  expect(JSON.parse(payloadOf(build('trusted_publisher.update', changes))).changes).toEqual(
+    changes,
+  );
+  expect(build('token.workload_issue', { repository_id: { new: null } })).toEqual({
+    ok: false,
+    reason: 'bad_value',
   });
 });

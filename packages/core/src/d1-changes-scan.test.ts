@@ -682,6 +682,22 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Publisher snapshot traversal pairs validated audit restriction values with their prior values; the contract traverses expected restrictions. None reads executor affected-row counts.',
+      sites: [
+        'db-sqlite/src/contract/trusted-publishers-contract.ts:opaque object access: Object.entries(values) #1',
+        'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(after) #1',
+        'db-sqlite/src/repositories/trusted-publishers.ts:unresolved computed access: old[field as keyof typeof old] #1',
+      ],
+    },
+    {
+      reason:
+        'The publisher page cursor comes from the last returned row of a bounded SELECT with one-row lookahead; it does not inspect executor affected-row metadata.',
+      sites: [
+        'db-sqlite/src/repositories/trusted-publishers.ts:unresolved computed access: rows[limit - 1] #1',
+      ],
+    },
+    {
+      reason:
         'These typed guards classify a refused publisher write; the result probe reads the selected failed flag, never executor changes.',
       sites: [
         'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(checks) #1',

@@ -20,6 +20,8 @@ const empty = (): Draft => ({
 });
 export interface State {
   items: Publisher[];
+  next: string | null;
+  hasPrevious: boolean;
   draft: Draft;
   editing: { id: string; revision: number } | null;
   loading: boolean;
@@ -32,6 +34,8 @@ export interface State {
 export function createTrustedPublishersController(services: ShellServices) {
   let state: State = {
     items: [],
+    next: null,
+    hasPrevious: false,
     draft: empty(),
     editing: null,
     loading: false,
@@ -42,6 +46,7 @@ export function createTrustedPublishersController(services: ShellServices) {
     notice: null,
   };
   let epoch = 0;
+  let cursors: (string | undefined)[] = [undefined];
   const listeners = new Set<() => void>();
   const set = (next: Partial<State>) => {
     state = { ...state, ...next };
@@ -97,10 +102,13 @@ export function createTrustedPublishersController(services: ShellServices) {
     },
     clear() {
       epoch++;
+      cursors = [undefined];
       set({
         draft: empty(),
         editing: null,
         items: [],
+        next: null,
+        hasPrevious: false,
         notice: null,
         busy: false,
         loading: false,
@@ -113,7 +121,10 @@ export function createTrustedPublishersController(services: ShellServices) {
       if (state.busy) return;
       const version = ++epoch;
       set({ loading: true, loadError: false });
-      const result = await services.client.request('get', '/_pb/trusted-publishers');
+      const cursor = cursors[cursors.length - 1];
+      const result = await services.client.request('get', '/_pb/trusted-publishers', {
+        query: cursor === undefined ? {} : { cursor },
+      });
       if (version !== epoch) return;
       if (!result.ok) {
         set({ loading: false, loadError: true });
@@ -130,6 +141,8 @@ export function createTrustedPublishersController(services: ShellServices) {
       }
       set({
         items: result.data.items,
+        next: result.data.next ?? null,
+        hasPrevious: cursors.length > 1,
         loading: false,
         stale: false,
         editing,
@@ -140,6 +153,32 @@ export function createTrustedPublishersController(services: ShellServices) {
             ? 'Latest settings loaded. Review your draft before saving again.'
             : state.notice,
       });
+    },
+    async nextPage() {
+      if (
+        state.busy ||
+        state.loading ||
+        state.stale ||
+        state.loadError ||
+        state.editing !== null ||
+        state.next === null
+      )
+        return;
+      cursors.push(state.next);
+      await controller.load();
+    },
+    async previousPage() {
+      if (
+        state.busy ||
+        state.loading ||
+        state.stale ||
+        state.loadError ||
+        state.editing !== null ||
+        cursors.length < 2
+      )
+        return;
+      cursors.pop();
+      await controller.load();
     },
     async save() {
       if (state.busy || state.loading || state.stale || state.loadError || state.editDisabled)

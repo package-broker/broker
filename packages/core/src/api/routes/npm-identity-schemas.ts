@@ -54,7 +54,14 @@ export const NPM_IDENTITY_SCHEMAS = {
     environment: z.string().max(255),
     refPattern: z.string().max(255).optional(),
   }),
-  TrustedPublisherList: z.strictObject({ items: z.array(trustedPublisher) }),
+  TrustedPublisherListQuery: z.strictObject({
+    cursor: id.optional(),
+    limit: z
+      .string()
+      .regex(/^(?:[1-9]|[1-4][0-9]|50)$/)
+      .optional(),
+  }),
+  TrustedPublisherList: z.strictObject({ items: z.array(trustedPublisher), next: id.nullable() }),
   NpmWorkloadToken: z.strictObject({
     token_type: z.literal('oidc'),
     token: z.string(),

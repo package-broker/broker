@@ -12,6 +12,8 @@ let ecosystem = 'npm';
 let releaseWrite: (() => void) | undefined;
 let holdWrites = false;
 let paginated = false;
+let publishState = 'pending';
+let scanState = 'queued';
 const reads: string[] = [];
 const writes: { path: string; body: unknown; match: string | null }[] = [];
 const item = {
@@ -52,6 +54,8 @@ beforeEach(async () => {
   releaseWrite = undefined;
   holdWrites = false;
   paginated = false;
+  publishState = 'pending';
+  scanState = 'queued';
   reads.length = 0;
   writes.length = 0;
   fixture = await createBrowserFixture({
@@ -126,9 +130,9 @@ beforeEach(async () => {
         requestedBy: { name: 'Release team' },
         project: { name: 'Checkout', slug: 'demo' },
         revision: 7,
-        approvalState: 'pending',
+        approvalState: publishState,
         state: 'pending',
-        scanState: 'queued',
+        scanState,
         holdScan: true,
         reason: 'Needed for checkout',
         expiresAt: '2026-12-01T00:00:00Z',
@@ -409,6 +413,8 @@ it('keeps each pagination action inside its matching section', async (context) =
     .browserExpect(fixture.page.getByRole('button', { name: 'Next access requests', exact: true }))
     .toHaveCount(0);
   paginated = false;
+  publishState = 'pending';
+  scanState = 'queued';
 });
 
 it('preserves filter controls and cached named choices across hash navigation per scope', async (context) => {
@@ -483,4 +489,69 @@ it('preserves filter controls and cached named choices across hash navigation pe
     .toHaveText(['All projects', 'Checkout']);
   expect(reads.filter((path) => path === '/_pb/sources')).toHaveLength(1);
   expect(reads.filter((path) => path === '/_pb/projects')).toHaveLength(1);
+});
+
+it.for(['not_required', 'approved'])(
+  'rescans a failed %s hold with its revision and queued feedback',
+  async (state, context) => {
+    if (!fixture) return context.skip();
+    publishState = state;
+    scanState = 'failed';
+    await fixture.mount(script);
+    await fixture.page.getByRole('button', { name: /^Rescan / }).click();
+    await fixture.page.getByRole('button', { name: 'Queue rescan' }).click();
+    await fixture
+      .browserExpect(fixture.page.getByRole('status').filter({ hasText: 'Security scan queued.' }))
+      .toContainText('remains held');
+    expect(reads).toContain('/_pb/publishes?actionable=true');
+    expect(writes[0]).toEqual({ path: '/_pb/publishes/request/rescan', body: {}, match: '"r7"' });
+  },
+);
+it('disposes an approved failed scan with a required reason', async (context) => {
+  if (!fixture) return context.skip();
+  publishState = 'approved';
+  scanState = 'failed';
+  await fixture.page.setViewportSize({ width: 390, height: 800 });
+  await fixture.mount(script);
+  await fixture.page.getByRole('button', { name: /More actions for .*1\.0\.0/ }).click();
+  await fixture.page.getByRole('menuitem', { name: /^Dispose failed publish / }).click();
+  await fixture.page.getByLabel('Reason (required)').fill('Failed security review');
+  await fixture.page.getByRole('button', { name: 'Confirm rejection' }).click();
+  await fixture
+    .browserExpect(fixture.page.getByRole('status').filter({ hasText: 'Publish rejected.' }))
+    .toContainText('rejected');
+  expect(writes[0]).toEqual({
+    path: '/_pb/publishes/request/reject',
+    body: { reason: 'Failed security review' },
+    match: '"r7"',
+  });
+});
+
+it('blocks rescan resubmission after a revision conflict until renewed review', async (context) => {
+  if (!fixture) return context.skip();
+  publishState = 'approved';
+  scanState = 'failed';
+  conflict = true;
+  await fixture.mount(script);
+  await fixture.page.getByRole('button', { name: /^Rescan / }).click();
+  await fixture.page.getByRole('button', { name: 'Queue rescan' }).click();
+  await fixture.page.getByRole('button', { name: 'Reload latest requests' }).waitFor();
+  await fixture
+    .browserExpect(fixture.page.getByRole('button', { name: 'Queue rescan' }))
+    .toBeDisabled();
+  expect(writes).toHaveLength(1);
+});
+
+it('hides failed-scan recovery controls from readers', async (context) => {
+  if (!fixture) return context.skip();
+  readOnly = true;
+  publishState = 'approved';
+  scanState = 'failed';
+  await fixture.mount(script);
+  await fixture.page.getByRole('heading', { name: 'Pending publishes', exact: true }).waitFor();
+  expect(await fixture.page.getByRole('button', { name: /^Rescan / }).count()).toBe(0);
+  expect(
+    await fixture.page.getByRole('button', { name: /More actions for .*1\.0\.0/ }).count(),
+  ).toBe(0);
+  expect(writes).toHaveLength(0);
 });

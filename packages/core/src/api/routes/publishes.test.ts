@@ -258,3 +258,23 @@ it.each([2, 3])('refuses a scan-denied publish before any decision write (%s)', 
   expect(await response.json()).toMatchObject({ error: { code: 'already_decided' } });
   expect(f.decide).not.toHaveBeenCalled();
 });
+
+it('permits audited rejection of an approved failed scan but refuses other approved states', async () => {
+  for (const scanState of ['failed', 'queued', 'running', 'allowed', 'denied'] as const) {
+    const f = fixture();
+    Object.assign(f.item, { approvalState: 'approved', scanState, holdScan: true });
+    const response = await f.routes[3]!.handler(
+      f.context('POST', `/_pb/publishes/${f.id}/reject`, { reason: 'Dispose failed scan' }),
+    );
+    expect(response.status).toBe(scanState === 'failed' ? 200 : 409);
+    expect(f.decide.mock.calls.length).toBe(scanState === 'failed' ? 1 : 0);
+  }
+});
+
+it('forwards the actionable filter without imposing pending approval state', async () => {
+  const f = fixture();
+  expect(
+    (await f.routes[0]!.handler(f.context('GET', '/_pb/publishes?actionable=true'))).status,
+  ).toBe(200);
+  expect(f.list).toHaveBeenCalledWith(orgContext('org'), { actionable: true, limit: 50 });
+});

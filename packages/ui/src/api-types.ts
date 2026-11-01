@@ -1970,6 +1970,8 @@ export interface components {
       next: string | null;
     };
     PublishListQuery: {
+      /** @enum {string} */
+      actionable?: 'true';
       cursor?: string;
       limit?: string;
       /** @enum {string} */
@@ -9151,6 +9153,7 @@ export interface operations {
   listPublishes: {
     parameters: {
       query?: {
+        actionable?: 'true';
         cursor?: string;
         limit?: string;
         state?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';

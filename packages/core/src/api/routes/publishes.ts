@@ -27,6 +27,7 @@ export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[
       return {
         status: 200,
         body: await deps.publishes.list(ctx.org, {
+          ...(query.actionable === undefined ? {} : { actionable: true }),
           ...(query.state === undefined ? {} : { state: query.state }),
           ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
           limit: Number(query.limit ?? 50),
@@ -54,7 +55,12 @@ export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[
         if (
           item.scanState === 'denied' ||
           (item.approvalState !== 'pending' &&
-            !(spec === publishRejectSpec && item.approvalState === 'not_required' && item.holdScan))
+            !(
+              spec === publishRejectSpec &&
+              item.holdScan &&
+              (item.approvalState === 'not_required' ||
+                (item.approvalState === 'approved' && item.scanState === 'failed'))
+            ))
         )
           return { error: 'already_decided' };
         if (

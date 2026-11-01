@@ -1,5 +1,6 @@
 import { auditEvent } from '../audit/actions.js';
 import { redactValue } from '../audit/redact.js';
+import { PUBLISH_SCAN_RECOVERY_BATCH_SIZE } from '../db/publishes.js';
 import type {
   PublishInspection,
   PublishesRepository,
@@ -208,11 +209,18 @@ export function createPublishScanSweepJob(deps: { readonly publishes: PublishesR
     version: 1,
     schedule: { everySeconds: 300 },
     validate(input: unknown) {
-      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length)
+      if (
+        !input ||
+        typeof input !== 'object' ||
+        Array.isArray(input) ||
+        Object.keys(input).some((key) => key !== 'after') ||
+        ('after' in input &&
+          (typeof input.after !== 'string' || !input.after || input.after.length > 128))
+      )
         throw new JobError('invalid_payload');
-      return {};
+      return input as { readonly after?: string };
     },
-    async handler(_input, job) {
+    async handler(input, job) {
       if (!jobLeaseOf(job)) throw new JobError('lease_lost');
       const now = job.ports.clock.now().getTime();
       const before = new Date(now - 600_000).toISOString();
@@ -222,7 +230,8 @@ export function createPublishScanSweepJob(deps: { readonly publishes: PublishesR
       const runningBefore = new Date(
         job.ports.clock.now().getTime() - JOB_LEASE_SECONDS * 1000,
       ).toISOString();
-      for (let item of await deps.publishes.listScanQueued(job.org, before, runningBefore)) {
+      const page = await deps.publishes.listScanQueued(job.org, before, runningBefore, input.after);
+      for (let item of page) {
         if (job.signal.aborted) return;
         if (item.scanState === 'running') {
           const state = item.scanAttempts >= 3 ? 'failed' : 'queued';
@@ -248,6 +257,17 @@ export function createPublishScanSweepJob(deps: { readonly publishes: PublishesR
           {
             idempotencyKey: `publish-sweep:${item.versionId}:${item.revision}:${bucket}`,
             resourceKey: `publish:${item.versionId}`,
+          },
+        );
+      }
+      const last = page[PUBLISH_SCAN_RECOVERY_BATCH_SIZE - 1];
+      if (last && !job.signal.aborted) {
+        await jobs.enqueue(
+          job.org,
+          'core:publish-scan-sweep:v1',
+          { after: last.id },
+          {
+            idempotencyKey: `publish-sweep-page:${last.id}:${bucket}`,
           },
         );
       }

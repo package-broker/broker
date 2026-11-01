@@ -6,6 +6,7 @@ import { parseHash } from '../app.js';
 import { safePageHash } from '../auth.js';
 import { createPackageFilterChoicesLoader, parsePackagesHash } from './packages.js';
 import {
+  publishActions,
   accessSetting,
   canEditAccess,
   decisionAllowed,
@@ -134,4 +135,39 @@ it('retries filter choices after a failed page instead of caching the partial li
   expect(retried.sources).toHaveLength(1);
   expect(await load('demo')).toBe(retried);
   expect(calls).toEqual(['/_pb/projects/demo/sources', '/_pb/projects/demo/sources']);
+});
+
+it('offers only valid actions across approval and scan combinations', () => {
+  for (const approvalState of [
+    'pending',
+    'not_required',
+    'approved',
+    'rejected',
+    'expired',
+  ] as const) {
+    for (const scanState of [
+      'not_required',
+      'queued',
+      'running',
+      'allowed',
+      'failed',
+      'denied',
+    ] as const) {
+      const actions = publishActions({
+        approvalState,
+        scanState,
+        holdScan: scanState !== 'not_required',
+      });
+      const open =
+        ['pending', 'not_required', 'approved'].includes(approvalState) && scanState !== 'denied';
+      expect(actions.includes('rescan')).toBe(open && scanState === 'failed');
+      expect(actions.includes('approve')).toBe(open && approvalState === 'pending');
+      expect(actions.includes('reject')).toBe(
+        open &&
+          (approvalState === 'pending' ||
+            (approvalState === 'not_required' && scanState !== 'not_required') ||
+            (approvalState === 'approved' && scanState === 'failed')),
+      );
+    }
+  }
 });

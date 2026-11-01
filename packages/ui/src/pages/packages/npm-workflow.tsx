@@ -49,6 +49,25 @@ export function decisionHeaders(revision: number) {
 export function decisionAllowed(authorized: boolean, busy: boolean, stale: boolean, state: string) {
   return authorized && !busy && !stale && state === 'pending';
 }
+type PublishAction = 'approve' | 'reject' | 'rescan';
+export function publishActions(
+  item: Pick<Publish, 'approvalState' | 'scanState' | 'holdScan'>,
+): PublishAction[] {
+  if (
+    !['pending', 'not_required', 'approved'].includes(item.approvalState) ||
+    item.scanState === 'denied'
+  )
+    return [];
+  const actions: PublishAction[] = [];
+  if (item.approvalState === 'pending') actions.push('approve');
+  if (item.holdScan && item.scanState === 'failed') actions.push('rescan');
+  if (
+    item.approvalState === 'pending' ||
+    (item.holdScan && (item.approvalState === 'not_required' || item.scanState === 'failed'))
+  )
+    actions.push('reject');
+  return actions;
+}
 export function validReason(reason: string, required: boolean) {
   return (
     (!required || reason.trim().length > 0) &&
@@ -68,7 +87,7 @@ const SCANS: Record<Publish['scanState'], string> = {
   not_required: 'Security scan not required',
 };
 type Decision =
-  | { kind: 'publish'; item: Publish; action: 'approve' | 'reject' }
+  | { kind: 'publish'; item: Publish; action: PublishAction }
   | { kind: 'access'; item: Access; action: 'approve' | 'reject' }
   | { kind: 'request'; item: Requestable };
 
@@ -154,7 +173,7 @@ export function PackageWorkflow({
       } else if (allowed.includes('org:packages:read')) {
         const [pub, req] = await Promise.all([
           services.client.request('get', '/_pb/publishes', {
-            query: { state: 'pending', cursor: cursors.publishes },
+            query: { actionable: 'true', cursor: cursors.publishes },
           }),
           services.client.request('get', '/_pb/package-access-requests', {
             query: { state: 'pending', cursor: cursors.requests },
@@ -216,7 +235,9 @@ export function PackageWorkflow({
         busy,
         stale,
         decision.kind === 'publish'
-          ? decision.item.approvalState
+          ? publishActions(decision.item).includes(decision.action)
+            ? 'pending'
+            : 'closed'
           : decision.kind === 'access'
             ? decision.item.state
             : 'pending',
@@ -243,7 +264,7 @@ export function PackageWorkflow({
           ? await services.client.request('post', `/_pb/publishes/{id}/${decision.action}`, {
               params: { id: decision.item.id },
               headers: decisionHeaders(decision.item.revision),
-              body,
+              body: decision.action === 'rescan' ? {} : body,
             })
           : await services.client.request(
               'post',
@@ -283,7 +304,9 @@ export function PackageWorkflow({
     setNotice(
       decision.kind === 'request'
         ? 'Package access requested. An organization administrator must approve it.'
-        : `${decision.kind === 'publish' ? 'Publish' : 'Package access'} ${decision.action === 'approve' ? 'approved' : 'rejected'}.${decision.kind === 'publish' && decision.action === 'approve' && decision.item.holdScan ? ' The package remains held until the security scan passes.' : ''}`,
+        : decision.kind === 'publish' && decision.action === 'rescan'
+          ? 'Security scan queued. The version remains held until all required reviews pass.'
+          : `${decision.kind === 'publish' ? 'Publish' : 'Package access'} ${decision.action === 'approve' ? 'approved' : 'rejected'}.${decision.kind === 'publish' && decision.action === 'approve' && decision.item.holdScan ? ' The package remains held until the security scan passes.' : ''}`,
     );
     setDecision(null);
     setRefresh((value) => value + 1);
@@ -364,8 +387,8 @@ export function PackageWorkflow({
               Rejection is permanent for this version.
             </p>
             <p>
-              {publishes.length} {publishes.length === 1 ? 'pending publish' : 'pending publishes'}{' '}
-              on this page
+              {publishes.length} {publishes.length === 1 ? 'held publish' : 'held publishes'} on
+              this page
             </p>
             <DataTable
               label="Pending publishes"
@@ -395,7 +418,23 @@ export function PackageWorkflow({
                     </>
                   ),
                 },
-                { key: 'scan', label: 'Security review', value: (item) => SCANS[item.scanState] },
+                {
+                  key: 'scan',
+                  label: 'Review status',
+                  value: (item) => SCANS[item.scanState],
+                  render: (item) => (
+                    <>
+                      {SCANS[item.scanState]}
+                      <span className="block">
+                        {item.approvalState === 'pending'
+                          ? 'Approval pending'
+                          : item.approvalState === 'approved'
+                            ? 'Publish approved'
+                            : 'Approval not required'}
+                      </span>
+                    </>
+                  ),
+                },
                 {
                   key: 'expires',
                   label: 'Expires',
@@ -410,27 +449,34 @@ export function PackageWorkflow({
                     permissions.includes('org:packages:approve') ? (
                       <WorkflowActions
                         entityLabel={`${item.packageName} ${item.version}`}
-                        actions={[
-                          {
-                            id: 'approve',
-                            label: 'Approve publish',
-                            onSelect: () => open({ kind: 'publish', item, action: 'approve' }),
-                          },
-                        ]}
-                        overflow={[
-                          {
-                            id: 'reject',
-                            label: 'Reject publish',
-                            variant: 'destructive',
-                            onSelect: () => open({ kind: 'publish', item, action: 'reject' }),
-                          },
-                        ]}
+                        actions={publishActions(item)
+                          .filter((action) => action !== 'reject')
+                          .map((action) => ({
+                            id: action,
+                            label: action === 'rescan' ? 'Rescan' : 'Approve publish',
+                            onSelect: () => open({ kind: 'publish', item, action }),
+                          }))}
+                        overflow={
+                          publishActions(item).includes('reject')
+                            ? [
+                                {
+                                  id: 'reject',
+                                  label:
+                                    item.approvalState === 'approved'
+                                      ? 'Dispose failed publish'
+                                      : 'Reject publish',
+                                  variant: 'destructive',
+                                  onSelect: () => open({ kind: 'publish', item, action: 'reject' }),
+                                },
+                              ]
+                            : []
+                        }
                       />
                     ) : null,
                 },
               ]}
             />
-            {!publishes.length && <p>No pending publishes on this page.</p>}
+            {!publishes.length && <p>No actionable holds on this page.</p>}
             {next.publishes && (
               <Button
                 type="button"
@@ -529,13 +575,15 @@ export function PackageWorkflow({
             <DialogTitle>
               {decision?.kind === 'request'
                 ? 'Request package access'
-                : decision?.action === 'reject'
-                  ? 'Reject request'
-                  : 'Approve request'}
+                : decision?.action === 'rescan'
+                  ? 'Rescan publish'
+                  : decision?.action === 'reject'
+                    ? 'Reject request'
+                    : 'Approve request'}
             </DialogTitle>
             <DialogDescription>
               {decision
-                ? `${decision.kind === 'request' ? decision.item.name : decision.item.packageName} · ${decision.kind === 'access' ? decision.item.project.name : scope}. ${decision.kind === 'publish' ? 'Rejection permanently removes this version. Approval still requires all security scans to pass.' : 'An approved request gives this project access to the package.'}`
+                ? `${decision.kind === 'request' ? decision.item.name : decision.item.packageName} · ${decision.kind === 'access' ? decision.item.project.name : scope}. ${decision.kind === 'publish' ? 'Rejection permanently removes this version. Rescan queues another security review and keeps the version held. Approval still requires all security scans to pass.' : 'An approved request gives this project access to the package.'}`
                 : ''}
             </DialogDescription>
           </DialogHeader>
@@ -548,23 +596,27 @@ export function PackageWorkflow({
             className="space-y-4"
             aria-busy={busy}
           >
-            <Label htmlFor="package-decision-reason">
-              Reason ({required ? 'required' : 'optional'})
-            </Label>
-            <Textarea
-              id="package-decision-reason"
-              ref={reasonField}
-              className="min-h-24 w-full rounded border p-2"
-              required={required}
-              value={reason}
-              disabled={busy}
-              onChange={(event) => setReason(event.target.value)}
-              aria-describedby="package-reason-help package-decision-error"
-              aria-invalid={!!error}
-            />
-            <p id="package-reason-help">
-              At most 1000 UTF-8 bytes. The reason is recorded with the decision.
-            </p>
+            {!(decision?.kind === 'publish' && decision.action === 'rescan') && (
+              <>
+                <Label htmlFor="package-decision-reason">
+                  Reason ({required ? 'required' : 'optional'})
+                </Label>
+                <Textarea
+                  id="package-decision-reason"
+                  ref={reasonField}
+                  className="min-h-24 w-full rounded border p-2"
+                  required={required}
+                  value={reason}
+                  disabled={busy}
+                  onChange={(event) => setReason(event.target.value)}
+                  aria-describedby="package-reason-help package-decision-error"
+                  aria-invalid={!!error}
+                />
+                <p id="package-reason-help">
+                  At most 1000 UTF-8 bytes. The reason is recorded with the decision.
+                </p>
+              </>
+            )}
             <p id="package-decision-error" role="alert">
               {error}
             </p>
@@ -593,9 +645,11 @@ export function PackageWorkflow({
                   ? 'Saving decision…'
                   : decision?.kind === 'request'
                     ? 'Send request'
-                    : required
-                      ? 'Confirm rejection'
-                      : 'Confirm approval'}
+                    : decision?.kind === 'publish' && decision.action === 'rescan'
+                      ? 'Queue rescan'
+                      : required
+                        ? 'Confirm rejection'
+                        : 'Confirm approval'}
               </Button>
             </DialogFooter>
           </form>

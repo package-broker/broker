@@ -1,3 +1,4 @@
+import { withNpmVcsBuildEnqueue } from './npm-build-apply.js';
 import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
 import { createOidcVerifier } from './npm/oidc/verify.js';
 import { createPublishService, type PublishDependencies } from './npm/publish-service.js';
@@ -634,49 +635,12 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
             };
           },
         });
-  const npmApply: ApplyDeps = {
-    ...ingest.apply,
-    writer: {
-      ...ingest.apply.writer,
-      get statementBudget() {
-        return ingest.apply.writer.statementBudget;
-      },
-      async syncPackage(ctx, guard, input) {
-        const result = await ingest.apply.writer.syncPackage(ctx, guard, input);
-        if (
-          input.ecosystem === 'npm' &&
-          (await catalogue.sources.get(ctx, input.sourceId))?.type === 'vcs' &&
-          input.versions.length > 0 &&
-          deps.npmVcsBuild !== undefined &&
-          jobs !== undefined
-        ) {
-          const rows = await ingest.apply.existing.existingVersions(ctx, {
-            packageId: result.packageId,
-            after: null,
-            withMetadata: false,
-            limit: input.versions.length,
-            keys: input.versions.map((v) => v.versionNormalized),
-          });
-          for (const version of rows.rows) {
-            const payload = {
-              sourceId: input.sourceId,
-              packageId: result.packageId,
-              versionId: version.id,
-              version: version.versionNormalized,
-            };
-            if ((await deps.npmVcsBuild.target(ctx, payload)) !== null)
-              await jobs.enqueue(
-                ctx,
-                NPM_VCS_BUILD_JOB_TYPE,
-                payload,
-                npmVcsBuildEnqueueInput(payload, deps.clock.now().getTime()),
-              );
-          }
-        }
-        return result;
-      },
-    },
-  };
+  const npmApply = withNpmVcsBuildEnqueue(ingest.apply, {
+    source: (ctx, id) => catalogue.sources.get(ctx, id),
+    target: deps.npmVcsBuild?.target,
+    jobs,
+    clock: deps.clock,
+  });
   const packageSyncJob =
     sync === undefined || jobs === undefined
       ? undefined

@@ -39,7 +39,7 @@ export function describeNpmClaimsContract(
       }
     });
 
-    async function setup(ownerType = 'hosted') {
+    async function setup(ownerType = 'hosted', projectOwned = false) {
       const database = await open();
       const { executor } = database;
       const { a, b } = await seedTwoOrganizations(executor);
@@ -95,6 +95,15 @@ export function describeNpmClaimsContract(
       await executor.batch([
         st("UPDATE source SET type = ? WHERE org_id = ? AND id = 'H'", ownerType, a.orgId),
       ]);
+      if (projectOwned) {
+        await executor.batch([
+          st(
+            "INSERT INTO project (id, org_id, slug, name) VALUES ('OWNER', ?, 'owner', 'Owner')",
+            a.orgId,
+          ),
+          st("UPDATE source SET project_id = 'OWNER' WHERE org_id = ? AND id = 'H'", a.orgId),
+        ]);
+      }
       const names = createRegisteredNameRepository(executor);
       const fence = mutationFence({ userId: 'U', sessionId: 'S' } as AuthenticatedActor, {});
 
@@ -140,164 +149,176 @@ export function describeNpmClaimsContract(
       return { ...database, a, b, names, fence, anchors, audit, add, snapshot };
     }
 
-    it.each(['create', 'attach'] as const)(
-      'accepts verified claims and rechecks late claims during proxy %s',
-      async (operation) => {
-        const f = await setup();
-        try {
-          expect(await f.add('C1', 'H', 'widget')).toBe('added');
-          await f.executor.batch([
-            st(
-              "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
-              f.a.orgId,
-            ),
-          ]);
-          const write = async (executor: SqlExecutor) =>
-            operation === 'create'
-              ? createSourceRepository(executor).create(f.a, f.fence, {
-                  id: 'NEW',
-                  projectId: null,
-                  name: 'new proxy',
-                  type: 'npmjs_proxy',
-                  ecosystem: 'npm',
-                  url: 'https://registry.npmjs.org',
-                  configJson: '{}',
-                  credential: null,
-                  verifiedClaims: ['widget'],
-                  providerAnchors: f.anchors,
-                  audit: f.audit('NEW'),
-                })
-              : createVisibilityAttachRepository(executor, {
-                  providerAnchors: f.anchors,
-                }).attachSource(f.a, f.fence, {
-                  projectId: 'PR',
-                  sourceId: 'P',
-                  verifiedClaims: ['widget'],
-                  audit: f.audit('P'),
-                });
-          let raced = false;
-          const executor: SqlExecutor = {
-            driver: f.executor.driver,
-            all: (statement) => f.executor.all(statement),
-            async batch(statements) {
-              if (!raced) {
-                raced = true;
-                await f.executor.batch([
-                  st(
-                    "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('LATE', ?, 'H', 'npm', 'late')",
-                    f.a.orgId,
-                  ),
-                ]);
-              }
-              return f.executor.batch(statements);
-            },
-          };
-          expect(await write(executor)).toEqual(
-            operation === 'create' ? 'conflict' : { ok: false, reason: 'conflict' },
-          );
-          expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
-          expect(await f.executor.all(st("SELECT * FROM source WHERE id = 'NEW'"))).toEqual([]);
-          await f.executor.batch([
-            st("DELETE FROM registered_name WHERE org_id = ? AND id = 'LATE'", f.a.orgId),
-          ]);
-          const result = await write(f.executor);
-          if (operation === 'create') expect(result).toBe('created');
-          else expect(result).toMatchObject({ ok: true });
-        } finally {
-          await f.close();
-        }
-      },
-    );
+    describe.each(['hosted', 'vcs', 'npm_registry'])(
+      'proxy addition with %s claims',
+      (ownerType) => {
+        describe.each(ownerType === 'hosted' ? [false] : [false, true])(
+          'project ownership: %s',
+          (projectOwned) => {
+            it.each(['create', 'attach'] as const)(
+              'accepts verified claims and rechecks late claims during proxy %s',
+              async (operation) => {
+                const f = await setup(ownerType, projectOwned);
+                try {
+                  expect(await f.add('C1', 'H', 'widget')).toBe('added');
+                  await f.executor.batch([
+                    st(
+                      "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+                      f.a.orgId,
+                    ),
+                  ]);
+                  const write = async (executor: SqlExecutor) =>
+                    operation === 'create'
+                      ? createSourceRepository(executor).create(f.a, f.fence, {
+                          id: 'NEW',
+                          projectId: null,
+                          name: 'new proxy',
+                          type: 'npmjs_proxy',
+                          ecosystem: 'npm',
+                          url: 'https://registry.npmjs.org',
+                          configJson: '{}',
+                          credential: null,
+                          verifiedClaims: ['widget'],
+                          providerAnchors: f.anchors,
+                          audit: f.audit('NEW'),
+                        })
+                      : createVisibilityAttachRepository(executor, {
+                          providerAnchors: f.anchors,
+                        }).attachSource(f.a, f.fence, {
+                          projectId: 'PR',
+                          sourceId: 'P',
+                          verifiedClaims: ['widget'],
+                          audit: f.audit('P'),
+                        });
+                  let raced = false;
+                  const executor: SqlExecutor = {
+                    driver: f.executor.driver,
+                    all: (statement) => f.executor.all(statement),
+                    async batch(statements) {
+                      if (!raced) {
+                        raced = true;
+                        await f.executor.batch([
+                          st(
+                            "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('LATE', ?, 'H', 'npm', 'late')",
+                            f.a.orgId,
+                          ),
+                        ]);
+                      }
+                      return f.executor.batch(statements);
+                    },
+                  };
+                  expect(await write(executor)).toEqual(
+                    operation === 'create' ? 'conflict' : { ok: false, reason: 'conflict' },
+                  );
+                  expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
+                  expect(await f.executor.all(st("SELECT * FROM source WHERE id = 'NEW'"))).toEqual(
+                    [],
+                  );
+                  await f.executor.batch([
+                    st("DELETE FROM registered_name WHERE org_id = ? AND id = 'LATE'", f.a.orgId),
+                  ]);
+                  const result = await write(f.executor);
+                  if (operation === 'create') expect(result).toBe('created');
+                  else expect(result).toMatchObject({ ok: true });
+                } finally {
+                  await f.close();
+                }
+              },
+            );
 
-    it.each(['create', 'attach'] as const)(
-      'refuses unverified exact claims inside the proxy %s batch',
-      async (operation) => {
-        const f = await setup();
-        try {
-          expect(await f.add('C1', 'H', 'widget')).toBe('added');
-          const before = await f.snapshot();
-          if (operation === 'create') {
-            const result = await createSourceRepository(f.executor).create(f.a, f.fence, {
-              id: 'NEW',
-              projectId: null,
-              name: 'new proxy',
-              type: 'npmjs_proxy',
-              ecosystem: 'npm',
-              url: 'https://registry.npmjs.org',
-              configJson: '{}',
-              credential: null,
-              providerAnchors: f.anchors,
-              audit: f.audit('NEW'),
-            });
-            expect(result).toBe('conflict');
-            expect(await createSourceRepository(f.executor).get(f.a, 'NEW')).toBeNull();
-          } else {
-            await f.executor.batch([
-              st(
-                "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
-                f.a.orgId,
-              ),
-            ]);
-            const result = await createVisibilityAttachRepository(f.executor, {
-              providerAnchors: f.anchors,
-            }).attachSource(f.a, f.fence, {
-              projectId: 'PR',
-              sourceId: 'P',
-              audit: f.audit('P'),
-            });
-            expect(result).toEqual({ ok: false, reason: 'conflict' });
-            expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
-          }
-          expect(await f.snapshot()).toBe(before);
-        } finally {
-          await f.close();
-        }
-      },
-    );
+            it.each(['create', 'attach'] as const)(
+              'refuses unverified exact claims inside the proxy %s batch',
+              async (operation) => {
+                const f = await setup(ownerType, projectOwned);
+                try {
+                  expect(await f.add('C1', 'H', 'widget')).toBe('added');
+                  const before = await f.snapshot();
+                  if (operation === 'create') {
+                    const result = await createSourceRepository(f.executor).create(f.a, f.fence, {
+                      id: 'NEW',
+                      projectId: null,
+                      name: 'new proxy',
+                      type: 'npmjs_proxy',
+                      ecosystem: 'npm',
+                      url: 'https://registry.npmjs.org',
+                      configJson: '{}',
+                      credential: null,
+                      providerAnchors: f.anchors,
+                      audit: f.audit('NEW'),
+                    });
+                    expect(result).toBe('conflict');
+                    expect(await createSourceRepository(f.executor).get(f.a, 'NEW')).toBeNull();
+                  } else {
+                    await f.executor.batch([
+                      st(
+                        "INSERT INTO project (id, org_id, slug, name) VALUES ('PR', ?, 'project', 'Project')",
+                        f.a.orgId,
+                      ),
+                    ]);
+                    const result = await createVisibilityAttachRepository(f.executor, {
+                      providerAnchors: f.anchors,
+                    }).attachSource(f.a, f.fence, {
+                      projectId: 'PR',
+                      sourceId: 'P',
+                      audit: f.audit('P'),
+                    });
+                    expect(result).toEqual({ ok: false, reason: 'conflict' });
+                    expect(await f.executor.all(st('SELECT * FROM project_source'))).toEqual([]);
+                  }
+                  expect(await f.snapshot()).toBe(before);
+                } finally {
+                  await f.close();
+                }
+              },
+            );
 
-    it.each(['found', 'unavailable', 'not_found'] as const)(
-      'preflights existing exact claims for proxy create and attach: %s',
-      async (answer) => {
-        const f = await setup();
-        try {
-          await f.executor.batch([
-            st("DELETE FROM source WHERE org_id = ? AND id = 'P'", f.a.orgId),
-          ]);
-          expect(await f.add('C1', 'H', 'widget', null)).toBe('added');
-          expect(await f.add('C2', 'H', '@private/two', null)).toBe('added');
-          expect(await f.add('C3', 'H', '@scope/*')).toBe('added');
-          await f.executor.batch([
-            st(
-              "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('FC', ?, 'F', 'npm', 'foreign')",
-              f.b.orgId,
-            ),
-          ]);
-          const seen: string[] = [];
-          const deps = {
-            sources: createSourceRepository(f.executor),
-            registeredNames: f.names,
-            claimProbe: async (_ctx: unknown, _source: unknown, key: string) => {
-              seen.push(key);
-              return answer;
-            },
-          };
-          const before = await f.snapshot();
-          const expected = answer === 'not_found' ? [] : ['widget', '@private/two'];
-          expect(
-            await checkProxyClaims(deps, f.a, { type: 'new_npmjs_proxy', userAgent: null }),
-          ).toEqual(expected);
-          await f.executor.batch([
-            st(
-              "INSERT INTO source (id, org_id, name, type, ecosystem) VALUES ('P', ?, 'proxy', 'npmjs_proxy', 'npm')",
-              f.a.orgId,
-            ),
-          ]);
-          expect(await checkProxyClaims(deps, f.a, 'P')).toEqual(expected);
-          expect(seen).toEqual(['widget', '@private/two', 'widget', '@private/two']);
-          expect(await f.snapshot()).toBe(before);
-        } finally {
-          await f.close();
-        }
+            it.each(['found', 'unavailable', 'not_found'] as const)(
+              'preflights existing exact claims for proxy create and attach: %s',
+              async (answer) => {
+                const f = await setup(ownerType, projectOwned);
+                try {
+                  await f.executor.batch([
+                    st("DELETE FROM source WHERE org_id = ? AND id = 'P'", f.a.orgId),
+                  ]);
+                  expect(await f.add('C1', 'H', 'widget', null)).toBe('added');
+                  expect(await f.add('C2', 'H', '@private/two', null)).toBe('added');
+                  expect(await f.add('C3', 'H', '@scope/*')).toBe('added');
+                  await f.executor.batch([
+                    st(
+                      "INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES ('FC', ?, 'F', 'npm', 'foreign')",
+                      f.b.orgId,
+                    ),
+                  ]);
+                  const seen: string[] = [];
+                  const deps = {
+                    sources: createSourceRepository(f.executor),
+                    registeredNames: f.names,
+                    claimProbe: async (_ctx: unknown, _source: unknown, key: string) => {
+                      seen.push(key);
+                      return answer;
+                    },
+                  };
+                  const before = await f.snapshot();
+                  const expected = answer === 'not_found' ? [] : ['widget', '@private/two'];
+                  expect(
+                    await checkProxyClaims(deps, f.a, { type: 'new_npmjs_proxy', userAgent: null }),
+                  ).toEqual(expected);
+                  await f.executor.batch([
+                    st(
+                      "INSERT INTO source (id, org_id, name, type, ecosystem) VALUES ('P', ?, 'proxy', 'npmjs_proxy', 'npm')",
+                      f.a.orgId,
+                    ),
+                  ]);
+                  expect(await checkProxyClaims(deps, f.a, 'P')).toEqual(expected);
+                  expect(seen).toEqual(['widget', '@private/two', 'widget', '@private/two']);
+                  expect(await f.snapshot()).toBe(before);
+                } finally {
+                  await f.close();
+                }
+              },
+            );
+          },
+        );
       },
     );
 

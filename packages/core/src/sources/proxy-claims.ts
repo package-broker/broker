@@ -2,6 +2,10 @@ import type { OrgContext } from '../db/port.js';
 import type { RegisteredNameRepository, SourceRepository } from '../db/source.js';
 import type { ClaimProbeTarget, SourcePackageProbe } from '../ingest/source-package.js';
 
+const MAX_ENUMERATED_SOURCES = 1000;
+const MAX_ENUMERATED_CLAIMS = 1000;
+const MAX_CONFLICTING_CLAIMS = 100;
+
 export const MAX_VERIFIED_CLAIMS_BYTES = 48 * 1024;
 
 export interface ProxyClaimDeps {
@@ -29,18 +33,21 @@ export async function checkProxyClaims(
   }, 15_000);
   const patterns: string[] = [];
   let proofBytes = 2;
+  let sourceCount = 0;
+  let claimCount = 0;
   const candidates: number[] = [];
   const encoder = new TextEncoder();
   try {
     let after: string | null = null;
     for (;;) {
       const rows: Awaited<ReturnType<ProxyClaimDeps['sources']['list']>> = await Promise.race([
-        deps.sources.list(ctx, { projectId: null, after, limit: 100 }),
+        deps.sources.list(ctx, { projectId: null, ownership: 'all', after, limit: 100 }),
         timeout,
       ]);
       const page = rows.slice(0, 100);
       for (const source of page) {
-        if (source.type !== 'hosted' || source.ecosystem !== 'npm') continue;
+        if (++sourceCount > MAX_ENUMERATED_SOURCES) return null;
+        if (source.ecosystem !== 'npm') continue;
         let next: string | undefined;
         do {
           const names = await Promise.race([
@@ -52,6 +59,7 @@ export async function checkProxyClaims(
             timeout,
           ]);
           for (const { pattern } of names.items) {
+            if (++claimCount > MAX_ENUMERATED_CLAIMS) return null;
             if (pattern.includes('*')) continue;
             patterns.push(pattern);
             const bytes =
@@ -101,7 +109,9 @@ export async function checkProxyClaims(
       .filter((position) => answers.has(position))
       .map((position) => patterns[position]!);
     verified?.push(...accepted);
-    return patterns.filter((_pattern, position) => !answers.has(position));
+    return patterns
+      .filter((_pattern, position) => !answers.has(position))
+      .slice(0, MAX_CONFLICTING_CLAIMS);
   } catch (error) {
     if (error === expired) return null;
     throw error;

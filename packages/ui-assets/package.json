@@ -1,6 +1,6 @@
 {
   "name": "@package-broker/ui-assets",
-  "version": "0.1.0-rc.3",
+  "version": "0.1.0-rc.4",
   "description": "Build-time asset provider for the Package Broker UI",
   "license": "AGPL-3.0-only",
   "type": "module",

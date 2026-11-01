@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.0-rc.4](https://github.com/package-broker/broker/compare/plugin-sso-oidc-v0.1.0-rc.3...plugin-sso-oidc-v0.1.0-rc.4) (2026-11-01)
+
+
+### Features
+
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **auth:** hide SSO confirmation when the provider cannot prove a fresh sign-in ([#987](https://github.com/package-broker/broker/issues/987)) ([1f1ccca](https://github.com/package-broker/broker/commit/1f1cccaa65fcecea157010d606aacde91976f429)), closes [#964](https://github.com/package-broker/broker/issues/964)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+
 ## [0.1.0-rc.3](https://github.com/package-broker/broker/compare/plugin-sso-oidc-v0.1.0-rc.2...plugin-sso-oidc-v0.1.0-rc.3) (2026-10-28)
 
 

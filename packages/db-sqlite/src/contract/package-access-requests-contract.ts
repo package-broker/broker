@@ -46,6 +46,90 @@ export function describePackageAccessRequests(
       expect(await rows('SELECT id FROM audit_pending')).toHaveLength(1);
       expect(await rows('SELECT package_id FROM project_package')).toEqual([]);
     });
+    it.each([
+      'https://user:password@example.test/path',
+      'https://example.test/path?token=private',
+      ' https://example.test/path ',
+      'person@example.test',
+      'Bearer private-value-with-enough-characters',
+    ])('rejects unsafe or transformed reasons without writes: %s', async (reason) => {
+      await expect(
+        f.repo.request(f.org, f.requestFence, { ...f.input(), reason }),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      expect(await rows('SELECT id FROM package_access_request')).toEqual([]);
+      expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+      const a = await create();
+      await expect(
+        f.repo.decide(f.org, f.decideFence, {
+          id: a.id,
+          state: 'approved',
+          expectedRevision: 1,
+          decidedByUserId: f.decider.userId,
+          now: f.now,
+          reason,
+          event: f.event('package.access_decide'),
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      expect(await f.repo.get(f.org, a.id)).toMatchObject({
+        state: 'pending',
+        decisionReason: null,
+        revision: 1,
+      });
+      expect(await rows('SELECT package_id FROM project_package')).toEqual([]);
+      expect(await rows('SELECT id FROM audit_pending')).toHaveLength(1);
+    });
+    it.each(['', 'Needed for builds', 'é'.repeat(500), 'https://example.test/path'])(
+      'stores and returns validated reasons unchanged: %s',
+      async (reason) => {
+        const a = await f.repo.request(f.org, f.requestFence, { ...f.input(), reason });
+        expect(a.reason).toBe(reason);
+        await f.repo.decide(f.org, f.decideFence, {
+          id: a.id,
+          state: 'rejected',
+          expectedRevision: 1,
+          decidedByUserId: f.decider.userId,
+          now: f.now,
+          reason,
+          event: f.event('package.access_decide'),
+        });
+        expect(await rows('SELECT reason, decision_reason FROM package_access_request')).toEqual([
+          { reason, decision_reason: reason },
+        ]);
+        expect((await f.repo.list(f.org, { limit: 50 })).items[0]).toMatchObject({
+          reason,
+          decisionReason: reason,
+        });
+      },
+    );
+    it('validates the final enriched request audit before storing anything', async () => {
+      await f.seed('UPDATE package SET name = ?', 'person@example.test');
+      await expect(create()).rejects.toMatchObject({ code: 'invalid_request' });
+      expect(await rows('SELECT id FROM package_access_request')).toEqual([]);
+      expect(await rows('SELECT id FROM audit_pending')).toEqual([]);
+    });
+    it('validates decision audit payloads before changing state or membership', async () => {
+      const a = await create();
+      await expect(
+        f.repo.decide(f.org, f.decideFence, {
+          id: a.id,
+          state: 'approved',
+          expectedRevision: 1,
+          decidedByUserId: f.decider.userId,
+          now: f.now,
+          event: {
+            ...f.event('package.access_decide'),
+            payloadJson: JSON.stringify({
+              op_id: '01JA0000000000000000000001',
+              request_id: '01JA0000000000000000000002',
+              changes: { reason: { new: 'person@example.test' } },
+            }),
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      expect((await f.repo.get(f.org, a.id))?.state).toBe('pending');
+      expect(await rows('SELECT package_id FROM project_package')).toEqual([]);
+      expect(await rows('SELECT id FROM audit_pending')).toHaveLength(1);
+    });
     it('exports sanitized display names without account or identity emails', async () => {
       const a = await create();
       await f.seed(

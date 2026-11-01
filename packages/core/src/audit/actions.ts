@@ -229,13 +229,13 @@ export interface AuditEvent {
 
 export function withPackageAuditName(event: AuditEvent, packageName: string): AuditEvent {
   const payload = JSON.parse(event.payloadJson) as { changes?: Record<string, unknown> };
-  return {
+  return validateAuditEvent({
     ...event,
     payloadJson: sortedJson({
       ...payload,
       changes: { ...payload.changes, package: { new: packageName } },
     }),
-  };
+  });
 }
 
 export interface AuditEventInput {
@@ -469,6 +469,7 @@ function cleanChanges(
                   ? cleanString(value, 1000, field)
                   : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
+      if (accessReason && cleaned.value !== value) return { ok: false, reason: 'bad_value' };
       cleanedEntry[key] = cleaned.value;
     }
     if (Object.keys(cleanedEntry).length === 0) return { ok: false, reason: 'bad_value' };
@@ -511,4 +512,37 @@ export function auditEvent(input: AuditEventInput): AuditEventResult {
       payloadJson,
     },
   };
+}
+
+export function validateAuditEvent(event: AuditEvent): AuditEvent {
+  try {
+    const payload: unknown = JSON.parse(event.payloadJson);
+    if (
+      !isPlainObject(payload) ||
+      Object.keys(payload).some((key) => !['op_id', 'request_id', 'changes'].includes(key))
+    )
+      throw new TypeError('invalid audit event');
+    const result = auditEvent({
+      id: event.id,
+      now: event.occurredAt,
+      action: event.action,
+      actor: event.actor,
+      target: event.target,
+      projectId: event.projectId,
+      context: {
+        opId: payload.op_id as string,
+        requestId: payload.request_id as string,
+        sourceIp: event.sourceIp,
+        tokenSelector: event.tokenSelector,
+      },
+      ...(payload.changes === undefined
+        ? {}
+        : { changes: payload.changes as NonNullable<AuditEventInput['changes']> }),
+    });
+    if (!result.ok || result.event.payloadJson !== sortedJson(payload))
+      throw new TypeError('invalid audit event');
+    return result.event;
+  } catch {
+    throw new TypeError('invalid audit event');
+  }
 }

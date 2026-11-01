@@ -1709,6 +1709,48 @@ export function describeNpmPublishWriterContract(
         expect(await repo.readme(ctx, query)).toBeNull();
         expect(await repo.readme(ctx, { ...query, version: '1.0.0' })).toBeNull();
       }));
+    it('validates package access audit after adding stored settings', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.batch([st("INSERT INTO cache_epoch (org_id,version) VALUES ('org','epoch')")]);
+        await e.batch([
+          st("INSERT INTO role_permission VALUES ('org','approver-role','org:sources:write')"),
+        ]);
+        const corrupted: SqlExecutor = {
+          ...e,
+          all: async <T>(query: Statement) => {
+            const rows = await e.all<T>(query);
+            return query.sql.startsWith('select source.project_id')
+              ? rows.map((row) => ({ ...row, new_project_access_mode: 'person@example.test' }))
+              : rows;
+          },
+        };
+        const before = await e.all(st('SELECT * FROM package'));
+        const auditBefore = await e.all(st('SELECT * FROM audit_pending'));
+        await expect(
+          createPackageDetailRepository(corrupted, [
+            {
+              provider: 'oidc',
+              anchor: 'oidc:https://idp.example.test',
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test'],
+            },
+          ]).setAccess(ctx, h.fence, {
+            packageId: h.result.packageId,
+            visibleToNewProjects: false,
+            newProjectAccessMode: 'request',
+            revision: 2,
+            audit: {
+              ...w.input().event,
+              id: ulid(),
+              payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+              action: 'package.access_update',
+            },
+          }),
+        ).rejects.toThrow('invalid audit event');
+        expect(await e.all(st('SELECT * FROM package'))).toEqual(before);
+        expect(await e.all(st('SELECT * FROM audit_pending'))).toEqual(auditBefore);
+      }));
     it('package access requires the source owning project authority', () =>
       run(async (e, w) => {
         const h = await held(e, w);
@@ -1730,7 +1772,12 @@ export function describeNpmPublishWriterContract(
           visibleToNewProjects: false,
           newProjectAccessMode: 'request' as const,
           revision: 2,
-          audit: { ...w.input().event, id: ulid(), action: 'package.access_update' as const },
+          audit: {
+            ...w.input().event,
+            id: ulid(),
+            payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+            action: 'package.access_update' as const,
+          },
         };
         expect(await repo.setAccess(ctx, h.fence, input)).toEqual({
           ok: false,
@@ -1817,7 +1864,12 @@ export function describeNpmPublishWriterContract(
             createdAt: NOW,
             expiresAt: '2099-01-01T00:00:00.000Z',
           },
-          audit: { ...w.input().event, id: ulid(), action: 'package.access_update' as const },
+          audit: {
+            ...w.input().event,
+            id: ulid(),
+            payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
+            action: 'package.access_update' as const,
+          },
         };
         expect(await repo.setAccess(ctx, h.fence, input)).toEqual({ ok: true });
         expect(

@@ -59,7 +59,7 @@ export async function accessFixture(executor: SqlExecutor, provided?: CaseContex
     projectId: 'PROJECT',
     tokenSelector: null,
     sourceIp: null,
-    payloadJson: '{}',
+    payloadJson: JSON.stringify({ op_id: ulid(), request_id: ulid() }),
   });
   const repo = createPackageAccessRequestRepository(executor, ANCHORS);
   const input = () => ({

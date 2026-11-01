@@ -1,4 +1,4 @@
-import { withPackageAuditName } from '@package-broker/core/audit/actions';
+import { validateAuditEvent, withPackageAuditName } from '@package-broker/core/audit/actions';
 import { sql, type Selectable, type SqlBool } from 'kysely';
 import { redactValue } from '@package-broker/core/audit/redact';
 import {
@@ -105,9 +105,12 @@ function page(input: AccessRequestPage) {
 }
 
 function reason(value: string | undefined) {
+  const cleaned = value === undefined ? undefined : redactValue(value, 1000, 'reason');
   if (
     value !== undefined &&
-    (new TextEncoder().encode(value).length > 1000 ||
+    (cleaned?.ok !== true ||
+      cleaned.value !== value ||
+      new TextEncoder().encode(value).length > 1000 ||
       !/^[\t\n\r\u0020-\u007e\u0080-\uffff]*$/.test(value))
   )
     throw new PackageAccessRequestError('invalid_request');
@@ -228,7 +231,12 @@ export function createPackageAccessRequestRepository(
             .where('id', '=', input.packageId),
         ),
       );
-      const event = withPackageAuditName(input.event, pkg?.name ?? '');
+      let event;
+      try {
+        event = withPackageAuditName(input.event, pkg?.name ?? '');
+      } catch {
+        throw new PackageAccessRequestError('invalid_request');
+      }
       const eligible = sql<SqlBool>`exists (select 1 from package as p where p.id = ${input.packageId} and ${requestable(ctx, input.projectId)})
         and not exists (select 1 from package_access_request as pending where pending.org_id = ${ctx.orgId}
           and pending.package_id = ${input.packageId} and pending.project_id = ${input.projectId} and pending.state = 'pending')`;
@@ -351,9 +359,15 @@ export function createPackageAccessRequestRepository(
           .where('state', '=', 'pending')
           .where('revision', '=', input.expectedRevision),
       );
+      let event;
+      try {
+        event = validateAuditEvent(input.event);
+      } catch {
+        throw new PackageAccessRequestError('invalid_request');
+      }
       const mutations = [
         update,
-        auditPendingStatement(ctx, input.event, { sql: 'changes() = 1', params: [] }),
+        auditPendingStatement(ctx, event, { sql: 'changes() = 1', params: [] }),
       ];
       if (input.state === 'approved')
         mutations.push(

@@ -512,6 +512,64 @@ it('keeps empty wildcard segments from matching slash anchors', () => {
     ),
   ).toEqual(['a/x', 'package.json']);
 });
+it.each(['', 'node_modules/@scope/dep/'])(
+  'keeps nested ignore rules relative to their directory in package %s',
+  (prefix) => {
+    const metadata = new Map([
+      [
+        'package.json',
+        prefix
+          ? JSON.stringify({
+              dependencies: { '@scope/dep': '1' },
+              bundleDependencies: ['@scope/dep'],
+            })
+          : '{}',
+      ],
+      [prefix + 'src/deep/.npmignore', '/drop.js'],
+    ]);
+    if (prefix) metadata.set(prefix + 'package.json', '{}');
+    expect(
+      packlist(
+        new Set([
+          ...metadata.keys(),
+          prefix + 'src/deep/drop.js',
+          prefix + 'src/deep/keep.js',
+          prefix + 'src/drop.js',
+        ]),
+        metadata,
+      ),
+    ).toEqual(
+      [
+        'package.json',
+        ...(prefix ? [prefix + 'package.json'] : []),
+        prefix + 'src/deep/keep.js',
+        prefix + 'src/drop.js',
+      ].sort(),
+    );
+  },
+);
+it.each(['*', '?', '[a-z]'])('applies exclusions without required literal text: %s', (pattern) => {
+  expect(
+    packlist(
+      new Set(['package.json', 'z']),
+      new Map([
+        ['package.json', '{}'],
+        ['.npmignore', pattern],
+      ]),
+    ),
+  ).toEqual(['package.json']);
+});
+it('keeps an ancestor exclusion when local exclusions cannot match', () => {
+  expect(
+    packlist(
+      new Set(['package.json', 'dir/zzz', 'dir/keep']),
+      new Map([
+        ['package.json', '{}'],
+        ['.npmignore', '/dir/zzz'],
+      ]),
+    ),
+  ).toEqual(['dir/keep', 'package.json']);
+});
 it.each([
   ['literal', 2000],
   ['wildcard', 2000],
@@ -544,6 +602,7 @@ it.each([
     }
     expect(result).toHaveLength(49001);
     expectWorkBudget();
+    if (count === 200) expect(work).toBeLessThan(100_000_000);
   },
   20000,
 );

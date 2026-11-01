@@ -172,3 +172,19 @@ deployed setting. Rebuild and redeploy after changing registry configuration.
 Sources: [D1 limits](https://developers.cloudflare.com/d1/platform/limits/),
 [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), and
 [workers.dev routing](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/).
+
+## Worker CPU budget
+
+`pb cloudflare deploy` and `pb cloudflare setup` set upload metadata
+`limits.cpu_ms` to **120000** (120 seconds) by default. Use `--cpu-ms 60000`
+on either command to override it with a positive integer number of milliseconds.
+The Cloudflare deployment requires Workers Paid; the provider's plan limits still
+apply. This setting provides headroom for large npm publishes and registry fills.
+It does not change package size caps or bound concurrent request memory use.
+
+For a Node CPU proxy of npm publish stages, run `pnpm typecheck` followed by
+`node scripts/benchmark-npm-publish.mjs`. The script generates a roughly 48 MB
+publish body with 48,000 tar entries and reports wall and process CPU times for
+base64 decode, the three production digests, gunzip, and the tar walk separately.
+Fixture generation is excluded. There is no timing assertion; these Node numbers
+do not establish hosted Workers CPU usage.

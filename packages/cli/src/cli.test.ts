@@ -228,3 +228,55 @@ it('documents local-auth and rejects invalid, missing and misplaced values safel
     error.mockRestore();
   }
 });
+
+it.each(['deploy', 'setup'])('passes --cpu-ms to cloudflare %s', async (command) => {
+  const { runCloudflareDeploy } = await import('./commands/cloudflare/deploy.js');
+  const operation = vi.mocked(command === 'deploy' ? runCloudflareDeploy : runCloudflareSetup);
+  operation.mockClear();
+  expect(await run(['cloudflare', command, '--worker-name', 'broker', '--cpu-ms', '45000'])).toBe(
+    0,
+  );
+  expect(operation).toHaveBeenCalledWith(expect.objectContaining({ cpuMs: 45000 }));
+});
+it.each(['deploy', 'setup'])(
+  'rejects malformed --cpu-ms for %s without reflecting values',
+  async (command) => {
+    const { runCloudflareDeploy } = await import('./commands/cloudflare/deploy.js');
+    const operation = vi.mocked(command === 'deploy' ? runCloudflareDeploy : runCloudflareSetup);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (const value of [
+        '0',
+        '-1',
+        '1.5',
+        '',
+        '+1',
+        '1e3',
+        ' 1 ',
+        'secret-sentinel',
+        '9007199254740992',
+      ]) {
+        operation.mockClear();
+        expect(
+          await run(['cloudflare', command, '--worker-name', 'broker', '--cpu-ms', value]),
+        ).toBe(2);
+        expect(operation).not.toHaveBeenCalled();
+      }
+      expect(error.mock.calls.flat().join(' ')).not.toContain('secret-sentinel');
+    } finally {
+      error.mockRestore();
+    }
+  },
+);
+
+it('rejects missing or misplaced --cpu-ms', async () => {
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    expect(await run(['cloudflare', 'deploy', '--worker-name', 'broker', '--cpu-ms'])).toBe(2);
+    expect(
+      await run(['cloudflare', 'provision', '--worker-name', 'broker', '--cpu-ms', '45000']),
+    ).toBe(2);
+  } finally {
+    error.mockRestore();
+  }
+});

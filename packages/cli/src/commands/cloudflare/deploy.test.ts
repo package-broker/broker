@@ -6645,3 +6645,20 @@ it('requires the flag when verified disabled survives but live mode is enabled a
   expect(mutations(h)).toEqual([]);
   expect((await deploy({ ...options(h), localAuth: 'enabled' })).output.error).toBeNull();
 });
+
+it.each([undefined, 1, 45000])('uploads the CPU limit (%s)', async (cpuMs) => {
+  const h = harness();
+  expect((await deploy(options(h, cpuMs === undefined ? {} : { cpuMs }))).exitCode).toBe(0);
+  expect(h.metadata!.limits).toEqual({ cpu_ms: cpuMs ?? 120000 });
+});
+it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid CPU limit %s before provider calls',
+  async (cpuMs) => {
+    const h = harness();
+    expect(await deploy(options(h, { cpuMs }))).toMatchObject({
+      exitCode: 2,
+      output: { error: { code: 'invalid_input' } },
+    });
+    expect(h.calls).toHaveLength(0);
+  },
+);

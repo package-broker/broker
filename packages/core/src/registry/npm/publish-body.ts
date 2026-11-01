@@ -35,6 +35,12 @@ function fail(code = 'invalid_json', status = 400): never {
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
+const base64Values = new Int16Array(256).fill(-1);
+for (const [value, char] of Array.from(
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+).entries())
+  base64Values[char.charCodeAt(0)] = value;
+base64Values[61] = 64;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
@@ -194,7 +200,7 @@ class JsonInput {
     }
     return undefined;
   }
-  async string(emit?: (part: string) => Promise<void>): Promise<string> {
+  async string(emit?: (part: Uint8Array) => Promise<void>): Promise<string> {
     if (!emit) {
       const inline = this.inlineString();
       if (inline !== undefined) return inline;
@@ -225,7 +231,7 @@ class JsonInput {
       if (end > this.at) {
         const part = this.consume(end - this.at, !!emit);
         if (emit) {
-          await emit(String.fromCharCode(...part));
+          await emit(part);
         } else {
           append(part);
         }
@@ -244,7 +250,7 @@ class JsonInput {
       } catch {
         return fail();
       }
-      if (emit) await emit(decoded);
+      if (emit) await emit(encoder.encode(decoded));
       else {
         append(encoder.encode(raw));
       }
@@ -362,37 +368,45 @@ class JsonInput {
   tarballBytes = 0;
   private async base64(): Promise<void> {
     if ((await this.peek()) !== 34) fail('invalid_attachments');
-    let pending = '',
-      ended = false;
+    const quantum = new Uint8Array(4);
+    let pending = 0;
+    let ended = false;
     await this.string(async (part) => {
-      if (ended && part.length) fail('invalid_attachments');
-      pending += part;
-      const complete = pending.length - (pending.length % 4);
-      if (!complete) return;
-      const encoded = pending.slice(0, complete);
-      pending = pending.slice(complete);
-      let binary: string;
-      try {
-        binary = atob(encoded);
-      } catch {
-        return fail('invalid_attachments');
+      const bytes = new Uint8Array(Math.floor((pending + part.length) / 4) * 3);
+      let size = 0;
+      for (const byte of part) {
+        if (ended) fail('invalid_attachments');
+        const value = base64Values[byte]!;
+        if (value < 0) fail('invalid_attachments');
+        quantum[pending++] = value;
+        if (pending !== 4) continue;
+        const a = quantum[0]!,
+          b = quantum[1]!,
+          c = quantum[2]!,
+          d = quantum[3]!;
+        if (a === 64 || b === 64) fail('invalid_attachments');
+        if (c === 64) {
+          if (d !== 64 || (b & 15) !== 0) fail('invalid_attachments');
+        } else if (d === 64 && (c & 3) !== 0) fail('invalid_attachments');
+        bytes[size++] = (a << 2) | (b >> 4);
+        if (c !== 64) {
+          bytes[size++] = (b << 4) | (c >> 2);
+          if (d !== 64) bytes[size++] = (c << 6) | d;
+        }
+        ended = d === 64;
+        pending = 0;
       }
-      if (btoa(binary) !== encoded) fail('invalid_attachments');
-      ended = encoded.endsWith('=');
-      this.tarballBytes += binary.length;
+      this.tarballBytes += size;
       if (
         this.tarballBytes >
         (this.options.caps?.publishTarballBytes ?? REGISTRY_DEFAULTS.caps.publishTarballBytes)
       )
         fail('tarball_too_large', 413);
-      if (binary.length)
-        await deliver(
-          this.options,
-          Uint8Array.from(binary, (c) => c.charCodeAt(0)),
-        );
+      if (size) await deliver(this.options, bytes.subarray(0, size));
     });
-    if (pending.length) fail('invalid_attachments');
+    if (pending) fail('invalid_attachments');
   }
+
   async close(error?: unknown): Promise<void> {
     this.options.signal?.removeEventListener('abort', this.abort);
     if (error !== undefined) await this.reader.cancel(error).catch(() => {});

@@ -66,6 +66,7 @@ import { smoke, type SmokeOptions } from './smoke.js';
 type Env = Readonly<Record<string, string | undefined>>;
 
 export interface SetupOptions extends Omit<ProvisionOptions, 'contract' | 'transaction'> {
+  cpuMs?: number;
   providers?: ProvidersOption;
   localAuth?: LocalAuthMode;
   orgSlug?: string;
@@ -462,6 +463,7 @@ export async function setup(
     return (completed = { exitCode: result.exitCode, output });
   };
   try {
+    if (o.cpuMs !== undefined && (!Number.isSafeInteger(o.cpuMs) || o.cpuMs < 1)) return invalid();
     if (o.prebuilt) await assertPrebuiltConfiguration(resolve(o.project ?? '.'), o.configPath);
     const guided = tty && (!o.workerName || !o.orgSlug || !o.orgName || !o.adminEmail);
     const values = {

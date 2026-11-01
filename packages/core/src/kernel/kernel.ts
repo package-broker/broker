@@ -279,7 +279,17 @@ function validateCoreRoutes(
     if (typeof route.path !== 'string') {
       problems.push(`${label}: path must be a string`);
       placeable = false;
-    } else if (!route.path.startsWith(prefix)) {
+    } else if (
+      !route.path.startsWith(prefix) &&
+      !(
+        ecosystem &&
+        route.method === 'POST' &&
+        route.path === '/-/npm/v1/oidc/token/exchange/package/:name' &&
+        route.permission === null &&
+        route.boundary === 'none' &&
+        route.needsOrg === false
+      )
+    ) {
       problems.push(`${label}: path ${JSON.stringify(route.path)} must start with "${prefix}"`);
       placeable = false;
     } else if (route.path === prefix) {
@@ -305,6 +315,7 @@ function validateCoreRoutes(
     }
     problems.push(
       ...routeBoundaryProblems(route, label, {
+        allowOrganizationAlternative: true,
         ...(ecosystem ? { apiVersion: 3 } : { allowSelf: true, allowAuthenticated: true }),
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
@@ -628,6 +639,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
           : { boundary: route.boundary === 'package' ? 'project' : route.boundary }),
         ...('bearerOnly' in route && route.bearerOnly === true
           ? { bearerOnly: true as const }
+          : {}),
+        ...(route.boundary === 'project' && route.organizationAlternative !== undefined
+          ? { organizationAlternative: route.organizationAlternative }
           : {}),
         ...(route.boundary === 'project' && route.allowArchived === true
           ? { allowArchived: true as const }

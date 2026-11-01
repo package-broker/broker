@@ -1,3 +1,16 @@
+import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
+import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
+import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+  createPublishWriteGuard,
+} from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
+import {
+  createPublishScanJob,
+  createPublishScanSweepJob,
+} from '@package-broker/core/ingest/publish-scan-job';
 import {
   createNpmVcsBuildReader,
   createNpmVcsBuildPendingReader,
@@ -714,6 +727,8 @@ function assembleRegistry(input: {
   readonly deploymentId: string;
   readonly findOrganization: () => Promise<OrganizationIdentity | null>;
   readonly ingestScope: AsyncLocalStorage<Observability>;
+  readonly anchors: ProviderAnchorReader;
+  readonly requiredScanners: () => readonly string[];
 }): RegistryAssembly {
   const { options, seams, executor, auth, platform, observability } = input;
   const { config } = options;
@@ -800,6 +815,29 @@ function assembleRegistry(input: {
 
   const module = createRegistryModule({
     runtime: 'node',
+    npmOidc: {
+      repository: createOidcRepository(executor),
+      tokens: createWorkloadTokenService({
+        tokens: createWorkloadTokenStore(executor),
+        keyring: auth.keyring,
+        clock: systemClock,
+        ids: { ulid },
+      }),
+      organization: async () => {
+        const org = await input.findOrganization();
+        return org === null ? null : orgContext(org.id);
+      },
+    },
+    npmPublish: {
+      reads: createPublishReads(executor),
+      lookupToken: createAccessRepository(executor).lookupToken,
+      anchors: (ctx) => input.anchors.anchors(ctx),
+      writeGuard: createPublishWriteGuard,
+      admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
+      writer,
+      requiredScanners: input.requiredScanners,
+      scanJobs: jobs,
+    },
     handleOf: createNpmHandleOf(
       createUserRepository(executor),
       createServicePrincipalRepository(executor),
@@ -1143,6 +1181,11 @@ export function createNodeServer(
             deploymentId,
             findOrganization: bootstrap.findSingleton,
             ingestScope,
+            anchors: {
+              anchors: (ctx) => access?.providerAnchors.anchors(ctx) ?? Promise.resolve([]),
+            },
+            requiredScanners: () =>
+              plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
           });
     const vulnerabilityPolicy = createOutboundPolicy({
       allowPrivateHosts: [],
@@ -1184,6 +1227,18 @@ export function createNodeServer(
                 }),
               ),
               ...(retention === undefined ? [] : retentionRegistrations(executor, () => retention)),
+              registerIngestJob(
+                createPublishScanJob({
+                  publishes: createPublishesRepository(executor),
+                  scanners: plugins.flatMap((plugin) =>
+                    plugin.publishPolicy ? [plugin.publishPolicy] : [],
+                  ),
+                  blob: options.platformServices!.blob,
+                }),
+              ),
+              registerIngestJob(
+                createPublishScanSweepJob({ publishes: createPublishesRepository(executor) }),
+              ),
               registerIngestJob(
                 createPublishApprovalExpireJob({ publishes: createPublishesRepository(executor) }),
               ),
@@ -1252,6 +1307,9 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : createApiRoutes({
+            ...(registry?.module.lookupTrustedPublisherRepository === undefined
+              ? {}
+              : { trustedPublisherLookup: registry?.module.lookupTrustedPublisherRepository }),
             clientIp,
             executor,
             runtime: 'node',

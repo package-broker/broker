@@ -71,6 +71,7 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
   readonly protectedHolder?: boolean;
   readonly token: TokenAccessView['token'] & {
     readonly boundProjectIds?: readonly string[];
+    readonly boundProjectId?: string | null;
     readonly userId: string | null;
     readonly servicePrincipalId: string | null;
     readonly bindingOk: boolean;
@@ -83,6 +84,7 @@ export type EngineBoundary = 'organization' | 'project';
 
 export interface EngineLookupInput {
   readonly boundary: EngineBoundary;
+  readonly organizationAlternative?: string;
   readonly projectSlug: string | null;
   /** Set only for a project-boundary route that opted in; the port then resolves an archived project too. */
   readonly allowArchived?: true;
@@ -377,7 +379,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       if (projectAccess?.project == null) return NOT_FOUND;
     }
     const effective = tokenEffective(found, input.boundary);
-    const decision = decideFrom(
+    let decision = decideFrom(
       {
         principal,
         project: found.project,
@@ -390,6 +392,26 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       input.boundary,
       slugValid,
     );
+    const alternative = input.organizationAlternative;
+    if (
+      !decision.allow &&
+      input.boundary === 'project' &&
+      slugValid &&
+      found.project !== null &&
+      alternative !== undefined &&
+      catalogueTokenEligible(alternative) &&
+      found.organizationPermissions.includes(alternative) &&
+      found.token.bindingOk &&
+      found.token.scope !== null &&
+      !found.token.scope.readOnly &&
+      (found.token.scope.level === 'write' || found.token.scope.level === 'full') &&
+      (found.token.projectMode === 'all' ||
+        (found.token.projectMode === 'selected' &&
+          (found.token.boundProjectIds?.includes(found.project.id) === true ||
+            found.token.boundProjectId === found.project.id)))
+    ) {
+      decision = { allow: true, principal, projectId: found.project.id };
+    }
     if (!decision.allow) return decision;
     if (permission !== null && !catalogueTokenEligible(permission)) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
@@ -486,6 +508,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       ) {
         return UNAUTHORIZED;
       }
+      const alternative = request.route.organizationAlternative;
       const input: EngineLookupInput = {
         boundary,
         projectSlug: boundary === 'project' && isValidProjectSlug(slug) ? slug : null,
@@ -493,6 +516,9 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
           ? { allowArchived: true as const }
           : {}),
         providerAnchors: await deps.providerAnchors(request.org),
+        ...(boundary === 'project' && alternative !== undefined
+          ? { organizationAlternative: alternative }
+          : {}),
       };
       if (credential.outcome === 'token') {
         return tokenDecision(

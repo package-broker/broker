@@ -16,6 +16,18 @@ let failIssue = false;
 let reauthIssue = false;
 let emptyProjects = false;
 let failPolicy = false;
+let failPublisher = false;
+const publisher = {
+  id: 'publisher',
+  revision: 1,
+  packageName: '@scope/widget',
+  repository: 'owner/repo',
+  workflow: 'publish.yml',
+  environment: '',
+  refPattern: null,
+  disabledAt: null,
+  lastUsedAt: null,
+};
 let organizationPermissions = ['org:service-principals:write', 'org:settings:write'];
 let createdPrincipal: {
   id: string;
@@ -62,6 +74,13 @@ beforeAll(async () => {
   fixture = await createBrowserFixture({
     api: async (request) => {
       const path = new URL(request.url).pathname;
+      if (path.startsWith('/_pb/trusted-publishers')) {
+        if (request.method === 'GET') return Response.json({ items: [publisher] });
+        writes.push({ path, body: (await request.json()) as Record<string, unknown> });
+        return failPublisher
+          ? Response.json({ error: { code: 'github_credentials_required' } }, { status: 409 })
+          : Response.json(publisher, { status: request.method === 'POST' ? 201 : 200 });
+      }
       if (request.method === 'POST') {
         writes.push({ path, body: (await request.json()) as Record<string, unknown> });
         if (path === '/_pb/service-principals') {
@@ -140,9 +159,119 @@ describe('guided token browser flows', () => {
     reauthIssue = false;
     emptyProjects = false;
     failPolicy = false;
+    failPublisher = false;
     organizationPermissions = ['org:service-principals:write', 'org:settings:write'];
     createdPrincipal = null;
     writes.length = 0;
+  });
+
+  it.for([1440, 1024, 768, 390, 320])(
+    'keeps publisher controls after the token list and supports keyboard create, edit and focus at %i px',
+    { timeout: 30_000 },
+    async (width, context) => {
+      if (!fixture) context.skip('Chromium cannot start in this environment');
+      const { page, browserExpect } = fixture!;
+      organizationPermissions.push('org:packages:publish');
+      await page.setViewportSize({ width, height: 900 });
+      await fixture!.mount(script);
+      const details = page.locator('details#trusted-publishers');
+      const summary = page.locator('details#trusted-publishers > summary');
+      await browserExpect(summary).toBeVisible();
+      expect(await details.evaluate((node: Element) => (node as HTMLDetailsElement).open)).toBe(
+        false,
+      );
+      expect(
+        await page
+          .getByLabel('Name (this page)')
+          .evaluate(
+            (node: Element) =>
+              !!(
+                node.compareDocumentPosition(document.getElementById('trusted-publishers')!) &
+                Node.DOCUMENT_POSITION_FOLLOWING
+              ),
+          ),
+      ).toBe(true);
+      expect(
+        await details.evaluate(
+          (node: Element) =>
+            !!(
+              node.compareDocumentPosition(
+                [...document.querySelectorAll('summary')].find(
+                  (summary) => summary.textContent === 'Service principals',
+                )!,
+              ) & Node.DOCUMENT_POSITION_FOLLOWING
+            ),
+        ),
+      ).toBe(true);
+      await summary.focus();
+      await page.keyboard.press('Enter');
+      await browserExpect(details.getByRole('form')).toHaveCount(0);
+      await browserExpect(
+        page.getByRole('button', { name: 'Add trusted publisher' }),
+      ).toBeEnabled();
+      await page.keyboard.press('Tab');
+      await browserExpect(
+        page.getByRole('button', { name: 'Add trusted publisher' }),
+      ).toBeFocused();
+      await page.keyboard.press('Enter');
+      const packageName = page.getByLabel('npm package', { exact: true });
+      await browserExpect(packageName).toBeFocused();
+      await packageName.fill('@scope/widget');
+      await page.getByLabel('GitHub repository (owner/name)', { exact: true }).fill('owner/repo');
+      await page.getByLabel('Workflow filename', { exact: true }).fill('publish.yml');
+      failPublisher = true;
+      await enterButton('Save trusted publisher');
+      await browserExpect(details.getByRole('status')).toContainText('Configure a GitHub source');
+      await browserExpect(packageName).toHaveValue('@scope/widget');
+      failPublisher = false;
+      await enterButton('Save trusted publisher');
+      await browserExpect(
+        page.getByRole('button', { name: 'Add trusted publisher' }),
+      ).toBeFocused();
+      await browserExpect(details.getByRole('form')).toHaveCount(0);
+      expect(writes.at(-1)).toEqual({
+        path: '/_pb/trusted-publishers',
+        body: {
+          packageName: '@scope/widget',
+          repository: 'owner/repo',
+          workflow: 'publish.yml',
+          environment: '',
+        },
+      });
+      await enterButton('Add trusted publisher');
+      await enterButton('Cancel');
+      await browserExpect(
+        page.getByRole('button', { name: 'Add trusted publisher' }),
+      ).toBeFocused();
+      await enterButton('Edit publisher');
+      await browserExpect(packageName).toBeFocused();
+      await enterButton('Cancel edit');
+      await browserExpect(page.getByRole('button', { name: 'Edit publisher' })).toBeFocused();
+      await enterButton('Edit publisher');
+      await enterButton('Save trusted publisher');
+      await browserExpect(
+        page.getByRole('button', { name: 'Add trusted publisher' }),
+      ).toBeFocused();
+      expect(writes.at(-1)?.path).toBe('/_pb/trusted-publishers/publisher');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+    },
+  );
+
+  it('opens publishers when the URL targets the section without opening its create form', async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    organizationPermissions.push('org:packages:publish');
+    await fixture!.mount(script);
+    await page.evaluate(() => {
+      location.hash = '/tokens?section=trusted-publishers';
+    });
+    await browserExpect(page.getByRole('button', { name: 'Add trusted publisher' })).toBeVisible();
+    await browserExpect(page.locator('#trusted-publishers form')).toHaveCount(0);
+    await page.evaluate(() => {
+      location.hash = '';
+    });
   });
 
   it.for([1440, 1024, 768, 390])(

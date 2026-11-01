@@ -1,7 +1,32 @@
+import {
+  createPublishScanJob,
+  createPublishScanSweepJob,
+} from '@package-broker/core/ingest/publish-scan-job';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { createJobRepository } from '../repositories/job.js';
+import { DbError } from '@package-broker/core/db/errors';
+import { createHash, randomBytes } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join as pathJoin } from 'node:path';
+import type { AuthorizationDecision } from '@package-broker/core/kernel/authorize';
+import { createPublishService } from '@package-broker/core/registry/module';
+import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
+import { REGISTRY_DEFAULTS } from '@package-broker/core/registry/registry-config';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { createAccessRepository } from '../repositories/access.js';
+import { createBlobRepository } from '../repositories/blob.js';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+} from '../repositories/catalogue-publish-guard.js';
 import { createPackageDetailRepository } from '../repositories/package-detail.js';
 import { publishRoutes } from '@package-broker/core/api/routes/publishes';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
+import { PUBLISH_APPROVAL_WINDOW_MS } from '@package-broker/core/db/publishes';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import { createBlobReferenceReader } from '../repositories/blob-references.js';
 import { bootstrapAdmin } from '../repositories/admin-bootstrap.js';
@@ -17,7 +42,7 @@ import type { PublishVersionInput } from '@package-broker/core/db/catalogue';
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
 import { ulid } from '@package-broker/core/ids';
 import { auditEvent } from '@package-broker/core/audit/actions';
-import type { Sha256 } from '@package-broker/core/platform/blob';
+import type { ByteStore, Sha256 } from '@package-broker/core/platform/blob';
 import { createPackageAccess } from '@package-broker/core/catalogue/package-access';
 import { createAuthorizationEngine, patValidationGate } from '@package-broker/core/authz/engine';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -47,7 +72,7 @@ const NOW = '2026-10-30T00:00:00.000Z';
 const st = (sql: string, ...params: Statement['params']): Statement => ({ sql, params });
 const ref = { projectId: 'project', ecosystem: 'npm' as const, key: 'widget' };
 
-async function world(executor: SqlExecutor) {
+async function world(executor: SqlExecutor, bytes?: ByteStore) {
   await migrate(executor, await discoveredMigrations(), { holder: 'publish-contract' });
   await executor.batch([
     st("INSERT INTO organization (id,slug,name) VALUES ('org','org','Organization')"),
@@ -165,6 +190,7 @@ async function world(executor: SqlExecutor) {
     };
   }
   return {
+    bytes,
     guard,
     input,
     writer: createCatalogueWriter(executor),
@@ -175,18 +201,781 @@ async function world(executor: SqlExecutor) {
 
 export function describeNpmPublishWriterContract(
   name: string,
-  open: () => Promise<OpenedCatalogueWriteDatabase>,
+  open: () => Promise<OpenedCatalogueWriteDatabase & { bytes?: ByteStore }>,
 ) {
   async function run(
     body: (executor: SqlExecutor, w: Awaited<ReturnType<typeof world>>) => Promise<void>,
   ) {
     const opened = await open();
     try {
-      await body(opened.executor, await world(opened.executor));
+      await body(opened.executor, await world(opened.executor, opened.bytes));
     } finally {
       await opened.close();
     }
   }
+  describe(`npm publish service on ${name}`, () => {
+    it('rechecks package binding inside the publish mutation fence', () =>
+      run(async (e, w) => {
+        await e.all(st("UPDATE token SET package_name='other' WHERE id='token'"));
+        await expect(w.writer.publishVersion(ctx, w.guard, w.input(false))).rejects.toThrow();
+        expect(await e.all(st('SELECT id FROM version'))).toEqual([]);
+        expect(await e.all(st('SELECT id FROM audit_pending'))).toEqual([]);
+      }));
+    it('scan CAS is scoped, leased, retryable and activates only after both gates', () =>
+      run(async (e, w) => {
+        const input = w.input(true);
+        await e.all(st('UPDATE source SET require_publish_approval=1'));
+        await w.writer.publishVersion(ctx, w.guard, {
+          ...input,
+          scanJobStatements: [st('SELECT 1')],
+          approval: {
+            ...input.approval!,
+            holdScan: true,
+            scanState: 'queued',
+            requiredScanners: ['scanner'],
+          },
+        });
+        const repo = createPublishesRepository(e);
+        const fence = systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {});
+        const item = (await repo.get(ctx, input.approval!.id))!;
+        const transition = {
+          id: item.id,
+          expectedRevision: item.revision,
+          expectedApprovalState: item.approvalState,
+          expectedScanState: item.scanState,
+          now: NOW,
+          event: { ...input.event, id: ulid() },
+        };
+        await expect(
+          repo.scan(ctx, fence, { ...transition, scanState: 'allowed', verdicts: [] }),
+        ).rejects.toThrow('invalid_scan_transition');
+        await expect(
+          repo.scan(ctx, fence, {
+            ...transition,
+            scanState: 'running',
+            verdicts: [{ plugin: 'bad/id', verdict: 'deny' }],
+          }),
+        ).rejects.toThrow('invalid_scan_verdict');
+        await expect(
+          repo.scan(ctx, fence, {
+            ...transition,
+            scanState: 'running',
+            verdicts: [{ plugin: 'scanner', verdict: 'deny', reason: 'private@example.test' }],
+          }),
+        ).rejects.toThrow('invalid_scan_verdict');
+        expect(
+          await repo.scan(orgContext('foreign'), fence, {
+            ...transition,
+            scanState: 'running',
+            verdicts: [],
+          }),
+        ).toMatchObject({ changed: false });
+        expect(
+          await repo.scan(ctx, fence, { ...transition, scanState: 'running', verdicts: [] }),
+        ).toMatchObject({ changed: true, active: false });
+        expect(
+          await repo.scan(ctx, fence, { ...transition, scanState: 'running', verdicts: [] }),
+        ).toMatchObject({ changed: false });
+        const running = (await repo.get(ctx, item.id))!;
+        expect(running.scanAttempts).toBe(1);
+        expect(
+          (
+            await repo.scan(ctx, fence, {
+              ...transition,
+              event: { ...input.event, id: ulid() },
+              expectedRevision: running.revision,
+              expectedScanState: 'queued',
+              scanState: 'running',
+              verdicts: [],
+            })
+          ).changed,
+        ).toBe(false);
+
+        expect(
+          (
+            await repo.scan(ctx, fence, {
+              ...transition,
+              expectedRevision: running.revision - 1,
+              expectedScanState: 'running',
+              scanState: 'allowed',
+              verdicts: [{ plugin: 'scanner', verdict: 'allow' }],
+            })
+          ).changed,
+        ).toBe(false);
+
+        expect(
+          await repo.scan(ctx, fence, {
+            ...transition,
+            expectedRevision: running.revision,
+            expectedScanState: 'running',
+            event: { ...input.event, id: ulid() },
+            scanState: 'allowed',
+            verdicts: [{ plugin: 'scanner', verdict: 'allow' }],
+          }),
+        ).toMatchObject({ changed: true, active: false });
+        expect(
+          (
+            await e.all<{ status: string }>(
+              st('select status from version where org_id=? and id=?', 'org', item.versionId),
+            )
+          )[0]?.status,
+        ).toBe('quarantined');
+      }));
+
+    it('scopes publish source, token binding and blob reads to the organization', () =>
+      run(async (e) => {
+        const reads = createPublishReads(e);
+        const foreign = orgContext('other');
+        expect(await reads.source(foreign, 'widget')).toEqual([]);
+        expect(await reads.packageBinding(foreign, 'token')).toBeNull();
+        expect(await reads.blobId(foreign, 'a'.repeat(64))).toBeNull();
+        expect((await reads.source(ctx, 'widget'))[0]?.id).toBe('source');
+        expect(await reads.packageBinding(ctx, 'token')).toEqual({ packageName: null });
+        expect(await reads.blobId(ctx, 'a'.repeat(64))).toBe('blob');
+        await e.batch([st("UPDATE token SET package_name = '@scope/bound'")]);
+        expect(await reads.packageBinding(ctx, 'token')).toEqual({ packageName: '@scope/bound' });
+      }));
+
+    async function flow(
+      e: SqlExecutor,
+      w: Awaited<ReturnType<typeof world>>,
+      options: {
+        held?: boolean;
+        policy?: boolean;
+        mutation?: string;
+        project?: boolean;
+        unclaimed?: boolean;
+        contentType?: string;
+        missingAttachments?: boolean;
+        superseded?: boolean;
+        initial?: string;
+        tags?: Record<string, string>;
+        duplicate?: boolean;
+        bound?: boolean;
+        organizationFallback?: boolean;
+        descriptionBytes?: number;
+        writerFailure?: boolean;
+        cancelMidBody?: boolean;
+        crashAfterPromote?: boolean;
+        clientInfoEcho?: boolean;
+      } = {},
+    ) {
+      const runtime = '../../../runtime-node/src/';
+      const { nodeCodecs } = await import(
+        new URL(runtime + 'codec/node-codec.ts', import.meta.url).href
+      );
+      const { openFilesystemByteStore } = await import(
+        new URL(runtime + 'blob/filesystem.ts', import.meta.url).href
+      );
+      const core = '../../../core/src/test-support/npm-publish.ts';
+      const { entry, archive } = await import(new URL(core, import.meta.url).href);
+      const directory = await mkdtemp(pathJoin(await realpath(tmpdir()), 'npm9-contract-'));
+      try {
+        const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(5) }]);
+        const token = formatToken('svc', 'abcdefghijkl', new Uint8Array(32).fill(9));
+        await e.batch([st('UPDATE token SET hash = ?', await hashToken(keyring, 1, token))]);
+        if (options.held) await e.batch([st('UPDATE source SET require_publish_approval = 1')]);
+        if (options.unclaimed) await e.batch([st('DELETE FROM registered_name')]);
+        if (options.project)
+          await e.batch([
+            st('DELETE FROM service_principal_permission'),
+            st(
+              "INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES ('org','principal','project:packages:write')",
+            ),
+            st(
+              "INSERT OR IGNORE INTO project_source (org_id, project_id, source_id) VALUES ('org','project','source')",
+            ),
+            st('UPDATE source SET default_visible_to_new_projects = 1'),
+          ]);
+        if (options.organizationFallback)
+          await e.batch([
+            st(
+              "INSERT INTO service_principal_permission (org_id,service_principal_id,permission) VALUES ('org','principal','org:packages:publish')",
+            ),
+          ]);
+        if (options.bound)
+          await e.batch([
+            st("UPDATE service_principal SET project_id = 'project'"),
+            st("UPDATE token SET project_id = 'project'"),
+            st('UPDATE source SET default_visible_to_new_projects = 1'),
+          ]);
+        if (options.initial) await e.batch([st(options.initial)]);
+        const bytes = gzipSync(
+          archive(
+            entry('package/package.json', JSON.stringify({ name: 'widget', version: '2.0.0' })),
+            entry(
+              'package/README.md',
+              options.cancelMidBody ? randomBytes(8192).toString('hex') : '# Widget',
+            ),
+          ),
+        );
+        const body = JSON.stringify({
+          name: 'widget',
+          versions: {
+            '2.0.0': {
+              name: 'widget',
+              version: '2.0.0',
+              ...(options.descriptionBytes === undefined
+                ? {}
+                : { description: 'x'.repeat(options.descriptionBytes) }),
+              _npmUser: { name: 'forged-handle' },
+              maintainers: [{ name: 'forged-maintainer', email: 'forged@example.test' }],
+              _npmOperationalInternal: { host: 'forged-host' },
+              _npmVersion: options.clientInfoEcho ? token : '11.17.0',
+              _nodeVersion: '24.0.0',
+            },
+          },
+          'dist-tags': options.tags ?? { latest: '2.0.0' },
+          ...(options.missingAttachments
+            ? {}
+            : {
+                _attachments: {
+                  'widget-2.0.0.tgz': { data: bytes.toString('base64'), length: bytes.length },
+                },
+              }),
+        });
+        const abort = new AbortController();
+        let bodyReads = 0;
+        let stagedBytes = 0;
+        let beganStaging!: () => void;
+        const stagingStarted = new Promise<void>((resolve) => {
+          beganStaging = resolve;
+        });
+        const request = () =>
+          new Request('https://broker.test/project/npm/widget', {
+            method: 'PUT',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': options.contentType ?? 'application/json',
+              'content-length': String(Buffer.byteLength(body)),
+            },
+            body: options.cancelMidBody
+              ? new ReadableStream<Uint8Array>({
+                  async pull(controller) {
+                    if (bodyReads++ === 0) {
+                      const end = body.indexOf('"data":"') + 8 + 8192;
+                      controller.enqueue(new TextEncoder().encode(body.slice(0, end)));
+                    } else {
+                      await stagingStarted;
+                      abort.abort();
+                    }
+                  },
+                })
+              : body,
+            signal: abort.signal,
+            duplex: 'half',
+          } as RequestInit);
+        const physical = w.bytes ?? (await openFilesystemByteStore({ root: directory }));
+        const removed: string[] = [];
+        if (options.superseded) {
+          await physical.putVerified('npm-publish/old', new Blob(['old']).stream(), {
+            sha256: await sha256Hex('old'),
+            size: 3,
+            mediaType: 'application/gzip',
+          });
+          await e.batch([
+            st(
+              "INSERT INTO blob (id, org_id, sha256, size_bytes, media_type, storage_key, refetchable) VALUES ('superseded','org',?,?,'application/gzip','npm-publish/old',0)",
+              createHash('sha256').update(bytes).digest('hex'),
+              bytes.length,
+            ),
+          ]);
+        }
+        const promotionStore = options.superseded
+          ? {
+              ...physical,
+              head: (key: string) =>
+                key === 'npm-publish/old' ? Promise.resolve(null) : physical.head(key),
+            }
+          : ({
+              ...physical,
+              putStaged: (handle, body, maxBytes, mediaType) =>
+                physical.putStaged(
+                  handle,
+                  body.pipeThrough(
+                    new TransformStream<Uint8Array, Uint8Array>({
+                      transform(chunk, controller) {
+                        stagedBytes += chunk.length;
+                        controller.enqueue(chunk);
+                        beganStaging();
+                      },
+                    }),
+                  ),
+                  maxBytes,
+                  mediaType,
+                ),
+            } satisfies ByteStore);
+        const blob = createBlobStore(
+          promotionStore,
+          createBlobRepository(e, {
+            supersededObjects: {
+              remove: async (key) => {
+                removed.push(key);
+                await physical.remove(key);
+              },
+              counter: () => undefined,
+            },
+          }),
+          {
+            admission: createBlobUploadAdmission(),
+          },
+        );
+        let discardCalls = 0;
+        let crashPending = options.crashAfterPromote;
+        let promotions = 0;
+        const makePublish = () =>
+          createPublishService({
+            reads: {
+              ...createPublishReads(e),
+              blobId: async (...args) => {
+                if (crashPending) {
+                  crashPending = false;
+                  throw new Error('process_stopped_after_promote');
+                }
+                return createPublishReads(e).blobId(...args);
+              },
+            },
+            lookupToken: createAccessRepository(e).lookupToken,
+            anchors: async () => [],
+            admitted: (org, input) => checkPublishAdmission(e, org, input),
+            writeGuard: createPublishWriteGuard,
+            writer: {
+              publishVersion: async (...args) => {
+                if (options.writerFailure)
+                  throw new DbError('unique', 'fixture', { constraint: 'audit_pending.id' });
+                if (options.mutation) await e.batch([st(options.mutation)]);
+                return w.writer.publishVersion(...args);
+              },
+            },
+            requiredScanners: () => (options.policy ? ['scanner'] : []),
+            scanJobs: createRepositoryJobs({
+              store: createJobRepository(e),
+              clock: fixedClock(NOW),
+              ids: { ulid },
+              jobs: [
+                {
+                  qualifiedName: 'core:publish-scan:v1',
+                  definition: {
+                    name: 'publish-scan',
+                    version: 1,
+                    maxAttempts: 3,
+                    validate: (input: unknown) => input,
+                    handler: async () => {},
+                  },
+                },
+              ],
+            })('core', { projectId: null, tokenId: null }),
+            blob: {
+              ...blob,
+              promote: async (...args) => {
+                promotions += 1;
+                return blob.promote(...args);
+              },
+              discard: async (...args) => {
+                discardCalls += 1;
+                await blob.discard(...args);
+              },
+            },
+            codecs: nodeCodecs,
+            registry: {
+              ...REGISTRY_DEFAULTS,
+              outbound: { allowPrivateHosts: [], selfOrigins: [] },
+            },
+            clock: fixedClock(NOW),
+            publicUrl: 'https://broker.test',
+          });
+        let publish = makePublish();
+        const authorization = createAuthorizationEngine({
+          access: createAccessRepository(e),
+          providerAnchors: async () => [],
+          publicOrigin: 'https://broker.test',
+          patValidation: patValidationGate,
+          tokenUse: {
+            keyring,
+            nowMs: () => Date.now(),
+            dispatch: () => undefined,
+            log: () => undefined,
+          },
+        });
+        let engineDecision: AuthorizationDecision | undefined;
+        const kernel = await createKernel({
+          platform: 'node',
+          plugins: [],
+          ports: {
+            organizations: { get: async () => null },
+            clock: fixedClock(NOW),
+            ids: { ulid },
+          },
+          resolveOrg: async () => ctx,
+          health: async () => true,
+          packageResolver: { resolve: async () => ({ kind: 'absent' }) },
+          authorization: {
+            authorize: async (input) => {
+              const decision = await authorization.authorize(input);
+              engineDecision = decision;
+              return decision;
+            },
+          },
+          ecosystemRoutes: [
+            {
+              method: 'PUT',
+              path: '/:project/npm/:a',
+              permission: 'project:packages:write',
+              boundary: 'project',
+              organizationAlternative: 'org:packages:publish',
+              handler: (context) => publish(context, 'widget'),
+            },
+          ],
+        });
+        const response = await kernel.fetch(request());
+        const interrupted = options.crashAfterPromote
+          ? {
+              versions: await e.all(st("SELECT id FROM version WHERE org_id='org'")),
+              audits: await e.all(
+                st("SELECT id FROM audit_pending WHERE org_id='org' AND action='package.publish'"),
+              ),
+              blobs: await e.all(
+                st(
+                  "SELECT sha256,refetchable FROM blob WHERE org_id='org' AND sha256<>?",
+                  'a'.repeat(64),
+                ),
+              ),
+            }
+          : null;
+        let retryStatus: number | undefined;
+        if (options.crashAfterPromote) {
+          publish = makePublish();
+          retryStatus = (await kernel.fetch(request())).status;
+        }
+        let duplicateStatus: number | undefined;
+        if (options.duplicate) duplicateStatus = (await kernel.fetch(request())).status;
+        const value = await response.json();
+        const versions = await e.all<{ status: string; publisher: string }>(
+          st(
+            "SELECT v.status, a.actor_id as publisher, json_extract(a.payload_json, '$.changes.authority.new') as authority FROM version v JOIN audit_pending a ON a.target_id = v.id WHERE v.org_id = 'org'",
+          ),
+        );
+        return {
+          interrupted,
+          retryStatus,
+          promotions,
+          bodyReads,
+          stagedBytes,
+          discardCalls,
+          metadata: await e.all<{ metadata: string }>(
+            st("SELECT metadata_json as metadata FROM version WHERE org_id = 'org'"),
+          ),
+          engineDecision,
+          duplicateStatus,
+          removed,
+          oldPresent: await physical.head('npm-publish/old'),
+          response,
+          value,
+          versions,
+          staged: await physical.listStaged('2099-01-01T00:00:00.000Z'),
+        };
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+    it('cancel mid-body through publish service leaves no blob, version or publication audit', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { cancelMidBody: true });
+        expect(result.bodyReads).toBeGreaterThan(1);
+        expect(result.stagedBytes).toBeGreaterThan(0);
+        expect(result.response.status).toBe(400);
+        expect(result.value).toMatchObject({ code: 'publish_cancelled' });
+        expect(result.promotions).toBe(0);
+        expect(result.staged).toEqual([]);
+        expect(await e.all(st("SELECT id FROM blob WHERE org_id='org' AND id<>'blob'"))).toEqual(
+          [],
+        );
+        expect(result.versions).toEqual([]);
+        expect(await e.all(st("SELECT id FROM version WHERE org_id='org'"))).toEqual([]);
+        expect(
+          await e.all(
+            st("SELECT id FROM audit_pending WHERE org_id='org' AND action='package.publish'"),
+          ),
+        ).toEqual([]);
+      }));
+
+    it('publish service stops after promote without a version or audit and restarts to retry once', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { crashAfterPromote: true });
+        expect(result.response.status).toBe(503);
+        expect(result.interrupted?.versions).toEqual([]);
+        expect(result.interrupted?.audits).toEqual([]);
+        expect(result.interrupted?.blobs).toEqual([{ sha256: expect.any(String), refetchable: 0 }]);
+        expect(result.retryStatus).toBe(201);
+        expect(result.promotions).toBe(2);
+        expect(result.versions).toHaveLength(1);
+        expect(await e.all(st("SELECT id FROM version WHERE org_id='org'"))).toHaveLength(1);
+        expect(result.staged).toEqual([]);
+        expect(
+          await e.all(
+            st(
+              "SELECT sha256,refetchable FROM blob WHERE org_id='org' AND sha256<>?",
+              'a'.repeat(64),
+            ),
+          ),
+        ).toEqual(result.interrupted?.blobs);
+        expect(
+          await e.all(
+            st("SELECT id FROM audit_pending WHERE org_id='org' AND action='package.publish'"),
+          ),
+        ).toHaveLength(1);
+      }));
+
+    it('accepts and queues a scanned publish atomically', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { policy: true });
+        expect(result.response.status).toBe(202);
+        expect(result.value).toMatchObject({ held: { scan: true, approval: false } });
+        expect(
+          await e.all(
+            st(
+              "SELECT hold_scan,scan_state,required_scanners_json FROM publish_approval WHERE org_id='org'",
+            ),
+          ),
+        ).toEqual([{ hold_scan: 1, scan_state: 'queued', required_scanners_json: '["scanner"]' }]);
+        expect(
+          await e.all(
+            st("SELECT max_attempts FROM job WHERE type='core:publish-scan:v1' AND org_id='org'"),
+          ),
+        ).toEqual([{ max_attempts: 3 }]);
+      }));
+    it.each([false, true])('stage → promote → fenced publishVersion, approval=%s', (held) =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { held });
+        expect(result.response.status).toBe(held ? 202 : 201);
+        expect(result.engineDecision?.allow).toBe(true);
+        expect(result.value).toMatchObject({ ok: true, id: 'widget@2.0.0' });
+        expect(result.staged).toEqual([]);
+        expect(result.versions).toEqual([
+          {
+            status: held ? 'quarantined' : 'active',
+            publisher: 'principal',
+            authority: 'organization',
+          },
+        ]);
+        const rows = await e.all<{ key: string; refetchable: number }>(
+          st(
+            "SELECT storage_key as key, refetchable FROM blob WHERE org_id = 'org' AND sha256 <> ?",
+            'a'.repeat(64),
+          ),
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.key).toMatch(/^npm-publish\//);
+        expect(rows[0]!.refetchable).toBe(0);
+      }),
+    );
+    it('expires a service-created approval at the shared fourteen-day boundary', () =>
+      run(async (e, w) => {
+        expect((await flow(e, w, { held: true })).response.status).toBe(202);
+        const repo = createPublishesRepository(e);
+        const expiry = Date.parse(NOW) + PUBLISH_APPROVAL_WINDOW_MS;
+        expect(PUBLISH_APPROVAL_WINDOW_MS).toBe(14 * 86400000);
+        expect(await repo.listExpired(ctx, new Date(expiry - 1).toISOString())).toEqual([]);
+        expect(await repo.listExpired(ctx, new Date(expiry).toISOString())).toHaveLength(1);
+        await createPublishApprovalExpireJob({ publishes: repo }).handler({}, {
+          org: ctx,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock: fixedClock(new Date(expiry).toISOString()), ids: { ulid } },
+        } as never);
+        expect(await e.all(st('SELECT approval_state FROM publish_approval'))).toEqual([
+          { approval_state: 'expired' },
+        ]);
+        expect(await e.all(st('SELECT status,tombstone_reason FROM version'))).toEqual([
+          { status: 'tombstoned', tombstone_reason: 'expired' },
+        ]);
+      }));
+    it('stage → promote → publishVersion removes the superseded physical key', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { superseded: true });
+        expect(result.response.status).toBe(201);
+        expect(result.removed).toEqual(['npm-publish/old']);
+        expect(result.oldPresent).toBeNull();
+        expect(result.staged).toEqual([]);
+      }));
+    it('attributes metadata to principal id and kind rather than the whoami handle', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w);
+        const metadata = JSON.parse(result.metadata[0]!.metadata);
+        expect(metadata.maintainers).toEqual([{ id: 'principal', kind: 'service' }]);
+        expect(metadata).not.toHaveProperty('_npmOperationalInternal');
+        expect(metadata._npmVersion).toBe('11.17.0');
+        expect(metadata._nodeVersion).toBe('24.0.0');
+        expect(metadata.dist.tarball).toBe(
+          'https://broker.test/project/npm/widget/-/widget-2.0.0.tgz',
+        );
+        expect(metadata._npmUser).toEqual({
+          id: 'principal',
+          kind: 'service',
+        });
+      }));
+    it('applies the manifest cap after principal attribution and discards staging', () =>
+      run(async (e, w) => {
+        const first = await flow(e, w);
+        const baseline = new TextEncoder().encode(first.metadata[0]!.metadata).length;
+        const result = await flow(e, w, { descriptionBytes: 262144 - baseline - 17 + 1 });
+        expect(result.response.status).toBe(413);
+        expect(result.value).toMatchObject({ code: 'manifest_too_large' });
+        expect(result.discardCalls).toBe(1);
+        expect(result.staged).toEqual([]);
+        expect(result.metadata).toHaveLength(1);
+      }));
+    it('maps immutable version reuse to 409', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { duplicate: true });
+        expect(result.response.status).toBe(201);
+        expect(result.duplicateStatus).toBe(409);
+        expect(result.versions).toHaveLength(1);
+      }));
+    it('allows an organization publisher with a project-bound write token only through admission', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, { bound: true });
+        expect(result.engineDecision).toMatchObject({ allow: true });
+        expect(result.response.status).toBe(201);
+      }));
+    it('refuses an organization publisher through an unattached route project', () =>
+      run(async (e, w) => {
+        const result = await flow(e, w, {
+          project: true,
+          organizationFallback: true,
+          initial: 'DELETE FROM project_source',
+        });
+        expect(result.response.status).toBe(403);
+        expect(result.value).toMatchObject({ code: 'not_admitted' });
+        expect(result.versions).toEqual([]);
+        expect(await e.all(st('SELECT count(*) as n FROM project_package'))).toEqual([{ n: 0 }]);
+      }));
+    it('accepts a project publisher admitted to the hosted claim', () =>
+      run(async (e, w) => {
+        expect((await flow(e, w, { project: true })).response.status).toBe(201);
+      }));
+    it.each([
+      [
+        'paused preflight',
+        { initial: "UPDATE source SET status = 'paused'" },
+        409,
+        'source_paused',
+      ],
+      [
+        'inactive principal',
+        { initial: "UPDATE service_principal SET status = 'suspended'" },
+        401,
+        'unauthorized',
+      ],
+      [
+        'read scope',
+        { initial: `UPDATE token SET scopes_json = '["read"]', read_only = 1` },
+        404,
+        'not_found',
+      ],
+      [
+        'lost organization permission',
+        { initial: 'DELETE FROM service_principal_permission' },
+        404,
+        'not_found',
+      ],
+      [
+        'package binding',
+        { initial: "UPDATE token SET package_name = 'another'" },
+        403,
+        'package_binding',
+      ],
+      [
+        'project admission removed',
+        { project: true, initial: 'DELETE FROM project_source' },
+        403,
+        'not_admitted',
+      ],
+      ['wrong tag target', { tags: { latest: '9.0.0' } }, 400, 'invalid_tags'],
+      ['tag grammar', { tags: { BAD: '2.0.0' } }, 400, 'invalid_tags'],
+      ['semver tag', { tags: { '1.0.0': '2.0.0' } }, 400, 'invalid_tags'],
+      [
+        'tag cap',
+        { tags: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`tag${i}`, '2.0.0'])) },
+        400,
+        'too_many_tags',
+      ],
+      [
+        'bound organization token without admission',
+        { bound: true, initial: 'DELETE FROM project_source' },
+        403,
+        'not_admitted',
+      ],
+      ['unrelated unique failure', { writerFailure: true }, 503, 'unavailable'],
+      [
+        'project archived after promote',
+        { mutation: "UPDATE project SET status = 'archived'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'claim removed after promote',
+        { mutation: 'DELETE FROM registered_name' },
+        403,
+        'forbidden',
+      ],
+      [
+        'principal suspended after promote',
+        { mutation: "UPDATE service_principal SET status = 'suspended'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'token expired after promote',
+        { mutation: "UPDATE token SET expires_at = '2000-01-01T00:00:00.000Z'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'publish permission removed after promote',
+        { mutation: 'DELETE FROM service_principal_permission' },
+        403,
+        'forbidden',
+      ],
+      [
+        'bound token admission removed after promote',
+        { bound: true, mutation: 'DELETE FROM project_source' },
+        403,
+        'forbidden',
+      ],
+      ['client info credential echo', { clientInfoEcho: true }, 400, 'invalid_manifest'],
+      ['unclaimed', { unclaimed: true }, 409, 'name_not_claimed'],
+      ['content type', { contentType: 'text/plain' }, 415, 'unsupported_media_type'],
+      ['missing attachments', { missingAttachments: true }, 405, 'write_unsupported'],
+      [
+        'revoked after promote',
+        { mutation: "UPDATE token SET revoked_at = '2026-10-30T00:00:00.000Z'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'paused after promote',
+        { mutation: "UPDATE source SET status = 'paused'" },
+        403,
+        'forbidden',
+      ],
+      [
+        'approval flips after promote',
+        { mutation: 'UPDATE source SET require_publish_approval = 1' },
+        403,
+        'forbidden',
+      ],
+    ] as const)('refuses %s without version or audit', (_label, options, status, code) =>
+      run(async (e, w) => {
+        const result = await flow(e, w, options);
+        expect(result.response.status).toBe(status);
+        expect(result.value).toMatchObject({ code });
+        expect(result.response.headers.get('cache-control')).toBe('no-store');
+        expect(result.versions).toEqual([]);
+        expect(result.staged).toEqual([]);
+      }),
+    );
+  });
   describe(`npm publish writer on ${name}`, () => {
     async function held(e: SqlExecutor, w: Awaited<ReturnType<typeof world>>) {
       await e.batch([
@@ -238,6 +1027,646 @@ export function describeNpmPublishWriterContract(
       };
       return { repo, fence, input, result };
     }
+    async function deny(e: SqlExecutor, h: Awaited<ReturnType<typeof held>>) {
+      await e.all(
+        st("UPDATE publish_approval SET hold_scan=1,scan_state='running' WHERE org_id='org'"),
+      );
+      expect(
+        (
+          await h.repo.scan(
+            ctx,
+            systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {}),
+            {
+              ...h.input,
+              expectedScanState: 'running',
+              scanState: 'denied',
+              verdicts: [{ plugin: 'scanner', verdict: 'deny' }],
+              event: { ...h.input.event, id: ulid(), action: 'publish.scan' },
+            },
+          )
+        ).changed,
+      ).toBe(true);
+    }
+    it('scan denial leaves pending approval out of pending pages until expiry closes it', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await deny(e, h);
+        const item = (await h.repo.get(ctx, h.input.id))!;
+        expect(item).toMatchObject({
+          approvalState: 'pending',
+          scanState: 'denied',
+          decidedByUserId: null,
+          decidedAt: null,
+        });
+        expect(await h.repo.list(ctx, { state: 'pending', limit: 1 })).toEqual({
+          items: [],
+          next: null,
+        });
+        expect((await h.repo.list(ctx, { limit: 1 })).items).toHaveLength(1);
+        const snapshot = await e.all(
+          st("SELECT status,tombstone_reason,tombstoned_at FROM version WHERE org_id='org'"),
+        );
+        const purge = await e.all(st("SELECT purge_after FROM blob WHERE org_id='org'"));
+        expect(snapshot).toEqual([
+          { status: 'tombstoned', tombstone_reason: 'scan_denied', tombstoned_at: NOW },
+        ]);
+        for (const decision of ['approved', 'rejected'] as const)
+          expect(
+            (
+              await h.repo.decide(ctx, h.fence, {
+                ...h.input,
+                expectedRevision: item.revision,
+                expectedScanState: 'denied',
+                decision,
+                reason: 'Policy',
+              })
+            ).changed,
+          ).toBe(false);
+        expect(await h.repo.get(ctx, h.input.id)).toEqual(item);
+        expect(
+          await h.repo.listExpired(ctx, new Date(Date.parse(item.expiresAt) - 1).toISOString()),
+        ).toEqual([]);
+        expect((await h.repo.listExpired(ctx, item.expiresAt)).map((row) => row.id)).toEqual([
+          item.id,
+        ]);
+        await createPublishApprovalExpireJob({ publishes: h.repo }).handler({}, {
+          org: ctx,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock: fixedClock(item.expiresAt), ids: { ulid } },
+        } as never);
+        expect(await h.repo.get(ctx, item.id)).toMatchObject({
+          approvalState: 'expired',
+          scanState: 'denied',
+          decidedByUserId: null,
+          decidedAt: item.expiresAt,
+          revision: item.revision + 1,
+        });
+        expect(
+          await e.all(
+            st("SELECT status,tombstone_reason,tombstoned_at FROM version WHERE org_id='org'"),
+          ),
+        ).toEqual(snapshot);
+        expect(await e.all(st("SELECT purge_after FROM blob WHERE org_id='org'"))).toEqual(purge);
+        expect(
+          await e.all(st("SELECT count(*) n FROM audit_pending WHERE action='publish.expire'")),
+        ).toEqual([{ n: 1 }]);
+      }));
+    it('restarts a persisted running scan through the real repository and job handler', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,scan_state='running',scan_attempts=1,required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+          ),
+        );
+        const job = createPublishScanJob({
+          publishes: h.repo,
+          scanners: [
+            {
+              id: 'scanner',
+              inspect: async (_ctx, input) => {
+                const reader = (await input.openTarball()).getReader();
+                expect((await reader.read()).value).toEqual(new Uint8Array([42]));
+                reader.releaseLock();
+                return { verdict: 'allow' };
+              },
+            },
+          ],
+          blob: {
+            get: async () => ({
+              body: new ReadableStream({
+                start(c) {
+                  c.enqueue(new Uint8Array([42]));
+                  c.close();
+                },
+              }),
+              info: {} as never,
+            }),
+          },
+        });
+        await job.handler({ id: h.input.id }, {
+          org: ctx,
+          jobId: 'job',
+          attempt: 2,
+          fence: 1,
+          idempotencyKey: 'publish:version',
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock: fixedClock(NOW), ids: { ulid } },
+        } as never);
+        const item = (await h.repo.get(ctx, h.input.id))!;
+        expect(item).toMatchObject({ scanState: 'allowed', scanAttempts: 2 });
+        expect(await e.all(st("SELECT status FROM version WHERE org_id='org'"))).toEqual([
+          { status: 'quarantined' },
+        ]);
+        expect(
+          (
+            await h.repo.decide(ctx, h.fence, {
+              ...h.input,
+              expectedRevision: item.revision,
+              expectedScanState: 'allowed',
+            })
+          ).active,
+        ).toBe(true);
+      }));
+    it('an aborted final scan is failed and rescannable', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,scan_state='queued',scan_attempts=2,required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+          ),
+        );
+        const controller = new AbortController();
+        const job = createPublishScanJob({
+          publishes: h.repo,
+          blob: { get: async () => null },
+          scanners: [
+            {
+              id: 'scanner',
+              inspect: async () => {
+                controller.abort();
+                return new Promise(() => {});
+              },
+            },
+          ],
+        });
+        await expect(
+          job.handler({ id: h.input.id }, {
+            org: ctx,
+            jobId: 'job',
+            attempt: 3,
+            signal: controller.signal,
+            fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+            ports: { clock: fixedClock(NOW), ids: { ulid } },
+          } as never),
+        ).rejects.toThrow('aborted');
+        const item = (await h.repo.get(ctx, h.input.id))!;
+        expect(item).toMatchObject({ scanState: 'failed', scanAttempts: 3 });
+        expect(
+          (
+            await h.repo.rescan(ctx, h.fence, {
+              ...h.input,
+              expectedRevision: item.revision,
+              expectedScanState: 'failed',
+            })
+          ).changed,
+        ).toBe(true);
+      }));
+    it.each(['rejected', 'expired', 'overdue'] as const)(
+      'scan cannot change a closed approval: %s',
+      (state) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(
+            st(
+              "UPDATE publish_approval SET hold_scan=1,scan_state='running',approval_state=?,decided_by_user_id=?,decided_at=?,expires_at=? WHERE org_id='org'",
+              state === 'overdue' ? 'pending' : state,
+              state === 'rejected' ? 'approver' : null,
+              state === 'overdue' ? null : NOW,
+              state === 'overdue' ? NOW : '2099-01-01T00:00:00.000Z',
+            ),
+          );
+          const result = await h.repo.scan(
+            ctx,
+            systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {}),
+            {
+              ...h.input,
+              expectedApprovalState: state === 'overdue' ? 'pending' : state,
+              expectedScanState: 'running',
+              scanState: 'allowed',
+              verdicts: [{ plugin: 'scanner', verdict: 'allow' }],
+              event: { ...h.input.event, id: ulid(), action: 'publish.scan' },
+            },
+          );
+          expect(result.changed).toBe(false);
+        }),
+    );
+    it('an approver can reject a failed scan-only publish', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_approval=0,approval_state='not_required',hold_scan=1,scan_state='failed' WHERE org_id='org'",
+          ),
+        );
+        expect(
+          (
+            await h.repo.decide(ctx, h.fence, {
+              ...h.input,
+              expectedApprovalState: 'not_required',
+              expectedScanState: 'failed',
+              decision: 'rejected',
+              reason: 'Policy refusal',
+            })
+          ).changed,
+        ).toBe(true);
+        expect(
+          await e.all(st("SELECT status,tombstone_reason FROM version WHERE org_id='org'")),
+        ).toEqual([{ status: 'tombstoned', tombstone_reason: 'rejected' }]);
+      }));
+    it.each(['scan-first', 'approval-first'] as const)(
+      'scan activation requires both gates: %s',
+      (order) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(
+            st(
+              "UPDATE publish_approval SET hold_scan=1,scan_state='queued',required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+            ),
+          );
+          const system = systemMutationFence(
+            'verifier',
+            { id: 'job', owner: 'owner', fence: 1 },
+            {},
+          );
+          const step = async (state: 'running' | 'allowed') => {
+            const item = (await h.repo.get(ctx, h.input.id))!;
+            return h.repo.scan(ctx, system, {
+              ...h.input,
+              expectedRevision: item.revision,
+              expectedApprovalState: item.approvalState,
+              expectedScanState: item.scanState,
+              scanState: state,
+              verdicts: state === 'allowed' ? [{ plugin: 'scanner', verdict: 'allow' }] : [],
+              event: { ...h.input.event, id: ulid(), action: 'publish.scan' },
+            });
+          };
+          const approve = async () => {
+            const item = (await h.repo.get(ctx, h.input.id))!;
+            return h.repo.decide(ctx, h.fence, {
+              ...h.input,
+              expectedRevision: item.revision,
+              expectedScanState: item.scanState,
+            });
+          };
+          await step('running');
+          expect((await (order === 'scan-first' ? step('allowed') : approve())).active).toBe(false);
+          expect(await e.all(st("SELECT status FROM version WHERE org_id='org'"))).toEqual([
+            { status: 'quarantined' },
+          ]);
+          if (order === 'approval-first')
+            await e.all(
+              st(
+                "UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z' WHERE org_id='org'",
+              ),
+            );
+          expect((await (order === 'scan-first' ? approve() : step('allowed'))).active).toBe(true);
+          expect((await w.reader.distTags(ctx, ref))?.tags).toEqual({ latest: '1.0.0' });
+          expect(
+            await e.all(st("SELECT held_until_active FROM package WHERE org_id='org'")),
+          ).toEqual([{ held_until_active: 0 }]);
+        }),
+    );
+    it.each(['denied', 'failed'] as const)(
+      'scan %s fails closed with scoped reads and conditional audit',
+      (state) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(
+            st(
+              "UPDATE publish_approval SET hold_scan=1,scan_state='running',required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+            ),
+          );
+          const data = await h.repo.scanInput(ctx, h.input.id);
+          expect(data).toMatchObject({
+            sha256: 'a'.repeat(64),
+            integrity: 'sha512-test',
+            sizeBytes: 10,
+            manifest: { name: 'widget' },
+          });
+          expect(await h.repo.scanInput(orgContext('foreign'), h.input.id)).toBeNull();
+          const transition = {
+            ...h.input,
+            expectedScanState: 'running' as const,
+            scanState: state,
+            verdicts:
+              state === 'denied'
+                ? [{ plugin: 'scanner', verdict: 'deny' as const, reason: 'Policy' }]
+                : [],
+            event: { ...h.input.event, id: ulid(), action: 'publish.scan' as const },
+          };
+          const system = systemMutationFence(
+            'verifier',
+            { id: 'job', owner: 'owner', fence: 1 },
+            {},
+          );
+          await expect(h.repo.scan(ctx, h.fence, transition)).rejects.toThrow(
+            'invalid_publish_fence',
+          );
+          await expect(
+            h.repo.scan(
+              ctx,
+              systemMutationFence('verifier', { id: 'job', owner: 'lost', fence: 1 }, {}),
+              transition,
+            ),
+          ).rejects.toThrow();
+          expect((await h.repo.scan(ctx, system, transition)).changed).toBe(true);
+          expect((await h.repo.scan(ctx, system, transition)).changed).toBe(false);
+          expect(
+            await e.all(st("SELECT count(*) n FROM audit_pending WHERE action='publish.scan'")),
+          ).toEqual([{ n: 1 }]);
+          expect(
+            await e.all(st("SELECT status,tombstone_reason FROM version WHERE org_id='org'")),
+          ).toEqual([
+            {
+              status: state === 'denied' ? 'tombstoned' : 'quarantined',
+              tombstone_reason: state === 'denied' ? 'scan_denied' : null,
+            },
+          ]);
+          expect(
+            (
+              await e.all<{ purge_after: string | null }>(
+                st("SELECT purge_after FROM blob WHERE org_id='org'"),
+              )
+            )[0]?.purge_after !== null,
+          ).toBe(state === 'denied');
+        }),
+    );
+    it('scan sweep reads only old queued organization rows; attempts and rescan are fenced', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,scan_state='queued',scan_attempts=3,updated_at=?,required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+            NOW,
+          ),
+        );
+        expect((await h.repo.listScanQueued(ctx, NOW)).map((item) => item.id)).toEqual([
+          h.input.id,
+        ]);
+        expect(await h.repo.listScanQueued(ctx, '2000-01-01T00:00:00.000Z')).toEqual([]);
+        expect(await h.repo.listScanQueued(orgContext('foreign'), NOW)).toEqual([]);
+        const system = systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {});
+        const base = {
+          ...h.input,
+          expectedScanState: 'queued' as const,
+          event: { ...h.input.event, id: ulid(), action: 'publish.scan' as const },
+        };
+        expect(
+          (await h.repo.scan(ctx, system, { ...base, scanState: 'running', verdicts: [] })).changed,
+        ).toBe(false);
+        expect((await h.repo.rescan(ctx, h.fence, base)).changed).toBe(false);
+        await h.repo.scan(ctx, system, { ...base, scanState: 'failed', verdicts: [] });
+        const current = (await h.repo.get(ctx, h.input.id))!;
+        const retry = {
+          ...base,
+          expectedScanState: 'failed' as const,
+          expectedRevision: current.revision,
+          event: { ...base.event, id: ulid() },
+        };
+        await expect(h.repo.rescan(ctx, system, retry)).rejects.toThrow('invalid_publish_fence');
+        expect((await h.repo.rescan(orgContext('foreign'), h.fence, retry)).changed).toBe(false);
+        await e.all(st("DELETE FROM role_permission WHERE permission='org:packages:approve'"));
+        expect((await h.repo.rescan(ctx, h.fence, retry)).changed).toBe(false);
+        await e.all(
+          st("INSERT INTO role_permission VALUES ('org','approver-role','org:packages:approve')"),
+        );
+        expect((await h.repo.rescan(ctx, h.fence, retry)).changed).toBe(true);
+        expect((await h.repo.rescan(ctx, h.fence, retry)).changed).toBe(false);
+        expect(
+          await e.all(
+            st("SELECT count(*) n FROM job WHERE org_id='org' AND type='core:publish-scan:v1'"),
+          ),
+        ).toEqual([{ n: 1 }]);
+      }));
+    it.each([1, 3])('sweeper recovers a crashed running scan with %i attempts', (attempts) =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,scan_state='running',scan_attempts=?,updated_at='2000-01-01T00:00:00.000Z',required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+            attempts,
+          ),
+        );
+        const jobs = createRepositoryJobs({
+          store: createJobRepository(e),
+          clock: fixedClock(NOW),
+          ids: { ulid },
+          jobs: [
+            {
+              qualifiedName: 'core:publish-scan:v1',
+              definition: createPublishScanJob({
+                publishes: h.repo,
+                scanners: [],
+                blob: { get: async () => null },
+              }) as import('@package-broker/core/platform/jobs').JobDefinition,
+            },
+          ],
+        })('core', { projectId: null, tokenId: null });
+        await createPublishScanSweepJob({ publishes: h.repo }).handler({}, {
+          org: ctx,
+          jobId: 'job',
+          attempt: 1,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock: fixedClock(NOW), ids: { ulid }, platform: { jobs } },
+        } as never);
+        const item = (await h.repo.get(ctx, h.input.id))!;
+        expect(item.scanState).toBe(attempts === 3 ? 'failed' : 'queued');
+        expect(
+          await e.all(
+            st("SELECT count(*) n FROM job WHERE org_id='org' AND type='core:publish-scan:v1'"),
+          ),
+        ).toEqual([{ n: attempts === 3 ? 0 : 1 }]);
+        if (attempts === 3) {
+          expect(
+            (
+              await h.repo.rescan(ctx, h.fence, {
+                ...h.input,
+                expectedRevision: item.revision,
+                expectedScanState: 'failed',
+              })
+            ).changed,
+          ).toBe(true);
+        }
+      }),
+    );
+    it('a later sweep replaces a dead sweep job and completes the queued scan', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,hold_approval=0,approval_state='not_required',scan_state='queued',updated_at='2000-01-01T00:00:00.000Z',required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+          ),
+        );
+        const clock = fixedClock(NOW);
+        const store = createJobRepository(e);
+        const scan = createPublishScanJob({
+          publishes: h.repo,
+          scanners: [{ id: 'scanner', inspect: async () => ({ verdict: 'allow' }) }],
+          blob: { get: async () => null },
+        });
+        const jobs = createRepositoryJobs({
+          store,
+          clock,
+          ids: { ulid },
+          jobs: [
+            {
+              qualifiedName: 'core:publish-scan:v1',
+              definition: scan as import('@package-broker/core/platform/jobs').JobDefinition,
+            },
+          ],
+        })('core', { projectId: null, tokenId: null });
+        const context = {
+          org: ctx,
+          jobId: 'job',
+          attempt: 1,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock, ids: { ulid }, platform: { jobs } },
+        };
+        const sweep = createPublishScanSweepJob({ publishes: h.repo });
+        await sweep.handler({}, context as never);
+        const rows = await e.all<{ id: string }>(
+          st("SELECT id FROM job WHERE type='core:publish-scan:v1'"),
+        );
+        expect(rows).toHaveLength(1);
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const claim = (await store.claim(ctx, ulid(), {
+            id: rows[0]!.id,
+            types: ['core:publish-scan:v1'],
+            leaseSeconds: 60,
+            maxRunning: 10,
+          }))!;
+          expect(claim.attempt).toBe(attempt);
+          await store.settle(ctx, claim, {
+            outcome: 'failed',
+            errorCode: 'handler_error',
+            permanent: false,
+          });
+          await e.all(st("UPDATE job SET run_at='2000-01-01T00:00:00.000Z' WHERE id=?", claim.id));
+        }
+        expect((await store.status(ctx, rows[0]!.id))?.state).toBe('dead');
+        expect((await h.repo.get(ctx, h.input.id))?.scanAttempts).toBe(0);
+        await sweep.handler({}, context as never);
+        expect(
+          await e.all(st("SELECT id FROM job WHERE type='core:publish-scan:v1'")),
+        ).toHaveLength(1);
+        context.ports.clock = fixedClock('2026-10-30T00:10:00.000Z');
+        await sweep.handler({}, context as never);
+        const claim = (await store.claim(ctx, ulid(), {
+          types: ['core:publish-scan:v1'],
+          leaseSeconds: 60,
+          maxRunning: 10,
+        }))!;
+        expect(claim).not.toBeNull();
+        expect(claim.id).not.toBe(rows[0]!.id);
+        await scan.handler({ id: h.input.id }, {
+          ...context,
+          jobId: claim.id,
+          attempt: claim.attempt,
+          fences: jobFences(claim),
+        } as never);
+        await store.settle(ctx, claim, { outcome: 'succeeded' });
+        expect(await h.repo.get(ctx, h.input.id)).toMatchObject({
+          scanState: 'allowed',
+          scanAttempts: 1,
+        });
+        expect((await w.reader.distTags(ctx, ref))?.tags).toEqual({ latest: '1.0.0' });
+      }));
+    it('retries a verdict after latest moves without another inspection or attempt', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(st('UPDATE source SET require_publish_approval=0'));
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,hold_approval=0,approval_state='not_required',scan_state='queued',required_scanners_json='[\"scanner\"]' WHERE org_id='org'",
+          ),
+        );
+        let inspections = 0;
+        let raced = false;
+        const repo = createPublishesRepository({
+          ...e,
+          batch: async (statements) => {
+            if (!raced && statements.some((s) => s.params.includes('allowed'))) {
+              raced = true;
+              await w.writer.publishVersion(ctx, w.guard, w.input(false, '2.0.0'));
+            }
+            return e.batch(statements);
+          },
+        });
+        const scan = createPublishScanJob({
+          publishes: repo,
+          scanners: [
+            {
+              id: 'scanner',
+              inspect: async () => {
+                inspections++;
+                return { verdict: 'allow' };
+              },
+            },
+          ],
+          blob: { get: async () => null },
+        });
+        await scan.handler({ id: h.input.id }, {
+          org: ctx,
+          jobId: 'job',
+          attempt: 1,
+          signal: new AbortController().signal,
+          fences: jobFences({ id: 'job', owner: 'owner', fence: 1 }),
+          ports: { clock: fixedClock(NOW), ids: { ulid } },
+        } as never);
+        expect(raced).toBe(true);
+        expect(inspections).toBe(1);
+        expect(await h.repo.get(ctx, h.input.id)).toMatchObject({
+          scanState: 'allowed',
+          scanAttempts: 1,
+          revision: 3,
+          scanVerdicts: [{ plugin: 'scanner', verdict: 'allow' }],
+        });
+        expect((await w.reader.distTags(ctx, ref))?.tags).toEqual({ latest: '2.0.0' });
+        expect(await e.all(st("SELECT status FROM version WHERE id='version-1.0.0'"))).toEqual([
+          { status: 'active' },
+        ]);
+        expect(
+          await e.all(st("SELECT count(*) n FROM audit_pending WHERE action='publish.scan'")),
+        ).toEqual([{ n: 2 }]);
+      }));
+    it('sweeper skips expired pending approvals and live scan leases', () =>
+      run(async (e, w) => {
+        const h = await held(e, w);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET hold_scan=1,scan_state='running',updated_at='2000-01-01T00:00:00.000Z',expires_at='2099-01-01T00:00:00.000Z' WHERE org_id='org'",
+          ),
+        );
+        await e.all(
+          st(
+            "UPDATE job SET resource_key=? WHERE org_id='org' AND id='job'",
+            `publish:${h.result.versionId}`,
+          ),
+        );
+        expect(await h.repo.listScanQueued(ctx, NOW, NOW)).toEqual([]);
+        await e.all(
+          st(
+            "INSERT INTO job (id,org_id,type,idempotency_key,state,lease_owner,lease_until,fence) VALUES ('sweep','org','core:publish-scan-sweep:v1','sweep','running','sweeper','2099-01-01T00:00:00.000Z',1)",
+          ),
+        );
+        expect(
+          (
+            await h.repo.scan(
+              ctx,
+              systemMutationFence('verifier', { id: 'sweep', owner: 'sweeper', fence: 1 }, {}),
+              {
+                ...h.input,
+                expectedScanState: 'running',
+                scanState: 'queued',
+                verdicts: [],
+              },
+            )
+          ).changed,
+        ).toBe(false);
+        await e.all(st("UPDATE job SET resource_key=NULL WHERE org_id='org' AND id='job'"));
+        expect(await h.repo.listScanQueued(ctx, NOW, NOW)).toHaveLength(1);
+        await e.all(
+          st(
+            "UPDATE publish_approval SET expires_at='2000-01-01T00:00:00.000Z' WHERE org_id='org'",
+          ),
+        );
+        expect(await h.repo.listScanQueued(ctx, NOW, NOW)).toEqual([]);
+      }));
     it('package detail reads latest and explicit readmes with project visibility', () =>
       run(async (e, w) => {
         const published = await w.writer.publishVersion(ctx, w.guard, w.input());
@@ -954,17 +2383,31 @@ export function describeNpmPublishWriterContract(
         expect(
           await e.all(
             st(
-              "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject')",
+              "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject','publish.scan')",
             ),
           ),
         ).toEqual([{ n: 1 }]);
       }));
-    for (const decision of ['approve', 'reject'] as const)
-      it(`approval API ${decision} has the same HTTP contract on both runtimes`, () =>
+    for (const [decision, denied] of [
+      ['approve', false],
+      ['reject', false],
+      ['rescan', false],
+      ['approve', true],
+      ['reject', true],
+    ] as const)
+      it(`approval API ${decision} denied=${denied} has the same HTTP contract on both runtimes`, () =>
         run(async (e, w) => {
           const h = await held(e, w);
           const id = ulid();
           await e.all(st('UPDATE publish_approval SET id=? WHERE id=?', id, h.input.id));
+          if (decision === 'rescan')
+            await e.all(
+              st(
+                "UPDATE publish_approval SET hold_scan=1,scan_state='failed',scan_attempts=3,required_scanners_json='[\"scanner\"]' WHERE org_id='org' AND id=?",
+                id,
+              ),
+            );
+          if (denied) await deny(e, { ...h, input: { ...h.input, id } });
           const csrf = 'B'.repeat(43),
             csrfHash = await sha256Hex(csrf);
           const engine = createAuthorizationEngine({
@@ -1034,6 +2477,22 @@ export function describeNpmPublishWriterContract(
             );
           const listed = await call('/_pb/publishes?state=pending');
           expect(listed.status).toBe(200);
+          if (denied) {
+            expect(((await listed.json()) as { items: unknown[] }).items).toEqual([]);
+            const before = await h.repo.get(ctx, id);
+            const response = await call(`/_pb/publishes/${id}/${decision}`, 'POST', '"r2"');
+            expect(response.status).toBe(409);
+            expect(await response.json()).toMatchObject({ error: { code: 'already_decided' } });
+            expect(await h.repo.get(ctx, id)).toEqual(before);
+            expect(
+              await e.all(
+                st(
+                  "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject')",
+                ),
+              ),
+            ).toEqual([{ n: 0 }]);
+            return;
+          }
           expect(((await listed.json()) as { items: { id: string }[] }).items[0]?.id).toBe(id);
           const inspected = await call('/_pb/publishes/' + id);
           expect(inspected.status).toBe(200);
@@ -1042,11 +2501,37 @@ export function describeNpmPublishWriterContract(
           const decided = await call(`/_pb/publishes/${id}/${decision}`, 'POST', '"r1"');
           expect(decided.status).toBe(200);
           expect(decided.headers.get('etag')).toBe('"r2"');
-          expect((await call(`/_pb/publishes/${id}/${decision}`, 'POST', '"r1"')).status).toBe(409);
+          expect((await call(`/_pb/publishes/${id}/${decision}`, 'POST', '"r1"')).status).toBe(
+            decision === 'rescan' ? 412 : 409,
+          );
+          if (decision === 'rescan') {
+            expect(
+              await e.all(
+                st(
+                  "SELECT scan_state,scan_attempts FROM publish_approval WHERE org_id='org' AND id=?",
+                  id,
+                ),
+              ),
+            ).toEqual([{ scan_state: 'queued', scan_attempts: 0 }]);
+            expect(
+              await e.all(
+                st(
+                  "SELECT type,max_attempts,payload_json FROM job WHERE type='core:publish-scan:v1' AND org_id='org'",
+                ),
+              ),
+            ).toEqual([
+              {
+                type: 'core:publish-scan:v1',
+                max_attempts: 3,
+                payload_json: JSON.stringify({ id }),
+              },
+            ]);
+          }
+
           expect(
             await e.all(
               st(
-                "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject')",
+                "SELECT count(*) n FROM audit_pending WHERE action IN ('publish.approve','publish.reject','publish.scan')",
               ),
             ),
           ).toEqual([{ n: 1 }]);
@@ -1438,7 +2923,7 @@ export function describeNpmPublishWriterContract(
           await expect(w.writer.publishVersion(ctx, w.guard, w.input())).rejects.toThrow();
           expect(await e.all(st('SELECT count(*) as n FROM package'))).toEqual([{ n: 0 }]);
         }));
-    it('requires current admission for project publishers and permits organization publishers', () =>
+    it('requires current admission for project and organization publishers', () =>
       run(async (e, w) => {
         await e.all(
           st("UPDATE service_principal_permission SET permission='project:packages:write'"),
@@ -1448,8 +2933,14 @@ export function describeNpmPublishWriterContract(
         await e.all(
           st("UPDATE service_principal_permission SET permission='org:packages:publish'"),
         );
-        await w.writer.publishVersion(ctx, w.guard, w.input());
-        expect(await e.all(st('SELECT count(*) as n FROM version'))).toEqual([{ n: 1 }]);
+        await expect(w.writer.publishVersion(ctx, w.guard, w.input())).rejects.toThrow();
+        expect(await e.all(st('SELECT count(*) as n FROM project_package'))).toEqual([{ n: 0 }]);
+      }));
+    it('refuses a detached hosted source for an organization publisher in the mutation fence', () =>
+      run(async (e, w) => {
+        await e.all(st('DELETE FROM project_source'));
+        await expect(w.writer.publishVersion(ctx, w.guard, w.input())).rejects.toThrow();
+        expect(await e.all(st('SELECT count(*) as n FROM project_package'))).toEqual([{ n: 0 }]);
       }));
     it('refuses a detached hosted source for a project publisher', () =>
       run(async (e, w) => {

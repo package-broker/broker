@@ -21,6 +21,29 @@ const plugin = (id: string, extra: { dependsOn?: string[]; apiVersion?: number }
   });
 
 describe('manifest', () => {
+  it.each([
+    ['same', 'same'],
+    ['bad/id', 'good'],
+  ])('refuses ambiguous scanner ids: %s', (first, second) => {
+    const scanners = [first, second].map((id, index) => ({
+      ...plugin(index ? 'b' : 'a'),
+      publishPolicy: { id, inspect: async () => ({ verdict: 'allow' as const }) },
+    }));
+    expect(validatePlugins(scanners, 'node')).toContain(
+      'publishPolicy ids must be valid and unique',
+    );
+  });
+
+  it('refuses more than three publish scanners as a fixed configuration problem', () => {
+    const scanners = ['a', 'b', 'c', 'd'].map((id) => ({
+      ...plugin(id),
+      publishPolicy: { id, inspect: async () => ({ verdict: 'allow' as const }) },
+    }));
+    expect(validatePlugins(scanners.slice(0, 3), 'node')).toEqual([]);
+    expect(validatePlugins(scanners, 'node')).toContain(
+      'at most three publishPolicy plugins are supported',
+    );
+  });
   it('accepts a valid plugin set and orders by dependency', () => {
     const plugins = [plugin('b', { dependsOn: ['a'] }), plugin('a')];
     expect(validatePlugins(plugins, 'node')).toEqual([]);

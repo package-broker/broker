@@ -15,6 +15,7 @@ export interface AuthorizationRequest {
     readonly boundary?: RouteBoundary;
     readonly bearerOnly?: true;
     readonly allowArchived?: true;
+    readonly organizationAlternative?: string;
   };
   readonly params: Readonly<Record<string, string>>;
 }

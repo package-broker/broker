@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -206,9 +206,12 @@ let sources: MigrationSource[] | undefined;
 
 async function coreMigrations(): Promise<MigrationSource[]> {
   sources ??= await Promise.all(
-    ['0001_init.sql'].map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
+    (await readdir(migrationsDirectory))
+      .filter((name) => name.endsWith('.sql'))
+      .sort()
+      .map(async (name) =>
+        loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
+      ),
   );
   return sources;
 }

@@ -682,6 +682,18 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'These typed guards classify a refused publisher write; the result probe reads the selected failed flag, never executor changes.',
+      sites: [
+        'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(checks) #1',
+      ],
+    },
+    {
+      reason:
+        'The default enqueue condition is a constant true predicate; it performs no write and cannot affect a changes count.',
+      sites: ['db-sqlite/src/repositories/job.ts:SQL template: sql`1` #1'],
+    },
+    {
+      reason:
         'Candidate reports check the package-sync or build payload source under a live job lease and set last_error without changing poll failures; no executor change metadata is read.',
       sites: [
         "db-sqlite/src/repositories/source.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM job\n          WHERE id=${guard.id} AND org_id=${ctx.orgId}\n          AND type=${pack ? 'core:npm-vcs-build:v1' : 'core:package-sync:v1'} AND json_extract(payload_json, '$.sourceId')=${input.id})` #1",
@@ -1121,6 +1133,16 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Selects a statement/result slot; count semantics are reviewed separately at each changes read.',
       sites: [
         'db-sqlite/src/contract/catalogue-read-contract.ts:unresolved computed access: results[index] #1',
+      ],
+    },
+    {
+      reason:
+        'Publish integration fixtures load fixed Node codec, filesystem byte-store and tar fixture modules; these modules do not read SQL result changes.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n      ) #1",
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'blob/filesystem.ts', import.meta.url).href\n      ) #1",
+        'db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(new URL(core, import.meta.url).href) #1',
+        'db-sqlite/src/contract/npm-publish-adversarial.ts:dynamic dependency: import(new URL(runtime, import.meta.url).href) #1',
       ],
     },
     {
@@ -2228,7 +2250,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/job.ts:SQL template: sql`0` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`${next} IS NULL` #1',
         "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n      state = CASE WHEN ${dead} THEN 'dead' ELSE 'queued' END,\n      attempts = ${outcome === 'released' ? sql`max(attempts - 1, 0)` : sql`attempts`},\n      run_at = COALESCE(${next}, run_at),\n      sync_error = CASE WHEN job.type = 'core:package-sync:v1' AND job.lease_until > ${finished}\n        THEN ${syncError} ELSE NULL END,\n      last_error = ${lastError === null ? sql`last_error` : sql`${lastError}`},\n      finished_at = CASE WHEN ${dead} THEN ${finished} ELSE NULL END,\n      lease_owner = NULL,\n      lease_until = NULL,\n      updated_at = ${finished}\n      WHERE ${where}\n      AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence\n        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL) RETURNING id` #1",
-        'db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO job\n          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,\n           project_id, initiator_token_id)\n          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},\n            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}\n          WHERE ${projectId} IS NULL\n            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})\n          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1',
+        'db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO job\n          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,\n           project_id, initiator_token_id)\n          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},\n            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}\n          WHERE (${projectId} IS NULL\n            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})) AND ${when}\n          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id, type, payload_json, project_id, resource_key FROM job\n          WHERE org_id = ${ctx.orgId} AND idempotency_key = ${key}` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id FROM project WHERE org_id = ${ctx.orgId} AND id = ${projectId}` #1',
         "db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id, type, state, attempts, max_attempts, run_at, last_error\n          FROM job WHERE org_id = ${ctx.orgId} AND id = ${text('id', id)}` #1",

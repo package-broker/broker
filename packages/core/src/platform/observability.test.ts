@@ -699,7 +699,7 @@ describe('LOG_FIELDS', () => {
   it('covers exactly the keys of SafeLogRecord', () => {
     expectTypeOf<(typeof LOG_FIELDS)[number]>().toEqualTypeOf<keyof SafeLogRecord>();
     const missing: readonly (keyof SafeLogRecord)[] = LOG_FIELDS;
-    expect(missing).toHaveLength(43);
+    expect(missing).toHaveLength(45);
     expect(new Set(LOG_FIELDS).size).toBe(LOG_FIELDS.length);
   });
 

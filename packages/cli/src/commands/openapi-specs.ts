@@ -1,3 +1,4 @@
+import * as trustedPublishers from '@package-broker/core/api/routes/trusted-publishers-schemas';
 import * as packageDetail from '@package-broker/core/api/routes/package-detail-schemas';
 import * as packageAccessRequests from '@package-broker/core/api/routes/package-access-requests-schemas';
 import { createApiModule, type ApiModuleDeps } from '@package-broker/core/api/module';
@@ -24,6 +25,7 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 function stubDependencies(): ApiModuleDeps {
   const deps: Record<string, unknown> = {
     imports: {},
+    trustedPublishers: {},
     packageAccessRequests: {},
     packageDetail: {},
     sources: { service: { acceptRemoval: () => undefined } },
@@ -57,6 +59,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
   };
   for (const module of [
     access,
+    trustedPublishers,
     imports,
     organization,
     packages,

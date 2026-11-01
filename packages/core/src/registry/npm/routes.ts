@@ -11,7 +11,9 @@ import type { OnDemandFill } from '../../ingest/on-demand.js';
 import { resolvedPackageOf } from '../../internal/package-context.js';
 import { CodecLimitError, type Codecs } from '../../platform/codec.js';
 import { NPM_AUDIT_EVENT } from '../../platform/observability.js';
-import type { RequestContext, RouteDefinition } from '../../plugin.js';
+import type { RequestContext } from '../../plugin.js';
+import type { RouteDefinition } from '../../kernel/routes.js';
+import { publishError } from './publish-service.js';
 import { isNotModified, notModifiedResponse, npmValidators } from '../conditional.js';
 import type { DistService } from '../dist-service.js';
 import { parseNpmPath, type NpmPath } from './paths.js';
@@ -30,6 +32,7 @@ const READ = 'project:packages:read';
 const NOT_FOUND = { status: 404, code: 'not_found', message: 'Route not found' };
 
 export interface NpmRouteDeps {
+  readonly publish?: (ctx: RequestContext, name: string) => Promise<Response>;
   readonly access: PackageAccess;
   readonly dist: Pick<DistService, 'serve'>;
   readonly onDemand: OnDemandFill;
@@ -417,7 +420,17 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   }
 
   function methodNotAllowed(ctx: RequestContext): Response {
-    return fail(ctx, 405, 'method_not_allowed', 'Method not allowed', { Allow: 'GET, HEAD' });
+    return publishError(ctx, 405, 'write_unsupported');
+  }
+
+  async function publish(ctx: RequestContext): Promise<Response> {
+    const segments = rawSegments(ctx);
+    if (segments.some((part) => part === '-rev' || part === '-')) return methodNotAllowed(ctx);
+    const name = [ctx.params['a'], ctx.params['b']].filter((part) => part !== undefined).join('/');
+    if (segments.length === 2 && !name.startsWith('@')) return methodNotAllowed(ctx);
+    return deps.publish === undefined
+      ? publishError(ctx, 503, 'unavailable')
+      : deps.publish(ctx, name);
   }
 
   const shapes = [['a'], ['a', 'b'], ['a', 'b', 'c'], ['a', 'b', 'c', 'd']] as const;
@@ -468,6 +481,19 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       handler: serveDistTags,
     },
   ];
+  for (const method of ['PUT', 'POST', 'DELETE'] as const) {
+    for (const path of [
+      '/:project/npm/-/package/:a/dist-tags/:tag',
+      '/:project/npm/-/package/:a/dist-tags',
+    ])
+      routes.push({
+        method,
+        path,
+        permission: READ,
+        boundary: 'project',
+        handler: methodNotAllowed,
+      });
+  }
   for (const names of shapes) {
     routes.push({
       method: 'GET',
@@ -485,9 +511,12 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       routes.push({
         method,
         path: pathOf(names),
-        permission: READ,
+        permission: method === 'PUT' && names.length <= 2 ? 'project:packages:write' : READ,
         boundary: 'project',
-        handler: methodNotAllowed,
+        ...(method === 'PUT' && names.length <= 2
+          ? { organizationAlternative: 'org:packages:publish' }
+          : {}),
+        handler: method === 'PUT' && names.length <= 2 ? publish : methodNotAllowed,
       });
     }
   }

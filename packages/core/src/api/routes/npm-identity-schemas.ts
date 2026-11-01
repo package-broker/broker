@@ -1,17 +1,7 @@
 import * as z from 'zod';
-import { MAX_NPM_NAME_LENGTH, packageKey } from '../../catalogue/names.js';
-const npmName = z
-  .string()
-  .min(1)
-  .max(MAX_NPM_NAME_LENGTH)
-  .refine((name) => {
-    try {
-      packageKey(name, { ecosystem: 'npm' });
-      return true;
-    } catch {
-      return false;
-    }
-  }, 'Invalid npm package name');
+import { NPM_HOSTNAME_CHECK, NPM_PACKAGE_NAME_CHECK } from '../npm-identity-checks.js';
+import { MAX_NPM_NAME_LENGTH } from '../../catalogue/names.js';
+const npmName = z.string().min(1).max(MAX_NPM_NAME_LENGTH).check(NPM_PACKAGE_NAME_CHECK);
 const id = z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
 export const trustedPublisher = z.strictObject({
   id,
@@ -35,14 +25,7 @@ export const NPM_IDENTITY_SCHEMAS = {
   NpmLoginStartBody: z
     .strictObject({
       create: z.boolean().optional(),
-      hostname: z
-        .string()
-        .max(253)
-        .refine(
-          (value) => new TextEncoder().encode(value).length <= 253,
-          'Hostname exceeds 253 bytes',
-        )
-        .optional(),
+      hostname: z.string().max(253).check(NPM_HOSTNAME_CHECK).optional(),
     })
     .default({}),
   NpmLoginConfirmation: z.strictObject({
@@ -63,11 +46,11 @@ export const NPM_IDENTITY_SCHEMAS = {
     repository: z
       .string()
       .max(140)
-      .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9_.-]+$/),
+      .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9_.-]{1,100}$/),
     workflow: z
       .string()
       .max(255)
-      .regex(/^[^/\\\r\n]+\.ya?ml$/),
+      .regex(/^[^/@\r\n]+\.ya?ml$/),
     environment: z.string().max(255),
     refPattern: z.string().max(255).optional(),
   }),

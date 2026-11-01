@@ -60,7 +60,7 @@ const identity = installIdentity({ accountId: ACCOUNT, workerName: 'broker' });
 const script = identity.script_name,
   base = `/workers/scripts/${script}`;
 const ports = {
-  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+  blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 50_000_000 },
   cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
   jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
   observability: {

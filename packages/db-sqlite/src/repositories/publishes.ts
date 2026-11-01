@@ -6,7 +6,18 @@ import {
   type MutationFence,
   type SystemMutationFence,
 } from '@package-broker/core/authz/fence';
-import type { PublishDecision, PublishTransition } from '@package-broker/core/db/publishes';
+import type {
+  PublishDecision,
+  PublishTransition,
+  PublishTransitionResult,
+  PublishScanTransition,
+} from '@package-broker/core/db/publishes';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import {
+  PUBLISH_SCAN_JOB,
+  PUBLISH_SCAN_JOB_OPTIONS,
+} from '@package-broker/core/ingest/publish-scan-job';
+import { createJobRepository } from './job.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
@@ -66,10 +77,39 @@ export function createPublishesRepository(
     fence: AnyMutationFence,
     input: PublishTransition,
     decision?: PublishDecision,
-  ) {
+    scan?: PublishScanTransition,
+    rescan = false,
+  ): Promise<PublishTransitionResult> {
     const kind = fenceKind(fence);
+    const session = !!decision || rescan;
+    if (scan) {
+      const from = input.expectedScanState;
+      const to = scan.scanState;
+      if (!(
+        (from === 'queued' && to === 'running') ||
+        (from === 'running' && ['queued', 'allowed', 'denied', 'failed'].includes(to)) ||
+        (from === 'queued' && to === 'failed')
+      ))
+        throw new TypeError('invalid_scan_transition');
+      for (const verdict of scan.verdicts) {
+        if (
+          !['allow', 'deny'].includes(verdict.verdict) ||
+          !/^[a-z][a-z0-9-]{0,63}$/.test(verdict.plugin)
+        )
+          throw new TypeError('invalid_scan_verdict');
+        if (verdict.reason !== undefined) {
+          const safe = redactValue(verdict.reason, 1000, 'reason');
+          if (
+            !safe.ok ||
+            safe.value !== verdict.reason ||
+            new TextEncoder().encode(verdict.reason).length > 1000
+          )
+            throw new TypeError('invalid_scan_verdict');
+        }
+      }
+    }
     if (
-      decision
+      session
         ? kind !== 'session'
         : kind !== 'system' || (fence as SystemMutationFence).writer !== 'verifier'
     )
@@ -87,13 +127,14 @@ export function createPublishesRepository(
     }
     const current = await executor.all<{
       package_id: string;
+      version_id: string;
       version: string;
       latest_id: string | null;
       latest: string | null;
       dist_tags_json: string;
     }>(
       statement(sql`
-      select pa.package_id, v.version, dt.version_id as latest_id, lv.version as latest, pa.dist_tags_json
+      select pa.package_id, pa.version_id, v.version, dt.version_id as latest_id, lv.version as latest, pa.dist_tags_json
       from publish_approval pa join version v on v.org_id=pa.org_id and v.id=pa.version_id
       left join dist_tag dt on dt.org_id=pa.org_id and dt.package_id=pa.package_id and dt.tag='latest'
       left join version lv on lv.org_id=dt.org_id and lv.id=dt.version_id
@@ -104,34 +145,59 @@ export function createPublishesRepository(
     const tags = JSON.parse(row.dist_tags_json) as Record<string, string>;
     if (row.latest && compareNpmVersions(row.version, row.latest) <= 0) delete tags.latest;
     const opId = newOpId();
-    const state = decision?.decision ?? 'expired';
-    const authority = decision
+    const state = decision?.decision ?? (scan || rescan ? input.expectedApprovalState : 'expired');
+    const tombstone = scan ? scan.scanState === 'denied' : rescan ? false : state !== 'approved';
+    const canActivate = scan ? scan.scanState === 'allowed' : !rescan && state === 'approved';
+    const authority = session
       ? actorHolds(ctx, fence as MutationFence, {
           permission: 'org:packages:approve',
           projectId: null,
           providerAnchors,
         })
       : sql<boolean>`1`;
-    const ready = sql<boolean>`exists (select 1 from version v where v.org_id=${ctx.orgId} and v.id=publish_approval.version_id and v.package_id=publish_approval.package_id and v.status='quarantined')`;
+    const expireDenied = !decision && !scan && !rescan && input.expectedScanState === 'denied';
+    const versionReady = expireDenied
+      ? sql<boolean>`v.status='tombstoned' and v.tombstone_reason='scan_denied'`
+      : sql<boolean>`v.status='quarantined'`;
+    const ready = sql<boolean>`exists (select 1 from version v where v.org_id=${ctx.orgId} and v.id=publish_approval.version_id and v.package_id=publish_approval.package_id and ${versionReady})`;
     const succeeded = sql<boolean>`exists (select 1 from version v where v.org_id=${ctx.orgId} and v.id=(select version_id from publish_approval where org_id=${ctx.orgId} and id=${input.id}) and v.last_op_id=${opId})`;
     const active = sql<boolean>`exists (select 1 from version v where v.org_id=${ctx.orgId} and v.package_id=${row.package_id} and v.last_op_id=${opId} and v.status='active')`;
     const statements: ScalarStatement[] = [
-      ...(decision
+      ...(session
         ? []
         : (jobLeaseGuard(ctx, (fence as SystemMutationFence).job) as ScalarStatement[])),
-      statement(sql`update publish_approval set approval_state=${state}, decided_by_user_id=${decision?.decidedByUserId ?? null}, decided_at=${input.now}, decision_reason=${decision?.reason ?? null}, revision=revision+1, updated_at=${input.now}
+      statement(sql`update publish_approval set
+        approval_state=${state},
+        hold_approval=case when ${state}='rejected' then 1 else hold_approval end,
+        scan_state=${scan?.scanState ?? (rescan ? 'queued' : input.expectedScanState)},
+        scan_attempts=case when ${Number(rescan)} then 0 when ${Number(scan?.scanState === 'running')} then scan_attempts+1 else scan_attempts end,
+        scan_verdict_json=case when ${Number(!!scan || rescan)} then ${JSON.stringify(scan?.verdicts ?? [])} else scan_verdict_json end,
+        decided_by_user_id=case when ${Number(!!scan || rescan)} then decided_by_user_id else ${decision?.decidedByUserId ?? null} end,
+        decided_at=case when ${Number(!!scan || rescan)} then decided_at else ${input.now} end,
+        decision_reason=case when ${Number(!!scan || rescan)} then decision_reason else ${decision?.reason ?? null} end,
+        revision=revision+1, updated_at=${input.now}
         where org_id=${ctx.orgId} and id=${input.id} and revision=${input.expectedRevision}
-        and approval_state=${input.expectedApprovalState} and approval_state='pending' and scan_state=${input.expectedScanState}
+        and approval_state=${input.expectedApprovalState} and scan_state=${input.expectedScanState}
+        and ${scan || rescan ? sql<boolean>`hold_scan=1 and approval_state in ('not_required','pending','approved')` : decision?.decision === 'rejected' ? sql<boolean>`(approval_state='pending' or (approval_state='not_required' and hold_scan=1))` : sql<boolean>`approval_state='pending'`}
+        and ${rescan ? sql<boolean>`scan_state='failed'` : sql<boolean>`1`}
+        and ${scan?.scanState === 'running' ? sql<boolean>`scan_attempts<3` : sql<boolean>`1`}
         and ${ready} and ${authority}
-        and ${decision ? sql<boolean>`expires_at > ${input.now}` : sql<boolean>`expires_at <= ${input.now}`}
+        and ${
+          scan &&
+          ['queued', 'failed'].includes(scan.scanState) &&
+          input.expectedScanState === 'running'
+            ? sql<boolean>`not exists (select 1 from job j where j.org_id=publish_approval.org_id and j.resource_key='publish:' || publish_approval.version_id and j.state='running' and j.lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now') and j.id<>${(fence as SystemMutationFence).job.id})`
+            : sql<boolean>`1`
+        }
+        and ${scan || rescan ? sql<boolean>`(approval_state<>'pending' or expires_at > ${input.now})` : decision ? sql<boolean>`(approval_state<>'pending' or expires_at > ${input.now})` : sql<boolean>`expires_at <= ${input.now}`}
         and ${decision?.decision === 'approved' ? sql<boolean>`(requested_by_type != 'user' or requested_by_id != ${decision.decidedByUserId})` : sql<boolean>`1`}
-        and ${decision?.decision === 'approved' ? sql<boolean>`(select version_id from dist_tag where org_id=${ctx.orgId} and package_id=${row.package_id} and tag='latest') is ${row.latest_id}` : sql<boolean>`1`}`),
+        and ${canActivate ? sql<boolean>`(select version_id from dist_tag where org_id=${ctx.orgId} and package_id=${row.package_id} and tag='latest') is ${row.latest_id}` : sql<boolean>`1`}`),
       statement(sql`update version set
-        status=case when ${state} != 'approved' then 'tombstoned' when exists (select 1 from publish_approval pa where pa.org_id=${ctx.orgId} and pa.id=${input.id} and (pa.hold_scan=0 or pa.scan_state='allowed')) then 'active' else 'quarantined' end,
-        tombstoned_at=case when ${state} != 'approved' then ${input.now} else null end,
-        tombstone_reason=case when ${state} != 'approved' then ${state} else null end,
+        status=case when ${Number(expireDenied)} then status when ${Number(tombstone)} then 'tombstoned' when ${Number(canActivate)} and exists (select 1 from publish_approval pa where pa.org_id=${ctx.orgId} and pa.id=${input.id} and (pa.hold_scan=0 or pa.scan_state='allowed') and (pa.hold_approval=0 or pa.approval_state='approved')) then 'active' else 'quarantined' end,
+        tombstoned_at=case when ${Number(expireDenied)} then tombstoned_at when ${Number(tombstone)} then ${input.now} else null end,
+        tombstone_reason=case when ${Number(expireDenied)} then tombstone_reason when ${Number(tombstone)} then ${scan ? 'scan_denied' : state} else null end,
         revision=revision+1,last_op_id=${opId}
-        where changes()=1 and org_id=${ctx.orgId} and id=(select version_id from publish_approval where org_id=${ctx.orgId} and id=${input.id}) and status='quarantined'`),
+        where changes()=1 and org_id=${ctx.orgId} and id=(select version_id from publish_approval where org_id=${ctx.orgId} and id=${input.id}) and ${expireDenied ? sql<boolean>`status='tombstoned' and tombstone_reason='scan_denied'` : sql<boolean>`status='quarantined'`}`),
       statement(
         sql`update publish_approval set readme_pending=0 where org_id=${ctx.orgId} and id=${input.id} and ${active}`,
       ),
@@ -139,20 +205,42 @@ export function createPublishesRepository(
         description=case when ${active} and ${Number(tags.latest !== undefined)}=1 then (select json_extract(metadata_json,'$.description') from version where org_id=${ctx.orgId} and last_op_id=${opId}) else description end
         where org_id=${ctx.orgId} and id=${row.package_id} and ${succeeded}`),
       statement(
-        sql`update blob set purge_after=strftime('%Y-%m-%dT%H:%M:%fZ',${input.now},${'+' + PUBLISH_PURGE_WINDOW_DAYS + ' days'}) where org_id=${ctx.orgId} and id in (select blob_id from version where org_id=${ctx.orgId} and last_op_id=${opId} and status='tombstoned') and not exists (select 1 from version live where live.org_id=blob.org_id and live.blob_id=blob.id and live.status='active')`,
+        sql`update blob set purge_after=strftime('%Y-%m-%dT%H:%M:%fZ',${input.now},${'+' + PUBLISH_PURGE_WINDOW_DAYS + ' days'}) where ${Number(!expireDenied)}=1 and org_id=${ctx.orgId} and id in (select blob_id from version where org_id=${ctx.orgId} and last_op_id=${opId} and status='tombstoned') and not exists (select 1 from version live where live.org_id=blob.org_id and live.blob_id=blob.id and live.status='active')`,
       ),
     ];
-    if (decision?.decision === 'approved')
+    if (canActivate)
       for (const tag of Object.keys(tags)) {
         statements.push(
           statement(sql`insert into dist_tag_history (id,org_id,package_id,tag,version_id,previous_version_id,action,actor_type,actor_id,op_id)
-          select ${newOpId()},${ctx.orgId},${row.package_id},${tag},v.id,(select version_id from dist_tag where org_id=${ctx.orgId} and package_id=${row.package_id} and tag=${tag}),'set','user',${decision.decidedByUserId},${opId}
+          select ${newOpId()},${ctx.orgId},${row.package_id},${tag},v.id,(select version_id from dist_tag where org_id=${ctx.orgId} and package_id=${row.package_id} and tag=${tag}),'set',${decision ? 'user' : 'system'},${decision?.decidedByUserId ?? null},${opId}
           from version v where v.org_id=${ctx.orgId} and v.last_op_id=${opId} and v.status='active'`),
           statement(sql`insert into dist_tag (org_id,package_id,tag,version_id)
           select ${ctx.orgId},${row.package_id},${tag},v.id from version v where v.org_id=${ctx.orgId} and v.last_op_id=${opId} and v.status='active'
           on conflict(package_id,tag) do update set version_id=excluded.version_id,updated_at=${input.now} where dist_tag.org_id=${ctx.orgId}`),
         );
       }
+    if (rescan) {
+      const store = createJobRepository(executor);
+      const jobs = createRepositoryJobs({
+        store: {
+          ...store,
+          enqueueStatements: (ctx, job) => store.enqueueStatements(ctx, job, succeeded),
+        },
+        jobs: [{ qualifiedName: PUBLISH_SCAN_JOB, definition: PUBLISH_SCAN_JOB_OPTIONS }],
+        clock: { now: () => new Date(input.now) },
+        ids: { ulid: newOpId },
+      })('core', { projectId: null, tokenId: null });
+      const queued = await jobs.enqueueStatements(
+        ctx,
+        PUBLISH_SCAN_JOB,
+        { id: input.id },
+        {
+          resourceKey: `publish:${row.version_id}`,
+          idempotencyKey: `rescan:${row.version_id}:${input.expectedRevision + 1}`,
+        },
+      );
+      statements.push(...(queued.statements as ScalarStatement[]));
+    }
     statements.push(
       auditPendingStatement(ctx, input.event, statement(succeeded)) as ScalarStatement,
       statement(
@@ -163,6 +251,19 @@ export function createPublishesRepository(
       ),
     );
     const result = (await executor.batch(statements)).at(-1)?.rows[0];
+    if (
+      scan?.scanState === 'allowed' &&
+      result?.changed !== 1 &&
+      Number(result?.revision) === input.expectedRevision
+    ) {
+      const latest = await executor.all<{ version_id: string }>(
+        statement(
+          sql`select version_id from dist_tag where org_id=${ctx.orgId} and package_id=${row.package_id} and tag='latest'`,
+        ),
+      );
+      if ((latest[0]?.version_id ?? null) !== row.latest_id)
+        return transition(ctx, fence, input, undefined, scan);
+    }
     return {
       changed: result?.changed === 1,
       active: result?.active === 1,
@@ -227,11 +328,36 @@ export function createPublishesRepository(
     },
     decide: (ctx, fence, input) => transition(ctx, fence, input, input),
     expire: (ctx, fence, input) => transition(ctx, fence, input),
-    scan: async () => {
-      throw new Error('not_implemented');
+    scan: (ctx, fence, input) => transition(ctx, fence, input, undefined, input),
+    rescan: (ctx, fence, input) => transition(ctx, fence, input, undefined, undefined, true),
+    async listScanQueued(ctx, before, runningBefore = before) {
+      const rows = await executor.all<InspectionRow>(
+        statement(
+          sql`${inspection} where pa.org_id=${ctx.orgId} and pa.hold_scan=1 and ((pa.scan_state='queued' and pa.updated_at<=${before}) or (pa.scan_state='running' and pa.updated_at<=${runningBefore} and not exists (select 1 from job j where j.org_id=pa.org_id and j.resource_key='publish:' || pa.version_id and j.state='running' and j.lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')))) and pa.approval_state in ('not_required','pending','approved') and (pa.approval_state<>'pending' or pa.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) and v.status='quarantined' order by pa.id limit 50`,
+        ),
+      );
+      return rows.map(inspect);
     },
-    rescan: async () => {
-      throw new Error('not_implemented');
+    async scanInput(ctx, id) {
+      const rows = await executor.all<{
+        sha256: import('@package-broker/core/platform/blob').Sha256;
+        metadata_json: string;
+        integrity: string;
+        size_bytes: number;
+      }>(
+        statement(
+          sql`select b.sha256,v.metadata_json,v.npm_integrity as integrity,b.size_bytes from publish_approval pa join version v on v.org_id=pa.org_id and v.id=pa.version_id join blob b on b.org_id=v.org_id and b.id=v.blob_id where pa.org_id=${ctx.orgId} and pa.id=${id} and v.status='quarantined'`,
+        ),
+      );
+      const row = rows[0];
+      return row
+        ? {
+            sha256: row.sha256,
+            manifest: JSON.parse(row.metadata_json) as Record<string, unknown>,
+            integrity: row.integrity,
+            sizeBytes: row.size_bytes,
+          }
+        : null;
     },
     async get(ctx, id) {
       const rows = await executor.all<InspectionRow>(
@@ -249,6 +375,7 @@ export function createPublishesRepository(
         statement(sql`${inspection}
         where pa.org_id=${ctx.orgId}
         and ${query.state === undefined ? sql`1` : sql`pa.approval_state=${query.state}`}
+        and ${query.state === 'pending' ? sql`pa.scan_state<>'denied'` : sql`1`}
         and ${query.cursor === undefined ? sql`1` : sql`pa.id > ${query.cursor}`}
         order by pa.id limit ${limit + 1}`),
       );

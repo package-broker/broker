@@ -17,6 +17,7 @@ import {
 } from './response.js';
 
 const statuses = {
+  github_credentials_required: 409,
   source_not_attached: 409,
   invalid_version: 400,
   invalid_attachments: 400,
@@ -47,6 +48,9 @@ const statuses = {
   tarball_too_large: 413,
   write_unsupported: 405,
   busy: 503,
+  length_required: 411,
+  staging_failed: 503,
+  invalid_publish_body: 400,
   unsupported_package: 400,
   unsupported_source_kind: 400,
   package_not_found: 404,

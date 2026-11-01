@@ -1,3 +1,7 @@
+import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
+import { createOidcVerifier } from './npm/oidc/verify.js';
+import { createPublishService, type PublishDependencies } from './npm/publish-service.js';
+export { createPublishService } from './npm/publish-service.js';
 import {
   createNpmVcsBuildJob,
   NPM_VCS_BUILD_JOB_TYPE,
@@ -147,6 +151,8 @@ export function createNpmHandleOf(
 }
 
 export interface RegistryModuleDeps {
+  readonly npmOidc?: Omit<OidcExchangeDependencies, 'verify' | 'clock'>;
+  readonly npmPublish?: PublishDependencies;
   readonly runtime: Platform;
   readonly ports: Partial<
     Omit<PlatformPorts, 'blob' | 'jobs'> & { blob: CoreBlobStore; jobs: CoreJobs }
@@ -224,6 +230,12 @@ export interface RegistryModuleDeps {
 }
 
 export interface RegistryModule extends Partial<RegistryJobs> {
+  readonly lookupTrustedPublisherRepository: (
+    ctx: OrgContext,
+    sourceId: string,
+    repository: string,
+    signal: AbortSignal,
+  ) => Promise<import('../sources/provider.js').RepositoryIdentity | null>;
   readonly probePackage: SourcePackageProbe;
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
@@ -743,6 +755,18 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   }
 
   const ecosystemRoutes: readonly RouteDefinition[] = Object.freeze([
+    ...(deps.npmOidc === undefined
+      ? []
+      : [
+          createOidcExchangeRoute({
+            ...deps.npmOidc,
+            clock: deps.clock,
+            verify: createOidcVerifier({
+              publicUrl: deps.publicUrl,
+              policyFetch: deps.policyFetch(registry.userAgent.default),
+            }),
+          }),
+        ]),
     ...composerRoutes({
       access: packageAccess,
       fill: onDemand,
@@ -753,6 +777,18 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     }),
     ...npmRoutes({
       access: packageAccess,
+      ...(deps.npmPublish === undefined
+        ? {}
+        : {
+            publish: createPublishService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
+          }),
       dist,
       onDemand,
       reresolve,
@@ -795,6 +831,27 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
 
   return Object.freeze({
     ecosystemRoutes,
+    async lookupTrustedPublisherRepository(
+      ctx: OrgContext,
+      sourceId: string,
+      repository: string,
+      signal: AbortSignal,
+    ) {
+      const record = await catalogue.sources.get(ctx, sourceId);
+      if (record === null || record.projectId !== null || record.type !== 'vcs') return null;
+      const bound = await bind(ctx, record);
+      if (
+        bound === null ||
+        typeof bound === 'string' ||
+        bound.provider.lookupRepository === undefined
+      )
+        return null;
+      return bound.provider.lookupRepository(
+        providerContext(ctx, bound, signal),
+        bound.source,
+        repository,
+      );
+    },
     async probePackage(
       ctx: OrgContext,
       sourceId: ClaimProbeTarget,

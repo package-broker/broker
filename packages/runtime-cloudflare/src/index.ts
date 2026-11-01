@@ -1,3 +1,16 @@
+import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
+import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
+import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+  createPublishWriteGuard,
+} from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
+import {
+  createPublishScanJob,
+  createPublishScanSweepJob,
+} from '@package-broker/core/ingest/publish-scan-job';
 import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
 import {
   createNpmVcsBuildReader,
@@ -149,7 +162,12 @@ import {
   createCredentialStore,
 } from '@package-broker/core/secrets/credential-store';
 import { DbError } from '@package-broker/core/db/errors';
-import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
+import {
+  orgContext,
+  type OrgContext,
+  type ScalarSqlExecutor,
+  type SqlExecutor,
+} from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
@@ -705,6 +723,8 @@ function buildRegistryModule(input: {
   readonly registry: RegistryConfig;
   readonly publicUrl: string;
   readonly dispatch: (run: () => Promise<void>) => void;
+  readonly anchors: ProviderAnchorReader;
+  readonly requiredScanners: () => readonly string[];
 }): {
   readonly policy: OutboundPolicy;
   readonly module: RegistryModule;
@@ -753,6 +773,34 @@ function buildRegistryModule(input: {
     });
   const dependencies: RegistryModuleDeps = {
     runtime: 'cloudflare',
+    npmOidc: {
+      repository: createOidcRepository(executor),
+      tokens: createWorkloadTokenService({
+        tokens: createWorkloadTokenStore(executor),
+        keyring: input.keyring,
+        clock: systemClock,
+        ids: { ulid },
+      }),
+      organization: async () => {
+        const org = await createOrganizationBootstrap(executor).findSingleton();
+        return org === null ? null : orgContext(org.id);
+      },
+    },
+    npmPublish: {
+      reads: createPublishReads(executor),
+      lookupToken: createAccessRepository(executor).lookupToken,
+      anchors: (ctx) => input.anchors.anchors(ctx),
+      writeGuard: createPublishWriteGuard,
+      admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
+      writer,
+      requiredScanners: input.requiredScanners,
+      scanJobs: createRepositoryJobs({
+        store: platformServices.jobStore,
+        jobs: input.registration.jobs,
+        clock: systemClock,
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null }),
+    },
     handleOf: createNpmHandleOf(
       createUserRepository(executor),
       createServicePrincipalRepository(executor),
@@ -1534,6 +1582,7 @@ export function createWorker(
         { metrics: observability, waitUntil: (promise) => track('cache.put_untracked', promise) },
       ),
       jobStore: Object.freeze({
+        enqueueStatements: repository.enqueueStatements,
         enqueue: enqueueAndNotify({
           repository,
           send: createJobSender(bound.queue),
@@ -1664,8 +1713,24 @@ export function createWorker(
     if (options.registry !== undefined && (config === null || db === undefined)) {
       throw new KernelConfigError(['registry: requires platformPorts and DB']);
     }
-    const registryConfig =
+    let registryConfig =
       publicUrl === undefined ? undefined : resolveRegistry(options.registry, publicUrl);
+    if (
+      registryConfig !== undefined &&
+      config !== null &&
+      config.blob.maxBytes < registryConfig.caps.publishTarballBytes
+    ) {
+      log({
+        level: 'warn',
+        event: 'registry.publish_cap_clamped',
+        publish_tarball_bytes: registryConfig.caps.publishTarballBytes,
+        blob_max_bytes: config.blob.maxBytes,
+      });
+      registryConfig = {
+        ...registryConfig,
+        caps: { ...registryConfig.caps, publishTarballBytes: config.blob.maxBytes },
+      };
+    }
     const executor: SqlExecutor | ScalarSqlExecutor =
       db === undefined ? unboundExecutor() : createD1Executor(db);
     const bootstrap = createOrganizationBootstrap(executor);
@@ -1788,6 +1853,26 @@ export function createWorker(
                         ),
                       ),
                     ]),
+                registerObservedJob(
+                  createPublishScanJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor),
+                    scanners: plugins.flatMap((plugin) =>
+                      plugin.publishPolicy ? [plugin.publishPolicy] : [],
+                    ),
+                    blob: {
+                      get: (...args) => {
+                        const blob = coreJobBindings.services?.platformServices.blob;
+                        if (!blob) throw new PlatformUnavailableError();
+                        return blob.get(...args);
+                      },
+                    },
+                  }),
+                ),
+                registerObservedJob(
+                  createPublishScanSweepJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor),
+                  }),
+                ),
                 registerObservedJob(
                   createPublishApprovalExpireJob({
                     publishes: createPublishesRepository(executor as SqlExecutor),
@@ -1921,6 +2006,9 @@ export function createWorker(
             registry: registryConfig,
             publicUrl,
             dispatch,
+            anchors: built.providerAnchors,
+            requiredScanners: () =>
+              plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
           });
     coreJobBindings.registry = registryModule;
 
@@ -1945,6 +2033,11 @@ export function createWorker(
       built === undefined || packages === null
         ? []
         : createApiRoutes({
+            ...(registryModule?.module.lookupTrustedPublisherRepository === undefined
+              ? {}
+              : {
+                  trustedPublisherLookup: registryModule?.module.lookupTrustedPublisherRepository,
+                }),
             clientIp: clientIpOf,
             executor: executor as SqlExecutor,
             ...(registryModule?.module.probePackage === undefined

@@ -1,3 +1,4 @@
+import * as registryModule from '@package-broker/core/registry/module';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -440,7 +441,9 @@ describe('startNode', () => {
     const path = databasePath();
     const broker = await startNode({
       plugins: [],
-      migrations: [await initSource()],
+      migrations: await (
+        await import('@package-broker/db-sqlite/testing/migrated-database')
+      ).discoveredMigrations(),
       mcp: { enabled: true },
       env: {
         PB_SQLITE_PATH: path,
@@ -714,7 +717,7 @@ describe('startNode', () => {
   describe('platform ports', () => {
     const MASTER = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
     const ports: PlatformPortConfig = {
-      blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1_048_576 },
+      blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
       cache: { adapter: 'lru', maxBytes: 1_048_576 },
       jobs: { adapter: 'database', maxRunning: 1 },
       observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
@@ -819,6 +822,40 @@ describe('startNode', () => {
       });
     }
 
+    it.each([1024, 50000000, 60000000])(
+      'resolves the Node publish cap for blob ceiling %s and warns only when clamped',
+      async (maxBytes) => {
+        const createModule = vi.spyOn(registryModule, 'createRegistryModule');
+        const err = capture();
+        try {
+          const broker = await start(
+            {},
+            { ...ports, blob: { ...ports.blob, maxBytes } },
+            { stderr: err.stream },
+          );
+          running.push(broker);
+          expect(createModule.mock.calls[0]?.[0].registry.caps.publishTarballBytes).toBe(
+            Math.min(maxBytes, 50000000),
+          );
+          expect(
+            err.lines().filter((line) => line['event'] === 'registry.publish_cap_clamped'),
+          ).toEqual(
+            maxBytes < 50000000
+              ? [
+                  expect.objectContaining({
+                    level: 'warn',
+                    publish_tarball_bytes: 50000000,
+                    blob_max_bytes: maxBytes,
+                  }),
+                ]
+              : [],
+          );
+        } finally {
+          createModule.mockRestore();
+        }
+      },
+    );
+
     it('7: builds blob, cache, jobs and observability and scopes them per plugin on both paths', async () => {
       const out = capture();
       const err = capture();
@@ -883,7 +920,7 @@ describe('startNode', () => {
         bucketEnv: 'PB_S3_BUCKET',
         accessKeyIdEnv: 'PB_S3_KEY',
         secretAccessKeyEnv: 'PB_S3_SECRET',
-        maxBytes: 1_048_576,
+        maxBytes: 50_000_000,
       } as const;
       const blank = (name: string): Record<string, string> => ({ [name]: '' });
       const cases: Array<[string, Record<string, string>, PlatformPortConfig, string]> = [
@@ -1604,7 +1641,7 @@ it.each([undefined, true, false])(
           DEPLOYMENT_ID: 'vulnerability-test',
         },
         platformPorts: {
-          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1024 },
+          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
           cache: { adapter: 'lru', maxBytes: 1024 },
           jobs: { adapter: 'database', maxRunning: 1 },
           observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },

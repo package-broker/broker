@@ -30,7 +30,7 @@ const policies = [
     label: 'Include publish permission',
     summary: 'Publish permission included',
     description:
-      'Also allow the package publishing permission. Publishing is not available in this version.',
+      'Also allow the package publishing permission. Publish npm packages to an enabled hosted source that claims the package name.',
   },
   {
     value: 'full',

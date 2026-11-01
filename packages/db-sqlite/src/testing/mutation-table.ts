@@ -1,3 +1,5 @@
+import { entries as trustedPublisherEntries } from './mutation-table/trusted-publishers.js';
+import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
 import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
 import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
 import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
@@ -127,6 +129,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...trustedPublisherEntries,
   ...npmLoginEntries,
   ...npmVcsBuildEntries,
   ...publishGuardEntries,
@@ -246,6 +249,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...sourceSelectionEntries,
   ...selectedKeysEntries,
   ...oidcEntries,
+  ...workloadTokenEntries,
 ];
 
 export function checkCompleteness(

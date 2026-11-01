@@ -1,4 +1,5 @@
 import { defineConfig } from '@package-broker/core/config';
+import { resolveRegistryConfig } from '@package-broker/core/registry/registry-config';
 import base from './observability-base.config.js';
 
 export default defineConfig({
@@ -7,7 +8,12 @@ export default defineConfig({
     ...base.platformPorts,
     cloudflare: {
       ...base.platformPorts!.cloudflare!,
-      blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1_048_576 },
+      blob: {
+        adapter: 'r2',
+        binding: 'STORAGE',
+        maxBytes: resolveRegistryConfig(base.registry, 'cloudflare', 'https://build.invalid').caps
+          .publishTarballBytes,
+      },
     },
   },
 });

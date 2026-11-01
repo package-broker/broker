@@ -81,7 +81,7 @@ describe('npm platform contracts', () => {
     },
   );
 
-  it('refuses to build job statements until their atomic implementation exists', async () => {
+  it('refuses job statements for an unknown definition', async () => {
     const factory = createRepositoryJobs({
       store: {
         enqueue: () => {
@@ -101,6 +101,6 @@ describe('npm platform contracts', () => {
         {},
         { idempotencyKey: 'publish:version' },
       ),
-    ).rejects.toThrow('not_implemented');
+    ).rejects.toThrow('unknown_job_type');
   });
 });

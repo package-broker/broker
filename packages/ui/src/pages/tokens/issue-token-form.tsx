@@ -32,7 +32,7 @@ const permissionLabels: Record<string, string> = {
 const descriptions = {
   read: 'Read project details and download packages.',
   write:
-    'Also include the package publishing permission. Publishing is not available in this version.',
+    'Also include the package publishing permission. Publish npm packages to an enabled hosted source that claims the package name.',
   full: 'Also allow reading project grants, sources and audit records, plus the publish permission.',
 };
 const levelAnchor = { read: 'project:packages:read', write: 'project:packages:write', full: null };

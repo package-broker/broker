@@ -1,3 +1,4 @@
+import { trustedPublisherRoutes } from './routes/trusted-publishers.js';
 import { packageDetailRoutes } from './routes/package-detail.js';
 import { npmLoginRoutes } from './routes/npm-login.js';
 import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
@@ -24,6 +25,7 @@ import { tokenRoutes } from './routes/tokens.js';
 export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
+  readonly trustedPublishers?: Parameters<typeof trustedPublisherRoutes>[0];
   readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
   readonly publishes: Parameters<typeof publishRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
@@ -58,7 +60,7 @@ export const API_EXEMPT_ROUTES = Object.freeze({
 
 type RouteDependencies = Omit<
   ApiModuleDeps,
-  'extensions' | 'imports' | 'packageAccessRequests' | 'packageDetail'
+  'extensions' | 'imports' | 'packageAccessRequests' | 'packageDetail' | 'trustedPublishers'
 > &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
@@ -76,7 +78,10 @@ const REQUIRED_DEPENDENCIES = {
     sessions: { authenticate: true, isReauthFresh: true },
     personal: true,
   },
-  publishes: { ...CONTEXT_METHODS, publishes: { get: true, list: true, decide: true } },
+  publishes: {
+    ...CONTEXT_METHODS,
+    publishes: { get: true, list: true, decide: true, rescan: true },
+  },
   organization: {
     ...CONTEXT_METHODS,
     organizations: { get: true },
@@ -284,7 +289,18 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     );
   }
 
+  if (deps.trustedPublishers !== undefined)
+    requireDependencies(
+      deps.trustedPublishers,
+      {
+        ...CONTEXT_METHODS,
+        store: { list: true, get: true, create: true, update: true, disable: true },
+        lookup: true,
+      },
+      'dependencies.trustedPublishers',
+    );
   const routes = [
+    ...(deps.trustedPublishers === undefined ? [] : trustedPublisherRoutes(deps.trustedPublishers)),
     ...organizationRoutes(deps.organization),
     ...projectRoutes(deps.projects),
     ...accessRoutes(deps.access),

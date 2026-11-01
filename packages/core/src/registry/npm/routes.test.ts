@@ -85,6 +85,8 @@ const actor: ProjectActor = {
 };
 
 interface Setup {
+  publisher?: 'project' | 'organization';
+  publish?: NpmRouteDeps['publish'];
   outcome?: PackageVisibility;
   reresolved?: PackageVisibility;
   ensure?: OnDemandResult;
@@ -122,6 +124,7 @@ async function harness(setup: Setup = {}) {
       setup.outcome ?? visible({ key: packageKey(name, { ecosystem: 'npm', legacyCase: true }) }),
   );
   const deps: NpmRouteDeps = {
+    ...(setup.publish === undefined ? {} : { publish: setup.publish }),
     access: access as unknown as PackageAccess,
     dist: { serve },
     onDemand: { ensure },
@@ -145,7 +148,11 @@ async function harness(setup: Setup = {}) {
     protectedHolder: false,
     project: { id: 'proj-1' },
     organizationPermissions: [],
-    projectPermissions: ['project:read', 'project:packages:read'],
+    projectPermissions: [
+      'project:read',
+      'project:packages:read',
+      ...(setup.publisher === 'project' ? ['project:packages:write'] : []),
+    ],
   };
   const token = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
   const tokenAccess = Object.defineProperty(
@@ -158,11 +165,14 @@ async function harness(setup: Setup = {}) {
         lastUsedAt: null,
         userId: 'user-1',
         servicePrincipalId: null,
+        ...(setup.publisher === undefined
+          ? {}
+          : { bindingOk: true, projectMode: 'all', scope: { level: 'write', readOnly: false } }),
       },
       principalStatus: 'active',
       validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
       project: session.project,
-      organizationPermissions: [],
+      organizationPermissions: setup.publisher === 'organization' ? ['org:packages:publish'] : [],
       projectPermissions: session.projectPermissions,
     },
     'verifier',
@@ -320,9 +330,13 @@ describe('npm route precedence and path hygiene', () => {
     const { call, access } = await harness();
     for (const path of ['/x', '/x/1.0.0', '/%40s%2Fn', '/x/-/x-1.0.0.tgz']) {
       const response = await call(path, { method, body: method === 'DELETE' ? null : '{}' });
-      expect(response.status).toBe(405);
-      expect(response.headers.get('allow')).toBe('GET, HEAD');
-      expect(await response.json()).toMatchObject({ code: 'method_not_allowed' });
+      if (method === 'PUT' && !path.includes('/-/')) {
+        expect(response.status).toBe(403);
+      } else {
+        expect(response.status).toBe(405);
+        expect(response.headers.get('allow')).toBe('GET, HEAD');
+        expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+      }
     }
     expect(access.versions).not.toHaveBeenCalled();
   });
@@ -894,4 +908,46 @@ describe('npm tarball refusal', () => {
     expect((await h.call('/x/-/x-9.9.9.tgz')).status).toBe(404);
     expect(h.serve).not.toHaveBeenCalled();
   });
+});
+
+describe('npm publish routing', () => {
+  it.each(['project', 'organization'] as const)(
+    'passes scoped and unscoped PUT through the %s authority route',
+    async (publisher) => {
+      const publish = vi.fn(async () => new Response(null, { status: 201 }));
+      const h = await harness({ publisher, publish });
+      for (const [path, name] of [
+        ['/widget', 'widget'],
+        ['/%40s%2Fn', '@s/n'],
+        ['/@s/n', '@s/n'],
+      ]) {
+        expect((await h.call(path!, { method: 'PUT', body: '{}' })).status).toBe(201);
+        expect(publish).toHaveBeenLastCalledWith(
+          expect.objectContaining({ org, projectId: 'proj-1' }),
+          name,
+        );
+      }
+      expect(h.resolve).not.toHaveBeenCalled();
+      expect(h.ensure).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['PUT', 'POST', 'DELETE'])(
+    'returns the write refusal for %s revision and dist-tag writes',
+    async (method) => {
+      const publish = vi.fn(async () => new Response(null, { status: 201 }));
+      const h = await harness({ publisher: 'project', publish });
+      for (const path of [
+        '/widget/-rev/1',
+        '/@s/n/-rev/1',
+        '/-/package/%40s%2Fn/dist-tags/latest',
+      ]) {
+        const response = await h.call(path, { method, body: '{}' });
+        expect(response.status).toBe(405);
+        expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+        expect(response.headers.get('allow')).toBe('GET, HEAD');
+        expect(response.headers.get('cache-control')).toBe('no-store');
+      }
+      expect(publish).not.toHaveBeenCalled();
+    },
+  );
 });

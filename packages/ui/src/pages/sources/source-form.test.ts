@@ -827,7 +827,10 @@ it('offers hosted npm for the organization with claims kept outside configuratio
   );
   expect(html).toContain('value="hosted"');
   expect(html).not.toContain('name="url"');
-  expect(html).toContain('Publishing arrives in a later release');
+  expect(html).toContain('Reserve private npm package names and publish packages to this broker.');
+  expect(html).toContain('npm publishing is available');
+  expect(html).toContain('Register package names');
+  expect(html).toContain('even while this source is paused.');
   expect(html).toContain('A claim immediately stops the npmjs proxy');
   expect(html).not.toContain('enable this source to publish');
   expect(html).toContain('not yet cached');

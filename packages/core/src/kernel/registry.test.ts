@@ -49,6 +49,28 @@ function problemsOf(plugins: readonly PluginDefinition[]): readonly string[] {
 }
 
 describe('collectRegistrations', () => {
+  it.each([
+    null,
+    {},
+    { id: 'scanner' },
+    { id: 'INVALID', inspect: async () => ({ verdict: 'allow' }) },
+  ])('rejects malformed publishPolicy %j', (policy) => {
+    expect(() =>
+      collectRegistrations([plugin('scanner', { publishPolicy: policy as never })]),
+    ).toThrow(KernelConfigError);
+  });
+  it('rejects duplicate scanner ids and more than three scanners', () => {
+    const scanners = ['a', 'b', 'c', 'd'].map((id) =>
+      plugin(id, { publishPolicy: { id, inspect: async () => ({ verdict: 'allow' }) } }),
+    );
+    expect(() => collectRegistrations(scanners)).toThrow(KernelConfigError);
+    expect(() =>
+      collectRegistrations([
+        scanners[0]!,
+        plugin('other', { publishPolicy: scanners[0]!.publishPolicy! }),
+      ]),
+    ).toThrow(KernelConfigError);
+  });
   it('returns routes with plugin ids, hooks in order and the bindings map', () => {
     const first = () => undefined;
     const second = () => undefined;

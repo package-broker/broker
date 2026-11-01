@@ -74,7 +74,15 @@ export const API_ERROR_CODES = {
   manifest_too_large: { status: 413, message: 'The package manifest is too large' },
   tarball_too_large: { status: 413, message: 'The package tarball is too large' },
   write_unsupported: { status: 405, message: 'This write operation is not supported' },
+  length_required: { status: 411, message: 'Content-Length is required' },
+  staging_failed: { status: 503, message: 'Publish staging failed' },
+  invalid_publish_body: { status: 400, message: 'The publish body is invalid' },
   busy: { status: 503, message: 'Publishing is busy, try again later' },
+  github_credentials_required: {
+    status: 409,
+    message:
+      'Configure a GitHub App installation or GitHub token before creating a trusted publisher',
+  },
 } as const;
 
 export type ApiErrorCode = keyof typeof API_ERROR_CODES;

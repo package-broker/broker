@@ -1,6 +1,6 @@
 # Architecture overview
 
-Package Broker serves Composer and npm registry documents and package archives, with a web interface for administration. This page describes the implementation merged on `main`.
+Package Broker serves Composer and npm registry documents and package archives, with a web interface for administration.
 
 <!-- source: packages/core/src/registry/composer/routes.ts:77 -->
 <!-- source: packages/core/src/registry/npm/routes.ts:423 -->
@@ -45,9 +45,10 @@ A deployment lists its plugins in `broker.config.ts`. `pb build` (`packages/cli`
 <!-- source: packages/core/src/plugin.ts:97 -->
 <!-- source: packages/core/src/kernel/authorize.ts:191 -->
 
-The first-party plugins are `packages/plugin-sso-oidc` and `packages/plugin-github`. The SSO plugin supplies Cloudflare Access and OIDC identity providers. The GitHub plugin supplies a Composer source provider, GitHub App installation tokens, repository discovery and webhook verification.
+The first-party plugins are `packages/plugin-sso-oidc` and `packages/plugin-github`. The SSO plugin supplies Cloudflare Access and OIDC identity providers. The GitHub plugin supplies Composer and npm source providers, GitHub App installation tokens, repository discovery and webhook verification.
 
-<!-- source: packages/plugin-sso-oidc/src/index.ts:224 -->
+<!-- source: packages/plugin-sso-oidc/src/index.ts:122 -->
+<!-- source: packages/plugin-github/src/provider.ts -->
 <!-- source: packages/plugin-github/src/index.ts:28 -->
 <!-- source: packages/plugin-github/src/index.ts:114 -->
 <!-- source: packages/plugin-github/src/index.ts:211 -->
@@ -95,6 +96,13 @@ The registry and catalogue code in `packages/core/src/registry` and `packages/co
 <!-- source: packages/core/src/registry/composer/dist-url.ts:65 -->
 <!-- source: packages/core/src/registry/npm/render.ts:86 -->
 
+The npm write path validates and stages a tarball before publishing its immutable version into the catalogue. Source approval and persisted scanner gates keep held versions outside ordinary readers until both gates permit activation. Web login issues a project-bound personal token after browser confirmation; trusted publishing exchanges workflow identity for a short-lived, package-bound service token. Both use the same publish policy. See the [access model](reference/access-model.md#publish-approval-and-scanning) for the gates and authority checks.
+
+<!-- source: packages/core/src/registry/npm/publish-service.ts -->
+<!-- source: packages/db-sqlite/src/repositories/publishes.ts -->
+<!-- source: packages/core/src/api/routes/npm-login.ts -->
+<!-- source: packages/core/src/registry/npm/oidc/exchange.ts -->
+
 ## Ingest and vendor repositories
 
 A source describes a vendor repository: Packagist, npm, a Composer repository such as Marketplace (`repo.magento.com`), or a Git repository. `packages/core/src/ingest` fetches and parses Composer and npm metadata, including Composer v1 provider indexes and v2 metadata. `packages/core/src/sources` defines the source provider port, credential handling and the Git client. Core handles plain Git and SSH repositories; the GitHub plugin adds GitHub App sources.
@@ -105,18 +113,27 @@ A source describes a vendor repository: Packagist, npm, a Composer repository su
 <!-- source: packages/core/src/ingest/vcs/git-provider.ts:300 -->
 <!-- source: packages/core/src/api/routes/sources-schemas.ts:18 -->
 
-Organization hosted npm sources reserve exact package names or scopes and are skipped by source synchronization. A claim immediately stops every npmjs proxy in the organization from serving that name, even while the hosted source is paused. Publishing arrives in a later release.
+Organization hosted npm sources reserve exact package names or scopes and are skipped by source synchronization. A claim immediately stops every npmjs proxy in the organization from serving that name, even while the hosted source is paused. Publishing accepts immutable versions through the project npm endpoint; the hosted source controls approval and composed scanner hooks control the scan gate. See the [access model](reference/access-model.md#npm-claims-publishing-and-admission) for authority and admission rules.
 
 <!-- source: packages/core/src/api/routes/sources-schemas.ts:9 -->
 <!-- source: packages/core/src/sources/config.ts:6 -->
 <!-- source: packages/core/src/sources/provider.ts:495 -->
 <!-- source: packages/core/src/ingest/source-sync-job.ts:586 -->
+<!-- source: packages/core/src/registry/npm/publish-service.ts -->
+<!-- source: packages/core/src/ingest/publish-scan-job.ts -->
 
 Outbound source requests use a shared fetch policy. Private, loopback and link-local addresses are denied by default, credentials are bound to their origin and are not sent across a redirect to another origin, and response and archive sizes are bounded. On Node, an operator can allow named private hosts in deployment configuration only; Workers keeps the deny. The Node-side network guard is in `packages/runtime-node/src/sources`.
 
 <!-- source: packages/core/src/sources/policy-fetch.ts:260 -->
 <!-- source: packages/core/src/sources/url-policy.ts:193 -->
 <!-- source: packages/runtime-node/src/sources/guarded-fetch.ts:103 -->
+
+npm repository ingest reads root manifests at version tags and queues leased archive builds outside the request path. Both runtimes support GitHub; generic Git archive builds require Node. The build stages and repacks the repository without lifecycle scripts, promotes a non-refetchable tarball, then attaches its integrity and README to the version. See [npm repository ingest](guides/npm-repository-ingest.md) for tag selection, packlist limits and retries.
+
+<!-- source: packages/core/src/ingest/vcs/npm-adapter.ts -->
+<!-- source: packages/core/src/ingest/npm-vcs-build-job.ts -->
+<!-- source: packages/core/src/ingest/dist-fetch.ts -->
+<!-- source: packages/core/src/sources/config.ts -->
 
 ## Storage and jobs
 
@@ -142,6 +159,13 @@ Jobs use Queues and Cron Triggers on Cloudflare and a leased job table polled by
 <!-- source: packages/runtime-cloudflare/src/index.ts:1715 -->
 <!-- source: packages/runtime-cloudflare/src/index.ts:1748 -->
 <!-- source: packages/runtime-node/src/index.ts:1139 -->
+
+Hosted publishes and repository builds use staged storage before promotion; a failed attachment leaves promoted bytes for orphan collection. These archives must be included in backups. Workers deploy installs no multipart lifecycle rule: explicit abort handles failures, R2's default cleanup covers incomplete uploads surviving a crash, and the hourly purge handles completed staging objects. See [staged uploads](operations/blob-staging.md) and [backup and upgrades](operations/backup-and-upgrades.md).
+
+<!-- source: packages/core/src/ingest/dist-fetch.ts -->
+<!-- source: packages/core/src/registry/npm/publish-service.ts -->
+<!-- source: packages/runtime-cloudflare/src/blob/r2.ts -->
+<!-- source: packages/core/src/ingest/retention-jobs.ts -->
 
 ## Observability
 

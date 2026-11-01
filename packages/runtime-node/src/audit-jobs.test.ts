@@ -50,6 +50,8 @@ describe('Node audit job registration', () => {
         ]),
       ).toEqual([
         ['core:vulnerability-sync:v1', { everySeconds: 300 }],
+        ['core:publish-scan:v1', undefined],
+        ['core:publish-scan-sweep:v1', { everySeconds: 300 }],
         ['core:publish-approval-expire:v1', { everySeconds: 3600 }],
         ['core:package-access-expire:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],

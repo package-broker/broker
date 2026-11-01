@@ -3,6 +3,8 @@ import type { AnyMutationFence } from '../authz/fence.js';
 import type { OrgContext } from './port.js';
 
 export const PUBLISH_PURGE_WINDOW_DAYS = 7;
+export const PUBLISH_APPROVAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
 export const PUBLISH_APPROVAL_EXPIRY_BATCH_SIZE = 10;
 
 export const PUBLISH_APPROVAL_STATES = [
@@ -109,6 +111,20 @@ export interface PublishInspection extends PublishApproval {
 }
 
 export interface PublishesRepository {
+  listScanQueued(
+    ctx: OrgContext,
+    before: string,
+    runningBefore?: string,
+  ): Promise<readonly PublishInspection[]>;
+  scanInput(
+    ctx: OrgContext,
+    id: string,
+  ): Promise<{
+    readonly sha256: import('../platform/blob.js').Sha256;
+    readonly manifest: Readonly<Record<string, unknown>>;
+    readonly integrity: string;
+    readonly sizeBytes: number;
+  } | null>;
   listExpired(ctx: OrgContext, now: string): Promise<readonly PublishInspection[]>;
   get(ctx: OrgContext, id: string): Promise<PublishInspection | null>;
   list(

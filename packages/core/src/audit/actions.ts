@@ -1,6 +1,7 @@
 import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
 import { isUlid } from '../ids.js';
+import { isWorkflowFilename } from '../registry/npm/oidc/claim-values.js';
 import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
@@ -11,6 +12,9 @@ export const AUDIT_ACTIONS = [
   'publish.expire',
   'publish.scan',
   'token.workload_issue',
+  'trusted_publisher.create',
+  'trusted_publisher.update',
+  'trusted_publisher.disable',
   'package.access_request',
   'package.access_decide',
   'session.login',
@@ -90,6 +94,7 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'package.publish': [
+    'authority',
     'package',
     'version',
     'hold_approval',
@@ -102,6 +107,9 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'publish.reject': ['package', 'version', 'reason', 'token_id'],
   'publish.expire': ['package', 'version'],
   'publish.scan': ['plugin', 'verdict', 'reason'],
+  'trusted_publisher.create': ['repository', 'workflow'],
+  'trusted_publisher.update': ['repository', 'workflow'],
+  'trusted_publisher.disable': ['repository', 'workflow'],
   'token.workload_issue': [
     'trusted_publisher_id',
     'repository_id',
@@ -238,6 +246,33 @@ export type AuditEventResult =
 
 const MAX_PAYLOAD_BYTES = 4096;
 const MAX_STRING = 200;
+const WORKLOAD_CLAIM_LIMITS: Readonly<Record<string, number>> = {
+  workflow: 255,
+  repository: 140,
+  environment: 255,
+  ref: 1024,
+  repository_id: 20,
+  repository_owner_id: 20,
+  repository_visibility: 8,
+};
+
+function cleanWorkloadClaim(value: unknown, field: string, limit: number): Cleaned {
+  if (typeof value !== 'string' || new TextEncoder().encode(value).length > limit)
+    return { ok: false, reason: 'bad_value' };
+  const valid =
+    field === 'repository'
+      ? /^[a-z0-9-]+\/[a-z0-9_.-]+$/.test(value)
+      : field === 'workflow'
+        ? isWorkflowFilename(value)
+        : field === 'environment'
+          ? !/\p{Cc}/u.test(value)
+          : field === 'ref'
+            ? /^[^\s\p{Cc}]+$/u.test(value)
+            : field === 'repository_visibility'
+              ? ['public', 'private', 'internal'].includes(value)
+              : /^[1-9][0-9]*$/.test(value);
+  return valid ? { ok: true, value } : { ok: false, reason: 'bad_value' };
+}
 const MAX_ARRAY = 50;
 const MAX_ARRAY_STRING = 100;
 const CHANGE_KEYS: ReadonlySet<string> = new Set(['old', 'new']);
@@ -402,20 +437,26 @@ function cleanChanges(
         /^(?:sha512-[A-Za-z0-9+/]{85}[AQgw]==|sha1-[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=)$/.test(
           value,
         );
+      const workloadLimit =
+        action === 'token.workload_issue' || action.startsWith('trusted_publisher.')
+          ? WORKLOAD_CLAIM_LIMITS[field]
+          : undefined;
       const cleaned =
-        accessReason && typeof value === 'string'
-          ? new TextEncoder().encode(value).length <= 1000
-            ? cleanString(value, 1000, field)
-            : { ok: false as const, reason: 'bad_value' as const }
-          : integrity
-            ? validIntegrity
-              ? { ok: true as const, value: value as string }
+        workloadLimit !== undefined
+          ? cleanWorkloadClaim(value, field, workloadLimit)
+          : accessReason && typeof value === 'string'
+            ? new TextEncoder().encode(value).length <= 1000
+              ? cleanString(value, 1000, field)
               : { ok: false as const, reason: 'bad_value' as const }
-            : field === 'provider' && IDENTITY_ACTIONS.has(action)
-              ? cleanProviderId(entry[key])
-              : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
-                ? cleanString(value, 1000, field)
-                : cleanValue(entry[key], field);
+            : integrity
+              ? validIntegrity
+                ? { ok: true as const, value: value as string }
+                : { ok: false as const, reason: 'bad_value' as const }
+              : field === 'provider' && IDENTITY_ACTIONS.has(action)
+                ? cleanProviderId(entry[key])
+                : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
+                  ? cleanString(value, 1000, field)
+                  : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
       cleanedEntry[key] = cleaned.value;
     }

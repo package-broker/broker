@@ -1,3 +1,4 @@
+import { createWorkloadTokenStore } from './workload-token.js';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { auditPendingStatement } from './audit-pending.js';
@@ -23,6 +24,7 @@ import type {
   ServiceTokenStoreInput,
   ServiceTokenRotationStore,
   ServiceTokenRecord,
+  WorkloadTokenStore,
 } from '@package-broker/core/authz/service-token-service';
 import {
   adminEligibility,
@@ -115,7 +117,7 @@ export type RevokeTokenResult =
   | { readonly status: 'refused'; readonly reason: FailureReason }
   | { readonly status: 'indeterminate' };
 
-export interface TokenRepository extends ServiceTokenRotationStore {
+export interface TokenRepository extends ServiceTokenRotationStore, WorkloadTokenStore {
   /**
    * Inserts the token and its bindings in one guarded batch; `mint` is called again for a fresh
    * pair after a selector collision, at most three times in all. The plaintext of the stored
@@ -725,6 +727,7 @@ export function createTokenRepository(
 ): TokenRepository {
   const idleSeconds = requireIdleSeconds(options.idleSeconds ?? DEFAULT_IDLE_SECONDS);
   const repository = {
+    ...createWorkloadTokenStore(executor),
     async issuePersonal(ctx, fence, input, mint) {
       validateInput(input);
       const selection: Selection = {
@@ -825,7 +828,9 @@ export function createTokenRepository(
             ])
             .where('org_id', '=', ctx.orgId)
             .where('id', '=', tokenId)
-            .where('kind', '=', 'svc'),
+            .where('kind', '=', 'svc')
+            .where('package_name', 'is', null)
+            .where('trusted_publisher_id', 'is', null),
         ),
       );
       const row = rows[0];
@@ -868,7 +873,7 @@ export function createTokenRepository(
         input.projectId === null ? sql`project_id is null` : sql`project_id = ${input.projectId}`;
       const oldLive = sql<boolean>`exists (select 1 from token where org_id = ${ctx.orgId}
         and id = ${input.tokenId} and kind = 'svc' and service_principal_id = ${input.servicePrincipalId}
-        and ${bound} and revoked_at is null
+        and ${bound} and revoked_at is null and package_name is null and trusted_publisher_id is null
         and unixepoch(expires_at, 'subsec') > unixepoch('now', 'subsec')
         and scopes_json = ${JSON.stringify([input.scope])} and read_only = ${input.readOnly ? 1 : 0})`;
       for (let attempt = 1; attempt <= MAX_SELECTOR_ATTEMPTS; attempt += 1) {

@@ -175,6 +175,7 @@ describe('registry job attachment', () => {
     const built = createRegistryModule({ ...h.deps, registryJobs });
     expect(Object.keys(built).sort()).toEqual([
       'ecosystemRoutes',
+      'lookupTrustedPublisherRepository',
       'probePackage',
       'visibilityPort',
     ]);
@@ -418,6 +419,7 @@ describe('createRegistryModule assembly', () => {
     const built = h.module();
     expect(Object.keys(built).sort()).toEqual([
       'ecosystemRoutes',
+      'lookupTrustedPublisherRepository',
       'probePackage',
       'visibilityPort',
     ]);
@@ -447,6 +449,10 @@ describe('createRegistryModule assembly', () => {
         'POST /:project/npm/-/npm/v1/security/audits/quick',
         'POST /:project/npm/-/npm/v1/security/audits',
         'GET /:project/npm/-/package/:a/dist-tags',
+        ...['PUT', 'POST', 'DELETE'].flatMap((method) => [
+          `${method} /:project/npm/-/package/:a/dist-tags`,
+          `${method} /:project/npm/-/package/:a/dist-tags/:tag`,
+        ]),
         ...shapes.flatMap((path) => ['GET', 'PUT', 'POST', 'DELETE'].map((m) => `${m} ${path}`)),
       ].sort(),
     );

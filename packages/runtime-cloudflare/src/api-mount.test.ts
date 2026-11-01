@@ -120,6 +120,18 @@ interface ManagementAssemblyEntry {
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
+    dependency: 'trustedPublishers',
+    constructed: 'Trusted publisher store and configured GitHub repository lookup',
+    routes: [
+      'GET /_pb/trusted-publishers',
+      'POST /_pb/trusted-publishers',
+      'PUT /_pb/trusted-publishers/:id',
+      'DELETE /_pb/trusted-publishers/:id',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM17c',
+  },
+  {
     dependency: 'packageDetail',
     constructed: 'SQLite package detail repository and idempotency repository',
     routes: [
@@ -301,6 +313,7 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/publishes/:id',
       'POST /_pb/publishes/:id/approve',
       'POST /_pb/publishes/:id/reject',
+      'POST /_pb/publishes/:id/rescan',
     ],
     jobs: [],
     ownerPacket: 'NPM10',
@@ -376,17 +389,19 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
     expect(entry.ownerPacket).toBe(
-      entry.dependency === 'packageDetail'
-        ? 'NPM13a'
-        : entry.dependency === 'publishes'
-          ? 'NPM10'
-          : entry.dependency === 'sourcePackages'
-            ? 'T1041'
-            : entry.dependency === 'npmLogin'
-              ? 'NPM16'
-              : entry.dependency === 'packageAccessRequests'
-                ? 'NPM12'
-                : 'T531',
+      entry.dependency === 'trustedPublishers'
+        ? 'NPM17c'
+        : entry.dependency === 'packageDetail'
+          ? 'NPM13a'
+          : entry.dependency === 'publishes'
+            ? 'NPM10'
+            : entry.dependency === 'sourcePackages'
+              ? 'T1041'
+              : entry.dependency === 'npmLogin'
+                ? 'NPM16'
+                : entry.dependency === 'packageAccessRequests'
+                  ? 'NPM12'
+                  : 'T531',
     );
     for (const key of entry.routes) {
       expect(

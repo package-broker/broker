@@ -537,7 +537,7 @@ it('plans a first install with the real collection shapes and no KV permission',
       schemaVersion: 1,
       platform: 'cloudflare',
       platformPorts: {
-        blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+        blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 50_000_000 },
         cache: { adapter: 'cache-api', namespace: 'pb-metadata-v1' },
         jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
         observability: {

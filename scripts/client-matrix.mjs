@@ -1,3 +1,5 @@
+import { assertIntegrationEvidence } from './client-matrix-api.mjs';
+import { matrixJwks } from './client-matrix-oidc.mjs';
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -18,6 +20,10 @@ export const harnessAssert = {
   },
 };
 
+export function safeFailureReason(error) {
+  return error instanceof HarnessError ? error.message : 'Harness operation failed';
+}
+
 export async function matrixStep(step, action, verbose = false) {
   if (verbose) console.log(`client-matrix: ${step} starting`);
   try {
@@ -26,7 +32,7 @@ export async function matrixStep(step, action, verbose = false) {
     return result;
   } catch (error) {
     if (error instanceof StepFailure) throw error;
-    const message = error instanceof HarnessError ? error.message : 'Harness operation failed';
+    const message = safeFailureReason(error);
     throw new StepFailure(`${step} failed: ${message}`);
   }
 }
@@ -55,6 +61,12 @@ export const CLIENT_VERSIONS = Object.freeze({
   yarn: '4.9.2',
 });
 export const PACKAGES = ['matrix-public', '@matrix/private'];
+export const PUBLISH_PACKAGES = [
+  'matrix-publish-active',
+  '@matrix-publish/active',
+  'matrix-publish-held',
+  '@matrix-publish/held',
+];
 export const CONTENT = 'module.exports = "client-matrix fixture";\n';
 
 export function selectClient(env) {
@@ -96,6 +108,18 @@ export function clientCommands(client) {
           ? ['install', '--ignore-scripts', '--no-frozen-lockfile']
           : ['install', '--ignore-scripts', '--no-audit'],
     ),
+    publish: native(
+      client === 'yarn'
+        ? ['npm', 'publish', '--access', 'public']
+        : [
+            'publish',
+            '--ignore-scripts',
+            '--provenance=false',
+            '--access',
+            'public',
+            ...(client === 'pnpm' ? ['--no-git-checks'] : []),
+          ],
+    ),
     audit: native(client === 'yarn' ? ['npm', 'audit', '--json'] : ['audit', '--json']),
     whoami: native(client === 'yarn' ? ['npm', 'whoami'] : ['whoami']),
     // Yarn 4 has no ping command. Its step is explicitly skipped.
@@ -135,6 +159,21 @@ export function checkTraffic(routes, audits, client = 'npm') {
 
 export async function observeResponse(routes, request, response, auditStatus) {
   const path = decodeURIComponent(new URL(request.url).pathname);
+  if (request.method === 'PUT' && PUBLISH_PACKAGES.some((name) => path === `/alpha/npm/${name}`)) {
+    const name = path.slice('/alpha/npm/'.length);
+    const held = name.endsWith('held');
+    harnessAssert.equal(response.status, held ? 202 : 201, 'Unexpected publish status');
+    const body = await response.clone().json();
+    harnessAssert.equal(body.ok, true, 'Publish was not accepted');
+    harnessAssert.equal(body.id, `${name}@1.0.0`, 'Unexpected publish identity');
+    if (held)
+      harnessAssert.ok(
+        body.held?.approval === true && body.held?.scan === false,
+        'Missing publish approval hold',
+      );
+    routes.push(`publish:${name}:${response.status}`);
+    return;
+  }
   if (path.includes('/security/')) {
     harnessAssert.equal(response.status, auditStatus, 'Unexpected audit status');
     const body = await response.clone().json();
@@ -203,6 +242,15 @@ const tarballs = new Map(
 
 export async function fixtureReply(request, audits) {
   const url = new URL(request.url);
+  if (url.href === 'https://token.actions.githubusercontent.com/.well-known/jwks') {
+    harnessAssert.ok(
+      request.method === 'GET' &&
+        !request.headers.has('authorization') &&
+        !request.headers.has('cookie'),
+      'Invalid JWKS fixture request',
+    );
+    return Response.json(matrixJwks);
+  }
   harnessAssert.ok(
     ['https://registry.npmjs.org', 'https://npm.matrix.test'].includes(url.origin),
     'Unexpected outbound destination',
@@ -256,6 +304,7 @@ export async function fixtureReply(request, audits) {
 
 export function redactClientOutput(output) {
   return stripVTControlCharacters(output)
+    .replace(/((?:#\/npm-login|\/-\/v1\/done)\/)[A-Za-z0-9_-]{43}/g, '$1[REDACTED]')
     .replace(/pb_[a-z0-9_-]+/gi, '[REDACTED]')
     .replace(/(_authToken["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi, '$1[REDACTED]')
     .replace(/((?:authorization|cookie|set-cookie)["']?\s*[:=]\s*)[^\r\n]*/gi, '$1[REDACTED]')
@@ -263,7 +312,13 @@ export function redactClientOutput(output) {
     .replace(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, '[REDACTED]');
 }
 
-export function runCommand(command, args, cwd, env, { debug = false, log = console.log } = {}) {
+export function runCommand(
+  command,
+  args,
+  cwd,
+  env,
+  { debug = false, log = console.log, input } = {},
+) {
   if (debug) log(`client-matrix: command ${redactClientOutput([command, ...args].join(' '))}`);
   return new Promise((resolve) => {
     const complete = (error, stdout = '', stderr = '') => {
@@ -276,7 +331,7 @@ export function runCommand(command, args, cwd, env, { debug = false, log = conso
       resolve(result);
     };
     try {
-      execFile(
+      const child = execFile(
         command,
         args,
         {
@@ -289,10 +344,45 @@ export function runCommand(command, args, cwd, env, { debug = false, log = conso
         },
         complete,
       );
+      if (input !== undefined) {
+        child.stdin.on('error', () => undefined);
+        child.stdin.end(input);
+      }
     } catch (error) {
       complete(error);
     }
   });
+}
+
+export async function preparePublisher(
+  directory,
+  client,
+  registry,
+  token,
+  name,
+  { debug = false, run = runCommand } = {},
+) {
+  const publisher = await prepareClient(directory, client, registry, token);
+  await writeFile(
+    join(publisher.project, 'package.json'),
+    JSON.stringify({
+      name,
+      version: '1.0.0',
+      main: 'index.js',
+      license: 'MIT',
+      files: ['index.js', 'README.md'],
+    }),
+  );
+  await writeFile(join(publisher.project, 'index.js'), 'module.exports = true;\n');
+  await writeFile(join(publisher.project, 'README.md'), '# Publish fixture\n');
+  if (client === 'yarn') {
+    const command = clientCommands(client).install;
+    const result = await run(command.command, command.args, publisher.project, publisher.env, {
+      debug,
+    });
+    checkResult(result, 'publisher install', client);
+  }
+  return publisher;
 }
 
 export async function prepareClient(directory, client, registry, token) {
@@ -438,10 +528,9 @@ async function main() {
   } else {
     await matrixStep(`${selection.client} runtime harness`, async () => {
       const { runMatrix } = await import('./client-matrix-runtime.mjs');
-      await runMatrix(selection);
+      assertIntegrationEvidence(await runMatrix(selection));
     });
   }
-  // TODO(NPM9): add real client publish here when the publish route lands.
   console.log(`client-matrix: ${selection.client} ${selection.version} passed`);
 }
 

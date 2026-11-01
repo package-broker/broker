@@ -298,6 +298,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/idempotency.ts',
   'db-sqlite/src/repositories/ingest-session.ts',
   'db-sqlite/src/repositories/job-lease-guard.ts',
+  'db-sqlite/src/repositories/npm-vcs-build.ts',
   'db-sqlite/src/repositories/proxy-admission.ts',
   'db-sqlite/src/repositories/proxy-claims.ts',
   'db-sqlite/src/repositories/registered-name.ts',
@@ -392,6 +393,8 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     "deleteFrom('credential'); insertInto('credential'); updateTable('local_login') x3",
   'db-sqlite/src/repositories/local-login-success.ts':
     "updateTable('local_login') x2; updateTable('session')",
+  'db-sqlite/src/repositories/npm-vcs-build.ts':
+    "insertInto('npm_vcs_build_outcome') [onConflict:doNothing]; insertInto('npm_vcs_build_outcome') [onConflict:doUpdateSet]; updateTable('npm_vcs_build_outcome')",
   'db-sqlite/src/repositories/project.ts':
     "insertInto('access_grant'); insertInto('project'); updateTable('project') x2",
   'db-sqlite/src/repositories/provider-binding.ts':
@@ -508,6 +511,8 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'dist_tag_history(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(previous_version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'npm_vcs_build_outcome(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'npm_vcs_build_outcome(version_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'publish_approval(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'version_readme(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
@@ -701,6 +706,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'The SQL builder import constructs typed statements; it does not read executor changes counts.',
+      sites: [
+        "db-sqlite/src/repositories/npm-vcs-build.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+      ],
+    },
+    {
+      reason:
         'The publisher page cursor comes from the last returned row of a bounded SELECT with one-row lookahead; it does not inspect executor affected-row metadata.',
       sites: [
         'db-sqlite/src/repositories/trusted-publishers.ts:unresolved computed access: rows[limit - 1] #1',
@@ -713,6 +725,35 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId}\n        and id = ${input.id} and revision = ${input.expectedRevision ?? current.revision})` #1',
         'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`1` #2',
         "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId} and id = ${input.id}\n            and type = 'hosted' and ecosystem = 'npm')` #1",
+      ],
+    },
+    {
+      reason:
+        'Build eligibility and retry-generation predicates read organization-scoped rows only; they neither write nor consume D1 changes counts.',
+      sites: [
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<number>`coalesce((select retry_generation from npm_vcs_build_outcome as bo where bo.org_id = ${ctx.orgId} and bo.version_id = nv.id and bo.source_ref = nv.source_ref and bo.packing_policy = ${input.packingPolicy ?? 'npm-pack-v1'}), 0)` #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<boolean>`nv.dist_type = 'tgz' AND nv.source_ref IS NOT NULL` #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<boolean>`NOT EXISTS (SELECT 1 FROM npm_vcs_build_outcome AS terminal WHERE terminal.org_id = ${ctx.orgId} AND terminal.version_id = nv.id AND terminal.source_ref = nv.source_ref AND terminal.packing_policy = ${input.packingPolicy ?? 'npm-pack-v1'} AND terminal.outcome IS NOT NULL)` #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<SqlBool>`EXISTS (SELECT 1 FROM version AS ov\n        JOIN package AS op ON op.id = ov.package_id AND op.org_id = ${ctx.orgId}\n        JOIN source AS os ON os.id = op.source_id AND os.org_id = ${ctx.orgId}\n        WHERE ov.org_id = ${ctx.orgId} AND ov.id = ${input.versionId}\n          AND op.id = ${input.packageId} AND os.id = ${input.sourceId}\n          AND ov.source_ref = ${input.sourceRef} AND ov.status = 'active'\n          AND os.status = 'active' AND os.type = 'vcs' AND os.ecosystem = 'npm'\n          AND coalesce((SELECT retry_generation FROM npm_vcs_build_outcome AS fence_outcome\n            WHERE fence_outcome.org_id = ${ctx.orgId} AND fence_outcome.version_id = ov.id\n              AND fence_outcome.source_ref = ${input.sourceRef} AND fence_outcome.packing_policy = ${input.packingPolicy}), 0) = ${input.retryGeneration})` #1",
+        'db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<number>`retry_generation + 1` #1',
+      ],
+    },
+    {
+      reason:
+        'Build-outcome upserts preserve all organization, version, commit and policy keys, changing only the outcome under the lease and retry fences; no changes count is read.',
+      sites: [
+        "db-sqlite/src/repositories/npm-vcs-build.ts:conflict action: db\n            .insertInto('npm_vcs_build_outcome')\n            .values({\n              org_id: ctx.orgId,\n              version_id: input.versionId,\n              source_ref: input.sourceRef!,\n              packing_policy: input.packingPolicy!,\n              retry_generation: input.retryGeneration!,\n              outcome: null,\n            })\n            .onConflict((oc) =>\n              oc.columns(['org_id', 'version_id', 'source_ref', 'packing_policy']).doNothing(),\n            ) #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:conflict action: db\n            .insertInto('npm_vcs_build_outcome')\n            .values({\n              org_id: ctx.orgId,\n              version_id: input.versionId,\n              source_ref: input.sourceRef!,\n              packing_policy: input.packingPolicy!,\n              retry_generation: input.retryGeneration!,\n              outcome,\n            })\n            .onConflict((oc) =>\n              oc\n                .columns(['org_id', 'version_id', 'source_ref', 'packing_policy'])\n                .doUpdateSet({ outcome }),\n            ) #1",
+      ],
+    },
+    {
+      reason:
+        'Mutation-table indexes and entry metadata refer to contract cases and SQL decision registrations, never SQL result counts.',
+      sites: [
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: cases[3 + index] #1',
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: outcomeCases[index] #1',
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: retryCases[index] #1',
+        "db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:opaque object access: Object.assign(outcomeEntry, {\n  sqlDecisions: [\n    {\n      name: 'immutable commit fence',\n      pattern: /ov\\.source_ref = \\?/,\n      replacement: '? IS NOT NULL',\n      expected: 1,\n      case: staleBuildCase('commit'),\n    },\n    {\n      name: 'deliberate retry generation fence',\n      pattern: /\\), 0\\) = \\?/,\n      replacement: '), 0) >= ?',\n      expected: 1,\n      case: staleBuildCase('retry'),\n    },\n  ],\n}) #1",
       ],
     },
     {
@@ -801,7 +842,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/source.ts:opaque dependency: import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
         "db-sqlite/src/repositories/job.ts:opaque dependency: import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
         "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source\n        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')` #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx, sql<SqlBool>`${isProxy(current.type) ? 1 : 0}`),\n        [\n          ...assertCheck(active),\n          compile(\n            db\n              .updateTable('source')\n              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('status', '!=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        { authority: probe(held, true), conflict: probe(collision, false) },\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx, sql<SqlBool>`${isProxy(current.type) ? 1 : 0}`),\n        [\n          ...assertCheck(active),\n          compile(\n            db\n              .updateTable('source')\n              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('status', '!=', 'paused'),\n          ),\n          npmVcsBuildRetryStatement(ctx, input.id),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        { authority: probe(held, true), conflict: probe(collision, false) },\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'requested'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'authority' || outcome.reason === 'indeterminate')\n        return failureResult(ctx, input.id, outcome.reason); #1",
       ],

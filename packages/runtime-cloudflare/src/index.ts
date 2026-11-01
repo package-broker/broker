@@ -17,6 +17,7 @@ import {
 } from '@package-broker/core/ingest/publish-scan-job';
 import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
 import {
+  createNpmVcsBuildOutcomes,
   createNpmVcsBuildReader,
   createNpmVcsBuildPendingReader,
 } from '@package-broker/db-sqlite/repositories/npm-vcs-build';
@@ -884,6 +885,7 @@ function buildRegistryModule(input: {
       credentialUnavailable: (ctx, id) => registrySources.markCredentialUnavailable(ctx, id),
     },
     npmVcsBuild: {
+      outcomes: createNpmVcsBuildOutcomes(executor),
       target: createNpmVcsBuildReader(executor),
       pending: createNpmVcsBuildPendingReader(executor),
       writeGuard: createCatalogueWriteGuard,
@@ -2042,6 +2044,15 @@ export function createWorker(
       built === undefined || packages === null
         ? []
         : createApiRoutes({
+            discoveryFetch: createPolicyFetch({
+              fetchImpl: (...args) => globalThis.fetch(...args),
+              policy: createOutboundPolicy({
+                allowPrivateHosts: [],
+                runtime: 'cloudflare',
+                selfOrigins: [publicOriginOf(env?.PB_PUBLIC_URL)],
+              }),
+              userAgent: 'PackageBroker/2.0',
+            }),
             ...(registryModule?.module.lookupTrustedPublisherRepository === undefined
               ? {}
               : {

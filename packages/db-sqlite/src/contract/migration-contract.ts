@@ -613,7 +613,7 @@ export function describeMigrationContract(
         expect(await readLock(executor)).toEqual(lockBefore);
       });
     });
-    it('8. fresh schema with foreign keys on: five bookkeeping rows, all tables, lock free', async () => {
+    it('8. fresh schema with foreign keys on: seven bookkeeping rows, all tables, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         await enableForeignKeys(executor);
         const sources = await discoveredMigrations();
@@ -626,7 +626,7 @@ export function describeMigrationContract(
         );
         const names = await tableNames(executor);
         for (const table of NEW_TABLES) expect(names).toContain(table);
-        expect(names).toHaveLength(62);
+        expect(names).toHaveLength(63);
         expect(await lockHolder(executor)).toBeNull();
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
         for (const table of ['token_project', 'service_principal_permission']) {
@@ -786,6 +786,7 @@ export function describeMigrationContract(
           'core:0004_source_revision',
           'core:0005_package_settings_revision',
           'core:0006_npm_login_handoff',
+          'core:0007_npm_vcs_build_outcomes',
         ]);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
@@ -805,6 +806,7 @@ export function describeMigrationContract(
           'core:0004_source_revision',
           'core:0005_package_settings_revision',
           'core:0006_npm_login_handoff',
+          'core:0007_npm_vcs_build_outcomes',
         ]);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
@@ -823,7 +825,7 @@ export function describeMigrationContract(
           { from: 'project_id', table: 'project', to: 'id' },
         ]);
         expect(await tableNames(executor)).not.toContain('job_attempt_0006');
-        expect(await countTables(executor)).toBe(62);
+        expect(await countTables(executor)).toBe(63);
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
 
         await seedPopulated(executor);
@@ -1115,6 +1117,7 @@ export function describeVulnerabilityMigrationContract(
           'core:0004_source_revision',
           'core:0005_package_settings_revision',
           'core:0006_npm_login_handoff',
+          'core:0007_npm_vcs_build_outcomes',
         ]);
         expect(
           await executor.all({
@@ -1199,12 +1202,15 @@ export function describeSchemaEquivalenceContract(
       const oldChain = JSON.parse(
         readFileSync(new URL('../migrations/old-chain-schema.json', import.meta.url), 'utf8'),
       ) as SchemaDump;
-      const sources = (await discoveredMigrations()).filter((source) => source.sequence <= 4);
+      const sources = (await discoveredMigrations()).filter(
+        (source) => source.sequence <= 4 || source.sequence === 7,
+      );
       expect(sources.map(({ id, phase }) => ({ id, phase }))).toEqual([
         { id: 'core:0001_init', phase: 'expand' },
         { id: 'core:0002_npm_publish', phase: 'expand' },
         { id: 'core:0003_npm_identity', phase: 'expand' },
         { id: 'core:0004_source_revision', phase: 'expand' },
+        { id: 'core:0007_npm_vcs_build_outcomes', phase: 'expand' },
       ]);
       const opened = await open();
       try {
@@ -1222,17 +1228,48 @@ export function describeSchemaEquivalenceContract(
           params: [],
         });
         const expected: SchemaDump = {
-          ...oldChain,
-          schema: oldChain.schema.map((row) =>
-            row.type === 'table' && row.name === 'source'
-              ? {
-                  ...row,
-                  sql: row.sql!.replace(
-                    ',\n  CHECK ((last_refusal_at',
-                    ', revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  CHECK ((last_refusal_at',
-                  ),
-                }
-              : row,
+          schema: [
+            ...oldChain.schema.map((row) =>
+              row.type === 'table' && row.name === 'source'
+                ? {
+                    ...row,
+                    sql: row.sql!.replace(
+                      ',\n  CHECK ((last_refusal_at',
+                      ', revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n  CHECK ((last_refusal_at',
+                    ),
+                  }
+                : row,
+            ),
+            {
+              type: 'table',
+              name: 'npm_vcs_build_outcome',
+              tbl_name: 'npm_vcs_build_outcome',
+              sql: `CREATE TABLE npm_vcs_build_outcome (
+  org_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  version_id TEXT NOT NULL,
+  source_ref TEXT NOT NULL CHECK(length(source_ref) = 40),
+  packing_policy TEXT NOT NULL,
+  retry_generation INTEGER NOT NULL DEFAULT 0 CHECK(retry_generation >= 0),
+  outcome TEXT CHECK(outcome IN ('too_large', 'unsupported_files_pattern', 'invalid_packlist', 'invalid_tarball', 'archive_changed', 'internal')),
+  PRIMARY KEY (org_id, version_id, source_ref, packing_policy),
+  FOREIGN KEY (version_id, org_id) REFERENCES version(id, org_id) ON DELETE CASCADE
+) STRICT`,
+            },
+          ].sort((a, b) =>
+            a.type === b.type ? (a.name < b.name ? -1 : 1) : a.type < b.type ? -1 : 1,
+          ),
+          indexes: [
+            ...oldChain.indexes,
+            {
+              tbl_name: 'npm_vcs_build_outcome',
+              seq: 0,
+              name: 'sqlite_autoindex_npm_vcs_build_outcome_1',
+              unique: 1,
+              origin: 'pk',
+              partial: 0,
+            },
+          ].sort((a, b) =>
+            a.tbl_name === b.tbl_name ? a.seq - b.seq : a.tbl_name < b.tbl_name ? -1 : 1,
           ),
         };
         expect(normalizedDump({ schema, indexes })).toBe(normalizedDump(expected));

@@ -1,3 +1,5 @@
+import { createNpmVcsBuildJob, type NpmVcsBuildPayload } from '../ingest/npm-vcs-build-job.js';
+import { JobError, type JobContext } from '../platform/jobs.js';
 import { createDistService } from './dist-service.js';
 import type { DistTarget } from '../db/catalogue.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -23,6 +25,10 @@ import { createRegistryModule, type RegistryModuleDeps } from './module.js';
 import { resolveRegistryConfig } from './registry-config.js';
 import type { RegistryJobsDeps } from './jobs.js';
 
+vi.mock('../ingest/npm-vcs-build-job.js', async (original) => {
+  const actual = await original<typeof import('../ingest/npm-vcs-build-job.js')>();
+  return { ...actual, createNpmVcsBuildJob: vi.fn(actual.createNpmVcsBuildJob) };
+});
 vi.mock('./dist-service.js', async (original) => {
   const actual = await original<typeof import('./dist-service.js')>();
   return { ...actual, createDistService: vi.fn(actual.createDistService) };
@@ -113,6 +119,7 @@ describe('registry job attachment', () => {
   const registryJobs: RegistryJobsDeps = {
     sourceSync: {
       sources: {
+        reportCandidateSkipped: async () => {},
         get: vi.fn<RegistryJobsDeps['sourceSync']['sources']['get']>(),
         pollState: vi.fn<RegistryJobsDeps['sourceSync']['sources']['pollState']>(),
       },
@@ -1344,7 +1351,12 @@ it.each(['queued', 'running'])(
     const pending = vi.fn(async () => true);
     createRegistryModule({
       ...h.deps,
-      npmVcsBuild: { pending, target: vi.fn(), writeGuard: vi.fn() },
+      npmVcsBuild: {
+        outcomes: {} as never,
+        pending,
+        target: vi.fn().mockResolvedValue({}),
+        writeGuard: vi.fn(),
+      },
     });
     const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
     expect(await enqueue(org, { sourceId: 'src-1', versionId: VERSION_ID } as DistTarget)).toBe(
@@ -1372,7 +1384,7 @@ it('skips the eager build lookup for a non-VCS npm source', async () => {
       },
     },
     sync: {} as never,
-    npmVcsBuild: { pending: vi.fn(), target, writeGuard: vi.fn() },
+    npmVcsBuild: { outcomes: {} as never, pending: vi.fn(), target, writeGuard: vi.fn() },
   });
   const apply = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0].apply;
   await apply.writer.syncPackage(
@@ -1462,3 +1474,215 @@ it('refuses a missing stored proxy in claim mode', async () => {
   ).toBe('unavailable');
   expect(h.policyFetch).not.toHaveBeenCalled();
 });
+
+it('does not bind credentials, enqueue or advertise a retry for a terminal VCS build', async () => {
+  const h = harness();
+  vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+    ...npmjsSource,
+    type: 'vcs',
+    ecosystem: 'npm',
+  });
+  const target = vi.fn().mockResolvedValue(null);
+  createRegistryModule({
+    ...h.deps,
+    npmVcsBuild: {
+      outcomes: { terminal: vi.fn().mockResolvedValue(true) } as never,
+      target,
+      pending: vi.fn(),
+      writeGuard: vi.fn(),
+    },
+  });
+  const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+  expect(
+    await enqueue(org, { sourceId: 'src-1', packageId: 'P', versionId: VERSION_ID } as DistTarget),
+  ).toBe('terminal');
+  expect(h.deps.ingest.credential).not.toHaveBeenCalled();
+  expect(h.jobs.enqueue).not.toHaveBeenCalled();
+});
+
+it('reserves eager enqueue reads and all four job statements per version', () => {
+  const h = harness();
+  createRegistryModule({
+    ...h.deps,
+    sync: {} as never,
+    npmVcsBuild: { outcomes: {} as never, pending: vi.fn(), target: vi.fn(), writeGuard: vi.fn() },
+    ingest: {
+      ...h.deps.ingest,
+      apply: {
+        ...h.deps.ingest.apply,
+        writer: { statementBudget: { syncPackage: 500 }, syncPackageCost: () => 100 } as never,
+      },
+    },
+  });
+  const writer = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0].apply.writer;
+  expect(writer.syncPackageCost({ versions: 50, tags: 0, guardStatements: 1 })).toBe(352);
+  expect(writer.syncPackageCost({ versions: 0, tags: 0, guardStatements: 1 })).toBe(102);
+  expect(writer.statementBudget.syncPackage).toBe(752);
+});
+
+it.each([false, true])(
+  'checks persisted terminal outcome when no build target is eligible (%s)',
+  async (terminal) => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+    });
+    const check = vi.fn().mockResolvedValue(terminal);
+    createRegistryModule({
+      ...h.deps,
+      npmVcsBuild: {
+        outcomes: { terminal: check } as never,
+        target: vi.fn().mockResolvedValue(null),
+        pending: vi.fn(),
+        writeGuard: vi.fn(),
+      },
+    });
+    const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+    expect(
+      await enqueue(org, {
+        sourceId: 'src-1',
+        packageId: 'K',
+        versionId: VERSION_ID,
+      } as DistTarget),
+    ).toBe(terminal ? 'terminal' : true);
+    expect(check).toHaveBeenCalledWith(
+      org,
+      expect.objectContaining({ sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID }),
+    );
+    expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['current', 'missing', 'version', 'commit', 'policy', 'retry', 'lease'] as const)(
+  'fences exhausted planning outcomes against %s identity',
+  async (change) => {
+    const h = harness();
+    const sourceRef = 'a'.repeat(40);
+    const finish = vi.fn(async () => {
+      if (change === 'lease') throw new JobError('lease_lost');
+    });
+    const reportCandidateSkipped = vi.fn();
+    const target = vi
+      .fn()
+      .mockResolvedValue(
+        change === 'missing' ? null : { sourceRef, version: '1.0.0', retryGeneration: 0 },
+      );
+    createRegistryModule({
+      ...h.deps,
+      registryJobs: {
+        sourceSync: { sources: { reportCandidateSkipped } },
+      } as unknown as RegistryJobsDeps,
+      npmVcsBuild: { outcomes: { finish } as never, target, pending: vi.fn(), writeGuard: vi.fn() },
+    });
+    const exhausted = vi.mocked(createNpmVcsBuildJob).mock.calls.at(-1)![0].exhausted!;
+    const payload = {
+      sourceId: 'S',
+      packageId: 'P',
+      versionId: 'V',
+      version: change === 'version' ? '2.0.0' : '1.0.0',
+      sourceRef: change === 'commit' ? 'b'.repeat(40) : sourceRef,
+      retryGeneration: change === 'retry' ? 1 : 0,
+      ...(change === 'policy' ? { packingPolicy: 'old-policy' } : {}),
+    };
+    const lease = { id: 'J', owner: 'worker', fence: 1 };
+    if (change === 'lease') {
+      await expect(exhausted({ org } as JobContext, payload, lease)).rejects.toMatchObject({
+        code: 'lease_lost',
+      });
+      expect(reportCandidateSkipped).not.toHaveBeenCalled();
+      return;
+    }
+    await exhausted({ org } as JobContext, payload, lease);
+    if (change === 'current') {
+      expect(finish).toHaveBeenCalledWith(
+        org,
+        lease,
+        expect.objectContaining({ ...payload, packingPolicy: expect.any(String) }),
+        'internal',
+      );
+      expect(reportCandidateSkipped).toHaveBeenCalledExactlyOnceWith(org, lease, {
+        id: payload.sourceId,
+        error: 'internal',
+      });
+      expect(finish.mock.invocationCallOrder[0]).toBeLessThan(
+        reportCandidateSkipped.mock.invocationCallOrder[0]!,
+      );
+    } else {
+      expect(finish).not.toHaveBeenCalled();
+      expect(reportCandidateSkipped).not.toHaveBeenCalled();
+    }
+  },
+);
+
+it.each(['registry', 'store'] as const)(
+  'reopens a too_large build when the effective %s input ceiling rises',
+  async (limit) => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+    });
+    const outcomes = new Map<string, string>();
+    const row = {
+      sourceRef: 'a'.repeat(40),
+      version: '1.0.0',
+      retryGeneration: 0,
+      packageName: 'widget',
+      revision: 1,
+    };
+    const target = vi.fn<NonNullable<RegistryModuleDeps['npmVcsBuild']>['target']>(
+      async (_ctx, input) => (outcomes.has(input.packingPolicy!) ? null : row),
+    );
+    const finish = vi.fn<NonNullable<RegistryModuleDeps['npmVcsBuild']>['outcomes']['finish']>(
+      async (_ctx, _lease, input, code) => {
+        outcomes.set(input.packingPolicy!, code);
+      },
+    );
+    const terminal = vi.fn<NonNullable<RegistryModuleDeps['npmVcsBuild']>['outcomes']['terminal']>(
+      async (_ctx, input) => outcomes.has(input.packingPolicy!),
+    );
+    const enqueueFor = (inputCeiling: number) => {
+      createRegistryModule({
+        ...h.deps,
+        registry: {
+          ...h.deps.registry,
+          caps: {
+            ...h.deps.registry.caps,
+            publishTarballBytes: 100,
+            archiveBytes: limit === 'registry' ? inputCeiling : 400,
+          },
+        },
+        ports: {
+          ...h.deps.ports,
+          blob: { ...h.blob, maxStagingBytes: limit === 'store' ? inputCeiling : 400 },
+        } as unknown as RegistryModuleDeps['ports'],
+        npmVcsBuild: {
+          outcomes: { finish, terminal } as never,
+          target,
+          pending: vi.fn().mockResolvedValue(false),
+          writeGuard: vi.fn(),
+        },
+      });
+      return vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+    };
+    const distTarget = { sourceId: 'src-1', packageId: 'P', versionId: VERSION_ID } as DistTarget;
+    const enqueue = enqueueFor(200);
+    expect(await enqueue(org, distTarget)).toBe(true);
+    const payload = h.jobs.enqueue.mock.calls.at(-1)![2] as NpmVcsBuildPayload;
+    await finish(org, { id: 'J', owner: 'worker', fence: 1 }, payload, 'too_large');
+    expect(await enqueue(org, distTarget)).toBe('terminal');
+    h.jobs.enqueue.mockClear();
+    expect(await enqueueFor(300)(org, distTarget)).toBe(true);
+    expect(h.jobs.enqueue).toHaveBeenCalledOnce();
+    expect((h.jobs.enqueue.mock.calls[0]![2] as NpmVcsBuildPayload).packingPolicy).not.toBe(
+      payload.packingPolicy,
+    );
+    expect(h.jobs.enqueue.mock.calls[0]![2]).toEqual({
+      ...payload,
+      packingPolicy: expect.any(String),
+    });
+  },
+);

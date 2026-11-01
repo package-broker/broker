@@ -62,6 +62,7 @@ describe('backup scope manifest', () => {
       token: 'include',
       trusted_publisher: 'include',
       npm_login_session: 'exclude',
+      npm_vcs_build_outcome: 'include',
       oidc_replay: 'exclude',
       token_project: 'include',
       credential: 'include',

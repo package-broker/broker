@@ -151,6 +151,7 @@ function setup(options: {
 
   const deps: SourceSyncDeps = {
     sources: {
+      reportCandidateSkipped: async () => {},
       get: async () => source,
       pollState: async (_ctx, _guard, input) => {
         if (input.outcome === 'started') starts.push(input);

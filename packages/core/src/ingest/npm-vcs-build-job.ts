@@ -11,11 +11,14 @@ export interface NpmVcsBuildPayload {
   readonly packageId: string;
   readonly versionId: string;
   readonly version: string;
+  readonly sourceRef?: string;
+  readonly packingPolicy?: string;
+  readonly retryGeneration?: number;
 }
 export function npmVcsBuildEnqueueInput(payload: NpmVcsBuildPayload, now: number) {
   return {
     resourceKey: payload.versionId,
-    idempotencyKey: `npm-vcs-build:${payload.versionId}:${Math.floor(now / 600_000)}`,
+    idempotencyKey: `npm-vcs-build:${payload.versionId}:${payload.sourceRef ?? 'legacy'}:${payload.packingPolicy ?? 'legacy'}:${payload.retryGeneration ?? 0}:${Math.floor(now / 600_000)}`,
   };
 }
 export interface NpmVcsBuildTarget {
@@ -23,8 +26,14 @@ export interface NpmVcsBuildTarget {
   readonly version: string;
   readonly revision: number;
   readonly sourceRef: string;
+  readonly retryGeneration: number;
 }
 export interface NpmVcsBuildDeps {
+  readonly exhausted?: (
+    job: JobContext,
+    payload: NpmVcsBuildPayload,
+    lease: JobGuard,
+  ) => Promise<void>;
   readonly plan: (
     job: JobContext,
     payload: NpmVcsBuildPayload,
@@ -40,7 +49,25 @@ function validate(input: unknown): NpmVcsBuildPayload {
   if (
     value === null ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join(',') !== 'packageId,sourceId,version,versionId' ||
+    Object.keys(value).some(
+      (key) =>
+        ![
+          'packageId',
+          'sourceId',
+          'version',
+          'versionId',
+          'sourceRef',
+          'packingPolicy',
+          'retryGeneration',
+        ].includes(key),
+    ) ||
+    (value.sourceRef !== undefined &&
+      (typeof value.sourceRef !== 'string' || !/^[a-f0-9]{40}$/.test(value.sourceRef))) ||
+    (value.packingPolicy !== undefined &&
+      (typeof value.packingPolicy !== 'string' ||
+        !/^[a-z0-9:-]{1,100}$/.test(value.packingPolicy))) ||
+    (value.retryGeneration !== undefined &&
+      (!Number.isSafeInteger(value.retryGeneration) || (value.retryGeneration as number) < 0)) ||
     ![value.sourceId, value.packageId, value.versionId].every(
       (id) => typeof id === 'string' && /^[A-Za-z0-9]{1,64}$/.test(id),
     ) ||
@@ -62,9 +89,28 @@ export function createNpmVcsBuildJob(deps: NpmVcsBuildDeps) {
       job.signal.throwIfAborted();
       const lease = jobLeaseOf(job);
       if (lease === null) throw new JobError('lease_lost');
-      const plan = await deps.plan(job, payload, lease);
-      if (plan === null) return;
-      await buildNpmVcsDist(plan.deps, job.org, plan.guard, plan.target);
+      let plan: Awaited<ReturnType<NpmVcsBuildDeps['plan']>> = null;
+      try {
+        plan = await deps.plan(job, payload, lease);
+        if (plan === null) return;
+        await buildNpmVcsDist(plan.deps, job.org, plan.guard, plan.target);
+      } catch (error) {
+        if (
+          !job.signal.aborted &&
+          job.attempt >= 3 &&
+          !(error instanceof JobError && error.code === 'lease_lost')
+        ) {
+          if (plan?.deps.reportSkipped !== undefined) {
+            await plan.deps.reportSkipped('internal');
+            return;
+          }
+          if (deps.exhausted !== undefined) {
+            await deps.exhausted(job, payload, lease);
+            return;
+          }
+        }
+        throw error;
+      }
     },
   });
 }

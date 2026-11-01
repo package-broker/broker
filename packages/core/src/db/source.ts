@@ -307,7 +307,7 @@ export interface SourceRepository {
    */
   markCredentialUnavailable(ctx: OrgContext, id: string): Promise<void>;
   /** Sets `last_error` only, never counts as a poll failure, and requires the live lease of a package-sync or build job for this source. */
-  reportCandidateSkipped?(
+  reportCandidateSkipped(
     ctx: OrgContext,
     guard: JobGuard,
     input: {

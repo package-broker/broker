@@ -497,6 +497,7 @@ function sourceRig(
   };
   const deps: SourceSyncDeps = {
     sources: {
+      reportCandidateSkipped: async () => {},
       get: async () => sourceRecord(over),
       pollState: async (_ctx, guard, input) => {
         if (guard.fence !== model.jobFence) return 'stale';

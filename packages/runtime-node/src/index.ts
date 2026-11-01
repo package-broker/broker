@@ -16,6 +16,7 @@ import {
   createPublishScanSweepJob,
 } from '@package-broker/core/ingest/publish-scan-job';
 import {
+  createNpmVcsBuildOutcomes,
   createNpmVcsBuildReader,
   createNpmVcsBuildPendingReader,
 } from '@package-broker/db-sqlite/repositories/npm-vcs-build';
@@ -920,6 +921,7 @@ function assembleRegistry(input: {
       credentialUnavailable: (ctx, id) => sources.markCredentialUnavailable(ctx, id),
     },
     npmVcsBuild: {
+      outcomes: createNpmVcsBuildOutcomes(executor),
       target: createNpmVcsBuildReader(executor),
       pending: createNpmVcsBuildPendingReader(executor),
       writeGuard: createCatalogueWriteGuard,
@@ -1323,6 +1325,14 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : createApiRoutes({
+            discoveryFetch: createPolicyFetch({
+              fetchImpl:
+                registry?.services.outboundFetch ??
+                seams.transport ??
+                createGuardedFetch(vulnerabilityPolicy),
+              policy: vulnerabilityPolicy,
+              userAgent: 'PackageBroker/2.0',
+            }),
             ...(registry?.module.lookupTrustedPublisherRepository === undefined
               ? {}
               : { trustedPublisherLookup: registry?.module.lookupTrustedPublisherRepository }),

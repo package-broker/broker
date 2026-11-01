@@ -115,6 +115,7 @@ function setup() {
   };
   const sourceSync: SourceSyncDeps = {
     sources: {
+      reportCandidateSkipped: async () => {},
       get: vi.fn<SourceSyncDeps['sources']['get']>().mockResolvedValue(source),
       pollState: vi.fn<SourceSyncDeps['sources']['pollState']>().mockResolvedValue('written'),
     },

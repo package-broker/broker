@@ -1,7 +1,13 @@
+import { GitFetchError } from '../sources/git/fetch.js';
 import { PublishValidationError } from '../registry/npm/tarball-walk.js';
 import { NPM_PACK_SKIP_CODES, type NpmPackSkipCode } from '../sources/source-error-codes.js';
 import { packTarball } from '../registry/npm/tarball-pack.js';
-import { formatIntegrity } from '../platform/codec.js';
+import {
+  CodecLimitError,
+  CodecCorruptError,
+  CodecTruncatedError,
+  formatIntegrity,
+} from '../platform/codec.js';
 import type {
   CatalogueWriteGuard,
   CatalogueWriter,
@@ -55,6 +61,7 @@ export interface DistFetchDeps {
   readonly writer: Pick<CatalogueWriter, 'attachDist' | 'quarantine'>;
   readonly blobReplacer: BlobReplacer;
   readonly maxBytes: number;
+  readonly repositoryArchiveBytes?: number;
   readonly enqueueNpmVcsBuild?: () => Promise<void>;
   readonly reportSkipped?: (code: NpmPackSkipCode) => Promise<void>;
 }
@@ -288,7 +295,10 @@ export async function buildNpmVcsDist(
       sourceRef: target.fetch.sourceRef,
       url: null,
     });
-    const inputCap = 64 * 1024 * 1024;
+    const inputCap = Math.min(
+      deps.repositoryArchiveBytes ?? 64 * 1024 * 1024,
+      deps.store.maxStagingBytes ?? 64 * 1024 * 1024,
+    );
     if (opened.size !== null && opened.size > inputCap) {
       await opened.body.cancel();
       throw new BlobTooLargeError();
@@ -305,11 +315,11 @@ export async function buildNpmVcsDist(
           { signal },
         ),
       codecs: deps.providerContext.codecs,
-      maxOutputBytes: Math.min(deps.maxBytes, 50_000_000),
+      maxOutputBytes: Math.min(deps.maxBytes, deps.store.maxStagingBytes ?? 50_000_000, 50_000_000),
     });
     const digest = deps.providerContext.codecs.digestTap(['sha512']);
     packed = await deps.store.stage(ctx, result.body.pipeThrough(digest.transform, { signal }), {
-      maxBytes: Math.min(deps.maxBytes, 50_000_000),
+      maxBytes: Math.min(deps.maxBytes, deps.store.maxStagingBytes ?? 50_000_000, 50_000_000),
       mediaType: 'application/gzip',
     });
     const npmIntegrity = formatIntegrity('sha512', (await digest.digests).sha512);
@@ -329,8 +339,32 @@ export async function buildNpmVcsDist(
     });
     return effect.changed ? 'attached' : 'stale';
   } catch (error) {
-    if (error instanceof PublishValidationError) {
-      const code = error.code === 'candidate_skipped' ? error.detail : error.code;
+    if (
+      !signal.aborted &&
+      (overSizeCap(error) ||
+        error instanceof CodecLimitError ||
+        (error instanceof GitFetchError &&
+          (error.code === 'too_large' || error.code === 'tree_too_large'))) &&
+      deps.reportSkipped !== undefined
+    ) {
+      await deps.reportSkipped('too_large');
+      return 'skipped';
+    }
+    if (
+      !signal.aborted &&
+      (error instanceof CodecCorruptError || error instanceof CodecTruncatedError) &&
+      deps.reportSkipped !== undefined
+    ) {
+      await deps.reportSkipped('invalid_tarball');
+      return 'skipped';
+    }
+    if (!signal.aborted && error instanceof PublishValidationError) {
+      const code =
+        error.detail === 'output_cap'
+          ? 'too_large'
+          : error.code === 'candidate_skipped'
+            ? error.detail
+            : error.code;
       if (
         (NPM_PACK_SKIP_CODES as readonly (string | undefined)[]).includes(code) &&
         deps.reportSkipped !== undefined

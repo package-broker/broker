@@ -710,11 +710,11 @@ it.each(['listing', 'plan'])('refuses malformed fork flags in %s', async (mode) 
   });
 });
 
-it('still classifies Composer forks', async () => {
+it('classifies Composer forks with explicit opt-in', async () => {
   const f = setup([{ name: 'lib', fork: true }], {
     lib: { 'composer.json': composer('acme/lib') },
   });
-  expect((await run(f)).entries).toContainEqual(
+  expect((await run(f, { includeForks: true })).entries).toContainEqual(
     expect.objectContaining({ ecosystem: 'composer', action: 'new', packageName: 'acme/lib' }),
   );
 });

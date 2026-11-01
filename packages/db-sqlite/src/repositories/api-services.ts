@@ -1,3 +1,6 @@
+import { createConfiguredGithubDiscovery } from '@package-broker/core/sources/configured-discovery';
+import { UpstreamError, type PolicyFetch } from '@package-broker/core/sources/policy-fetch';
+import { createDiscoveryRepositoryReader } from './discovery.js';
 import { createTrustedPublisherStore, createTrustedPublisherLookup } from './trusted-publishers.js';
 import type { TrustedPublisherRouteDeps } from '@package-broker/core/api/routes/trusted-publishers';
 import { createPackageDetailRepository } from './package-detail.js';
@@ -72,6 +75,7 @@ function auditReader(executor: SqlExecutor): AuditReader {
 
 export interface ApiRoutesOptions {
   readonly runtime: 'node' | 'cloudflare';
+  readonly discoveryFetch?: PolicyFetch;
   readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
   readonly keyring: Keyring;
@@ -128,6 +132,21 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
   }
   try {
     const module = createApiModule({
+      sourceDiscovery: {
+        ...common,
+        discovery: createConfiguredGithubDiscovery({
+          credentials: credentialRepository,
+          store: credentialStore,
+          sources: sourceService,
+          existingRepository: createDiscoveryRepositoryReader(executor),
+          clock: systemClock,
+          fetch:
+            input.discoveryFetch ??
+            (async () => {
+              throw new UpstreamError('refused');
+            }),
+        }),
+      },
       npmLogin: access.npmLogin,
       trustedPublishers: {
         ...common,

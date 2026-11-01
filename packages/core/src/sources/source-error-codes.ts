@@ -22,9 +22,11 @@ export const SOURCE_ERROR_CODES = [
 ] as const;
 
 export const NPM_PACK_SKIP_CODES = [
+  'too_large',
   'unsupported_files_pattern',
   'invalid_packlist',
   'invalid_tarball',
   'archive_changed',
+  'internal',
 ] as const;
 export type NpmPackSkipCode = (typeof NPM_PACK_SKIP_CODES)[number];

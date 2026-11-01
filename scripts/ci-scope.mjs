@@ -220,6 +220,8 @@ export function runCheck(check, packages, { spawn = spawnSync, extraArgs = [] } 
     if (packages.includes('ui'))
       run(['--filter', '@package-broker/ui', 'exec', 'tsc', '-b', 'test-support']);
   } else if (check === 'unit' && projects.length) {
+    // The cli tests import built runtimes and UI assets; in a full run the e2e project's global setup builds them.
+    if (projects.includes('cli') && !projects.includes('e2e')) run(['build']);
     run(['vitest', 'run', ...projects.flatMap((name) => ['--project', name]), ...extraArgs]);
   } else if (check === 'lint') {
     run(['exec', 'eslint', '.', '--ignore-pattern', 'packages/**']);

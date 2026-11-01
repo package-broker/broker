@@ -153,12 +153,17 @@ export async function inventory(paths: DeploymentPaths): Promise<BlobEntry[]> {
     db.close();
   }
 }
+function storedObjectPath(paths: DeploymentPaths, entry: BlobEntry): string {
+  const path = resolve(paths.blobRoot, entry.storageKey);
+  if (!path.startsWith(resolve(paths.blobRoot) + '/')) throw new BackupIntegrityError();
+  return path;
+}
 export async function checkInventory(paths: DeploymentPaths, objects?: BlobEntry[]) {
   const expected = objects ?? (await inventory(paths));
   const missing: string[] = [];
   const corrupt: string[] = [];
   for (const entry of expected) {
-    const path = paths.blobObject(entry.orgId, entry.sha256);
+    const path = storedObjectPath(paths, entry);
     if (!(await exists(path))) {
       missing.push(entry.sha256);
       continue;
@@ -230,13 +235,10 @@ export async function backupDeployment(
   await cp(paths.secrets, target.secrets, { recursive: true });
   await mkdir(target.blobRoot, { recursive: true });
   for (const object of objects) {
-    const destination = target.blobObject(object.orgId, object.sha256);
+    const destination = storedObjectPath(target, object);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(paths.blobObject(object.orgId, object.sha256), destination);
-    await copyFile(
-      paths.blobObject(object.orgId, object.sha256) + '.media',
-      destination + '.media',
-    );
+    await copyFile(storedObjectPath(paths, object), destination);
+    await copyFile(storedObjectPath(paths, object) + '.media', destination + '.media');
   }
   const keys = (await readdir(target.secrets)).sort();
   const keyChecksums: Record<string, string> = {};

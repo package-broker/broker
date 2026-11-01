@@ -210,3 +210,27 @@ case "$LAB" in */pb-rehearsal-manual-*) rm -rf -- "$LAB" ;; *) exit 1 ;; esac
 ```
 
 The disposable Analytics Engine dataset has no per-dataset delete operation in the inspected Wrangler CLI; it receives no application traffic after Worker deletion and expires under account retention. Record its generated name in the report; records remain subject to account retention. For production backups include separately retained filesystem/S3/R2 bytes, all external secrets and referenced master-key versions, consistent DB state and exact deployment configuration/artifact identity; derived caches and in-process execution state are excluded. A bucket binding, secret name, or database path is not a backup of its contents.
+
+## npm publish and repository-build restore (DEC-NPM-24)
+
+On the Linux gate host, with Node 24, npm and the installed workspace dependencies:
+
+```sh
+pnpm build
+node --test scripts/npm-restore-rehearsal.test.mjs
+node scripts/npm-restore-rehearsal.mjs
+```
+
+For an offline storage check without a listener or client invocation, use `node scripts/npm-restore-rehearsal.mjs --storage-only` after building. It exercises the repository archive/packlist build and restores its database, key file and blob into fresh storage. Its result explicitly excludes publish/install acceptance.
+
+The script uses a disposable `.pb/npm-restore-*` directory. It migrates a file-backed SQLite database, writes a fixture keyring secret, seeds an isolated organization/project and boots the Node runtime. It creates a repository fixture through the shipped Git archive builder and npm packlist builder (no remote repository or lifecycle scripts), then publishes a second package using the real npm client. It closes the broker before the backup boundary, backs up SQLite with the online backup API, and copies all referenced filesystem blob bytes, media sidecars and key files. The existing backup helper checks hashes and records candidate identity.
+
+It removes the source deployment directory, restores the three backup sets into a fresh directory, verifies the inventory, and boots a new runtime with empty derived caches and the restored keyring file. A new npm home/cache installs both exact versions through the broker. Acceptance checks both installed manifests and `index.js` bytes. Upstream proxy sources are detached and the repository fixture has no refetch URL; missing restored bytes cannot be replaced by a remote fetch. The script cleans up on success or failure and prints only a fixed result, never client output or credentials. Exit zero and the `npm restore rehearsal: PASS` line establish acceptance; guard tests alone do not.
+
+For a deployment restore, pause writers and job consumers before taking the coordinated backup. Preserve the database, every referenced object with metadata, and **all current and previous keyring versions** outside the lost deployment. Preserve runtime configuration, source/plugin composition and the matching release as well. Restore into empty storage with the same organization identity; never bootstrap a replacement organization or enable keyring reseeding. Start with the saved keyring, check readiness, sign in and verify scoped tokens, then install both a directly published package and a repository-built package with empty client caches. Compare their expected versions and file digests recorded before backup. Resume writers only after those checks pass. If moving the public origin, update client registry configuration and regenerate/review locks that embed the old archive URL.
+
+Result for NPM20b: the storage-only rehearsal passed in the sandbox, including repository build and restore of the recorded promoted blob path. Guard tests and validation are recorded in `NPM20b-report.md`; the listener/client rehearsal is **NOT RUN in the sandbox**. Run the command above on the Linux gate host and retain its exit status and fixed PASS line with the release candidate identity. Until then, npm restore acceptance remains pending.
+
+### Cloudflare owner step
+
+A live Cloudflare restore requires owner credentials and disposable D1/R2 resources. It is separate from the Node script and from Miniflare evidence. Quiesce Worker writes and queue consumers, export the deployment's D1 database and migration ledger, copy every referenced R2 object including content type metadata, and securely save all Worker keyring secret versions and configuration. Restore to fresh D1/R2 bindings using the same candidate and organization identity; provision the saved secrets without reseeding. Check readiness, sign-in and scoped tokens, then install a pre-backup directly published package and a GitHub repository-built package with empty caches and compare the recorded bytes. Exercise missing-object and wrong-key refusal before accepting the restore. Record deployment/candidate identifiers, backup/restore timing, package versions/digests and pass/fail without recording credentials. This live rehearsal is **NOT RUN** by NPM20b and remains an owner action.

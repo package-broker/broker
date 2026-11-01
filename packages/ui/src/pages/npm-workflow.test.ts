@@ -69,10 +69,10 @@ describe('package workflow guards', () => {
 
 it('uses the exact project registry address for each ecosystem', () => {
   expect(installSnippet('npm', '@team/library', 'https://broker.test', 'demo')).toBe(
-    'npm install @team/library\n# Registry: https://broker.test/demo/npm/',
+    'registry=https://broker.test/demo/npm/',
   );
   expect(installSnippet('composer', 'team/library', 'https://broker.test', 'demo')).toBe(
-    'composer require team/library\n# Repository: https://broker.test/demo',
+    'composer config repositories.demo composer https://broker.test/demo\ncomposer require team/library',
   );
 });
 
@@ -170,4 +170,17 @@ it('offers only valid actions across approval and scan combinations', () => {
       );
     }
   }
+});
+
+it('invalidates filter choices after source changes', async () => {
+  let name = 'Before';
+  const client = createApiClient({
+    readCookie: () => undefined,
+    fetch: async () => Response.json({ items: [{ id: 'source', name }], next: null }),
+  });
+  const load = createPackageFilterChoicesLoader({ client } as ShellServices);
+  expect((await load('demo')).sources[0]?.name).toBe('Before');
+  name = 'After';
+  load.invalidate();
+  expect((await load('demo')).sources[0]?.name).toBe('After');
 });

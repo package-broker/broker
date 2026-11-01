@@ -4,7 +4,15 @@ import { PackageWorkflow } from './packages/npm-workflow.js';
 import { PackageDetail } from './packages/package-detail.js';
 import { PackageSourceControls } from './packages/source-actions.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
-import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from 'react';
 import type { operations } from '../api-types.js';
 import { safePageHash, useServices, type ShellServices, type ReplayResult } from '../auth.js';
 import { buildListFilterHash } from '../page-hash.js';
@@ -706,7 +714,7 @@ type FilterChoice = { id: string; name: string };
 type FilterChoices = { sources: FilterChoice[]; projects: FilterChoice[] };
 export function createPackageFilterChoicesLoader(services: ShellServices) {
   const cache = new Map<string | null, Promise<FilterChoices>>();
-  return (project: string | null) => {
+  const load = (project: string | null) => {
     const cached = cache.get(project);
     if (cached) return cached;
     const pending = (async () => {
@@ -750,12 +758,14 @@ export function createPackageFilterChoicesLoader(services: ShellServices) {
     cache.set(project, pending);
     return pending;
   };
+  return Object.assign(load, { invalidate: () => cache.clear() });
 }
 
 function PackageFilters(props: {
   query: PackageQuery;
   onChange: (query: PackageQuery) => void;
   loadChoices: ReturnType<typeof createPackageFilterChoicesLoader>;
+  choicesRevision: number;
 }) {
   const [draft, setDraft] = useState(props.query);
   const { q, status, source, projectId, project } = props.query;
@@ -778,7 +788,7 @@ function PackageFilters(props: {
     return () => {
       active = false;
     };
-  }, [props.loadChoices, props.query.project]);
+  }, [props.loadChoices, props.query.project, props.choicesRevision]);
   const sources = choices?.sources ?? [];
   const projects = choices?.projects ?? [];
   const choicesLoaded = choices !== null;
@@ -796,7 +806,7 @@ function PackageFilters(props: {
   return (
     <FilterToolbar
       chips={(['q', 'status', 'source', 'projectId'] as const).flatMap((key) =>
-        props.query[key]
+        props.query[key] && (choicesLoaded || (key !== 'source' && key !== 'projectId'))
           ? [
               {
                 label: {
@@ -918,7 +928,21 @@ function PackageFilters(props: {
 export function PackagesPage() {
   const services = useServices();
   const controller = useMemo(() => createPackagesController(services), [services]);
+  const [choicesRevision, setChoicesRevision] = useState(0);
   const loadFilterChoices = useMemo(() => createPackageFilterChoicesLoader(services), [services]);
+  const sourceSignatures = useRef(new Map<string | null, string>());
+  const sourcesChanged = useCallback(
+    (scope?: string | null, signature?: string) => {
+      if (scope !== undefined && signature !== undefined) {
+        const previous = sourceSignatures.current.get(scope);
+        sourceSignatures.current.set(scope, signature);
+        if (previous === undefined || previous === signature) return;
+      }
+      loadFilterChoices.invalidate();
+      setChoicesRevision((value) => value + 1);
+    },
+    [loadFilterChoices],
+  );
   const state = useSyncExternalStore(
     controller.subscribe,
     controller.snapshot,
@@ -945,9 +969,10 @@ export function PackagesPage() {
   useEffect(
     () =>
       services.subscribeReplay?.((result) => {
+        if (result.ok && /\/sources(?:\/|$)/.test(result.path)) sourcesChanged();
         void controller.replayed(result);
       }),
-    [services, controller],
+    [services, controller, sourcesChanged],
   );
   const go = (query: PackageQuery) => {
     window.location.hash = buildPackagesHash(query);
@@ -980,11 +1005,13 @@ export function PackagesPage() {
           key={state.query.project}
           services={services}
           project={state.query.project}
+          onSourcesChanged={sourcesChanged}
         />
       ) : null}
       {state.selected === null ? (
         <PackageFilters
           loadChoices={loadFilterChoices}
+          choicesRevision={choicesRevision}
           query={parsePackagesHash(hash)}
           onChange={go}
         />

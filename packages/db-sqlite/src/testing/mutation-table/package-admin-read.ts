@@ -1,10 +1,13 @@
 import { expect } from 'vitest';
-import { createPackageAdminReader } from '../../repositories/package-admin-read.js';
+import {
+  createPackageAdminReader,
+  readPackageDetail,
+} from '../../repositories/package-admin-read.js';
 import { executing } from './factory-cases.js';
 import { NOT_NULL, seedPackage, seedProject, seedSource, seedVersion } from './fixtures.js';
 import { orgOf, seeder, type ContractCase, type MutationEntry } from './harness.js';
 
-type Operation = 'list' | 'versions' | 'manage';
+type Operation = 'list' | 'versions' | 'manage' | 'detail';
 type Boundary = 'pkg' | 'src' | 'v';
 function boundaryCase(operation: Operation, boundary: Boundary): ContractCase {
   return {
@@ -35,7 +38,14 @@ function boundaryCase(operation: Operation, boundary: Boundary): ContractCase {
         '1.0.0',
       );
       const reader = createPackageAdminReader(executing(context));
-      if (operation === 'list') {
+      if (operation === 'detail') {
+        const item = await readPackageDetail(executing(context), own, {
+          packageId: 'K',
+          projectId: null,
+        });
+        if (boundary === 'v') expect(item).toMatchObject({ latestVersion: null, versionCount: 0 });
+        else expect(item).toBeNull();
+      } else if (operation === 'list') {
         const page = await reader.listOrganization(own, { limit: 10 });
         if (boundary === 'v') {
           expect(page.items[0]).toMatchObject({ latestVersion: null, versionCount: 0 });
@@ -52,7 +62,7 @@ function boundaryCase(operation: Operation, boundary: Boundary): ContractCase {
   };
 }
 
-type ProjectOperation = 'listProject' | 'listVersions' | 'findManagedVersion';
+type ProjectOperation = 'listProject' | 'listVersions' | 'findManagedVersion' | 'detail';
 function projectBoundaryCase(operation: ProjectOperation, boundary: Boundary | 'p'): ContractCase {
   return {
     name: `package admin ${operation} project branch excludes foreign ${boundary} rows`,
@@ -95,7 +105,15 @@ function projectBoundaryCase(operation: ProjectOperation, boundary: Boundary | '
         own.orgId,
       );
       const reader = createPackageAdminReader(executing(context));
-      if (operation === 'listProject') {
+      if (operation === 'detail') {
+        await seed("DELETE FROM project_package WHERE project_id = 'P'");
+        const item = await readPackageDetail(executing(context), own, {
+          packageId: 'K0',
+          projectId: 'P',
+        });
+        if (boundary === 'v') expect(item).toMatchObject({ latestVersion: null, versionCount: 0 });
+        else expect(item).toBeNull();
+      } else if (operation === 'listProject') {
         const page = await reader.listProject(own, 'P', { limit: 10 });
         if (boundary === 'v')
           expect(page.items[0]).toMatchObject({ latestVersion: null, versionCount: 0 });
@@ -114,13 +132,14 @@ function projectBoundaryCase(operation: ProjectOperation, boundary: Boundary | '
     },
   };
 }
-const projectCases = (['listProject', 'listVersions', 'findManagedVersion'] as const).flatMap(
-  (operation) =>
-    (['pkg', 'src', 'v', 'p'] as const).map((boundary) => ({
-      operation,
-      boundary,
-      contract: projectBoundaryCase(operation, boundary),
-    })),
+const projectCases = (
+  ['listProject', 'listVersions', 'findManagedVersion', 'detail'] as const
+).flatMap((operation) =>
+  (['pkg', 'src', 'v', 'p'] as const).map((boundary) => ({
+    operation,
+    boundary,
+    contract: projectBoundaryCase(operation, boundary),
+  })),
 );
 const mixedStatus: ContractCase = {
   name: 'package admin keeps active plus tombstoned versions active',
@@ -254,7 +273,7 @@ const attributionCases = (['pu', 'sp', 'au', 'dt', 'pending', 'sealed'] as const
   contract: attributionCase(alias),
 }));
 
-const boundaryCases = (['list', 'versions', 'manage'] as const).flatMap((operation) =>
+const boundaryCases = (['list', 'versions', 'manage', 'detail'] as const).flatMap((operation) =>
   (['pkg', 'src', 'v'] as const).map((boundary) => ({
     operation,
     boundary,
@@ -295,7 +314,7 @@ export const entries: readonly MutationEntry[] = [
         caseName: contract.name,
         locate: new RegExp(`(?<![\\w.])${boundary}\\.org_id = \\?`),
         neutral: NOT_NULL,
-        copies: operation === 'list' && boundary === 'v' ? 2 : 1,
+        copies: (operation === 'list' || operation === 'detail') && boundary === 'v' ? 2 : 1,
       })),
       ...projectCases
         .filter(({ operation, boundary }) => operation !== 'listProject' || boundary !== 'p')
@@ -304,7 +323,8 @@ export const entries: readonly MutationEntry[] = [
           caseName: contract.name,
           locate: new RegExp(`(?<![\\w.])${boundary}\\.org_id = \\?`),
           neutral: NOT_NULL,
-          copies: operation === 'listProject' ? 2 : 1,
+          copies:
+            operation === 'listProject' || (operation === 'detail' && boundary === 'v') ? 2 : 1,
           ...(operation === 'listProject' && (boundary === 'pkg' || boundary === 'src')
             ? {
                 waivedCopies: {

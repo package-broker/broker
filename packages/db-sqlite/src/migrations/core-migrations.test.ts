@@ -172,6 +172,7 @@ describe('core migrations', () => {
       'core:0002_npm_publish',
       'core:0003_npm_identity',
       'core:0004_source_revision',
+      'core:0005_package_settings_revision',
     ]);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))

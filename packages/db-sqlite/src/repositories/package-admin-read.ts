@@ -129,7 +129,7 @@ type PackageRow = Omit<
   readonly id: string | null;
   readonly visible_to_new_projects: number;
   readonly new_project_access_mode: 'none' | 'request';
-  readonly rev: number;
+  readonly settings_revision: number;
   readonly scanned: number;
   readonly source_id: string;
   readonly source_name: string;
@@ -147,6 +147,7 @@ async function list(
   query: PackageListQuery,
   projectId?: string,
   attachedProjectId?: string,
+  target?: { readonly packageId: string; readonly projectId: string | null },
 ) {
   validateQuery(query);
   const organization = projectId === undefined;
@@ -157,6 +158,11 @@ async function list(
     sql`src.org_id = ${ctx.orgId}`,
     after?.condition ?? sql`1 = 1`,
   ];
+  if (target) {
+    filters.push(sql`pkg.id = ${target.packageId}`);
+    if (target.projectId !== null)
+      filters.push(sql`((${owner(ctx, target.projectId)}) or (${winner(ctx, target.projectId)}))`);
+  }
   const range = (eco: NameEcosystem | undefined, limit: RawBuilder<unknown>) => {
     const rangeFilters = [...filters];
     if (eco !== undefined) rangeFilters.push(sql`pkg.ecosystem = ${eco}`);
@@ -177,7 +183,7 @@ async function list(
         and substr(pkg.name, 1, length(${query.q})) = ${query.q}`);
     }
     return sql`
-    select pkg.id, pkg.ecosystem, pkg.name, pkg.status, pkg.last_synced_at, pkg.visible_to_new_projects, pkg.new_project_access_mode, pkg.rev,
+    select pkg.id, pkg.ecosystem, pkg.name, pkg.status, pkg.last_synced_at, pkg.visible_to_new_projects, pkg.new_project_access_mode, pkg.settings_revision,
       src.id as source_id, src.name as source_name, src.type as source_type, src.project_id as source_project_id
     from package as pkg join source as src on src.id = +pkg.source_id
     where ${sql.join(rangeFilters, sql` and `)}
@@ -200,7 +206,7 @@ async function list(
   const candidates =
     projectId === undefined
       ? sql`select * from scan`
-      : sql`select k.ecosystem, k.name, pkg.id, pkg.status, pkg.last_synced_at, pkg.visible_to_new_projects, pkg.new_project_access_mode, pkg.rev,
+      : sql`select k.ecosystem, k.name, pkg.id, pkg.status, pkg.last_synced_at, pkg.visible_to_new_projects, pkg.new_project_access_mode, pkg.settings_revision,
         src.id as source_id, src.name as source_name, src.type as source_type, src.project_id as source_project_id
       from (
         select ecosystem, name from scan group by ecosystem, name
@@ -212,7 +218,7 @@ async function list(
     statement(sql`with ${scan}, c as materialized (${candidates}), d as materialized (
     select c.*, ${derivedStatus(ctx)} as list_status from c
   ) select d.id, d.ecosystem, d.name, d.list_status as status,
-    d.visible_to_new_projects, d.new_project_access_mode, d.rev,
+    d.visible_to_new_projects, d.new_project_access_mode, d.settings_revision,
     d.source_id, d.source_name, d.source_type, d.source_project_id, d.last_synced_at,
     (select count(*) from scan) as scanned,
     (select v.version from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id
@@ -233,7 +239,7 @@ async function list(
           ? {
               visibleToNewProjects: row.visible_to_new_projects === 1,
               newProjectAccessMode: row.new_project_access_mode,
-              revision: row.rev,
+              revision: row.settings_revision,
             }
           : {}),
         ecosystem: row.ecosystem,
@@ -373,4 +379,13 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
       return { ...version, ...(publishGate === 1 ? { publishGate: true } : {}) };
     },
   };
+}
+
+export async function readPackageDetail(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  query: { readonly packageId: string; readonly projectId: string | null },
+): Promise<PackageListItem | null> {
+  const page = await list(executor, ctx, { limit: 1 }, undefined, undefined, query);
+  return page.items[0] ?? null;
 }

@@ -443,7 +443,7 @@ export function createVisibilityAttachRepository(
       const owner = row.project_id;
       const update = db
         .updateTable('package')
-        .set({ visible_to_new_projects: flag })
+        .set({ visible_to_new_projects: flag, settings_revision: sql`settings_revision + 1` })
         .where('org_id', '=', ctx.orgId)
         .where('id', '=', input.packageId)
         .where('visible_to_new_projects', 'is not', flag);

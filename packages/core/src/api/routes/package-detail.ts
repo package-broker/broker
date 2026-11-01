@@ -31,6 +31,18 @@ export interface PackageDetailRouteDeps extends ApiRouteDeps {
 
 export function packageDetailRoutes(deps: PackageDetailRouteDeps): readonly RouteDefinition[] {
   const [readme, access] = PACKAGE_DETAIL_API_SPECS;
+  const details = PACKAGE_DETAIL_API_SPECS.slice(2).map((spec) =>
+    apiRoute(spec, async ({ ctx, params }) => {
+      if (ctx.org === null || (spec.boundary === 'project' && ctx.projectId === null))
+        return { error: 'not_found' };
+      const item = await deps.repository.detail(ctx.org, {
+        packageId: params.package,
+        projectId: spec.boundary === 'project' ? ctx.projectId : null,
+      });
+      if (item === null) return { error: 'not_found' };
+      return { status: 200, body: item };
+    }),
+  );
   const routes = [
     {
       ...apiRoute(readme, async ({ ctx, params, query }) => {
@@ -135,15 +147,17 @@ export function packageDetailRoutes(deps: PackageDetailRouteDeps): readonly Rout
       return { status: 200, body: response };
     }),
   ];
-  return routes.map((route, index) => {
+  return [...routes, ...details].map((route, index) => {
     const wrapped: RouteDefinition = {
       ...route,
       handler: async (ctx) => {
         const response = await route.handler(ctx);
-        if (response.status === 404)
-          return envelopeResponse(404, 'not_found', 'Route not found', ctx.requestId);
-        response.headers.set('cache-control', 'no-store');
-        return response;
+        const result =
+          response.status === 404
+            ? envelopeResponse(404, 'not_found', 'Route not found', ctx.requestId)
+            : response;
+        result.headers.set('cache-control', 'no-store');
+        return result;
       },
     };
     return index === 0

@@ -86,7 +86,7 @@ export function describeNpmIdentityMigrationContract(
         ]);
         expect(
           (await migrate(opened.executor, sources, { holder: 'source-upgrade' })).applied,
-        ).toEqual(['core:0004_source_revision']);
+        ).toEqual(['core:0004_source_revision', 'core:0005_package_settings_revision']);
         await opened.executor.all({
           sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('new', 'revision-org', 'New', 'npm', 'hosted')",
           params: [],
@@ -123,6 +123,7 @@ export function describeNpmIdentityMigrationContract(
             'core:0002_npm_publish',
             'core:0003_npm_identity',
             'core:0004_source_revision',
+            'core:0005_package_settings_revision',
           ]);
           await migrate(opened.executor, sources.slice(0, baseline), { holder: 'baseline' });
           await seed(opened.executor);

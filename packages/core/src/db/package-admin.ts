@@ -103,6 +103,10 @@ export interface PackageAccessInput {
 }
 
 export interface PackageDetailRepository {
+  detail(
+    ctx: OrgContext,
+    query: { readonly packageId: string; readonly projectId: string | null },
+  ): Promise<PackageListItem | null>;
   packageName(ctx: OrgContext, packageId: string): Promise<string | null>;
   readme(
     ctx: OrgContext,

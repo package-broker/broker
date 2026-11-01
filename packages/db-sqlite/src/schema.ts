@@ -398,6 +398,7 @@ export interface RegisteredNameTable {
 
 /** Mirrors `package` in the core migrations. */
 export interface PackageTable {
+  settings_revision: Generated<number>;
   new_project_access_mode: Generated<'none' | 'request'>;
   held_until_active: Generated<number>;
   id: string;

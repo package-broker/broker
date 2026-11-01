@@ -673,7 +673,7 @@ export interface NpmLoginSessionTable {
   done_hash: string;
   org_id: string;
   project_id: string;
-  state: Generated<'pending' | 'approved' | 'consumed'>;
+  state: Generated<'pending' | 'approved' | 'delivering' | 'consumed'>;
   cli_hostname: string | null;
   source_ip: string | null;
   created_at: Generated<string>;
@@ -684,6 +684,7 @@ export interface NpmLoginSessionTable {
   token_nonce: string | null;
   token_key_version: number | null;
   consumed_at: string | null;
+  delivering_at: string | null;
 }
 
 export interface TrustedPublisherTable {

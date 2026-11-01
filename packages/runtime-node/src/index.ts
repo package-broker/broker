@@ -182,7 +182,7 @@ import {
 } from '@package-broker/core/kernel/ui-routes';
 import { fileURLToPath } from 'node:url';
 import { createNodeAssets } from './assets.js';
-import { nodeClientIp, type TrustedProxy } from './client-ip.js';
+import { nodeAdmissionIp, nodeClientIp, type TrustedProxy } from './client-ip.js';
 import { nodeCodecs } from './codec/node-codec.js';
 import { reportedVcsProviders, type VcsProvider } from '@package-broker/core/sources/config';
 import { createDnsGuard } from './sources/dns-guard.js';
@@ -444,6 +444,7 @@ async function assembleAccess(
   log: KernelLog,
   tokens: TokenWiring,
   clientIp: (request: Request) => string | null,
+  admissionIp: (request: Request) => string | null,
 ): Promise<AccessAssembly> {
   const localAuth = parseLocalAuthPolicy(auth.env['PB_AUTH_LOCAL']);
   await auth.keyring.hmacKey('token-pepper', auth.keyring.currentVersion);
@@ -466,7 +467,7 @@ async function assembleAccess(
     registration,
     tokens,
   });
-  return built;
+  return { ...built, npmLogin: { ...built.npmLogin, admissionIp } };
 }
 
 function buildPackageReads(executor: SqlExecutor) {
@@ -718,6 +719,7 @@ interface RegistryAssembly {
 }
 
 function assembleRegistry(input: {
+  readonly admissionIp: (request: Request) => string | null;
   readonly options: NodeRegistryOptions;
   readonly seams: RegistrySeams;
   readonly executor: SqlExecutor;
@@ -817,6 +819,7 @@ function assembleRegistry(input: {
   const module = createRegistryModule({
     runtime: 'node',
     npmOidc: {
+      clientIp: input.admissionIp,
       repository: createOidcRepository(executor),
       tokens: createWorkloadTokenService({
         tokens: createWorkloadTokenStore(executor),
@@ -1050,6 +1053,9 @@ export function createNodeServer(
   const clientIp = (request: Request): string | null =>
     nodeClientIp(request, remoteAddress.getStore() ?? null, options.trustedProxy);
 
+  const admissionIp = (request: Request): string | null =>
+    nodeAdmissionIp(request, remoteAddress.getStore() ?? null, options.trustedProxy);
+
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);
 
@@ -1182,6 +1188,7 @@ export function createNodeServer(
             ),
             deploymentId,
             findOrganization: bootstrap.findSingleton,
+            admissionIp,
             ingestScope,
             anchors: {
               anchors: (ctx) => access?.providerAnchors.anchors(ctx) ?? Promise.resolve([]),
@@ -1289,6 +1296,7 @@ export function createNodeServer(
             log,
             tokenWiring(lifetime, patJobs, options.platformServices !== undefined),
             clientIp,
+            admissionIp,
           );
     if (access !== undefined && options.platformServices !== undefined) {
       importJobs.set({

@@ -61,3 +61,20 @@ it('npm_identity fits D1 migration statement and parameter limits', async () => 
     ),
   ).toBe(true);
 });
+
+it('npm_login_handoff fits D1 migration statement and parameter limits', async () => {
+  const source = (await discoveredMigrations()).find(
+    (source) => source.id === 'core:0006_npm_login_handoff',
+  )!;
+  expect(source.phase).toBe('contract');
+  const statements = splitStatements(source.sql);
+  expect(statements.length + 3).toBeLessThanOrEqual(200);
+  expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
+  expect(
+    statements.every((sql) =>
+      scanSql(sql)
+        .filter((part) => part.kind === 'code')
+        .every((part) => !/[?:@$]/.test(part.text)),
+    ),
+  ).toBe(true);
+});

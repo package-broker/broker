@@ -114,3 +114,14 @@ export function nodeClientIp(
         : trustedProxy;
   return headerClientIp(request, policy) ?? ipLiteral(remoteAddress);
 }
+
+/** Admission never trusts client-chosen headers in deprecated legacy mode. */
+export function nodeAdmissionIp(
+  request: Request,
+  remoteAddress: string | null,
+  trustedProxy: TrustedProxy | boolean = NO_TRUSTED_PROXY,
+): string | null {
+  if (trustedProxy === true || (typeof trustedProxy === 'object' && trustedProxy.kind === 'legacy'))
+    return ipLiteral(remoteAddress);
+  return nodeClientIp(request, remoteAddress, trustedProxy);
+}

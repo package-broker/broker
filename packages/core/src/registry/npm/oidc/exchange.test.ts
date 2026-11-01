@@ -43,6 +43,7 @@ function setup() {
   }));
   const organization = vi.fn(async () => orgContext('org'));
   const route = createOidcExchangeRoute({
+    clientIp: () => '192.0.2.1',
     verify,
     repository: { find, reserveStatements },
     tokens: { issueWorkload },
@@ -181,4 +182,15 @@ describe('host-level OIDC exchange', () => {
     expect(response.status).toBe(503);
     expect(await response.text()).not.toContain('secret');
   });
+});
+
+it('limits anonymous exchange before verification and publisher reads', async () => {
+  const h = setup();
+  for (let n = 0; n < 10; n++) await h.route.handler(h.ctx());
+  const response = await h.route.handler(h.ctx());
+  expect(response.status).toBe(429);
+  expect(response.headers.get('retry-after')).toBe('60');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(h.verify).toHaveBeenCalledTimes(10);
+  expect(h.find).toHaveBeenCalledTimes(10);
 });

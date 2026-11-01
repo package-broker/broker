@@ -1,6 +1,11 @@
 import { isIpLiteral } from '@package-broker/core/audit/actions';
 import { describe, expect, it } from 'vitest';
-import { nodeClientIp, parseTrustedProxy, type TrustedProxy } from './client-ip.js';
+import {
+  nodeAdmissionIp,
+  nodeClientIp,
+  parseTrustedProxy,
+  type TrustedProxy,
+} from './client-ip.js';
 
 const request = (headers: Record<string, string> = {}) =>
   new Request('http://broker.test', { headers });
@@ -422,4 +427,20 @@ describe('parseTrustedProxy', () => {
   ])('rejects %j', (value) => {
     expect(parseTrustedProxy(value)).toBeNull();
   });
+});
+
+it.each([true, { kind: 'legacy' }] as const)(
+  'keys legacy admission on the socket while preserving the audit address: %j',
+  (policy) => {
+    const incoming = request({ 'cf-connecting-ip': '203.0.113.66' });
+    expect(nodeClientIp(incoming, '10.0.0.5', policy)).toBe('203.0.113.66');
+    expect(nodeAdmissionIp(incoming, '10.0.0.5', policy)).toBe('10.0.0.5');
+    expect(nodeAdmissionIp(incoming, null, policy)).toBeNull();
+    expect(nodeAdmissionIp(incoming, 'invalid', policy)).toBeNull();
+  },
+);
+it('uses the explicit trusted proxy policy for admission', () => {
+  const incoming = request({ 'x-forwarded-for': '198.51.100.7' });
+  expect(nodeAdmissionIp(incoming, '10.0.0.5', { kind: 'xff', hops: 1 })).toBe('198.51.100.7');
+  expect(nodeAdmissionIp(incoming, '10.0.0.5')).toBe('10.0.0.5');
 });

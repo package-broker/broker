@@ -133,6 +133,6 @@ describe('discoveredMigrations', () => {
       .sort();
     const sources = await discoveredMigrations();
     expect(sources.map((source) => `${source.id.slice('core:'.length)}.sql`)).toEqual(files);
-    expect(sources.length).toBe(5);
+    expect(sources.length).toBe(6);
   });
 });

@@ -143,7 +143,12 @@ export function createNpmLoginRepository(executor: SqlExecutor, keyring: Keyring
         return { status: 'refused', reason: 'authority' } as const;
       return outcome;
     },
-    async poll(ctx: OrgContext, projectId: string, doneHash: string) {
+    async poll(
+      ctx: OrgContext,
+      projectId: string,
+      doneHash: string,
+      buildResponse: (token: string) => void,
+    ) {
       const predicate = `org_id = ? AND project_id = ? AND done_hash = ? AND state = 'approved' AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
       const params: [orgId: string, projectId: string, doneHash: string] = [
         ctx.orgId,
@@ -156,7 +161,7 @@ export function createNpmLoginRepository(executor: SqlExecutor, keyring: Keyring
           params,
         },
         {
-          sql: `UPDATE npm_login_session SET state = 'consumed', consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), token_ciphertext = NULL, token_nonce = NULL, token_key_version = NULL WHERE ${predicate} RETURNING id`,
+          sql: `UPDATE npm_login_session SET state = 'delivering', delivering_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), token_ciphertext = NULL, token_nonce = NULL, token_key_version = NULL WHERE ${predicate} RETURNING id`,
           params,
         },
       ]);
@@ -171,6 +176,7 @@ export function createNpmLoginRepository(executor: SqlExecutor, keyring: Keyring
             }
           | undefined;
         if (row === undefined) throw new Error('Login consume failed');
+        let plaintext: string;
         try {
           const token = await cipher.open(
             {
@@ -180,7 +186,8 @@ export function createNpmLoginRepository(executor: SqlExecutor, keyring: Keyring
             },
             `npm-login/${ctx.orgId}/${row.selector_hash}`,
           );
-          return { status: 'token', token: new TextDecoder().decode(token) } as const;
+          plaintext = new TextDecoder().decode(token);
+          buildResponse(plaintext);
         } catch {
           const now = systemClock.now().toISOString();
           const op = ulid();
@@ -208,6 +215,14 @@ export function createNpmLoginRepository(executor: SqlExecutor, keyring: Keyring
           ]);
           return { status: 'not_found' } as const;
         }
+        const completed = await executor.batch([
+          {
+            sql: "UPDATE npm_login_session SET state = 'consumed', consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), delivering_at = NULL WHERE org_id = ? AND project_id = ? AND done_hash = ? AND state = 'delivering' RETURNING id",
+            params,
+          },
+        ]);
+        if (completed[0]?.rows.length !== 1) return { status: 'not_found' } as const;
+        return { status: 'token', token: plaintext } as const;
       }
       const pending = await executor.all({
         sql: `SELECT 1 FROM npm_login_session WHERE org_id = ? AND project_id = ? AND done_hash = ? AND state = 'pending' AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')`,

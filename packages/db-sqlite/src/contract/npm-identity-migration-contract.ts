@@ -57,6 +57,85 @@ export function describeNpmIdentityMigrationContract(
   name: string,
   open: () => Promise<OpenedPair>,
 ): void {
+  it(`preserves every login state across the handoff migration: ${name}`, async () => {
+    const opened = await open();
+    const executor = opened.executor;
+    try {
+      const sources = await discoveredMigrations();
+      await migrate(
+        executor,
+        sources.filter((source) => source.sequence <= 5),
+        { holder: 'handoff-before' },
+      );
+      await seed(executor);
+      await login(executor, 'pending');
+      await login(executor, 'approved', 'c'.repeat(64), 'd'.repeat(64));
+      await login(executor, 'consumed', 'e'.repeat(64), 'f'.repeat(64));
+      await executor.batch([
+        {
+          sql: "UPDATE npm_login_session SET state='approved',user_id='user',token_id='token',token_ciphertext='box',token_nonce='nonce',token_key_version=1 WHERE org_id='org' AND id='approved'",
+          params: [],
+        },
+        {
+          sql: "UPDATE npm_login_session SET state='consumed',consumed_at=? WHERE org_id='org' AND id='consumed'",
+          params: [EXPIRES],
+        },
+      ]);
+      const query = {
+        sql: "SELECT * FROM npm_login_session WHERE org_id='org' ORDER BY id",
+        params: [],
+      };
+      const before = await executor.all(query);
+      await migrate(executor, sources, { holder: 'handoff-after' });
+      expect(
+        await executor.all({
+          ...query,
+          sql: query.sql.replace('SELECT *', 'SELECT npm_login_session.*'),
+        }),
+      ).toEqual(before.map((row) => ({ ...row, delivering_at: null })));
+      await executor.all({
+        sql: "UPDATE npm_login_session SET state='delivering',delivering_at=?,token_ciphertext=NULL,token_nonce=NULL,token_key_version=NULL WHERE org_id='org' AND id='approved'",
+        params: [EXPIRES],
+      });
+      await expect(
+        executor.all({
+          sql: "UPDATE npm_login_session SET delivering_at=NULL WHERE org_id='org' AND id='approved'",
+          params: [],
+        }),
+      ).rejects.toThrow();
+      const indexes = await executor.all<{
+        name: string;
+        unique: number;
+        origin: string;
+        partial: number;
+      }>({
+        sql: "PRAGMA index_list('npm_login_session')",
+        params: [],
+      });
+      expect(
+        indexes
+          .filter((index) => index.origin === 'c')
+          .map(({ name, unique, partial }) => ({ name, unique, partial }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      ).toEqual([
+        { name: 'npm_login_session_delivery', unique: 0, partial: 1 },
+        { name: 'npm_login_session_expiry', unique: 0, partial: 0 },
+        { name: 'npm_login_session_pending', unique: 0, partial: 1 },
+      ]);
+      const uniqueColumns = [];
+      for (const index of indexes.filter((index) => index.unique === 1)) {
+        const columns = await executor.all<{ name: string }>({
+          sql: `PRAGMA index_info('${index.name}')`,
+          params: [],
+        });
+        uniqueColumns.push(columns.map((column) => column.name));
+      }
+      expect(uniqueColumns.sort()).toEqual([['done_hash'], ['id'], ['selector_hash']]);
+      expect(await executor.all({ sql: 'PRAGMA foreign_key_check', params: [] })).toEqual([]);
+    } finally {
+      await opened.close();
+    }
+  });
   async function withDatabase(body: (executor: ScalarSqlExecutor) => Promise<void>) {
     const opened = await open();
     try {
@@ -86,7 +165,11 @@ export function describeNpmIdentityMigrationContract(
         ]);
         expect(
           (await migrate(opened.executor, sources, { holder: 'source-upgrade' })).applied,
-        ).toEqual(['core:0004_source_revision', 'core:0005_package_settings_revision']);
+        ).toEqual([
+          'core:0004_source_revision',
+          'core:0005_package_settings_revision',
+          'core:0006_npm_login_handoff',
+        ]);
         await opened.executor.all({
           sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('new', 'revision-org', 'New', 'npm', 'hosted')",
           params: [],
@@ -124,6 +207,7 @@ export function describeNpmIdentityMigrationContract(
             'core:0003_npm_identity',
             'core:0004_source_revision',
             'core:0005_package_settings_revision',
+            'core:0006_npm_login_handoff',
           ]);
           await migrate(opened.executor, sources.slice(0, baseline), { holder: 'baseline' });
           await seed(opened.executor);

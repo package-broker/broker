@@ -64,7 +64,7 @@ const foreignPoll: ContractCase = {
       executing(context),
       createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(1) }]),
     );
-    expect(await repo.poll(own, 'foreign-project', 'b'.repeat(64))).toEqual({
+    expect(await repo.poll(own, 'foreign-project', 'b'.repeat(64), () => {})).toEqual({
       status: 'not_found',
     });
   },

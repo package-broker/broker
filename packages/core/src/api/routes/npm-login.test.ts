@@ -128,3 +128,41 @@ it('uses the nested envelope for malformed approval bodies', async () => {
     });
   }
 });
+
+it('bounds anonymous start and poll independently before database work', async () => {
+  const { deps, ctx, routes } = fixture();
+  for (let i = 0; i < 10; i++) await routes[0]!.handler(ctx('/demo/npm/-/v1/login', '{}'));
+  const blocked = await routes[0]!.handler(ctx('/demo/npm/-/v1/login', '{}'));
+  expect(blocked.status).toBe(429);
+  expect(blocked.headers.get('retry-after')).toBe('60');
+  expect(blocked.headers.get('cache-control')).toBe('no-store');
+  expect(deps.store.start).toHaveBeenCalledTimes(10);
+  for (let i = 0; i < 60; i++) await routes[1]!.handler(ctx('/demo/npm/-/v1/done/secret'));
+  expect((await routes[1]!.handler(ctx('/demo/npm/-/v1/done/secret'))).status).toBe(429);
+  expect(deps.store.poll).toHaveBeenCalledTimes(60);
+});
+
+it('uses admission IP separately from the legacy audit IP', async () => {
+  const { deps, ctx } = fixture();
+  let socket = '192.0.2.1';
+  const routes = npmLoginRoutes({ ...deps, admissionIp: () => socket });
+  for (let n = 0; n < 10; n++)
+    expect((await routes[0]!.handler(ctx('/demo/npm/-/v1/login', '{}'))).status).toBe(200);
+  expect((await routes[0]!.handler(ctx('/demo/npm/-/v1/login', '{}'))).status).toBe(429);
+  socket = '192.0.2.2';
+  expect((await routes[0]!.handler(ctx('/demo/npm/-/v1/login', '{}'))).status).toBe(200);
+  expect(
+    vi.mocked(deps.store.start).mock.calls.every(([, input]) => input.sourceIp === '127.0.0.1'),
+  ).toBe(true);
+});
+
+it('allows an unknown-IP CLI to poll for a minute at the route Retry-After cadence', async () => {
+  const { deps, ctx } = fixture();
+  const routes = npmLoginRoutes({ ...deps, admissionIp: () => null });
+  const poll = () => routes[1]!.handler(ctx('/demo/npm/-/v1/done/' + 'b'.repeat(43)));
+  const first = await poll();
+  expect(first.status).toBe(202);
+  const retryAfter = Number(first.headers.get('retry-after'));
+  expect(retryAfter).toBeGreaterThan(0);
+  for (let n = 1; n < Math.ceil(60 / retryAfter); n++) expect((await poll()).status).toBe(202);
+});

@@ -1500,6 +1500,39 @@ it('does not bind credentials, enqueue or advertise a retry for a terminal VCS b
   expect(h.jobs.enqueue).not.toHaveBeenCalled();
 });
 
+it.each([
+  ['builds and jobs', true, true, true],
+  ['no build reader', false, true, false],
+  ['no job port', true, false, false],
+] as const)(
+  'resyncs unchanged npm VCS versions only with %s configured',
+  (_label, builds, withJobs, expected) => {
+    const h = harness({ jobs: withJobs });
+    createRegistryModule({
+      ...h.deps,
+      ...(builds
+        ? {
+            npmVcsBuild: {
+              outcomes: {} as never,
+              pending: vi.fn(),
+              target: vi.fn(),
+              writeGuard: vi.fn(),
+            },
+          }
+        : {}),
+      ingest: {
+        ...h.deps.ingest,
+        apply: {
+          ...h.deps.ingest.apply,
+          writer: { statementBudget: { syncPackage: 500 }, syncPackageCost: () => 100 } as never,
+        },
+      },
+    });
+    const writer = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0].apply.writer;
+    expect(writer.resyncsUnchangedNpmVcs).toBe(expected);
+  },
+);
+
 it('reserves eager enqueue reads and all four job statements per version', () => {
   const h = harness();
   createRegistryModule({
@@ -1520,9 +1553,13 @@ it('reserves eager enqueue reads and all four job statements per version', () =>
   expect(writer.statementBudget.syncPackage).toBe(752);
 });
 
-it.each([false, true])(
-  'checks persisted terminal outcome when no build target is eligible (%s)',
-  async (terminal) => {
+it.each([
+  [true, false, 'terminal'],
+  [false, true, true],
+  [false, false, false],
+] as const)(
+  'checks persisted terminal outcome when no build target is eligible (terminal %s, pending %s)',
+  async (terminal, pending, expected) => {
     const h = harness();
     vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
       ...npmjsSource,
@@ -1535,7 +1572,7 @@ it.each([false, true])(
       npmVcsBuild: {
         outcomes: { terminal: check } as never,
         target: vi.fn().mockResolvedValue(null),
-        pending: vi.fn(),
+        pending: vi.fn().mockResolvedValue(pending),
         writeGuard: vi.fn(),
       },
     });
@@ -1546,12 +1583,98 @@ it.each([false, true])(
         packageId: 'K',
         versionId: VERSION_ID,
       } as DistTarget),
-    ).toBe(terminal ? 'terminal' : true);
+    ).toBe(expected);
     expect(check).toHaveBeenCalledWith(
       org,
       expect.objectContaining({ sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID }),
     );
     expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  },
+);
+
+it('lets a held version without a build fall through to the archive path', async () => {
+  const h = harness();
+  vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+    ...npmjsSource,
+    type: 'vcs',
+    ecosystem: 'npm',
+  });
+  const terminal = vi.fn().mockResolvedValue(false);
+  const pending = vi.fn().mockResolvedValue(false);
+  const target = vi.fn().mockResolvedValue(null);
+  createRegistryModule({
+    ...h.deps,
+    npmVcsBuild: { outcomes: { terminal } as never, target, pending, writeGuard: vi.fn() },
+  });
+  const service = vi.mocked(createDistService).mock.calls.at(-1)![0];
+  const distTarget = {
+    sourceId: 'src-1',
+    packageId: 'K',
+    versionId: VERSION_ID,
+    status: 'quarantined',
+    blob: null,
+  } as unknown as DistTarget;
+  expect(await service.enqueueNpmVcsBuild!(org, distTarget)).toBe(false);
+  expect(target).toHaveBeenCalledWith(
+    org,
+    expect.objectContaining({ sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID }),
+  );
+  expect(pending).toHaveBeenCalledWith(org, VERSION_ID);
+  expect(h.jobs.enqueue).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['eligible', { version: '1.0.0', sourceRef: 'c'.repeat(40), retryGeneration: 2 }],
+  ['ineligible', null],
+] as const)(
+  'enqueues the archive-path build with the full build identity when %s',
+  async (_label, row) => {
+    const h = harness();
+    const record = {
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+      url: null,
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/repo',
+        refs: { tags: true, branches: [] },
+      }),
+    } as SourceRecord;
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+    h.versionById.mockResolvedValue({ packageName: 'widget', version: '1.0.0' } as never);
+    const target = vi.fn().mockResolvedValue(row);
+    createRegistryModule({
+      ...h.deps,
+      providers: [{ id: 'github', sourceTypes: ['vcs'] } as never],
+      npmVcsBuild: {
+        outcomes: { terminal: vi.fn().mockResolvedValue(false) } as never,
+        target,
+        pending: vi.fn().mockResolvedValue(false),
+        writeGuard: vi.fn(),
+      },
+    });
+    const service = vi.mocked(createDistService).mock.calls.at(-1)![0];
+    const distTarget = { sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID } as DistTarget;
+    const plan = await service.planFetch(org, distTarget);
+    await plan!.deps.enqueueNpmVcsBuild!();
+    if (row === null) {
+      expect(h.jobs.enqueue).not.toHaveBeenCalled();
+      return;
+    }
+    expect(await service.enqueueNpmVcsBuild!(org, distTarget)).toBe(true);
+    expect(h.jobs.enqueue).toHaveBeenCalledTimes(2);
+    const [first, second] = h.jobs.enqueue.mock.calls;
+    expect(first).toEqual(second);
+    expect(first![2]).toEqual({
+      sourceId: 'src-1',
+      packageId: 'K',
+      versionId: VERSION_ID,
+      version: '1.0.0',
+      sourceRef: 'c'.repeat(40),
+      packingPolicy: expect.stringMatching(/^npm-pack-v1:/),
+      retryGeneration: 2,
+    });
   },
 );
 

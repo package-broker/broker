@@ -411,6 +411,8 @@ export interface CatalogueWriter {
     readonly tags: number;
     readonly guardStatements: number;
   }): number;
+  /** Set when syncing an unchanged npm VCS version has an effect, such as queueing its build. */
+  readonly resyncsUnchangedNpmVcs?: boolean;
   /** Bound parameter bytes one syncPackage version group may carry. */
   readonly syncPayloadLimit: number;
   /**

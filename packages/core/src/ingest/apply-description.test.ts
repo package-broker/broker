@@ -389,6 +389,41 @@ describe('applyChunk', () => {
     expect(f.marked).toEqual(['1.0.0']);
   });
 
+  it.each([
+    ['vcs', true, true],
+    ['vcs', undefined, false],
+    ['npm_registry', true, false],
+  ] as const)(
+    'resyncs an unchanged active %s version only when the writer queues builds (%s)',
+    async (type, resync, expected) => {
+      const f = fixture();
+      f.existing = [
+        {
+          versionNormalized: '1.0.0',
+          id: 'ver-1',
+          revision: 1,
+          status: 'active',
+          npmIntegrity: INTEGRITY_A,
+          composerShasum: null,
+          metadataJson: normalizeVersionMetadata('npm', JSON.parse(manifest('1.0.0'))).json,
+        },
+      ];
+      const deps = {
+        ...f.deps,
+        writer: {
+          ...f.deps.writer,
+          ...(resync === undefined ? {} : { resyncsUnchangedNpmVcs: resync }),
+        },
+      };
+      await applyChunk(ctx, deps, {
+        ...input(handle(), description(['1.0.0'])),
+        source: { id: 'source-1', key: KEY, type, ecosystem: 'npm', covered: true },
+      });
+      expect(f.calls.includes('sync:1.0.0')).toBe(expected);
+      expect(f.marked).toEqual(['1.0.0']);
+    },
+  );
+
   it('refuses a name outside the registered names before any write', async () => {
     const f = fixture();
     const outcome = await applyChunk(ctx, f.deps, {

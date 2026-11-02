@@ -565,23 +565,45 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
           ? {}
           : {
               enqueueNpmVcsBuild: async () => {
-                if (jobs === undefined) throw new PlatformUnavailableError();
-                const payload = {
-                  sourceId: record.id,
-                  packageId: target.packageId,
-                  versionId: target.versionId,
-                  version: row.version,
-                };
-                await jobs.enqueue(
-                  ctx,
-                  NPM_VCS_BUILD_JOB_TYPE,
-                  payload,
-                  npmVcsBuildEnqueueInput(payload, deps.clock.now().getTime()),
-                );
+                await enqueueNpmVcsBuild(ctx, target);
               },
             }),
       },
     };
+  }
+
+  async function enqueueNpmVcsBuild(
+    ctx: OrgContext,
+    target: Pick<DistTarget, 'sourceId' | 'packageId' | 'versionId'>,
+  ): Promise<boolean | 'terminal'> {
+    if (deps.npmVcsBuild === undefined || jobs === undefined) throw new PlatformUnavailableError();
+    const payload = {
+      sourceId: target.sourceId,
+      packageId: target.packageId,
+      versionId: target.versionId,
+      version: '',
+    };
+    const row = await deps.npmVcsBuild.target(ctx, { ...payload, packingPolicy });
+    if (row === null) {
+      if (await deps.npmVcsBuild.outcomes.terminal(ctx, { ...payload, packingPolicy }))
+        return 'terminal';
+      return deps.npmVcsBuild.pending(ctx, target.versionId);
+    }
+    if (await deps.npmVcsBuild.pending(ctx, target.versionId)) return true;
+    const identity = {
+      ...payload,
+      version: row.version,
+      sourceRef: row.sourceRef,
+      packingPolicy,
+      retryGeneration: row.retryGeneration,
+    };
+    await jobs.enqueue(
+      ctx,
+      NPM_VCS_BUILD_JOB_TYPE,
+      identity,
+      npmVcsBuildEnqueueInput(identity, deps.clock.now().getTime()),
+    );
+    return true;
   }
 
   async function enqueueSync(ctx: OrgContext, payload: PackageSyncPayload): Promise<void> {
@@ -777,34 +799,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     enqueueNpmVcsBuild: async (ctx, target) => {
       const record = await catalogue.sources.get(ctx, target.sourceId);
       if (record?.type !== 'vcs' || record.ecosystem !== 'npm') return false;
-      if (deps.npmVcsBuild === undefined || jobs === undefined)
-        throw new PlatformUnavailableError();
-      const payload = {
-        sourceId: target.sourceId,
-        packageId: target.packageId,
-        versionId: target.versionId,
-        version: '',
-      };
-      const row = await deps.npmVcsBuild.target(ctx, { ...payload, packingPolicy });
-      if (row === null)
-        return (await deps.npmVcsBuild.outcomes.terminal(ctx, { ...payload, packingPolicy }))
-          ? 'terminal'
-          : true;
-      if (await deps.npmVcsBuild.pending(ctx, target.versionId)) return true;
-      const identity = {
-        ...payload,
-        version: row.version,
-        sourceRef: row.sourceRef,
-        packingPolicy,
-        retryGeneration: row.retryGeneration,
-      };
-      await jobs.enqueue(
-        ctx,
-        NPM_VCS_BUILD_JOB_TYPE,
-        identity,
-        npmVcsBuildEnqueueInput(identity, deps.clock.now().getTime()),
-      );
-      return true;
+      return enqueueNpmVcsBuild(ctx, target);
     },
     access: packageAccess,
     store: blob,

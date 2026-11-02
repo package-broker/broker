@@ -498,7 +498,10 @@ export async function applyChunk(
       { key: source.key, type: source.type, covered: source.covered },
       {
         sessionStatements: used + closeStatements,
-        syncUnchanged: source.type === 'vcs' && source.ecosystem === 'npm',
+        syncUnchanged:
+          writer.resyncsUnchangedNpmVcs === true &&
+          source.type === 'vcs' &&
+          source.ecosystem === 'npm',
         statementBudget: budget,
         syncCost: (versions) => writer.syncPackageCost({ versions, tags: 0, guardStatements }),
         syncPayload: {

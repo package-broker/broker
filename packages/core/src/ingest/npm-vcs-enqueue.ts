@@ -28,6 +28,7 @@ export function createNpmVcsEagerWriter(
   const extra = (versions: number) => 2 + versions * 5;
   return {
     ...writer,
+    resyncsUnchangedNpmVcs: deps.target !== undefined && deps.jobs !== undefined,
     get statementBudget() {
       return {
         ...writer.statementBudget,

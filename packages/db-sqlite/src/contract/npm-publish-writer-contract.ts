@@ -1008,7 +1008,7 @@ export function describeNpmPublishWriterContract(
         expect((await request('widget/-rev/' + remaining._rev, 'DELETE')).status).toBe(409);
         await e.all(
           st(
-            "UPDATE version SET published_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute') WHERE version='2.0.0'",
+            "UPDATE version SET published_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute') WHERE version IN ('2.0.0','3.0.0')",
           ),
         );
         expect((await request('widget/-rev/' + remaining._rev, 'DELETE')).status).toBe(200);

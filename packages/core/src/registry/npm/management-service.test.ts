@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { validateAuditEvent } from '../../audit/actions.js';
 import { setAccessContext } from '../../authz/access-context.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '../../db/errors.js';
 import { orgContext } from '../../db/port.js';
@@ -10,6 +11,7 @@ import {
   createUnpublishService,
 } from './publish-service.js';
 import { manifest } from './render.js';
+import type { DeprecationStore } from './deprecate.js';
 
 const { nodeCodecs } = await import(
   new URL('../../../../runtime-node/src/codec/node-codec.ts', import.meta.url).href
@@ -73,9 +75,15 @@ function harness(projectPermissions: string[], organizationPermissions: string[]
     writer: { publishVersion: vi.fn() },
     requiredScanners: (): readonly string[] => [],
     scanJobs: { enqueueStatements: async () => ({ statements: [] }) },
-    deprecations: { snapshot: vi.fn(async () => snapshot), update: vi.fn(async () => {}) },
+    deprecations: {
+      snapshot: vi.fn(async () => snapshot),
+      update: vi.fn<DeprecationStore['update']>(async () => {}),
+    },
     distTags: { update: vi.fn(async () => {}) },
-    unpublish: { remove: vi.fn(async () => {}), tarballRemoved: vi.fn(async () => false) },
+    unpublish: {
+      remove: vi.fn<import('./unpublish.js').UnpublishStore['remove']>(async () => {}),
+      tarballRemoved: vi.fn(async () => false),
+    },
     blob: {
       stage: vi.fn(async () => {
         throw new Error('unexpected stage');
@@ -295,4 +303,147 @@ describe('unpublish', () => {
     expect(h.deps.unpublish.remove).not.toHaveBeenCalled();
     expect(h.deps.unpublish.tarballRemoved).not.toHaveBeenCalled();
   });
+});
+
+it.each(['\n', '\u0000', '\t', '"', '\\', 'é'])(
+  'applies and clears escaped deprecation text at the byte limit: %j',
+  async (character) => {
+    const h = harness(MANAGE);
+    const message = character.repeat(1024 / new TextEncoder().encode(character).length);
+    h.snapshot.versions[0]!.deprecatedMessage = null;
+    const service = createPublishService(h.deps as never);
+    for (const next of [message, message.slice(1) + 'x', '']) {
+      // Keep the old message at the boundary while testing replacement and clearing.
+      const old = h.snapshot.versions[0]!.deprecatedMessage;
+      const response = await service(
+        h.context('PUT', 'widget', JSON.stringify(h.packument(next))),
+        'widget',
+      );
+      expect(response.status).toBe(200);
+      const input = h.deps.deprecations.update.mock.calls.at(-1)![2];
+      const payload = JSON.parse(input.edits[0]!.event.payloadJson);
+      const decoded =
+        payload.changes.deprecated_encoding?.new === 'base64-utf8'
+          ? Buffer.from(payload.changes.deprecated.new, 'base64').toString('utf8')
+          : payload.changes.deprecated.new;
+      expect(decoded).toBe(next);
+      const decodedOld =
+        payload.changes.deprecated_encoding?.new === 'base64-utf8' &&
+        payload.changes.deprecated.old !== null
+          ? Buffer.from(payload.changes.deprecated.old, 'base64').toString('utf8')
+          : payload.changes.deprecated.old;
+      expect(decodedOld).toBe(old);
+      expect(validateAuditEvent(input.edits[0]!.event)).toEqual(input.edits[0]!.event);
+      expect(
+        new TextEncoder().encode(input.edits[0]!.event.payloadJson).byteLength,
+      ).toBeLessThanOrEqual(4096);
+      h.snapshot.versions[0]!.deprecatedMessage = next;
+    }
+    const response = await service(
+      h.context('PUT', 'widget', JSON.stringify(h.packument(message + character))),
+      'widget',
+    );
+    expect(response.status).toBe(400);
+  },
+);
+it('unpublishes every version of an 82-version package through the service', async () => {
+  const h = harness(MANAGE);
+  h.snapshot.versions = Array.from({ length: 82 }, (_, i) => version(`1.0.${i}`));
+  const response = await createUnpublishService(h.deps as never)(
+    h.context('DELETE', 'widget/-rev/3'),
+    'widget',
+    '3',
+  );
+  expect(response.status).toBe(200);
+  expect(h.deps.unpublish.remove).toHaveBeenCalledOnce();
+  const payload = JSON.parse(h.deps.unpublish.remove.mock.calls[0]![2].event.payloadJson);
+  expect(payload.changes).toEqual({ removed_version_count: { new: 82 } });
+});
+it.each([[MANAGE], [[...MANAGE, 'project:packages:write']]])(
+  'answers fixed 405 for a manifest update without a hosted claim',
+  async (permissions) => {
+    const h = harness(permissions);
+    h.deps.reads.source.mockResolvedValue([]);
+    const response = await createPublishService(h.deps as never)(
+      h.context('PUT', 'widget', JSON.stringify(h.packument('old'))),
+      'widget',
+    );
+    expect(response.status).toBe(405);
+    expect(await json(response)).toMatchObject({ code: 'write_unsupported' });
+    expect(response.headers.get('Allow')).toBe('GET, HEAD');
+    expect(h.deps.blob.stage).not.toHaveBeenCalled();
+    expect(h.deps.deprecations.update).not.toHaveBeenCalled();
+  },
+);
+
+it.each([3, 50])(
+  'preserves bounded version lists and the removal count for %i versions',
+  async (count) => {
+    const h = harness(MANAGE);
+    h.snapshot.versions = Array.from({ length: count }, (_, i) => version(`1.0.${i}`));
+    const response = await createUnpublishService(h.deps as never)(
+      h.context('DELETE', 'widget/-rev/3'),
+      'widget',
+      '3',
+    );
+    expect(response.status).toBe(200);
+    const payload = JSON.parse(h.deps.unpublish.remove.mock.calls[0]![2].event.payloadJson);
+    expect(payload.changes).toEqual({
+      removed_version_count: { new: count },
+      ...(count <= 50 ? { versions: { old: h.snapshot.versions.map((v) => v.version) } } : {}),
+    });
+  },
+);
+
+it.each([
+  ['missing', 411, 'length_required'],
+  ['oversize', 413, 'publish_body_too_large'],
+  ['malformed', 400, 'invalid_publish_body'],
+] as const)(
+  'checks %s content-length before looking up an unclaimed name',
+  async (kind, status, code) => {
+    const h = harness(MANAGE);
+    h.deps.reads.source.mockResolvedValue([]);
+    const ctx = h.context('PUT', 'widget', JSON.stringify(h.packument('old')));
+    if (kind === 'missing') ctx.request.headers.delete('content-length');
+    else
+      ctx.request.headers.set(
+        'content-length',
+        kind === 'oversize' ? String(h.deps.registry.caps.publishBodyBytes + 1) : 'invalid',
+      );
+    const response = await createPublishService(h.deps as never)(ctx, 'widget');
+    expect(response.status).toBe(status);
+    expect(await json(response)).toMatchObject({ code });
+    expect(h.deps.reads.source).not.toHaveBeenCalled();
+    expect(ctx.request.bodyUsed).toBe(false);
+    expect(h.deps.blob.stage).not.toHaveBeenCalled();
+  },
+);
+
+it('checks package binding before looking up an unclaimed name', async () => {
+  const h = harness(MANAGE);
+  h.deps.reads.source.mockResolvedValue([]);
+  h.deps.reads.packageBinding.mockResolvedValue(null as never);
+  const response = await createPublishService(h.deps as never)(
+    h.context('PUT', 'widget', JSON.stringify(h.packument('old'))),
+    'widget',
+  );
+  expect(response.status).toBe(403);
+  expect(await json(response)).toMatchObject({ code: 'package_binding' });
+  expect(h.deps.reads.source).not.toHaveBeenCalled();
+});
+
+it('keeps ambiguous hosted claims as a conflict for manifest updates', async () => {
+  const h = harness(MANAGE);
+  h.deps.reads.source.mockResolvedValue([
+    { id: 'source', status: 'active', requirePublishApproval: false },
+    { id: 'other', status: 'active', requirePublishApproval: false },
+  ]);
+  const response = await createPublishService(h.deps as never)(
+    h.context('PUT', 'widget', JSON.stringify(h.packument('old'))),
+    'widget',
+  );
+  expect(response.status).toBe(409);
+  expect(await json(response)).toMatchObject({ code: 'name_not_claimed' });
+  expect(h.deps.deprecations.update).not.toHaveBeenCalled();
 });

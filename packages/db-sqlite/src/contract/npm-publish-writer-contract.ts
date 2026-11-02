@@ -298,7 +298,10 @@ export function describeNpmPublishWriterContract(
         ...w.input().event,
         id: ulid(),
         action: 'package.deprecate' as const,
-        payloadJson: JSON.stringify({ changes: { deprecated: { old: null, new: 'use v2' } } }),
+        payloadJson: JSON.stringify({
+          op_id: ulid(),
+          changes: { deprecated: { old: null, new: 'use v2' } },
+        }),
       };
       const input = {
         tokenId: 'token',
@@ -399,7 +402,12 @@ export function describeNpmPublishWriterContract(
           ...h.input,
           versions: ['1.0.0', '2.0.0'],
           whole: true,
-          event: { ...w.input().event, id: ulid(), action: 'package.unpublish' as const },
+          event: {
+            ...w.input().event,
+            id: ulid(),
+            action: 'package.unpublish' as const,
+            payloadJson: JSON.stringify({ op_id: ulid() }),
+          },
         });
         expect(await reader.stillEligible(ctx, 'a'.repeat(64) as Sha256)).toBe(true);
         expect(await e.all(st("SELECT count(*) n FROM version WHERE status='tombstoned'"))).toEqual(
@@ -444,13 +452,81 @@ export function describeNpmPublishWriterContract(
         snapshot = (await h.store.snapshot(ctx, 'source', 'widget'))!;
         expect(snapshot.versions).toHaveLength(82);
         expect(snapshot.versions.every((v) => v.deprecatedMessage === 'use v3')).toBe(true);
-        await createUnpublishStore(e).remove(ctx, h.guard, {
-          ...h.input,
-          snapshot,
-          versions: snapshot.versions.map((v) => v.version),
-          whole: true,
-          event: { ...w.input().event, id: ulid(), action: 'package.unpublish' as const },
+        const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
+        const plaintext = formatToken('svc', 'abcdefghijkl', new Uint8Array(32).fill(9));
+        await e.batch([
+          st(
+            "UPDATE token SET hash=? WHERE org_id='org' AND id='token'",
+            await hashToken(keyring, 1, plaintext),
+          ),
+          st(
+            "INSERT OR IGNORE INTO service_principal_permission VALUES ('org','principal','project:read')",
+          ),
+          st(
+            "INSERT OR IGNORE INTO service_principal_permission VALUES ('org','principal','project:packages:read')",
+          ),
+        ]);
+        const unpublish = createUnpublishService({
+          reads: createPublishReads(e),
+          lookupToken: createAccessRepository(e).lookupToken,
+          admitted: (org, input) => checkPublishAdmission(e, org, input),
+          anchors: async () => [],
+          deprecations: h.store,
+          unpublish: createUnpublishStore(e),
+          writeGuard: createPublishWriteGuard,
+          registry: { ...REGISTRY_DEFAULTS, outbound: { allowPrivateHosts: [], selfOrigins: [] } },
+          clock: fixedClock(new Date().toISOString()),
+          writer: w.writer,
+          requiredScanners: () => [],
+          scanJobs: { enqueueStatements: async () => ({ id: 'job', statements: [] }) },
+          blob: {} as never,
+          codecs: {} as never,
+          publicUrl: 'https://broker.test',
         });
+        const packageAccess = createPackageAccess(w.reader);
+        const kernel = await createKernel({
+          platform: name === 'd1' ? 'cloudflare' : 'node',
+          plugins: [],
+          ports: {
+            organizations: { get: async () => null },
+            clock: fixedClock(NOW),
+            ids: { ulid },
+          },
+          resolveOrg: async () => ctx,
+          health: async () => true,
+          log: () => undefined,
+          packageResolver: packageAccess,
+          authorization: createAuthorizationEngine({
+            access: createAccessRepository(e),
+            tokenUse: {
+              keyring,
+              nowMs: () => Date.now(),
+              dispatch: () => undefined,
+              log: () => undefined,
+            },
+            patValidation: patValidationGate,
+            publicOrigin: 'https://broker.test',
+            providerAnchors: async () => [],
+          }),
+          ecosystemRoutes: npmRoutes({
+            unpublish,
+            access: packageAccess,
+            dist: {} as never,
+            codecs: {} as never,
+            onDemand: { ensure: async () => ({ kind: 'serve', stale: false }) },
+            reresolve: async () => ({ kind: 'absent' }),
+            handleOf: async () => null,
+            publicUrl: 'https://broker.test',
+            audit: { enabled: false },
+          }),
+        });
+        const response = await kernel.fetch(
+          new Request('https://broker.test/project/npm/widget/-rev/' + snapshot.rev, {
+            method: 'DELETE',
+            headers: { authorization: `Bearer ${plaintext}` },
+          }),
+        );
+        expect(response.status).toBe(200);
         expect(
           await e.all(
             st("SELECT count(*) n FROM version WHERE org_id='org' AND status='tombstoned'"),
@@ -459,6 +535,21 @@ export function describeNpmPublishWriterContract(
         expect(
           await e.all(st("SELECT count(*) n FROM version_revision WHERE org_id='org'")),
         ).toEqual([{ n: 164 }]);
+        expect(
+          await e.all(
+            st(
+              "SELECT count(*) n FROM version_revision vr JOIN audit_pending a ON a.org_id=vr.org_id AND json_extract(a.payload_json,'$.op_id')=vr.op_id WHERE vr.org_id='org' AND a.action='package.unpublish' AND json_extract(a.payload_json,'$.changes.removed_version_count.new')=82 AND json_type(a.payload_json,'$.changes.versions') IS NULL AND EXISTS (SELECT 1 FROM version v WHERE v.org_id=vr.org_id AND v.id=vr.version_id AND v.last_op_id=vr.op_id)",
+            ),
+          ),
+        ).toEqual([{ n: 82 }]);
+
+        expect(
+          await e.all(
+            st(
+              "SELECT json_extract(metadata_json,'$.deprecated') message FROM version_revision WHERE org_id='org' AND reason='npm_unpublish'",
+            ),
+          ),
+        ).toEqual(Array.from({ length: 82 }, () => ({ message: 'use v3' })));
       }));
     it('admin tombstone requires a live protected holder, fresh reauth, reason and revision', () =>
       run(async (e, w) => {
@@ -561,7 +652,12 @@ export function describeNpmPublishWriterContract(
             ...h.input,
             versions: ['1.0.0', '2.0.0'],
             whole: true,
-            event: { ...w.input().event, id: ulid(), action: 'package.unpublish' as const },
+            event: {
+              ...w.input().event,
+              id: ulid(),
+              action: 'package.unpublish' as const,
+              payloadJson: JSON.stringify({ op_id: ulid() }),
+            },
           }),
         ).rejects.toThrow();
         expect(await e.all(st('SELECT DISTINCT status FROM version'))).toEqual([
@@ -577,7 +673,12 @@ export function describeNpmPublishWriterContract(
           ...h.input,
           versions: ['2.0.0'],
           whole: false,
-          event: { ...w.input().event, id: ulid(), action: 'package.unpublish' as const },
+          event: {
+            ...w.input().event,
+            id: ulid(),
+            action: 'package.unpublish' as const,
+            payloadJson: JSON.stringify({ op_id: ulid() }),
+          },
         };
         await createUnpublishStore(e).remove(ctx, h.guard, input);
         expect((await h.store.snapshot(ctx, 'source', 'widget'))?.tags.latest).toBe('1.0.0');
@@ -627,7 +728,12 @@ export function describeNpmPublishWriterContract(
             ...h.input,
             versions: ['2.0.0'],
             whole: false,
-            event: { ...w.input().event, id: ulid(), action: 'package.unpublish' as const },
+            event: {
+              ...w.input().event,
+              id: ulid(),
+              action: 'package.unpublish' as const,
+              payloadJson: JSON.stringify({ op_id: ulid() }),
+            },
           }),
         ).rejects.toThrow();
         expect(await e.all(st("SELECT status FROM version WHERE version='2.0.0'"))).toEqual([
@@ -740,6 +846,13 @@ export function describeNpmPublishWriterContract(
         const h = await deprecations(e, w);
         expect(await h.store.snapshot(orgContext('foreign'), 'source', 'widget')).toBeNull();
         await h.store.update(ctx, h.guard, h.input);
+        expect(
+          await e.all(
+            st(
+              "SELECT count(*) n FROM version_revision vr JOIN version v ON v.org_id=vr.org_id AND v.id=vr.version_id JOIN audit_pending a ON a.org_id=vr.org_id AND a.target_id=vr.version_id WHERE vr.org_id='org' AND vr.reason='npm_deprecate' AND vr.op_id=json_extract(a.payload_json,'$.op_id') AND v.last_op_id=vr.op_id",
+            ),
+          ),
+        ).toEqual([{ n: 1 }]);
         const after = (await h.store.snapshot(ctx, 'source', 'widget'))!;
         expect(after.rev).toBeGreaterThan(h.snapshot.rev);
         expect(after.versions.find((v) => v.version === '1.0.0')).toMatchObject({
@@ -976,10 +1089,26 @@ export function describeNpmPublishWriterContract(
           }>;
         };
         const rendered = await getPackument();
+        for (const type of ['npm_registry', 'vcs']) {
+          await e.all(st("UPDATE source SET type=? WHERE org_id='org' AND id='source'", type));
+          const unsupported = await send(rendered);
+          expect(unsupported.status).toBe(405);
+          expect(unsupported.headers.get('Allow')).toBe('GET, HEAD');
+          expect(await unsupported.json()).toMatchObject({ code: 'write_unsupported' });
+        }
+        await e.all(st("UPDATE source SET type='hosted' WHERE org_id='org' AND id='source'"));
+
         expect(rendered.versions['1.0.0']!.deprecated).toBe('Contact maintainer@example.test');
         rendered.versions['1.0.0']!.deprecated = '';
         expect((await send(rendered)).status).toBe(200);
         expect((await getPackument()).versions['1.0.0']!.deprecated).toBe('');
+        for (const message of ['\u0000'.repeat(1024), '\n'.repeat(1024), '']) {
+          const updated = await getPackument();
+          updated.versions['1.0.0']!.deprecated = message;
+          expect((await send(updated)).status).toBe(200);
+          expect((await getPackument()).versions['1.0.0']!.deprecated).toBe(message);
+        }
+
         expect((await request('-/package/widget/dist-tags/beta', 'PUT', '1.0.0')).status).toBe(200);
         expect(await (await request('-/package/widget/dist-tags')).json()).toMatchObject({
           beta: '1.0.0',

@@ -141,7 +141,7 @@ export function createPackageManageService(deps: {
           version: { new: version.version },
         },
       });
-      if (!audit.ok) throw new TypeError('Invalid package manage audit event');
+      if (!audit.ok) return fail('invalid_input');
       const write = {
         packageId: input.packageId,
         versionId: input.versionId,

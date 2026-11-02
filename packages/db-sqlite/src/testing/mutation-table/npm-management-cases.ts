@@ -68,7 +68,7 @@ export function managementEntry(kind: 'tags' | 'unpublish'): MutationEntry {
           projectId: null,
           tokenSelector: null,
           sourceIp: null,
-          payloadJson: '{}',
+          payloadJson: JSON.stringify({ op_id: ulid() }),
         };
         const input = { ...binding, snapshot, event };
         const result =

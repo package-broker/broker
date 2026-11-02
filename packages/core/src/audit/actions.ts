@@ -2,6 +2,19 @@ import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
 import { isUlid } from '../ids.js';
 import { isWorkflowFilename } from '../registry/npm/oidc/claim-values.js';
+import {
+  POLICY_CLIENT_FAMILIES,
+  POLICY_ECOSYSTEMS,
+  POLICY_OVERRIDE_REASONS,
+  POLICY_REASON_CODES,
+  POLICY_RULE_KINDS,
+  MAX_MIN_AGE_SECONDS,
+  MAX_POLICY_MEMBERS,
+  POLICY_PROJECT_ID,
+  isPolicyClientVersion,
+  isPolicyPackageKey,
+  isPolicyTimestamp,
+} from '../db/registry-policy.js';
 import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
@@ -79,6 +92,14 @@ export const AUDIT_ACTIONS = [
   'import_run.credential_set',
   'purge.batch',
   'sync_session.finalize',
+  'registry_policy.create',
+  'registry_policy.update',
+  'registry_policy.disable',
+  'registry_policy.release',
+  'registry_policy.members_replace',
+  'registry_policy.expire',
+  'policy.read_denied',
+  'policy.inspect',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -94,6 +115,31 @@ const TRUSTED_PUBLISHER_FIELDS = [
 ] as const;
 
 const GRANT_FIELDS = ['subject_kind', 'role_id'] as const;
+const POLICY_RULE_FIELDS = [
+  'kind',
+  'ecosystem',
+  'package_key',
+  'project_id',
+  'min_age_seconds',
+  'client_family',
+  'client_min_version',
+  'deny_unknown',
+  'reason_code',
+  'incident_id',
+  'expires_at',
+  'revision',
+  'member_count',
+  'changed_fields',
+] as const;
+const POLICY_OVERRIDE_FIELDS = [...POLICY_RULE_FIELDS, 'override_reason'] as const;
+const POLICY_MEMBER_FIELDS = [
+  'kind',
+  'revision',
+  'member_count',
+  'members_added',
+  'members_removed',
+  'override_reason',
+] as const;
 const IMPORT_RUN_FIELDS = ['state', 'plan_hash', 'count', 'external_ref_count'] as const;
 const IMPORT_ROLLBACK_FIELDS = [...IMPORT_RUN_FIELDS, 'restored', 'conflict', 'expired'] as const;
 const ATTACH_FIELDS = ['project_id', 'position'] as const;
@@ -209,6 +255,21 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.credential_set': ['external_ref'],
   'purge.batch': ['count', 'kind'],
   'sync_session.finalize': ['source_id', 'added', 'updated', 'removed'],
+  'registry_policy.create': POLICY_RULE_FIELDS,
+  'registry_policy.update': POLICY_OVERRIDE_FIELDS,
+  'registry_policy.disable': POLICY_OVERRIDE_FIELDS,
+  'registry_policy.release': POLICY_OVERRIDE_FIELDS,
+  'registry_policy.members_replace': POLICY_MEMBER_FIELDS,
+  'registry_policy.expire': ['kind', 'expires_at', 'revision'],
+  'policy.read_denied': [
+    'read_kind',
+    'ecosystem',
+    'package_key',
+    'version_id',
+    'version_revision',
+    'reasons',
+  ],
+  'policy.inspect': ['scope', 'ecosystem', 'package_key', 'result_count'],
 };
 
 export type AuditValue = string | number | boolean | null | readonly string[];
@@ -426,6 +487,135 @@ function checkEnvelope(input: AuditEventInput): AuditRefusal | null {
   return null;
 }
 
+const POLICY_CHANGED_FIELDS: ReadonlySet<string> = new Set([
+  'min_age_seconds',
+  'client_min_version',
+  'deny_unknown',
+  'reason_code',
+  'incident_id',
+  'expires_at',
+  'disabled',
+  'members',
+]);
+const POLICY_READ_KINDS: readonly string[] = ['version', 'tag', 'dist'];
+const POLICY_DENIAL_REASONS =
+  'min_age|blocked|not_allowlisted|quarantined|client_floor|restricted|client_unsupported';
+const POLICY_RULE_REASON = new RegExp(
+  `^rule:[0-9A-HJKMNP-TV-Z]{26}:[1-9][0-9]{0,9}:(?:${POLICY_DENIAL_REASONS})$`,
+);
+const POLICY_PLUGIN_REASON = new RegExp(
+  `^plugin:[a-z0-9][a-z0-9._@/-]{0,63}:(?:${POLICY_DENIAL_REASONS})$`,
+);
+const POLICY_IDENTIFIER = POLICY_PROJECT_ID;
+const MAX_POLICY_REASONS = 32;
+
+function bounded(value: unknown, min: number, max: number): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max;
+}
+
+/** Policy events carry identifiers, enums and counts only; nothing a request could fill freely. */
+function cleanPolicyValue(field: string, value: unknown): Cleaned {
+  const ok = { ok: true as const, value: value as AuditValue };
+  const bad = { ok: false as const, reason: 'bad_value' as const };
+  const member = (list: readonly string[]) =>
+    typeof value === 'string' && list.includes(value) ? ok : bad;
+  switch (field) {
+    case 'kind':
+      return member(POLICY_RULE_KINDS);
+    case 'ecosystem':
+      return member(POLICY_ECOSYSTEMS);
+    case 'client_family':
+      return value === null ? ok : member(POLICY_CLIENT_FAMILIES);
+    case 'reason_code':
+      return member(POLICY_REASON_CODES);
+    case 'override_reason':
+      return member(POLICY_OVERRIDE_REASONS);
+    case 'read_kind':
+      return member(POLICY_READ_KINDS);
+    case 'scope':
+      return member(['organization', 'project']);
+    case 'package_key':
+      return value === null ||
+        isPolicyPackageKey('npm', value) ||
+        isPolicyPackageKey('composer', value)
+        ? ok
+        : bad;
+    case 'project_id':
+    case 'version_id':
+      if (value === null) return ok;
+      return typeof value === 'string' && POLICY_IDENTIFIER.test(value)
+        ? cleanString(value, MAX_STRING, field)
+        : bad;
+    case 'incident_id':
+      return value === null || (typeof value === 'string' && isUlid(value)) ? ok : bad;
+    case 'client_min_version':
+      return value === null || isPolicyClientVersion(value) ? ok : bad;
+    case 'expires_at':
+      return value === null || isPolicyTimestamp(value) ? ok : bad;
+    case 'deny_unknown':
+      return typeof value === 'boolean' ? ok : bad;
+    case 'min_age_seconds':
+      return value === null || bounded(value, 0, MAX_MIN_AGE_SECONDS) ? ok : bad;
+    case 'revision':
+    case 'version_revision':
+      return bounded(value, 1, Number.MAX_SAFE_INTEGER) ? ok : bad;
+    case 'member_count':
+    case 'members_added':
+    case 'members_removed':
+    case 'result_count':
+      return bounded(value, 0, field === 'result_count' ? 10_000 : MAX_POLICY_MEMBERS) ? ok : bad;
+    case 'changed_fields':
+      return Array.isArray(value) &&
+        value.length > 0 &&
+        value.every((name) => typeof name === 'string' && POLICY_CHANGED_FIELDS.has(name)) &&
+        new Set(value).size === value.length
+        ? ok
+        : bad;
+    case 'reasons':
+      return Array.isArray(value) &&
+        value.length > 0 &&
+        value.length <= MAX_POLICY_REASONS &&
+        value.every(
+          (entry) =>
+            typeof entry === 'string' &&
+            (POLICY_RULE_REASON.test(entry) || POLICY_PLUGIN_REASON.test(entry)),
+        ) &&
+        new Set(value).size === value.length
+        ? ok
+        : bad;
+    default:
+      return bad;
+  }
+}
+
+const POLICY_OVERRIDES: ReadonlySet<string> = new Set([
+  'registry_policy.disable',
+  'registry_policy.release',
+]);
+
+/**
+ * A disable, a release, a block or quarantine member removal and the first member of an empty
+ * block name their fixed reason; emptying a block covers every version again and is no removal.
+ * A member replacement without its rule kind cannot be judged and is refused.
+ */
+function missingOverrideReason(
+  action: AuditAction,
+  changes: Record<string, Record<string, AuditValue>>,
+): boolean {
+  const kind = changes.kind?.new;
+  if (action === 'registry_policy.members_replace' && kind === undefined) return true;
+  if (changes.override_reason?.new !== undefined) return false;
+  if (POLICY_OVERRIDES.has(action)) return true;
+  if (action !== 'registry_policy.members_replace') return false;
+  const removed = changes.members_removed?.new;
+  const count = changes.member_count;
+  if (kind === 'block' && count?.new === 0) return false;
+  if (kind === 'block' && count?.old === 0 && typeof count.new === 'number' && count.new > 0) {
+    return true;
+  }
+  return (kind === 'block' || kind === 'quarantine') && typeof removed === 'number' && removed > 0;
+}
+
 function cleanChanges(
   action: AuditAction,
   changes: unknown,
@@ -455,6 +645,12 @@ function cleanChanges(
         /^(?:sha512-[A-Za-z0-9+/]{85}[AQgw]==|sha1-[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=)$/.test(
           value,
         );
+      if (action.startsWith('registry_policy.') || action.startsWith('policy.')) {
+        const cleanedPolicy = cleanPolicyValue(field, value);
+        if (!cleanedPolicy.ok) return cleanedPolicy;
+        cleanedEntry[key] = cleanedPolicy.value;
+        continue;
+      }
       const workloadLimit =
         action === 'token.workload_issue' || action.startsWith('trusted_publisher.')
           ? WORKLOAD_CLAIM_LIMITS[field]
@@ -488,6 +684,7 @@ function cleanChanges(
     if (Object.keys(cleanedEntry).length === 0) return { ok: false, reason: 'bad_value' };
     out[field] = cleanedEntry;
   }
+  if (missingOverrideReason(action, out)) return { ok: false, reason: 'bad_value' };
   return { ok: true, value: out };
 }
 
@@ -502,6 +699,12 @@ export function auditEvent(input: AuditEventInput): AuditEventResult {
     op_id: input.context.opId,
     request_id: input.context.requestId,
   };
+  if (
+    input.changes === undefined &&
+    (POLICY_OVERRIDES.has(input.action) || input.action === 'registry_policy.members_replace')
+  ) {
+    return { ok: false, reason: 'bad_value' };
+  }
   if (input.changes !== undefined) {
     const changes = cleanChanges(input.action, input.changes);
     if (!changes.ok) return changes;

@@ -94,6 +94,24 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ownerPacket: 'NPM19c',
   },
   {
+    dependency: 'registryPolicy',
+    constructed: 'Registry policy management, mounted whenever the policy migration is applied',
+    routes: [
+      'GET /_pb/policies',
+      'POST /_pb/policies',
+      'GET /_pb/policies/:policy',
+      'PATCH /_pb/policies/:policy',
+      'GET /_pb/policies/packages/:package',
+      'GET /_pb/projects/:project/policies',
+      'POST /_pb/projects/:project/policies',
+      'GET /_pb/projects/:project/policies/:policy',
+      'PATCH /_pb/projects/:project/policies/:policy',
+      'GET /_pb/projects/:project/policies/packages/:package',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM27',
+  },
+  {
     dependency: 'trustedPublishers',
     constructed: 'Trusted publisher store and configured GitHub repository lookup',
     routes: [
@@ -367,19 +385,21 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
     expect(entry.ownerPacket).toBe(
       entry.dependency === 'sourceDiscovery'
         ? 'NPM19c'
-        : entry.dependency === 'trustedPublishers'
-          ? 'NPM17c'
-          : entry.dependency === 'packageDetail'
-            ? 'NPM13a'
-            : entry.dependency === 'publishes'
-              ? 'NPM10'
-              : entry.dependency === 'sourcePackages'
-                ? 'T1041'
-                : entry.dependency === 'npmLogin'
-                  ? 'NPM16'
-                  : entry.dependency === 'packageAccessRequests'
-                    ? 'NPM12'
-                    : 'T531',
+        : entry.dependency === 'registryPolicy'
+          ? 'NPM27'
+          : entry.dependency === 'trustedPublishers'
+            ? 'NPM17c'
+            : entry.dependency === 'packageDetail'
+              ? 'NPM13a'
+              : entry.dependency === 'publishes'
+                ? 'NPM10'
+                : entry.dependency === 'sourcePackages'
+                  ? 'T1041'
+                  : entry.dependency === 'npmLogin'
+                    ? 'NPM16'
+                    : entry.dependency === 'packageAccessRequests'
+                      ? 'NPM12'
+                      : 'T531',
     );
     for (const key of entry.routes) {
       expect(

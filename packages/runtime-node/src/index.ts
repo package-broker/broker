@@ -24,6 +24,15 @@ import { createCatalogueWriteGuard } from '@package-broker/db-sqlite/repositorie
 import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
 import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
 import { createPackageAccessExpiryJob } from '@package-broker/core/api/routes/package-access-requests-expiry';
+import type { RegisteredReadHook } from '@package-broker/core/registry/policy/hooks';
+import {
+  REGISTRY_POLICY_JOB_EVENTS,
+  registryPolicyJobs,
+} from '@package-broker/core/runtime/policy-jobs';
+import { createRegistryPolicyExpiry } from '@package-broker/db-sqlite/repositories/registry-policy-expiry';
+import { createRegistryPolicyReader } from '@package-broker/db-sqlite/repositories/registry-policy-read';
+import { createPolicyReadAuditSink } from '@package-broker/db-sqlite/repositories/registry-policy-read-audit';
+import { registryPolicySchemaReady } from '@package-broker/db-sqlite/repositories/registry-policy-schema';
 import { createPackageAccessRequestRepository } from '@package-broker/db-sqlite/repositories/package-access-requests';
 import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
 import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
@@ -736,6 +745,7 @@ function assembleRegistry(input: {
   readonly ingestScope: AsyncLocalStorage<Observability>;
   readonly anchors: ProviderAnchorReader;
   readonly requiredScanners: () => readonly string[];
+  readonly policyHooks: () => readonly RegisteredReadHook[];
 }): RegistryAssembly {
   const { options, seams, executor, auth, platform, observability } = input;
   const { config } = options;
@@ -822,6 +832,12 @@ function assembleRegistry(input: {
 
   const module = createRegistryModule({
     runtime: 'node',
+    policy: {
+      reader: createRegistryPolicyReader(executor),
+      audit: createPolicyReadAuditSink(executor),
+      hooks: input.policyHooks,
+      ids: { ulid },
+    },
     npmOidc: {
       clientIp: input.admissionIp,
       repository: createOidcRepository(executor),
@@ -1171,6 +1187,20 @@ export function createNodeServer(
       });
     }
     const reads = options.executor === undefined ? undefined : buildPackageReads(executor);
+    let policyHooks: readonly RegisteredReadHook[] = [];
+    const policyEnabled = options.registry?.config.policy.enabled === true;
+    // With the flag off a failed probe only leaves management unmounted; boot stays as before.
+    const policySchema =
+      options.executor !== undefined &&
+      (await registryPolicySchemaReady(executor).catch((error: unknown) => {
+        if (policyEnabled) throw error;
+        return false;
+      }));
+    if (options.executor !== undefined && policyEnabled && !policySchema) {
+      throw new KernelConfigError([
+        'registry.policy.enabled: the registry policy migration is missing',
+      ]);
+    }
     const deploymentId = options.observability?.deploymentId ?? 'unconfigured';
     const registry =
       options.registry === undefined ||
@@ -1203,6 +1233,7 @@ export function createNodeServer(
             },
             requiredScanners: () =>
               plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
+            policyHooks: () => policyHooks,
           });
     const vulnerabilityPolicy = createOutboundPolicy({
       allowPrivateHosts: [],
@@ -1262,6 +1293,17 @@ export function createNodeServer(
               registerIngestJob(
                 createPackageAccessExpiryJob(createPackageAccessRequestRepository(executor, [])),
               ),
+              ...(options.registry === undefined
+                ? []
+                : registryPolicyJobs(options.registry.config, () =>
+                    createRegistryPolicyExpiry(executor),
+                  ).map((job) =>
+                    registerIngestJob(job, {
+                      events: new Set([...INGEST_EVENTS, ...REGISTRY_POLICY_JOB_EVENTS]),
+                      reasonCodes: INGEST_REASON_CODES,
+                      routeTemplates: new Set<string>(),
+                    }),
+                  )),
               registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
               registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
               ...(registry?.module.coreJobs ?? []).map((job) => registerIngestJob(job.definition)),
@@ -1272,6 +1314,7 @@ export function createNodeServer(
               ...(auth === undefined ? [] : tokenJobRegistrations(executor, patJobs, log)),
             ],
     });
+    policyHooks = registration.hooks['registry.read'];
     if (registry !== undefined && options.platformServices !== undefined) {
       await registry.bindSourceProviders(registration.sourceProviders.values());
       registry.bindJobs(
@@ -1357,6 +1400,10 @@ export function createNodeServer(
             vcsProviders: () => registry?.vcsProviders() ?? [],
             refuseVcsProvider: (provider) =>
               provider === 'git' && !(registry?.vcsProviders() ?? []).includes('git'),
+            registryPolicy: {
+              ...(policySchema ? { management: true as const } : {}),
+              ...(registry?.module.policy === undefined ? {} : { serving: registry.module.policy }),
+            },
           });
     const authorization = options.authorization ?? access?.module.authorization;
     const assets = await createNodeAssets(

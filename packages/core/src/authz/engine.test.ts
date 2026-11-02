@@ -2348,3 +2348,52 @@ describe('DEC-NPM-35 exception grants only the manage permission', () => {
     },
   );
 });
+
+describe('project session routes', () => {
+  const session = (projectSession: boolean) => {
+    const base = req({ headers: cookie, permission: 'project:read' });
+    return projectSession
+      ? { ...base, route: { ...base.route, projectSession: true as const } }
+      : base;
+  };
+
+  it('admits a session holding any project permission and keeps the project', async () => {
+    const state = freshState();
+    state.sessionProjectPermissions = ['project:settings:write'];
+    const engine = createAuthorizationEngine(deps(state));
+    expect(await engine.authorize(session(false))).toEqual({ allow: false, status: 403 });
+    expect(await engine.authorize(session(true))).toEqual({
+      allow: true,
+      principal: { kind: 'user', id: 'user-1' },
+      projectId: 'proj-1',
+    });
+  });
+
+  it('still hides a project the session holds nothing in', async () => {
+    const state = freshState();
+    state.sessionProjectPermissions = [];
+    expect(await createAuthorizationEngine(deps(state)).authorize(session(true))).toEqual({
+      allow: false,
+      status: 404,
+    });
+    state.sessionProjectPermissions = ['project:settings:write'];
+    state.sessionProject = null;
+    expect(await createAuthorizationEngine(deps(state)).authorize(session(true))).toEqual({
+      allow: false,
+      status: 404,
+    });
+  });
+
+  it('keeps the declared permission for tokens', async () => {
+    const state = freshState();
+    state.token.projectPermissions = ['project:settings:write'];
+    const base = session(true);
+    const engine = createAuthorizationEngine(deps(state));
+    expect(
+      await engine.authorize({
+        ...base,
+        request: new Request(`${ORIGIN}/_pb/projects/demo`, { headers: bearer(PAT) }),
+      }),
+    ).toMatchObject({ allow: false });
+  });
+});

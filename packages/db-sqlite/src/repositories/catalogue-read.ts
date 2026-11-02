@@ -91,12 +91,14 @@ interface Row {
   readonly npm_integrity: string | null;
   readonly deprecated_message: string | null;
   readonly metadata_json: string;
+  readonly published_at_basis: string;
+  readonly version_created_at: string;
 }
 
 const VERSION_COLUMNS = sql.raw(
   `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,
    v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,
-   v.deprecated_message, v.metadata_json`,
+   v.deprecated_message, v.metadata_json, v.published_at_basis, v.created_at as version_created_at`,
 );
 
 function validate(query: ResolveVersionsQuery): number {
@@ -150,7 +152,8 @@ select w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_syn
   case when ${bound} then 0 else 1 end as changed,
   s.candidates, s.id, s.revision, s.version, s.version_normalized, s.stability, s.status,
   s.published_at, s.upstream_released_at, s.license, s.dist_type, s.composer_shasum,
-  s.npm_integrity, s.deprecated_message, s.metadata_json
+  s.npm_integrity, s.deprecated_message, s.metadata_json, s.published_at_basis,
+  s.version_created_at
 from (select 1) as one
 left join w on 1 = 1
 left join cache_epoch as e on e.org_id = ${ctx.orgId} and w.package_id is not null
@@ -176,6 +179,8 @@ function toVersion(row: Row): CatalogueVersion {
     npmIntegrity: row.npm_integrity,
     deprecatedMessage: row.deprecated_message,
     metadataJson: row.metadata_json,
+    publishedAtBasis: row.published_at_basis,
+    createdAt: row.version_created_at,
   };
 }
 

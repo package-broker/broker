@@ -16,6 +16,8 @@ export interface AuthorizationRequest {
     readonly bearerOnly?: true;
     readonly allowArchived?: true;
     readonly organizationAlternative?: string;
+    /** Core project routes whose service decides by permission: any project permission admits. */
+    readonly projectSession?: true;
   };
   readonly params: Readonly<Record<string, string>>;
 }

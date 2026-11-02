@@ -12,8 +12,8 @@ export interface AccessCheckOptions {
 
 type AccessDenial = { readonly deny: true; readonly reason: string };
 
-const DEFAULT_HOOK_TIMEOUT_MS = 1000;
-const MAX_HOOK_TIMEOUT_MS = 600_000;
+export const DEFAULT_HOOK_TIMEOUT_MS = 1000;
+export const MAX_HOOK_TIMEOUT_MS = 600_000;
 const MAX_REASON_LENGTH = 200;
 const MAX_RESULT_DEPTH = 8;
 const MAX_RESULT_ARRAY_LENGTH = 100_000;

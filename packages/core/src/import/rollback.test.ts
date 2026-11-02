@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import type { ImportPublishedAtBasis } from '../catalogue/version-rules.js';
 import type { AuditEvent } from '../audit/actions.js';
 import { delegatedMutationFence, fenceKind } from '../authz/fence.js';
 import { orgContext } from '../db/port.js';
@@ -710,5 +711,13 @@ describe('runImportRollback', () => {
       conflict: { new: 0 },
       expired: { new: 0 },
     });
+  });
+});
+
+describe('rollback reference basis', () => {
+  it('is the shared import basis list, not a hand-kept copy', () => {
+    expectTypeOf<
+      ImportRollbackRef['publishedAtBasis']
+    >().toEqualTypeOf<ImportPublishedAtBasis | null>();
   });
 });

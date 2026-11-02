@@ -146,6 +146,8 @@ function versionPayload(v: FixtureVersion) {
     npmIntegrity: 'sha512-fixture',
     deprecatedMessage: 'fixture deprecation',
     metadataJson: JSON.stringify(metadata),
+    publishedAtBasis: 'import_time',
+    createdAt: expect.any(String) as unknown as string,
   };
 }
 const blob = (history: boolean) => ({
@@ -395,6 +397,13 @@ it.each([false, true])(
                 composerShasum: 'abc',
                 npmIntegrity: 'sha512-fixture',
                 npmShasum: ecosystem === 'npm' ? 'abc' : null,
+              },
+              facts: {
+                version: expected.version,
+                versionNormalized: expected.normalized,
+                publishedAt: expected.publishedAt,
+                publishedAtBasis: 'import_time',
+                createdAt: expect.any(String) as unknown as string,
               },
             };
             expect(dist).toEqual(target);

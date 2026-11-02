@@ -178,6 +178,7 @@ describe('resolveRegistryConfig', () => {
       },
       publish: { requireLicense: false },
       npmAudit: { enabled: true },
+      policy: { enabled: false, hookBudgetMs: 1000 },
     };
     expect(resolveRegistryConfig(undefined, target, PUBLIC_URL)).toEqual(expected);
     expect(resolveRegistryConfig({}, target, PUBLIC_URL)).toEqual(expected);

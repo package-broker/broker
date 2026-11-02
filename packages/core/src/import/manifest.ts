@@ -8,6 +8,7 @@ import {
 } from '../authz/permissions.js';
 import { PROJECT_SLUG_PATTERN } from '../authz/project-path.js';
 import { packageKey } from '../catalogue/names.js';
+import { IMPORT_PUBLISHED_AT_BASES } from '../catalogue/version-rules.js';
 import { ROLE_KEY_PATTERN } from '../db/roles.js';
 import { normalizeEmail } from '../identity/policy.js';
 import { isReservedProviderId, isValidProviderId } from '../identity/port.js';
@@ -74,7 +75,7 @@ const versionText = z.string().check(z.regex(/^[0-9A-Za-z][0-9A-Za-z.+_~/-]{0,25
 
 const ecosystem = z.enum(['composer', 'npm']);
 const scope = z.enum(['organization', 'project']);
-const basis = z.enum(['source_release', 'packagist_added', 'import_time']);
+const basis = z.enum(IMPORT_PUBLISHED_AT_BASES);
 const sourceType = z.enum(SOURCE_TYPES);
 
 const PUBLISHED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;

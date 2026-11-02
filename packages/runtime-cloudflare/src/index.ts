@@ -31,6 +31,14 @@ import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repo
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
+import {
+  REGISTRY_POLICY_JOB_EVENTS,
+  registryPolicyJobs,
+} from '@package-broker/core/runtime/policy-jobs';
+import { createRegistryPolicyExpiry } from '@package-broker/db-sqlite/repositories/registry-policy-expiry';
+import { createRegistryPolicyReader } from '@package-broker/db-sqlite/repositories/registry-policy-read';
+import { createPolicyReadAuditSink } from '@package-broker/db-sqlite/repositories/registry-policy-read-audit';
+import { registryPolicySchemaReady } from '@package-broker/db-sqlite/repositories/registry-policy-schema';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
@@ -777,6 +785,12 @@ function buildRegistryModule(input: {
       ...context,
     });
   const dependencies: RegistryModuleDeps = {
+    policy: {
+      reader: createRegistryPolicyReader(executor),
+      audit: createPolicyReadAuditSink(executor),
+      hooks: () => input.registration.hooks['registry.read'],
+      ids: { ulid },
+    },
     runtime: 'cloudflare',
     npmOidc: {
       clientIp: clientIpOf,
@@ -1901,6 +1915,17 @@ export function createWorker(
                   : tokenJobRegistrations(executor as SqlExecutor, patJobs, log)),
                 ...(db === undefined || registryConfig === undefined
                   ? []
+                  : registryPolicyJobs(registryConfig, () =>
+                      createRegistryPolicyExpiry(executor as SqlExecutor),
+                    ).map((job) =>
+                      registerObservedJob(job, {
+                        events: new Set([...AUDIT_EVENTS, ...REGISTRY_POLICY_JOB_EVENTS]),
+                        reasonCodes: new Set(),
+                        routeTemplates: new Set(),
+                      }),
+                    )),
+                ...(db === undefined || registryConfig === undefined
+                  ? []
                   : [
                       ...[sourceSyncJob, sourcePollJob, npmVcsBuildJob].map((definition) =>
                         registerObservedJob(
@@ -2022,6 +2047,19 @@ export function createWorker(
               plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
           });
     coreJobBindings.registry = registryModule;
+    const policyEnabled = registryConfig?.policy.enabled === true;
+    // With the flag off a failed probe only leaves management unmounted; boot stays as before.
+    const policySchema =
+      db !== undefined &&
+      (await registryPolicySchemaReady(executor as SqlExecutor).catch((error: unknown) => {
+        if (policyEnabled) throw error;
+        return false;
+      }));
+    if (db !== undefined && policyEnabled && !policySchema) {
+      throw new KernelConfigError([
+        'registry.policy.enabled: the registry policy migration is missing',
+      ]);
+    }
 
     const ports: PluginPorts = {
       organizations: Object.freeze({ get: (ctx: OrgContext) => organizations.get(ctx) }),
@@ -2082,6 +2120,12 @@ export function createWorker(
               registryModule === undefined
                 ? []
                 : reportedVcsProviders('cloudflare', registration.sourceProviders.values()),
+            registryPolicy: {
+              ...(policySchema ? { management: true as const } : {}),
+              ...(registryModule?.module.policy === undefined
+                ? {}
+                : { serving: registryModule.module.policy }),
+            },
           });
     const authorization = options.authorization ?? auth?.authorization;
 

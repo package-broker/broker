@@ -25,6 +25,8 @@ import {
   SourceUnavailableError,
 } from '../sources/source-unavailable.js';
 import type { AccessRecorder } from './access-recorder.js';
+import { governDistHeaders } from './policy/http.js';
+import { withPolicyRetry, type RegistryReadSession } from './policy/session.js';
 
 export const DIST_BUSY_RETRY_AFTER_SECONDS = 5;
 export const DIST_CACHE_CONTROL = 'private, max-age=31536000, immutable';
@@ -82,6 +84,14 @@ export interface DistServeOptions {
   readonly observability?: Observability;
   /** Aborting cancels the coalesced wait and, for the lease holder, the upstream fetch. */
   readonly signal?: AbortSignal;
+  /** Present only when registry policy governs this read. */
+  readonly policy?: DistPolicy;
+}
+
+export interface DistPolicy {
+  readonly session: RegistryReadSession;
+  /** The session's policy facade; every target resolution goes through it. */
+  readonly access: Pick<PackageAccess, 'dist'>;
 }
 
 export interface DistService {
@@ -110,6 +120,8 @@ function parseRevision(value: unknown): number | null {
 }
 
 type StoredRead = BlobRead | 'absent' | 'failed';
+/** Records the download at once, or defers it until the policy seal has passed. */
+type Recording = 'now' | { blobId?: string };
 
 async function readStored(
   store: Pick<BlobStore, 'get'>,
@@ -175,19 +187,25 @@ export function createDistService(deps: DistServiceDeps): DistService {
   );
 
   async function resolve(
+    access: Pick<PackageAccess, 'dist'>,
     actor: ProjectActor,
     request: DistServeRequest,
     versionId: string,
     revision: number,
   ): Promise<DistTarget | null> {
-    return deps.access.dist(actor, request.ecosystem, request.key, {
+    return access.dist(actor, request.ecosystem, request.key, {
       by: 'id',
       versionId,
       revision,
     });
   }
 
-  function file(ctx: OrgContext, target: DistTarget, read: BlobRead): DistServeResult {
+  function file(
+    ctx: OrgContext,
+    target: DistTarget,
+    read: BlobRead,
+    record: Recording,
+  ): DistServeResult {
     const blob = target.blob;
     if (blob === null) return NOT_FOUND;
     const extension = target.fetch.distType === null ? 'bin' : EXTENSIONS[target.fetch.distType];
@@ -198,14 +216,19 @@ export function createDistService(deps: DistServiceDeps): DistService {
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': DIST_CACHE_CONTROL,
     });
-    deps.recorder.record(ctx, blob.id);
+    if (record === 'now') deps.recorder.record(ctx, blob.id);
+    else record.blobId = blob.id;
     return { kind: 'file', headers, size: read.info.size, body: read.body };
   }
 
-  async function serveStored(ctx: OrgContext, target: DistTarget | null): Promise<DistServeResult> {
+  async function serveStored(
+    ctx: OrgContext,
+    target: DistTarget | null,
+    record: Recording,
+  ): Promise<DistServeResult> {
     if (target?.blob == null) return NOT_FOUND;
     const read = await readable(deps.store, ctx, target.blob.sha256);
-    return read === null ? NOT_FOUND : file(ctx, target, read);
+    return read === null ? NOT_FOUND : file(ctx, target, read, record);
   }
 
   async function fill(
@@ -264,92 +287,118 @@ export function createDistService(deps: DistServiceDeps): DistService {
     return outcome === 'stale' ? isDone() : 'filled';
   }
 
+  async function serveWith(
+    access: Pick<PackageAccess, 'dist'>,
+    record: Recording,
+    actor: ProjectActor,
+    request: DistServeRequest,
+    options: DistServeOptions | undefined,
+  ): Promise<DistServeResult> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+    const revision = parseRevision(request.revision);
+    if (revision === null || typeof request.versionId !== 'string') return NOT_FOUND;
+    if (!SEGMENT.test(request.versionId)) return NOT_FOUND;
+    const { versionId } = request;
+    const ctx: OrgContext = { orgId: actor.orgId };
+
+    const target = await resolve(access, actor, request, versionId, revision);
+    if (target === null) return NOT_FOUND;
+
+    try {
+      if (target.blob === null && request.ecosystem === 'npm') {
+        const build = await deps.enqueueNpmVcsBuild?.(ctx, target);
+        if (build === 'terminal') return GONE;
+        if (build) return { kind: 'busy', retryAfterSeconds: 10 };
+      }
+    } catch (error) {
+      if (error instanceof SourceUnavailableError)
+        return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
+      if (error instanceof PlatformUnavailableError) return BUSY;
+      throw error;
+    }
+    if (target.blob !== null) {
+      const read = await readStored(deps.store, ctx, target.blob.sha256);
+      if (typeof read !== 'string') return file(ctx, target, read, record);
+      if (unrefetchable(target)) {
+        if (read === 'failed') return BUSY;
+        logGone(options?.observability, target);
+        return GONE;
+      }
+    }
+    if (!target.current || !hasUpstream(target)) return NOT_FOUND;
+
+    const key = await deps.leaseKey([ctx.orgId, 'dist', versionId, String(revision)]);
+    let refused = false;
+    let gone = false;
+    let latest: DistTarget | null = null;
+    const isDone = async (): Promise<DoneState> => {
+      latest = await resolve(access, actor, request, versionId, revision);
+      if (latest === null) return 'negative';
+      if (latest.blob !== null) {
+        try {
+          if ((await deps.store.head(ctx, latest.blob.sha256)) !== null) return 'filled';
+        } catch {
+          // Missing or unreadable bytes need a refill of the current revision.
+        }
+      }
+      return latest.current ? 'pending' : 'negative';
+    };
+    let outcome;
+    try {
+      outcome = await coalescer.run(
+        ctx,
+        key,
+        (signal) =>
+          latest === null
+            ? Promise.resolve('negative')
+            : fill(
+                ctx,
+                latest,
+                key,
+                signal,
+                isDone,
+                () => {
+                  refused = true;
+                },
+                () => {
+                  gone = true;
+                },
+                request.key,
+                options?.observability,
+              ),
+        { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
+      );
+    } catch (error) {
+      if (error instanceof SourceUnavailableError)
+        return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
+      throw error;
+    }
+
+    if (outcome === 'busy') return BUSY;
+    if (outcome === 'negative') return refused ? REFUSED : gone ? GONE : NOT_FOUND;
+    return serveStored(ctx, await resolve(access, actor, request, versionId, revision), record);
+  }
+
   return {
     async serve(actor, request, options) {
-      const signal = options?.signal;
-      signal?.throwIfAborted();
-      const revision = parseRevision(request.revision);
-      if (revision === null || typeof request.versionId !== 'string') return NOT_FOUND;
-      if (!SEGMENT.test(request.versionId)) return NOT_FOUND;
-      const { versionId } = request;
-      const ctx: OrgContext = { orgId: actor.orgId };
-
-      const target = await resolve(actor, request, versionId, revision);
-      if (target === null) return NOT_FOUND;
-
-      try {
-        if (target.blob === null && request.ecosystem === 'npm') {
-          const build = await deps.enqueueNpmVcsBuild?.(ctx, target);
-          if (build === 'terminal') return GONE;
-          if (build) return { kind: 'busy', retryAfterSeconds: 10 };
+      const policy = options?.policy;
+      if (policy === undefined) return serveWith(deps.access, 'now', actor, request, options);
+      return withPolicyRetry(async () => {
+        const deferred: { blobId?: string } = {};
+        const result = await serveWith(policy.access, deferred, actor, request, options);
+        if (result.kind !== 'file') return result;
+        governDistHeaders(result.headers);
+        const revision = parseRevision(request.revision)!;
+        await policy.session.sealBody(result.body, {
+          bindings: async () =>
+            (await resolve(policy.access, actor, request, request.versionId, revision)) !== null,
+        });
+        if (deferred.blobId !== undefined) {
+          deps.recorder.record({ orgId: actor.orgId }, deferred.blobId);
         }
-      } catch (error) {
-        if (error instanceof SourceUnavailableError)
-          return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
-        if (error instanceof PlatformUnavailableError) return BUSY;
-        throw error;
-      }
-      if (target.blob !== null) {
-        const read = await readStored(deps.store, ctx, target.blob.sha256);
-        if (typeof read !== 'string') return file(ctx, target, read);
-        if (unrefetchable(target)) {
-          if (read === 'failed') return BUSY;
-          logGone(options?.observability, target);
-          return GONE;
-        }
-      }
-      if (!target.current || !hasUpstream(target)) return NOT_FOUND;
-
-      const key = await deps.leaseKey([ctx.orgId, 'dist', versionId, String(revision)]);
-      let refused = false;
-      let gone = false;
-      let latest: DistTarget | null = null;
-      const isDone = async (): Promise<DoneState> => {
-        latest = await resolve(actor, request, versionId, revision);
-        if (latest === null) return 'negative';
-        if (latest.blob !== null) {
-          try {
-            if ((await deps.store.head(ctx, latest.blob.sha256)) !== null) return 'filled';
-          } catch {
-            // Missing or unreadable bytes need a refill of the current revision.
-          }
-        }
-        return latest.current ? 'pending' : 'negative';
-      };
-      let outcome;
-      try {
-        outcome = await coalescer.run(
-          ctx,
-          key,
-          (signal) =>
-            latest === null
-              ? Promise.resolve('negative')
-              : fill(
-                  ctx,
-                  latest,
-                  key,
-                  signal,
-                  isDone,
-                  () => {
-                    refused = true;
-                  },
-                  () => {
-                    gone = true;
-                  },
-                  request.key,
-                  options?.observability,
-                ),
-          { ...deps.coalesce, isDone, ...(signal === undefined ? {} : { signal }) },
-        );
-      } catch (error) {
-        if (error instanceof SourceUnavailableError)
-          return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };
-        throw error;
-      }
-
-      if (outcome === 'busy') return BUSY;
-      if (outcome === 'negative') return refused ? REFUSED : gone ? GONE : NOT_FOUND;
-      return serveStored(ctx, await resolve(actor, request, versionId, revision));
+        return result;
+      });
     },
   };
 }

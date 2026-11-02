@@ -2723,10 +2723,15 @@ export function describeNpmPublishWriterContract(
         const query = { packageId: published.packageId, projectId: 'project' };
         expect(await repo.packageName(ctx, published.packageId)).toBe('widget');
         expect(await repo.packageName(orgContext('foreign'), published.packageId)).toBeNull();
-        expect(await repo.readme(ctx, query)).toEqual({ filename: 'README.md', body: '# Widget' });
+        expect(await repo.readme(ctx, query)).toEqual({
+          filename: 'README.md',
+          body: '# Widget',
+          versionId: 'version-1.0.0',
+        });
         expect(await repo.readme(ctx, { ...query, version: '1.0.0' })).toEqual({
           filename: 'README.md',
           body: '# Widget',
+          versionId: 'version-1.0.0',
         });
         expect(await repo.readme(ctx, { ...query, version: 'missing' })).toBeNull();
         const second = w.input(false, '2.0.0');
@@ -2734,16 +2739,22 @@ export function describeNpmPublishWriterContract(
           ...second,
           readme: { filename: 'README.txt', body: 'Second' },
         });
-        expect(await repo.readme(ctx, query)).toEqual({ filename: 'README.txt', body: 'Second' });
+        expect(await repo.readme(ctx, query)).toEqual({
+          filename: 'README.txt',
+          body: 'Second',
+          versionId: 'version-2.0.0',
+        });
         expect(await repo.readme(ctx, { ...query, version: '1.0.0' })).toEqual({
           filename: 'README.md',
           body: '# Widget',
+          versionId: 'version-1.0.0',
         });
         await e.batch([st("DELETE FROM dist_tag WHERE org_id='org' AND tag='latest'")]);
         expect(await repo.readme(ctx, query)).toBeNull();
         expect(await repo.readme(ctx, { ...query, version: '2.0.0' })).toEqual({
           filename: 'README.txt',
           body: 'Second',
+          versionId: 'version-2.0.0',
         });
         expect(await repo.readme(orgContext('foreign'), query)).toBeNull();
         await e.batch([st("DELETE FROM project_package WHERE org_id='org'")]);

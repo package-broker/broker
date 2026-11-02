@@ -18,6 +18,17 @@ import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
+import type { PolicyServing } from '@package-broker/core/registry/policy/serving';
+import { createPolicyManageService } from '@package-broker/core/registry/policy/manage';
+import { createPolicyMemberService } from '@package-broker/core/registry/policy/manage-members';
+import { createPolicyInspectService } from '@package-broker/core/registry/policy/inspect';
+import { createPolicyVersionFactsReader } from './policy-version-facts.js';
+import { createRegistryPolicyCatalog } from './registry-policy-catalog.js';
+import { createRegistryPolicyStore } from './registry-policy-create.js';
+import { createRegistryPolicyMembers } from './registry-policy-members.js';
+import { createRegistryPolicyReader } from './registry-policy-read.js';
+import { createPolicyReadAuditSink } from './registry-policy-read-audit.js';
+import { createRegistryPolicyUpdater } from './registry-policy-update.js';
 import { createAuditQueryRepository } from './audit-query.js';
 import { createPackageAdminReader } from './package-admin-read.js';
 import { createProjectSourceReader } from './project-source-read.js';
@@ -96,6 +107,47 @@ export interface ApiRoutesOptions {
   /** The VCS providers the runtime has registered and serves, read per request. */
   readonly vcsProviders?: () => readonly VcsProvider[];
   readonly refuseVcsProvider?: (provider: VcsProvider) => boolean;
+  readonly registryPolicy?: {
+    /** Set whenever the policy migration is applied: the management routes, enforced or not. */
+    readonly management?: true;
+    /** Present only when registry policy is enabled: the package views filter through it. */
+    readonly serving?: PolicyServing;
+  };
+}
+
+function registryPolicyApi(
+  executor: SqlExecutor,
+  providerAnchors: AccessAssembly['anchors'],
+  common: {
+    ids: { ulid(): string };
+    clock: typeof systemClock;
+    clientIp: ApiRoutesOptions['clientIp'];
+  },
+  idempotency: ReturnType<typeof createIdempotencyRepository>,
+) {
+  const repositories = {
+    store: createRegistryPolicyStore(executor, providerAnchors),
+    updater: createRegistryPolicyUpdater(executor, providerAnchors),
+    members: createRegistryPolicyMembers(executor, providerAnchors),
+    catalog: createRegistryPolicyCatalog(executor),
+    ids: common.ids,
+    clock: common.clock,
+  };
+  const manage = createPolicyManageService(repositories);
+  return {
+    ...common,
+    manage,
+    members: createPolicyMemberService({ ...repositories, manage }),
+    inspect: createPolicyInspectService({
+      policy: createRegistryPolicyReader(executor),
+      facts: createPolicyVersionFactsReader(executor),
+      packages: createPackageAdminReader(executor),
+      audit: createPolicyReadAuditSink(executor),
+      ids: common.ids,
+      clock: common.clock,
+    }),
+    idempotency,
+  };
 }
 
 export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefinition[] {
@@ -147,6 +199,17 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
             }),
         }),
       },
+      ...(input.registryPolicy?.management === true
+        ? { registryPolicy: registryPolicyApi(executor, anchors, common, idempotency) }
+        : {}),
+      ...(input.registryPolicy?.serving === undefined
+        ? {}
+        : {
+            packageViewPolicy: {
+              serving: input.registryPolicy.serving,
+              facts: createPolicyVersionFactsReader(executor),
+            },
+          }),
       npmLogin: access.npmLogin,
       trustedPublishers: {
         ...common,

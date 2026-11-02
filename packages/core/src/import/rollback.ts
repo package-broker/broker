@@ -1,5 +1,6 @@
 import { auditEvent, type AuditEvent } from '../audit/actions.js';
 import type { DelegatedMutationFence } from '../authz/fence.js';
+import type { ImportPublishedAtBasis } from '../catalogue/version-rules.js';
 import type { OrgContext } from '../db/port.js';
 import type { Clock } from '../ids.js';
 import type { DelegatedFenceIssuer } from './apply.js';
@@ -38,7 +39,7 @@ export interface ImportRollbackRef {
   readonly action: 'create' | 'update';
   readonly beforeImageJson: string | null;
   readonly contentHash: string | null;
-  readonly publishedAtBasis: 'source_release' | 'packagist_added' | 'import_time' | null;
+  readonly publishedAtBasis: ImportPublishedAtBasis | null;
   readonly beforeImageExpiresAt: string | null;
   readonly conflictState: 'none' | 'changed_after_import' | 'resolved';
   readonly rolledBackAt: string | null;

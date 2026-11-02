@@ -16,6 +16,7 @@ import * as sourceAttachments from '@package-broker/core/api/routes/source-attac
 import * as sourceNames from '@package-broker/core/api/routes/source-names-schemas';
 import * as sources from '@package-broker/core/api/routes/sources-schemas';
 import * as publishes from '@package-broker/core/api/routes/publishes-schemas';
+import * as policies from '@package-broker/core/api/routes/policies-schemas';
 import * as tokens from '@package-broker/core/api/routes/tokens-schemas';
 import type { ApiSlot } from '@package-broker/core/plugin';
 
@@ -30,6 +31,7 @@ function stubDependencies(): ApiModuleDeps {
     trustedPublishers: {},
     packageAccessRequests: {},
     packageDetail: {},
+    registryPolicy: {},
     sources: { service: { acceptRemoval: () => undefined } },
   };
   for (let round = 0; round < MAX_STUB_ROUNDS; round += 1) {
@@ -76,6 +78,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
     sources,
     tokens,
     publishes,
+    policies,
   ]) {
     Object.values(module).forEach(collect);
   }

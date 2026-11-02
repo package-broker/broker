@@ -722,8 +722,40 @@ export interface NpmVcsBuildOutcomeTable {
   outcome: string | null;
 }
 
+/** Mirrors `registry_policy_rule` in `migrations/0008_registry_policy.sql`. */
+export interface RegistryPolicyRuleTable {
+  id: string;
+  org_id: string;
+  project_id: string | null;
+  ecosystem: 'npm' | 'composer';
+  package_key: string | null;
+  kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+  min_age_seconds: number | null;
+  client_family: 'npm' | 'pnpm' | 'yarn' | 'composer' | null;
+  client_min_version: string | null;
+  deny_unknown: Generated<number>;
+  reason_code: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+  incident_id: string | null;
+  expires_at: string | null;
+  expiry_audited_at: string | null;
+  disabled_at: string | null;
+  disabled_reason: 'false_positive' | 'emergency_compatibility' | 'superseded' | 'other' | null;
+  revision: Generated<number>;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Mirrors `registry_policy_version` in `migrations/0008_registry_policy.sql`. */
+export interface RegistryPolicyVersionTable {
+  org_id: string;
+  rule_id: string;
+  version_normalized: string;
+}
+
 export interface Database {
   npm_vcs_build_outcome: NpmVcsBuildOutcomeTable;
+  registry_policy_rule: RegistryPolicyRuleTable;
+  registry_policy_version: RegistryPolicyVersionTable;
   npm_login_session: NpmLoginSessionTable;
   trusted_publisher: TrustedPublisherTable;
   oidc_replay: OidcReplayTable;

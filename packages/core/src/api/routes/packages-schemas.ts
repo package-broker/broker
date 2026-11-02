@@ -45,6 +45,12 @@ export const packageItem = z.strictObject({
     projectId: ulid.nullable(),
   }),
   versionCount: z.number().int().nonnegative(),
+  versionCountTruncated: z
+    .boolean()
+    .optional()
+    .describe(
+      'Present only when registry policy filters this view. True when only the newest 100 versions were counted, so the package has at least versionCount permitted versions and latestVersion is the newest permitted among them.',
+    ),
   lastSyncedAt: z.string().nullable(),
 });
 const assessment = z.enum(['affected', 'not_affected']);

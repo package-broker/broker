@@ -103,6 +103,11 @@ import { npmRoutes } from './npm/routes.js';
 import { forwardNpmAudit } from './npm/audit.js';
 import type { RegistryConfig } from './registry-config.js';
 import { createScopedAdmittingAccess } from './scoped-access.js';
+import type { RegistryPolicyReader } from '../db/registry-policy.js';
+import type { RegisteredReadHook } from './policy/hooks.js';
+import type { PolicyReadAuditSink } from './policy/read-audit.js';
+import { createPolicyServing, type PolicyServing } from './policy/serving.js';
+import { KernelConfigError } from '../kernel/registry.js';
 
 export class SourceMissingError extends Error {
   override readonly name = 'SourceMissingError';
@@ -157,8 +162,49 @@ export function createNpmHandleOf(
   };
 }
 
+/** What registry policy serving reads; required when `registry.policy.enabled` is true. */
+export interface RegistryPolicyDeps {
+  readonly reader: RegistryPolicyReader;
+  readonly audit: PolicyReadAuditSink;
+  /** The compiled `registry.read` hooks, read per request because plugins register later. */
+  readonly hooks: () => readonly RegisteredReadHook[];
+  readonly ids: { ulid(): string };
+}
+
+/**
+ * The policy serving port for the enabled flag, or undefined so every serving path keeps its
+ * legacy behavior; an enabled flag without its dependencies is a configuration error.
+ */
+export function registryPolicyServing(
+  registry: RegistryConfig,
+  deps: RegistryPolicyDeps | undefined,
+  clock: Clock,
+  observability: Pick<Observability, 'counter'> | undefined,
+): PolicyServing | undefined {
+  if (!registry.policy.enabled) return undefined;
+  if (deps === undefined) {
+    throw new KernelConfigError(['registry.policy.enabled: registry policy is not wired']);
+  }
+  const serving = () =>
+    createPolicyServing({
+      policy: deps.reader,
+      hooks: deps.hooks(),
+      hookBudgetMs: registry.policy.hookBudgetMs,
+      clock,
+      audit: deps.audit,
+      ids: deps.ids,
+      ...(observability === undefined ? {} : { observability }),
+    });
+  return Object.freeze({
+    open: (...args: Parameters<PolicyServing['open']>) => serving().open(...args),
+    organization: (...args: Parameters<PolicyServing['organization']>) =>
+      serving().organization(...args),
+  });
+}
+
 export interface RegistryModuleDeps {
   readonly npmTokens?: NpmTokenAdapters;
+  readonly policy?: RegistryPolicyDeps;
   readonly npmOidc?: Omit<OidcExchangeDependencies, 'verify' | 'clock'>;
   readonly npmPublish?: PublishDependencies;
   readonly runtime: Platform;
@@ -266,6 +312,8 @@ export interface RegistryModule extends Partial<RegistryJobs> {
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
   readonly packageSyncJob?: JobDefinition;
+  /** Present only when registry policy is enabled; API views filter through the same port. */
+  readonly policy?: PolicyServing;
 }
 
 const NO_PROBE: CredentialEchoProbe = { secrets: [], queryParams: [] };
@@ -291,6 +339,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   const { catalogue, ingest, registry, sync, npmAudit } = deps;
 
   const packageAccess = createPackageAccess(catalogue.reader);
+  const policy = registryPolicyServing(registry, deps.policy, deps.clock, observability);
   const visibilityPort = createScopedAdmittingAccess(packageAccess, catalogue.scopedAdmission);
   const scopedCache = createScopedCache(cache, catalogue.epoch, {
     deploymentId: deps.deploymentId,
@@ -839,6 +888,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       clock: catalogue.representationClock,
       publicUrl: deps.publicUrl,
       cache: scopedCache,
+      ...(policy === undefined ? {} : { policy }),
     }),
     ...npmRoutes({
       ...(deps.npmTokens === undefined ? {} : { tokens: deps.npmTokens }),
@@ -874,6 +924,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       dist,
       onDemand,
       reresolve,
+      ...(policy === undefined ? {} : { policy }),
       handleOf: deps.handleOf ?? (async () => null),
       ...(deps.defer === undefined ? {} : { defer: deps.defer }),
       publicUrl: deps.publicUrl,
@@ -912,6 +963,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   ]);
 
   return Object.freeze({
+    ...(policy === undefined ? {} : { policy }),
     ecosystemRoutes,
     async lookupTrustedPublisherRepository(
       ctx: OrgContext,

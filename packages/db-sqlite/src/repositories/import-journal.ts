@@ -8,6 +8,7 @@ import {
 } from '@package-broker/core/authz/fence';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { auditEvent, type AuditEventInput } from '@package-broker/core/audit/actions';
+import type { ImportPublishedAtBasis } from '@package-broker/core/catalogue/version-rules';
 import {
   D1_STATEMENTS_PER_BATCH,
   type OrgContext,
@@ -70,7 +71,7 @@ export interface ImportRollbackRef {
   readonly action: 'create' | 'update';
   readonly beforeImageJson: string | null;
   readonly contentHash: string | null;
-  readonly publishedAtBasis: 'source_release' | 'packagist_added' | 'import_time' | null;
+  readonly publishedAtBasis: ImportPublishedAtBasis | null;
   readonly beforeImageExpiresAt: string | null;
   readonly conflictState: 'none' | 'changed_after_import' | 'resolved';
   readonly rolledBackAt: string | null;

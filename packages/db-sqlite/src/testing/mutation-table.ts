@@ -4,9 +4,15 @@ import { entries as npmUnpublishEntries } from './mutation-table/npm-unpublish.j
 import { entries as npmDeprecateEntries } from './mutation-table/npm-deprecate.js';
 import { entries as discoveryEntries } from './mutation-table/discovery.js';
 import { entries as trustedPublisherEntries } from './mutation-table/trusted-publishers.js';
+import { entries as registryPolicyReadEntries } from './mutation-table/registry-policy-read.js';
+import { entries as registryPolicyCreateEntries } from './mutation-table/registry-policy-create.js';
+import { entries as registryPolicyUpdateEntries } from './mutation-table/registry-policy-update.js';
+import { entries as registryPolicyMembersEntries } from './mutation-table/registry-policy-members.js';
+import { entries as registryPolicyManageEntries } from './mutation-table/registry-policy-manage.js';
 import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
 import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
 import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
+import { entries as policyVersionFactsEntries } from './mutation-table/policy-version-facts.js';
 import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
 import { entries as oidcEntries } from './mutation-table/oidc.js';
 import { entries as proxyClaimsEntries } from './mutation-table/proxy-claims.js';
@@ -134,6 +140,11 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 export const mutationTable: readonly MutationEntry[] = [
+  ...registryPolicyReadEntries,
+  ...registryPolicyCreateEntries,
+  ...registryPolicyUpdateEntries,
+  ...registryPolicyMembersEntries,
+  ...registryPolicyManageEntries,
   ...trustedPublisherEntries,
   ...npmLoginEntries,
   ...npmTokensEntries,
@@ -143,6 +154,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...publishesEntries,
   ...readmeEntries,
   ...packageDetailEntries,
+  ...policyVersionFactsEntries,
   ...accessRequestsEntries,
   ...explicitPackageEntries,
   ...sourceAttachmentCountsEntries,

@@ -103,6 +103,19 @@ export interface CatalogueVersion {
   readonly npmIntegrity: string | null;
   readonly deprecatedMessage: string | null;
   readonly metadataJson: string;
+  /** Stored provenance of publishedAt; policy only, never rendered. */
+  readonly publishedAtBasis?: string;
+  /** The row's immutable creation time; the policy age fallback, never rendered. */
+  readonly createdAt?: string;
+}
+
+/** The immutable date and identity facts of the version a dist target belongs to. */
+export interface DistPolicyFacts {
+  readonly version: string;
+  readonly versionNormalized: string;
+  readonly publishedAt: string;
+  readonly publishedAtBasis: string;
+  readonly createdAt: string;
 }
 
 export interface PackageResolution {
@@ -161,6 +174,8 @@ export interface DistTarget {
   readonly status: 'active' | 'removed_upstream';
   readonly blob: DistBlob | null;
   readonly fetch: FetchDescriptor;
+  /** Always from the current version row, so an old revision carries current identity and dates. */
+  readonly facts?: DistPolicyFacts;
 }
 
 export interface DistIdentity {

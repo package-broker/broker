@@ -43,7 +43,7 @@ export interface DeprecationStore {
   ): Promise<void>;
 }
 
-/** Old and new messages both enter one audit event, whose payload is bounded. */
+/** UTF-8 message limit before lossless audit encoding. */
 export const DEPRECATION_MESSAGE_MAX_BYTES = 1024;
 
 export class ManifestUpdate extends PublishValidationError {
@@ -98,4 +98,13 @@ export function deprecationChanges(
     Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'versions'));
   if (!equal(envelope(before), envelope(after))) return fail();
   return changes;
+}
+
+/** Base64 keeps JSON escaping from exceeding the audit event's storage budget. */
+export function deprecationAuditText(message: string | null): string | null {
+  return message === null
+    ? null
+    : btoa(
+        Array.from(new TextEncoder().encode(message), (byte) => String.fromCharCode(byte)).join(''),
+      );
 }

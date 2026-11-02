@@ -328,6 +328,9 @@ test('package and held-action confirmations in their open states', async ({
   });
   await versions.getByRole('button', { name: 'Tombstone', exact: true }).click();
   await activeDialog(page, `Tombstone ${packageTarget.version}?`)
+    .getByLabel('Reason (required)')
+    .fill('Retired release');
+  await activeDialog(page, `Tombstone ${packageTarget.version}?`)
     .getByRole('button', { name: 'Confirm tombstone', exact: true })
     .click();
   await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeVisible();

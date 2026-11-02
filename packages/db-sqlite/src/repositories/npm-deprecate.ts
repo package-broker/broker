@@ -56,7 +56,6 @@ export function createDeprecationStore(executor: SqlExecutor): DeprecationStore 
     async update(ctx, guard, input) {
       assertPublishBinding(ctx, guard, input, true);
       const { snapshot, edits } = input;
-      const opId = newOpId();
       const statements: Statement[] = [
         ...guard,
         ...assertCheck(sql<boolean>`exists (
@@ -93,11 +92,12 @@ export function createDeprecationStore(executor: SqlExecutor): DeprecationStore 
         statements.push(
           statement(sql`insert into version_revision (id,org_id,version_id,revision,blob_id,source_ref,metadata_json,reason,op_id)
           select json_extract(edit.value,'$.revisionId'),v.org_id,v.id,v.revision,v.blob_id,v.source_ref,
-            json_set(v.metadata_json,'$.deprecated',v.deprecated_message),'npm_deprecate',${opId}
+            json_set(v.metadata_json,'$.deprecated',v.deprecated_message),'npm_deprecate',json_extract(json_extract(edit.value,'$.event.payloadJson'),'$.op_id')
           from json_each(${json}) edit join version v on ${eligible}`),
           statement(sql`update version as v set deprecated_message=(select json_extract(edit.value,'$.message')
             from json_each(${json}) edit where v.id=json_extract(edit.value,'$.id')),
-          revision=revision+1,last_op_id=${opId}
+          revision=revision+1,last_op_id=(select json_extract(json_extract(edit.value,'$.event.payloadJson'),'$.op_id')
+            from json_each(${json}) edit where v.id=json_extract(edit.value,'$.id'))
           where v.org_id=${ctx.orgId} and v.package_id=${snapshot.packageId}
           and exists (select 1 from json_each(${json}) edit where ${eligible})`),
           statement(sql`insert into audit_pending (id,org_id,created_at,actor_type,actor_id,token_selector,source_ip,action,target_type,target_id,project_id,payload_json)

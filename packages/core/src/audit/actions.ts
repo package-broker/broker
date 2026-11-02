@@ -152,9 +152,9 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
-  'package.deprecate': ['version', 'deprecated'],
+  'package.deprecate': ['version', 'deprecated', 'deprecated_encoding'],
   'package.dist_tag': ['tag', 'version'],
-  'package.unpublish': ['versions'],
+  'package.unpublish': ['versions', 'removed_version_count'],
   'package.publish': [
     'authority',
     'package',
@@ -637,7 +637,9 @@ function cleanChanges(
       if (entry[key] === undefined) continue;
       const integrity = action === 'package.publish' && field === 'integrity';
       const accessReason =
-        (action === 'package.access_request' || action === 'package.access_decide') &&
+        (action === 'package.access_request' ||
+          action === 'package.access_decide' ||
+          action === 'version.state_change') &&
         field === 'reason';
       const value = entry[key];
       const validIntegrity =

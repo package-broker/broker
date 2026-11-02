@@ -5,6 +5,7 @@ import { createPublishService, publishError } from './publish-service.js';
 import { API_ERROR_CODES } from '../../api/response.js';
 import { orgContext } from '../../db/port.js';
 import type { RequestContext } from '../../plugin.js';
+import { REGISTRY_DEFAULTS } from '../registry-config.js';
 
 const ctx = (name = 'widget') =>
   ({
@@ -88,6 +89,7 @@ function authorized(
   };
   const source = { id: 'source', status: 'active', requirePublishApproval: false };
   const deps = {
+    registry: REGISTRY_DEFAULTS,
     anchors: async () => [],
     lookupToken: vi.fn(async () => found),
     reads: {

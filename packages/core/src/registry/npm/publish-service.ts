@@ -1,11 +1,16 @@
-import { deprecationChanges, ManifestUpdate, type DeprecationStore } from './deprecate.js';
+import {
+  deprecationChanges,
+  deprecationAuditText,
+  ManifestUpdate,
+  type DeprecationStore,
+} from './deprecate.js';
 import { manifest } from './render.js';
 import { removedVersions, type UnpublishStore } from './unpublish.js';
 import { validDistTag } from './dist-tags.js';
 import { normalizeVersionMetadata, MetadataTooLargeError } from '../../catalogue/metadata.js';
 import { parseAuthorization } from '../../auth/credential-parser.js';
 import { API_ERROR_CODES, jsonResponse } from '../../api/response.js';
-import { auditEvent } from '../../audit/actions.js';
+import { auditEvent, type AuditEventInput } from '../../audit/actions.js';
 import { accessContextOf } from '../../authz/access-context.js';
 import type { EngineAccessPort, EngineProviderAnchor } from '../../authz/engine.js';
 import { packageKey } from '../../catalogue/names.js';
@@ -142,25 +147,9 @@ export function createPublishService(deps: PublishServiceDeps) {
       const manageAuthority = found.projectPermissions.includes('project:packages:manage');
       if (!projectAuthority && !organizationAuthority && !manageAuthority)
         return publishError(ctx, 403, 'forbidden');
-      const claims = await deps.reads.source(org, key);
-      if (claims.length !== 1) return publishError(ctx, 409, 'name_not_claimed');
-      const source = claims[0]!;
-      const guardInput = {
-        tokenId: token.id,
-        selector,
-        projectSlug: ctx.params['project'] ?? '',
-        routeProjectId: ctx.projectId,
-        sourceId: source.id,
-        key,
-      };
-      if (!(await deps.admitted(org, guardInput))) return publishError(ctx, 403, 'not_admitted');
-      const authority = projectAuthority ? 'project' : 'organization';
-      if (source.status !== 'active') return publishError(ctx, 409, 'source_paused');
       const binding = await deps.reads.packageBinding(org, token.id);
       if (binding === null || (binding.packageName !== null && binding.packageName !== key))
         return publishError(ctx, 403, 'package_binding');
-      const requiredScanners = [...deps.requiredScanners()];
-      const holdScan = requiredScanners.length > 0;
       if (
         ctx.request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !==
         'application/json'
@@ -174,6 +163,49 @@ export function createPublishService(deps: PublishServiceDeps) {
       const contentLength = Number(length);
       if (contentLength > deps.registry.caps.publishBodyBytes)
         return publishError(ctx, 413, 'publish_body_too_large');
+      const claims = await deps.reads.source(org, key);
+      if (claims.length !== 1) {
+        if (claims.length > 1 || !manageAuthority)
+          return publishError(ctx, 409, 'name_not_claimed');
+        try {
+          await validatePublishBody(ctx.request.body, {
+            name,
+            caps: {
+              ...deps.registry.caps,
+              publishBodyBytes: Math.min(deps.registry.caps.publishBodyBytes, contentLength),
+            },
+            codecs: deps.codecs,
+            origin: {
+              importedAt: deps.clock.now().toISOString(),
+              probe: { secrets: [], queryParams: [] },
+            },
+            tarballUrl: () => '',
+            requireLicense: deps.registry.publish.requireLicense,
+            // A publish still gets its claim refusal without staging its attachment.
+            refuseAttachments: true,
+            signal: ctx.request.signal,
+            onTarballChunk: async () => undefined,
+          });
+        } catch (error) {
+          if (error instanceof ManifestUpdate) return publishError(ctx, 405, 'write_unsupported');
+          if (!(error instanceof PublishValidationError) || error.code !== 'forbidden') throw error;
+        }
+        return publishError(ctx, 409, 'name_not_claimed');
+      }
+      const source = claims[0]!;
+      const guardInput = {
+        tokenId: token.id,
+        selector,
+        projectSlug: ctx.params['project'] ?? '',
+        routeProjectId: ctx.projectId,
+        sourceId: source.id,
+        key,
+      };
+      if (!(await deps.admitted(org, guardInput))) return publishError(ctx, 403, 'not_admitted');
+      const authority = projectAuthority ? 'project' : 'organization';
+      if (source.status !== 'active') return publishError(ctx, 409, 'source_paused');
+      const requiredScanners = [...deps.requiredScanners()];
+      const holdScan = requiredScanners.length > 0;
       const now = deps.clock.now().toISOString();
       const credential = parseAuthorization(ctx.request.headers.get('authorization'));
       const pipe = new TransformStream<Uint8Array, Uint8Array>(
@@ -251,9 +283,10 @@ export function createPublishService(deps: PublishServiceDeps) {
               ...Object.fromEntries(snapshot.versions.map((v) => [v.version, v.publishedAt])),
             },
           };
+          const opId = ulid();
           const changes = deprecationChanges(before, error.metadata).map((change) => {
             const version = snapshot.versions.find((v) => v.version === change.version)!;
-            const event = auditEvent({
+            const eventInput: AuditEventInput = {
               id: ulid(),
               now,
               action: 'package.deprecate',
@@ -262,7 +295,7 @@ export function createPublishService(deps: PublishServiceDeps) {
                 id: ctx.principal!.id,
               },
               context: {
-                opId: ulid(),
+                opId,
                 requestId: ctx.requestId,
                 sourceIp: null,
                 tokenSelector: selector,
@@ -271,9 +304,26 @@ export function createPublishService(deps: PublishServiceDeps) {
               projectId: ctx.projectId,
               changes: {
                 version: { new: change.version },
-                deprecated: { old: change.old, new: change.message },
+                deprecated: {
+                  old: change.old,
+                  new: change.message,
+                },
               },
-            });
+            };
+            let event = auditEvent(eventInput);
+            if (!event.ok && event.reason === 'too_large') {
+              event = auditEvent({
+                ...eventInput,
+                changes: {
+                  version: { new: change.version },
+                  deprecated: {
+                    old: deprecationAuditText(change.old),
+                    new: deprecationAuditText(change.message),
+                  },
+                  deprecated_encoding: { new: 'base64-utf8' },
+                },
+              });
+            }
             if (!event.ok) throw new PublishValidationError('invalid_deprecation');
             return { ...change, event: event.event };
           });
@@ -734,7 +784,10 @@ export function createUnpublishService(deps: PublishServiceDeps) {
       target: { type: 'package', id: snapshot.packageId },
       projectId: ctx.projectId,
       context: { opId: ulid(), requestId: ctx.requestId, sourceIp: null, tokenSelector: selector },
-      changes: { versions: { old: versions } },
+      changes: {
+        removed_version_count: { new: versions.length },
+        ...(versions.length <= 50 ? { versions: { old: versions } } : {}),
+      },
     });
     if (!event.ok) return invalid();
     try {

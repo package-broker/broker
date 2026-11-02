@@ -231,6 +231,13 @@ test.describe('Node management UI', () => {
     await expect(
       dialog.getByRole('button', { name: 'Confirm tombstone', exact: true }),
     ).toBeVisible();
+    await expect(
+      dialog.getByRole('button', { name: 'Confirm tombstone', exact: true }),
+    ).toBeDisabled();
+    await dialog.getByLabel('Reason (required)').fill('Retired release');
+    await expect(
+      dialog.getByRole('button', { name: 'Confirm tombstone', exact: true }),
+    ).toBeEnabled();
     expect(versionStatus(broker)).toBe('active');
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(dialog).toHaveCount(0);

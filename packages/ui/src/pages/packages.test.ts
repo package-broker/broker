@@ -304,7 +304,7 @@ describe('page requests and actions', () => {
       const scope = organizationAdmin ? 'Organization' : 'Project web';
       expect(html).toContain(`<dd>${scope}</dd>`);
       expect(html).toContain('Only this version is affected.');
-      await f.controller.confirmTombstone();
+      await f.controller.confirmTombstone('Retired release');
       expect(f.requireReauth).toHaveBeenCalledWith(
         expect.objectContaining({
           path: organizationAdmin
@@ -398,7 +398,7 @@ describe('page requests and actions', () => {
     await f.controller.act(versionId, 'tombstone');
     expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0);
     expect(f.controller.snapshot().confirmVersion).toBe(versionId);
-    await f.controller.confirmTombstone();
+    await f.controller.confirmTombstone('Retired release');
     expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
   });
   it('cancels a tombstone without sending a request', async () => {
@@ -407,7 +407,7 @@ describe('page requests and actions', () => {
     await f.controller.open(own.id);
     await f.controller.act(versionId, 'tombstone');
     f.controller.cancelTombstone();
-    await f.controller.confirmTombstone();
+    await f.controller.confirmTombstone('Retired release');
     expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0);
   });
   it.each(['absent', 'foreign'])(
@@ -473,12 +473,12 @@ describe('page requests and actions', () => {
     await f.controller.load(query);
     await f.controller.open(own.id);
     await f.controller.act(versionId, 'tombstone');
-    await f.controller.confirmTombstone();
+    await f.controller.confirmTombstone('Retired release');
     expect(f.requireReauth).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'POST',
         path: `/_pb/projects/web/packages/${packageId}/versions/${versionId}/tombstone`,
-        body: {},
+        body: { reason: 'Retired release' },
       }),
       {
         credential: false,
@@ -844,3 +844,37 @@ it('explains proxy demand fill in the packages empty state', async () => {
   expect(html).toContain('For proxy sources, packages appear when a client first requests them.');
   expect(html).not.toContain('run a sync');
 });
+
+it.each(['', '   ', 'é'.repeat(501), 'x'.repeat(1001)])(
+  'keeps invalid tombstone reasons out of requests',
+  async (reason) => {
+    const f = fixture();
+    await f.controller.load(query);
+    await f.controller.open(own.id);
+    await f.controller.act(versionId, 'tombstone');
+    await f.controller.confirmTombstone(reason);
+    expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toEqual([]);
+    expect(f.controller.snapshot().confirmVersion).toBe(versionId);
+  },
+);
+it('keeps the tombstone confirmation available after a failed request', async () => {
+  const f = fixture({ status: 503 });
+  await f.controller.load(query);
+  await f.controller.open(own.id);
+  await f.controller.act(versionId, 'tombstone');
+  await f.controller.confirmTombstone('Retired release');
+  expect(f.controller.snapshot()).toMatchObject({ confirmVersion: versionId, busy: false });
+});
+
+it.each(['x'.repeat(1000), 'é'.repeat(500)])(
+  'sends the exact tombstone reason at the UTF-8 byte boundary',
+  async (reason) => {
+    const f = fixture();
+    await f.controller.load(query);
+    await f.controller.open(own.id);
+    await f.controller.act(versionId, 'tombstone');
+    await f.controller.confirmTombstone(reason);
+    const post = f.fetch.mock.calls.find(([, init]) => init.method === 'POST');
+    expect(JSON.parse(post![1].body as string)).toEqual({ reason });
+  },
+);

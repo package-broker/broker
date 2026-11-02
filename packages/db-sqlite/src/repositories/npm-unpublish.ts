@@ -38,7 +38,7 @@ export function createUnpublishStore(executor: SqlExecutor): UnpublishStore {
         .sort((a, b) => compareNpmVersions(b.version, a.version));
       if (input.whole && remaining.length) throw new TypeError('invalid whole unpublish');
       const next = remaining[0];
-      const opId = newOpId();
+      const opId = (JSON.parse(input.event.payloadJson) as { op_id: string }).op_id;
       const statements: Statement[] = [
         ...guard,
         ...assertCheck(sql<boolean>`exists (
@@ -67,7 +67,7 @@ export function createUnpublishStore(executor: SqlExecutor): UnpublishStore {
         select 1 from version v where ${eligible}
         and unixepoch(v.published_at,'subsec') between unixepoch('now','subsec')-259200 and unixepoch('now','subsec'))))`),
         statement(sql`insert into version_revision (id,org_id,version_id,revision,blob_id,source_ref,metadata_json,reason,op_id)
-          select json_extract(edit.value,'$.revisionId'),v.org_id,v.id,v.revision,v.blob_id,v.source_ref,v.metadata_json,'npm_unpublish',${opId}
+          select json_extract(edit.value,'$.revisionId'),v.org_id,v.id,v.revision,v.blob_id,v.source_ref,json_set(v.metadata_json,'$.deprecated',v.deprecated_message),'npm_unpublish',${opId}
           from json_each(${json}) edit join version v on ${eligible}`),
         statement(sql`update version as v set status='tombstoned',tombstoned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
           tombstone_reason='npm_unpublish',purge_after=strftime('%Y-%m-%dT%H:%M:%fZ','now','+' ||

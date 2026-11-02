@@ -302,7 +302,12 @@ export function createPackagesController(services: ShellServices) {
       await open(selected, after);
   }
 
-  async function execute(versionId: string, action: Action, confirmed = false): Promise<void> {
+  async function execute(
+    versionId: string,
+    action: Action,
+    confirmed = false,
+    reason = '',
+  ): Promise<void> {
     const item = state.selected;
     const version = state.versions.find((entry) => entry.id === versionId);
     if (
@@ -323,20 +328,24 @@ export function createPackagesController(services: ShellServices) {
     const query = state.query;
     const params = { package: item.id, version: version.id };
     const project = state.access.projectSlug;
-    set({ busy: true, notice: null, confirmVersion: null });
+    set({ busy: true, notice: null });
     const result = state.access.organization.includes('org:packages:manage')
       ? await client.request('post', `/_pb/packages/{package}/versions/{version}/${action}`, {
           params,
-          body: {},
+          body: action === 'tombstone' ? { reason } : {},
         })
       : await client.request(
           'post',
           `/_pb/projects/{project}/packages/{package}/versions/{version}/${action}`,
-          { params: { ...params, project: project! }, body: {} },
+          {
+            params: { ...params, project: project! },
+            body: action === 'tombstone' ? { reason } : {},
+          },
         );
     if (current !== generation || currentVersions !== versionGeneration) return;
     set({ busy: false });
     if (!result.ok && result.code === 'reauth_required') {
+      set({ confirmVersion: null });
       services.requireReauth(result.request, {
         credential: false,
         secretFields: [],
@@ -405,9 +414,10 @@ export function createPackagesController(services: ShellServices) {
     act: execute,
     close,
     cancelTombstone: () => set({ confirmVersion: null }),
-    async confirmTombstone() {
+    async confirmTombstone(reason: string) {
+      if (!reason.trim() || new TextEncoder().encode(reason).byteLength > 1000) return;
       const id = state.confirmVersion;
-      if (id !== null) await execute(id, 'tombstone', true);
+      if (id !== null) await execute(id, 'tombstone', true, reason);
     },
     dispose() {
       ++navigationGeneration;
@@ -494,11 +504,17 @@ export function PackagesView(props: {
   onNext: () => void;
   onVersionNext: () => void;
   onRefresh: () => void;
-  onConfirm: () => void;
+  onConfirm: (reason: string) => void;
   onCancel: () => void;
   onBack?: () => void;
 }) {
   const { state } = props;
+  const [reason, setReason] = useState('');
+  useEffect(() => {
+    if (state.confirmVersion !== null) setReason('');
+  }, [state.confirmVersion]);
+  const reasonBytes = new TextEncoder().encode(reason).byteLength;
+  const reasonValid = reason.trim().length > 0 && reasonBytes <= 1000;
   const confirm = state.versions.find((version) => version.id === state.confirmVersion);
   const filtered = !!(
     state.query.q ||
@@ -695,11 +711,31 @@ export function PackagesView(props: {
               <dt>Scope</dt>
               <dd>{mutationScope(state.access)}</dd>
             </dl>
+            <div>
+              <Label htmlFor="tombstone-reason">Reason (required)</Label>
+              <Input
+                id="tombstone-reason"
+                disabled={state.busy}
+                required
+                value={reason}
+                aria-describedby="tombstone-reason-help"
+                aria-invalid={reasonBytes > 1000}
+                onChange={(event) => setReason(event.target.value)}
+              />
+              <p id="tombstone-reason-help">
+                Enter a reason of 1–1000 UTF-8 bytes. {reasonBytes} bytes used.
+              </p>
+            </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={props.onCancel}>
                 Cancel
               </Button>
-              <Button type="button" variant="destructive" onClick={props.onConfirm}>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={!reasonValid || state.busy}
+                onClick={() => props.onConfirm(reason)}
+              >
                 Confirm tombstone
               </Button>
             </DialogFooter>
@@ -1035,7 +1071,7 @@ export function PackagesPage() {
           }
         }}
         onRefresh={() => void controller.refresh()}
-        onConfirm={() => void controller.confirmTombstone()}
+        onConfirm={(reason) => void controller.confirmTombstone(reason)}
         onCancel={controller.cancelTombstone}
       />
     </section>

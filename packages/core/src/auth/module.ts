@@ -72,7 +72,10 @@ export interface AuthModuleOptions {
   readonly clientIp: (request: Request) => string | null;
   readonly providers: ProviderMap;
   readonly localAuth?: LocalAuthPolicy;
-  readonly hooks: Registration['hooks'];
+  readonly hooks: Pick<
+    Registration['hooks'],
+    'access.check' | 'auth.resolveIdentity' | 'auth.mapGroups'
+  >;
   readonly log: KernelLog;
   readonly access?: Pick<AuthorizationEngineDeps, 'access' | 'providerAnchors'> & {
     readonly dispatch: AuthorizationEngineDeps['tokenUse']['dispatch'];

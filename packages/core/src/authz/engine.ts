@@ -211,11 +211,17 @@ function tokenEffective(found: EngineTokenAccess, boundary: EngineBoundary): Set
   );
 }
 
+/** A project-session route admits any caller holding some permission in the project. */
+function projectSession(request: AuthorizationRequest, boundary: EngineBoundary): boolean {
+  return boundary === 'project' && request.route.projectSession === true;
+}
+
 function decideFrom(
   found: Authenticated,
   permission: string | null,
   boundary: EngineBoundary,
   slugValid: boolean,
+  anyProjectPermission = false,
 ): AuthorizationDecision {
   if (permission === null) return { allow: true, principal: found.principal, projectId: null };
   if (boundary === 'organization') {
@@ -227,7 +233,7 @@ function decideFrom(
   if (found.project === null || found.effective.size === 0) {
     return found.projectVisible ? FORBIDDEN : NOT_FOUND;
   }
-  return found.effective.has(permission)
+  return anyProjectPermission || found.effective.has(permission)
     ? { allow: true, principal: found.principal, projectId: found.project.id }
     : FORBIDDEN;
 }
@@ -290,6 +296,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       permission,
       input.boundary,
       slugValid,
+      projectSession(request, input.boundary),
     );
     if (decision.allow) {
       dispatchSafely(async () => {

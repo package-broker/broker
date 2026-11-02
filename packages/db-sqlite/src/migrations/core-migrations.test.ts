@@ -161,7 +161,7 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 63 tables, four expand migrations, the login handoff migration and the npm build outcome migration', async () => {
+  it('1: a fresh database gets every core migration: 65 tables, four expand migrations, the login handoff migration, the npm build outcome migration and the registry policy migration', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
@@ -175,6 +175,7 @@ describe('core migrations', () => {
       'core:0005_package_settings_revision',
       'core:0006_npm_login_handoff',
       'core:0007_npm_vcs_build_outcomes',
+      'core:0008_registry_policy',
     ]);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))
@@ -182,7 +183,7 @@ describe('core migrations', () => {
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    expect(await countTables()).toBe(63);
+    expect(await countTables()).toBe(65);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );

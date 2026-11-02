@@ -460,3 +460,33 @@ describe('core organization alternative declaration', () => {
     },
   );
 });
+
+describe('core project session declaration', () => {
+  const route = {
+    method: 'GET',
+    path: '/_pb/projects/:project/policies',
+    boundary: 'project',
+    permission: 'project:read',
+    projectSession: true,
+  };
+  it('accepts a project session on a core project route declaring project:read', () => {
+    expect(routeBoundaryProblems(route, 'policies', { allowSelf: true })).toEqual([]);
+  });
+  it('refuses the declaration on plugin and ecosystem routes', () => {
+    expect(
+      routeBoundaryProblems(route, 'policies', { apiVersion: SUPPORTED_PLUGIN_API[0] }).join(' '),
+    ).toContain('projectSession is reserved for core routes');
+    expect(
+      routeBoundaryProblems(route, 'policies', { allowOrganizationAlternative: true }).join(' '),
+    ).toContain('projectSession is reserved for core routes');
+  });
+  it.each([
+    ['another permission', { permission: 'project:packages:manage' }],
+    ['the organization boundary', { boundary: 'organization', permission: 'org:read' }],
+    ['a non-true flag', { projectSession: false }],
+  ])('refuses %s', (_name, change) => {
+    expect(
+      routeBoundaryProblems({ ...route, ...change }, 'policies', { allowSelf: true }).length,
+    ).toBeGreaterThan(0);
+  });
+});

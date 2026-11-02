@@ -29,10 +29,10 @@ async function withDatabase(
 }
 
 describe('openMigratedDatabase', () => {
-  it('1: applies every core migration and reports 63 user tables', async () => {
+  it('1: applies every core migration and reports 65 user tables', async () => {
     await withDatabase(undefined, async ({ executor }) => {
       const rows = await executor.all<{ n: number }>({ sql: COUNT_TABLES, params: [] });
-      expect(rows).toEqual([{ n: 63 }]);
+      expect(rows).toEqual([{ n: 65 }]);
     });
   });
 
@@ -133,6 +133,6 @@ describe('discoveredMigrations', () => {
       .sort();
     const sources = await discoveredMigrations();
     expect(sources.map((source) => `${source.id.slice('core:'.length)}.sql`)).toEqual(files);
-    expect(sources.length).toBe(7);
+    expect(sources.length).toBe(8);
   });
 });

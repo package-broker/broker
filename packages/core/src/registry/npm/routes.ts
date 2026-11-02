@@ -15,15 +15,29 @@ import { NPM_AUDIT_EVENT } from '../../platform/observability.js';
 import type { RequestContext } from '../../plugin.js';
 import type { RouteDefinition } from '../../kernel/routes.js';
 import { publishError } from './publish-service.js';
-import { isNotModified, notModifiedResponse, npmValidators } from '../conditional.js';
-import type { DistService } from '../dist-service.js';
+import {
+  isNotModified,
+  notModifiedResponse,
+  npmValidators,
+  representationValidator,
+} from '../conditional.js';
+import type { DistPolicy, DistService } from '../dist-service.js';
+import { createPolicyPackageAccess } from '../../catalogue/policy-access.js';
+import { governNotFound, policyErrorResponse } from '../policy/http.js';
+import type { PolicyServing } from '../policy/serving.js';
+import { withPolicyRetry, type RegistryReadSession } from '../policy/session.js';
+import type { ReadKind } from '../../plugin.js';
 import { parseNpmPath, type NpmPath } from './paths.js';
-import { renderPackument, renderVersionDocument, type NpmRenderOptions } from './render.js';
+import {
+  NPM_VARY,
+  renderPackument,
+  renderVersionDocument,
+  type NpmRenderOptions,
+} from './render.js';
 import type { NpmAuditEntries } from './audit.js';
 
 export const NPM_RENDER_VERSION = 2;
 const ABBREVIATED_TYPE = 'application/vnd.npm.install-v1+json';
-const VARY = 'Accept, Authorization';
 const REVALIDATE = 'private, no-cache';
 const AUDIT_BODY_MAX = 1024 * 1024;
 const AUDIT_NAMES_MAX = 1000;
@@ -51,6 +65,8 @@ export interface NpmRouteDeps {
   readonly defer?: (thunk: () => Promise<void>) => void;
   readonly publicUrl: string;
   readonly codecs: Pick<Codecs, 'gunzip'>;
+  /** Present only when `registry.policy.enabled`; absent keeps every response unchanged. */
+  readonly policy?: PolicyServing;
   readonly audit: {
     readonly enabled: boolean;
     readonly forward?: (entries: NpmAuditEntries, ctx: RequestContext) => Promise<Response>;
@@ -107,6 +123,18 @@ function outcomeKey(outcome: PackageVisibility): string | null {
 
 type Served = Extract<NpmPath, { kind: 'packument' | 'version' | 'tarball' }>;
 
+interface Governed {
+  readonly session: RegistryReadSession;
+  readonly access: PackageAccess;
+}
+
+const READ_KINDS: Readonly<Record<Served['kind'] | 'dist_tags', ReadKind>> = {
+  packument: 'metadata',
+  version: 'version',
+  tarball: 'dist',
+  dist_tags: 'tags',
+};
+
 export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   function actorFor(ctx: RequestContext): ProjectActor | null {
     const actor = (deps.actorOf ?? contextPackageActorOf)(ctx);
@@ -132,10 +160,17 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   function ok(body: unknown): Response {
     const response = jsonResponse(200, body);
     response.headers.set('Cache-Control', REVALIDATE);
-    response.headers.set('Vary', VARY);
+    response.headers.set('Vary', NPM_VARY);
     return response;
   }
 
+  function govern(ctx: RequestContext, actor: ProjectActor, kind: ReadKind): Governed | null {
+    if (deps.policy === undefined) return null;
+    const session = deps.policy.open(ctx, actor, 'npm', kind);
+    return { session, access: createPolicyPackageAccess(deps.access, session) };
+  }
+
+  /** Request-wide restrictions run after authorization and before any fill is scheduled. */
   async function resolveForRead(
     ctx: RequestContext,
     parsed: Served | { kind: 'dist_tags'; key: string },
@@ -148,10 +183,13 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       return notFound(ctx);
     }
     if (parsed.kind === 'dist_tags') {
-      return resolved.kind === 'visible'
-        ? { actor, pkg: resolved.pkg, stale: false }
-        : notFound(ctx);
+      if (resolved.kind !== 'visible') return notFound(ctx);
+      const governed = govern(ctx, actor, READ_KINDS.dist_tags);
+      await governed?.session.request(parsed.key);
+      return { actor, pkg: resolved.pkg, stale: false, governed };
     }
+    const governed = govern(ctx, actor, READ_KINDS[parsed.kind]);
+    await governed?.session.request(parsed.key);
     const filled = await deps.onDemand.ensure(actor, {
       ecosystem: 'npm',
       key: parsed.key,
@@ -173,7 +211,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       (deps.defer ?? deferOf(ctx))(filled.background);
     }
     if (resolved.kind === 'visible' && filled.kind === 'serve') {
-      return { actor, pkg: resolved.pkg, stale: filled.stale };
+      return { actor, pkg: resolved.pkg, stale: filled.stale, governed };
     }
     const current = await deps.reresolve(ctx);
     if (
@@ -184,7 +222,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     ) {
       return notFound(ctx);
     }
-    return { actor, pkg: current.pkg, stale: false };
+    return { actor, pkg: current.pkg, stale: false, governed };
   }
 
   function revalidating(response: Response, stale: boolean): Response {
@@ -195,25 +233,69 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     return response;
   }
 
+  /** Maps a policy refusal raised outside a renderer to its fixed response. */
+  async function refusing(ctx: RequestContext, work: () => Promise<Response>): Promise<Response> {
+    try {
+      return await work();
+    } catch (error) {
+      const refused = policyErrorResponse(error, ctx.requestId, 'npm');
+      if (refused !== null) return refused;
+      throw error;
+    }
+  }
+
   async function servePackage(ctx: RequestContext): Promise<Response> {
     const parsed = parseNpmPath(rawSegments(ctx));
     if (parsed.kind !== 'packument' && parsed.kind !== 'version' && parsed.kind !== 'tarball') {
       return notFound(ctx);
     }
+    return refusing(ctx, () => servePackageAt(ctx, parsed));
+  }
+
+  async function servePackageAt(ctx: RequestContext, parsed: Served): Promise<Response> {
     const read = await resolveForRead(ctx, parsed);
     if (read instanceof Response) return read;
-    const { actor, pkg, stale } = read;
+    const response = await serveRead(ctx, parsed, read);
+    return read.governed === null ? response : governNotFound(response);
+  }
+
+  async function serveRead(
+    ctx: RequestContext,
+    parsed: Served,
+    read: Exclude<Awaited<ReturnType<typeof resolveForRead>>, Response>,
+  ): Promise<Response> {
+    const { actor, pkg, stale, governed } = read;
     const name = displayName(parsed.key);
     const projectSlug = ctx.params['project'] ?? '';
     const abbreviated = acceptsAbbreviated(ctx.request.headers.get('accept'));
+    const form = abbreviated ? 'npm-abbreviated' : 'npm-full';
+    const embedded = { projectSlug, origin: deps.publicUrl };
     const options: NpmRenderOptions = {
       requestId: ctx.requestId,
-      access: deps.access,
+      access: governed?.access ?? deps.access,
       actor,
       projectSlug,
       name,
       publicUrl: deps.publicUrl,
       abbreviated,
+      ...(governed === null || parsed.kind === 'tarball'
+        ? {}
+        : {
+            policy: {
+              session: governed.session,
+              conditional: ctx.request,
+              ...(parsed.kind === 'packument'
+                ? {
+                    baseValidator: await representationValidator(
+                      pkg,
+                      form,
+                      NPM_RENDER_VERSION,
+                      embedded,
+                    ),
+                  }
+                : {}),
+            },
+          }),
     };
     const uniform = async (response: Response) => {
       if (response.status !== 404) return response;
@@ -226,15 +308,13 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
         stale,
       );
     }
+    if (parsed.kind === 'packument' && options.policy !== undefined) {
+      return revalidating(await uniform(await renderPackument(options)), stale);
+    }
     if (parsed.kind === 'packument') {
-      const validators = await npmValidators(
-        pkg,
-        abbreviated ? 'npm-abbreviated' : 'npm-full',
-        NPM_RENDER_VERSION,
-        { projectSlug, origin: deps.publicUrl },
-      );
+      const validators = await npmValidators(pkg, form, NPM_RENDER_VERSION, embedded);
       if (isNotModified(ctx.request, validators))
-        return revalidating(notModifiedResponse(validators, VARY), stale);
+        return revalidating(notModifiedResponse(validators, NPM_VARY), stale);
       const response = await uniform(await renderPackument(options));
       if (response.ok) response.headers.set('ETag', validators.etag);
       return revalidating(response, stale);
@@ -258,6 +338,11 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
           ...(ctx.ports.platform === undefined
             ? {}
             : { observability: ctx.ports.platform.observability }),
+          ...(governed === null
+            ? {}
+            : {
+                policy: { session: governed.session, access: governed.access } satisfies DistPolicy,
+              }),
         },
       );
     } catch (error) {
@@ -280,9 +365,25 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   async function serveDistTags(ctx: RequestContext): Promise<Response> {
     const parsed = parseNpmPath(rawSegments(ctx));
     if (parsed.kind !== 'dist_tags') return notFound(ctx);
+    return refusing(ctx, () => serveDistTagsOf(ctx, parsed));
+  }
+
+  async function serveDistTagsOf(
+    ctx: RequestContext,
+    parsed: { kind: 'dist_tags'; key: string },
+  ): Promise<Response> {
     const read = await resolveForRead(ctx, parsed);
     if (read instanceof Response) return read;
-    const tags = await deps.access.distTags(read.actor, 'npm', displayName(parsed.key));
+    const { governed } = read;
+    const name = displayName(parsed.key);
+    const tags =
+      governed === null
+        ? await deps.access.distTags(read.actor, 'npm', name)
+        : await withPolicyRetry(async () => {
+            const found = await governed.access.distTags(read.actor, 'npm', name);
+            await governed.session.seal();
+            return found;
+          });
     if (tags === null) return notFound(ctx);
     if (!tags.pkg.listingComplete) return unavailable(ctx, 10);
     return ok(tags.tags);
@@ -364,7 +465,17 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       Number.isSafeInteger(requested) && requested >= 1
         ? Math.min(requested, CATALOGUE_SEARCH_MAX)
         : SEARCH_DEFAULT;
-    const found = text === '' ? [] : await deps.access.search(actor, 'npm', { text, limit });
+    const governed = text === '' ? null : govern(ctx, actor, 'search');
+    const found =
+      text === ''
+        ? []
+        : governed === null
+          ? await deps.access.search(actor, 'npm', { text, limit })
+          : await withPolicyRetry(async () => {
+              const proved = await governed.access.search(actor, 'npm', { text, limit });
+              await governed.session.seal();
+              return proved;
+            });
     return ok({
       objects: found.map((item) => ({
         package: {
@@ -550,7 +661,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       path: '/:project/npm/-/v1/search',
       permission: READ,
       boundary: 'project',
-      handler: search,
+      handler: (ctx) => refusing(ctx, () => search(ctx)),
     },
     {
       method: 'POST',

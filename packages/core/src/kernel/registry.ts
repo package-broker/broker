@@ -173,9 +173,12 @@ export const ROUTE_METHODS: ReadonlySet<string> = new Set([
 
 const HOOK_NAME_KEYS = {
   'access.check': true,
+  'registry.read': true,
   'auth.resolveIdentity': true,
   'auth.mapGroups': true,
 } satisfies Record<keyof HookMap, true>;
+
+const REGISTRY_READ_API_VERSION = 4;
 
 const HOOK_NAMES: ReadonlySet<string> = new Set(Object.keys(HOOK_NAME_KEYS));
 
@@ -229,6 +232,7 @@ export function collectRegistrations(
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
     'access.check': [],
+    'registry.read': [],
     'auth.resolveIdentity': [],
     'auth.mapGroups': [],
   };
@@ -363,6 +367,13 @@ export function collectRegistrations(
             problems.push(`plugin "${id}" registered unknown hook ${quoted(name)}`);
           } else if (typeof handler !== 'function') {
             problems.push(`plugin "${id}" hook ${quoted(name)} handler must be a function`);
+          } else if (
+            name === 'registry.read' &&
+            !(plugin.apiVersion >= REGISTRY_READ_API_VERSION)
+          ) {
+            problems.push(
+              `plugin "${id}" hook "registry.read" requires apiVersion ${REGISTRY_READ_API_VERSION}`,
+            );
           } else {
             (hooks[name] as Array<{ plugin: string; handler: unknown }>).push({
               plugin: id,

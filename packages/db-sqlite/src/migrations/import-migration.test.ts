@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { IMPORT_PUBLISHED_AT_BASES } from '@package-broker/core/catalogue/version-rules';
 import type { SqlValue } from '@package-broker/core/db/port';
 import { BACKUP_SCOPE } from '../backup-scope.js';
 import { openNodeSqliteExecutor, type OpenedExecutor } from '../testing/node-sqlite-executor.js';
@@ -129,6 +130,16 @@ describe('baseline schema', () => {
       ).toEqual([{ published_at_basis: basis }]);
     },
   );
+
+  it('accepts every import basis the core import manifest and policy recognize', async () => {
+    for (const basis of IMPORT_PUBLISHED_AT_BASES) await insertRef(basis);
+    expect(
+      await rows<{ basis: string }>(
+        'SELECT published_at_basis AS basis FROM import_ref WHERE org_id = ? ORDER BY 1',
+        [ORG],
+      ),
+    ).toEqual([...IMPORT_PUBLISHED_AT_BASES].sort().map((basis) => ({ basis })));
+  });
 
   it('refuses registry_time as the publication basis', async () => {
     await expect(insertRef('registry_time')).rejects.toThrow(/CHECK constraint failed/);

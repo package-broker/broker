@@ -697,6 +697,21 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Registry policy D1 contracts load Miniflare and the Workers executor at run time, the migration contract builds rows by column name and walks a constant digest table, and the rule update maps validated patch fields to their columns; none reads executor affected-row counts.',
+      sites: [
+        "db-sqlite/src/contract/d1-open.ts:dynamic dependency: import(require.resolve('miniflare')) #1",
+        'db-sqlite/src/contract/d1-open.ts:dynamic dependency: import(module) #1',
+        'db-sqlite/src/contract/policy-migration.ts:unresolved computed access: row[column] #1',
+        'db-sqlite/src/contract/policy-migration.ts:opaque object access: Object.entries(FROZEN) #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: rule[COLUMNS[field]] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: patch[field] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: set[COLUMNS[field]] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: fields[COLUMNS[field]] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: COLUMNS[field] #1',
+      ],
+    },
+    {
+      reason:
         'Publisher snapshot traversal pairs validated audit restriction values with their prior values; the contract traverses expected restrictions. None reads executor affected-row counts.',
       sites: [
         'db-sqlite/src/contract/trusted-publishers-contract.ts:opaque object access: Object.entries(values) #1',
@@ -1693,8 +1708,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`null` #1',
         "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`lower(nullif(${jsonText(historyMeta, '$.dist.shasum')}, ''))` #1",
         'db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`null` #2',
-        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`\n  union all\n  select v.id, r.revision, 0, w.package_id, w.source_id, v.status, r.source_ref, r.blob_id, r.metadata_json,\n    case when json_extract(r.metadata_json, '$.dist.type') in ('zip', 'tar', 'tgz')\n      then json_extract(r.metadata_json, '$.dist.type') else v.dist_type end,\n    ${historyShasum}, ${historyIntegrity}\n  from w\n  join version as v on v.package_id = w.package_id\n  join version_revision as r on r.version_id = v.id and r.revision = ${query.revision}\n  where ${available} and r.org_id = ${ctx.orgId}\n    and v.id = ${query.versionId} and v.revision > ${query.revision}` #1",
-        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\nt (version_id, revision, current, package_id, source_id, status, source_ref, blob_id, metadata_json,\n   dist_type, composer_shasum, npm_integrity) as (\n  select v.id, v.revision, 1, w.package_id, w.source_id, v.status, v.source_ref, v.blob_id, v.metadata_json,\n    v.dist_type, v.composer_shasum, v.npm_integrity\n  from w\n  join version as v on v.package_id = w.package_id\n  where ${available} and ${selector}${history}\n)\nselect t.version_id, t.revision, t.current, t.package_id, t.source_id, t.status, t.source_ref,\n  t.dist_type, t.composer_shasum, t.npm_integrity,\n  ${jsonText(meta, npm ? '$.dist.tarball' : '$.dist.url')} as upstream_dist_url,\n  ${npm ? jsonText(meta, '$.dist.shasum') : sql`null`} as npm_shasum,\n  b.id as blob_id, b.sha256, b.size_bytes, b.media_type, b.refetchable\nfrom t\nleft join blob as b on b.id = t.blob_id and b.org_id = ${ctx.orgId} and b.deleted_at is null\nlimit 1` #1",
+        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`\n  union all\n  select v.id, r.revision, 0, w.package_id, w.source_id, v.status, r.source_ref, r.blob_id, r.metadata_json,\n    case when json_extract(r.metadata_json, '$.dist.type') in ('zip', 'tar', 'tgz')\n      then json_extract(r.metadata_json, '$.dist.type') else v.dist_type end,\n    ${historyShasum}, ${historyIntegrity}, ${FACT_COLUMNS}\n  from w\n  join version as v on v.package_id = w.package_id\n  join version_revision as r on r.version_id = v.id and r.revision = ${query.revision}\n  where ${available} and r.org_id = ${ctx.orgId}\n    and v.id = ${query.versionId} and v.revision > ${query.revision}` #1",
+        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\nt (version_id, revision, current, package_id, source_id, status, source_ref, blob_id, metadata_json,\n   dist_type, composer_shasum, npm_integrity, version, version_normalized, published_at,\n   published_at_basis, version_created_at) as (\n  select v.id, v.revision, 1, w.package_id, w.source_id, v.status, v.source_ref, v.blob_id, v.metadata_json,\n    v.dist_type, v.composer_shasum, v.npm_integrity, ${FACT_COLUMNS}\n  from w\n  join version as v on v.package_id = w.package_id\n  where ${available} and ${selector}${history}\n)\nselect t.version_id, t.revision, t.current, t.package_id, t.source_id, t.status, t.source_ref,\n  t.dist_type, t.composer_shasum, t.npm_integrity,\n  ${jsonText(meta, npm ? '$.dist.tarball' : '$.dist.url')} as upstream_dist_url,\n  ${npm ? jsonText(meta, '$.dist.shasum') : sql`null`} as npm_shasum,\n  b.id as blob_id, b.sha256, b.size_bytes, b.media_type, b.refetchable,\n  t.version, t.version_normalized, t.published_at, t.published_at_basis, t.version_created_at\nfrom t\nleft join blob as b on b.id = t.blob_id and b.org_id = ${ctx.orgId} and b.deleted_at is null\nlimit 1` #1",
+        "db-sqlite/src/repositories/catalogue-dist.ts:opaque SQL input: sql.raw(\n  'v.version, v.version_normalized, v.published_at, v.published_at_basis, v.created_at',\n) #1",
       ],
     },
     {
@@ -1716,7 +1732,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'SQL boundary in catalogue-lookup; callers supply compiled or parameterized statements and retain responsibility for count semantics.',
       sites: [
         "db-sqlite/src/repositories/catalogue-lookup.ts:opaque SQL input: sql.raw(\n  'w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_synced_at, e.version as cache_epoch',\n) #1",
-        'db-sqlite/src/repositories/catalogue-lookup.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json`,\n) #1',
+        'db-sqlite/src/repositories/catalogue-lookup.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json, v.published_at_basis, v.created_at as version_created_at`,\n) #1',
       ],
     },
     {
@@ -1775,14 +1791,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`v.published_at >= ${after.publishedAt} and (v.published_at > ${after.publishedAt} or v.id > ${after.id})` #1',
         'db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`` #1',
         'db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql` and ${sql.join(filters, sql` and `)}` #1',
-        "db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\ncand as (\n  select ${VERSION_COLUMNS}\n  from w cross join version as v indexed by version_by_published on v.package_id = w.package_id\n  where v.org_id = ${ctx.orgId} and ${bound}\n    and (v.status = 'active' or (v.status = 'removed_upstream' and w.removal_policy = 'flag'))${extra}\n  order by v.published_at, v.id\n  limit ${limit + 1}\n),\nsized as (\n  select cand.*,\n    row_number() over page as rn,\n    sum(length(cast(metadata_json as blob))) over (page rows between unbounded preceding and current row) as bytes,\n    count(*) over () as candidates\n  from cand\n  window page as (order by published_at, id)\n)\nselect w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_synced_at,\n  e.version as cache_epoch,\n  case when ${bound} then 0 else 1 end as changed,\n  s.candidates, s.id, s.revision, s.version, s.version_normalized, s.stability, s.status,\n  s.published_at, s.upstream_released_at, s.license, s.dist_type, s.composer_shasum,\n  s.npm_integrity, s.deprecated_message, s.metadata_json\nfrom (select 1) as one\nleft join w on 1 = 1\nleft join cache_epoch as e on e.org_id = ${ctx.orgId} and w.package_id is not null\nleft join sized as s on s.rn <= ${limit} and (s.rn = 1 or s.bytes <= ${CATALOGUE_PAGE_BYTES})\nwhere w.package_id is not null or ${sql.lit(binding ? 1 : 0)} = 1\norder by s.rn` #1",
+        "db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\ncand as (\n  select ${VERSION_COLUMNS}\n  from w cross join version as v indexed by version_by_published on v.package_id = w.package_id\n  where v.org_id = ${ctx.orgId} and ${bound}\n    and (v.status = 'active' or (v.status = 'removed_upstream' and w.removal_policy = 'flag'))${extra}\n  order by v.published_at, v.id\n  limit ${limit + 1}\n),\nsized as (\n  select cand.*,\n    row_number() over page as rn,\n    sum(length(cast(metadata_json as blob))) over (page rows between unbounded preceding and current row) as bytes,\n    count(*) over () as candidates\n  from cand\n  window page as (order by published_at, id)\n)\nselect w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_synced_at,\n  e.version as cache_epoch,\n  case when ${bound} then 0 else 1 end as changed,\n  s.candidates, s.id, s.revision, s.version, s.version_normalized, s.stability, s.status,\n  s.published_at, s.upstream_released_at, s.license, s.dist_type, s.composer_shasum,\n  s.npm_integrity, s.deprecated_message, s.metadata_json, s.published_at_basis,\n  s.version_created_at\nfrom (select 1) as one\nleft join w on 1 = 1\nleft join cache_epoch as e on e.org_id = ${ctx.orgId} and w.package_id is not null\nleft join sized as s on s.rn <= ${limit} and (s.rn = 1 or s.bytes <= ${CATALOGUE_PAGE_BYTES})\nwhere w.package_id is not null or ${sql.lit(binding ? 1 : 0)} = 1\norder by s.rn` #1",
       ],
     },
     {
       reason:
         'SQL boundary in catalogue-read; callers supply compiled or parameterized statements and retain responsibility for count semantics.',
       sites: [
-        'db-sqlite/src/repositories/catalogue-read.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json`,\n) #1',
+        'db-sqlite/src/repositories/catalogue-read.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json, v.published_at_basis, v.created_at as version_created_at`,\n) #1',
       ],
     },
     {

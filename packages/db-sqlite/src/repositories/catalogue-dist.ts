@@ -28,6 +28,11 @@ interface Row {
   readonly size_bytes: number | null;
   readonly media_type: string | null;
   readonly refetchable: number | null;
+  readonly version: string;
+  readonly version_normalized: string;
+  readonly published_at: string;
+  readonly published_at_basis: string;
+  readonly version_created_at: string;
 }
 
 const isText = (value: unknown): value is string => typeof value === 'string' && value !== '';
@@ -51,6 +56,10 @@ function validate(query: ResolveDistQuery): void {
     throw new TypeError('invalid dist query');
   }
 }
+
+const FACT_COLUMNS = sql.raw(
+  'v.version, v.version_normalized, v.published_at, v.published_at_basis, v.created_at',
+);
 
 const jsonText = (column: RawBuilder<unknown>, path: string) =>
   sql`case when json_type(${column}, ${path}) = 'text' then json_extract(${column}, ${path}) end`;
@@ -79,7 +88,7 @@ function statement(ctx: OrgContext, query: ResolveDistQuery): ScalarStatement {
   select v.id, r.revision, 0, w.package_id, w.source_id, v.status, r.source_ref, r.blob_id, r.metadata_json,
     case when json_extract(r.metadata_json, '$.dist.type') in ('zip', 'tar', 'tgz')
       then json_extract(r.metadata_json, '$.dist.type') else v.dist_type end,
-    ${historyShasum}, ${historyIntegrity}
+    ${historyShasum}, ${historyIntegrity}, ${FACT_COLUMNS}
   from w
   join version as v on v.package_id = w.package_id
   join version_revision as r on r.version_id = v.id and r.revision = ${query.revision}
@@ -88,9 +97,10 @@ function statement(ctx: OrgContext, query: ResolveDistQuery): ScalarStatement {
   }
   const raw = sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},
 t (version_id, revision, current, package_id, source_id, status, source_ref, blob_id, metadata_json,
-   dist_type, composer_shasum, npm_integrity) as (
+   dist_type, composer_shasum, npm_integrity, version, version_normalized, published_at,
+   published_at_basis, version_created_at) as (
   select v.id, v.revision, 1, w.package_id, w.source_id, v.status, v.source_ref, v.blob_id, v.metadata_json,
-    v.dist_type, v.composer_shasum, v.npm_integrity
+    v.dist_type, v.composer_shasum, v.npm_integrity, ${FACT_COLUMNS}
   from w
   join version as v on v.package_id = w.package_id
   where ${available} and ${selector}${history}
@@ -99,7 +109,8 @@ select t.version_id, t.revision, t.current, t.package_id, t.source_id, t.status,
   t.dist_type, t.composer_shasum, t.npm_integrity,
   ${jsonText(meta, npm ? '$.dist.tarball' : '$.dist.url')} as upstream_dist_url,
   ${npm ? jsonText(meta, '$.dist.shasum') : sql`null`} as npm_shasum,
-  b.id as blob_id, b.sha256, b.size_bytes, b.media_type, b.refetchable
+  b.id as blob_id, b.sha256, b.size_bytes, b.media_type, b.refetchable,
+  t.version, t.version_normalized, t.published_at, t.published_at_basis, t.version_created_at
 from t
 left join blob as b on b.id = t.blob_id and b.org_id = ${ctx.orgId} and b.deleted_at is null
 limit 1`;
@@ -131,6 +142,13 @@ function toTarget(row: Row): DistTarget {
       composerShasum: row.composer_shasum,
       npmIntegrity: row.npm_integrity,
       npmShasum: row.npm_shasum,
+    },
+    facts: {
+      version: row.version,
+      versionNormalized: row.version_normalized,
+      publishedAt: row.published_at,
+      publishedAtBasis: row.published_at_basis,
+      createdAt: row.version_created_at,
     },
   };
 }

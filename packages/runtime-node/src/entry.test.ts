@@ -207,6 +207,7 @@ describe('runEntry', () => {
         'core:0005_package_settings_revision',
         'core:0006_npm_login_handoff',
         'core:0007_npm_vcs_build_outcomes',
+        'core:0008_registry_policy',
       ]);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
@@ -246,6 +247,12 @@ describe('runEntry', () => {
           level: 'info',
           message: 'applied core:0007_npm_vcs_build_outcomes',
           id: 'core:0007_npm_vcs_build_outcomes',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0008_registry_policy',
+          id: 'core:0008_registry_policy',
           holder,
         },
       ]);

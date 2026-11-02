@@ -1,8 +1,8 @@
 import { proxyClaimConflict } from './routes/proxy-claims-schema.js';
 import type { ErrorEnvelope } from '../envelope.js';
 import { type $ZodType, type output } from 'zod/v4/core';
-import { routeApiProblems } from '../kernel/routes.js';
-import type { ApiSlot, RequestContext, RouteBoundary, RouteDefinition } from '../plugin.js';
+import { routeApiProblems, type RouteDefinition } from '../kernel/routes.js';
+import type { ApiSlot, RequestContext, RouteBoundary } from '../plugin.js';
 import { assertRepresentable } from './json-schema.js';
 import { apiError, jsonResponse, SERVICE_ERROR_TABLE, type ApiErrorCode } from './response.js';
 import {
@@ -23,6 +23,8 @@ export interface ApiRouteSpec {
   readonly permission: string | null;
   readonly boundary?: RouteBoundary;
   readonly allowArchived?: true;
+  /** See the kernel route definition; the handler decides by permission. */
+  readonly projectSession?: true;
   readonly concurrency?: 'if-match';
   readonly service?: keyof typeof SERVICE_ERROR_TABLE;
   readonly api: ApiSlot;
@@ -149,6 +151,7 @@ export function apiRoute<const S extends ApiRouteSpec>(
     permission: spec.permission,
     ...(spec.boundary === undefined ? {} : { boundary: spec.boundary }),
     ...(spec.allowArchived === true ? { allowArchived: true as const } : {}),
+    ...(spec.projectSession === true ? { projectSession: true as const } : {}),
     api,
     handler: async (ctx) => {
       const fail = (code: ApiErrorCode, details?: readonly ValidationDetail[]): Response =>

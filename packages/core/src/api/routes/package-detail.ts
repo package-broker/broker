@@ -14,8 +14,18 @@ import {
   type IdempotencyRecord,
 } from '../idempotency.js';
 import { apiRoute } from '../route.js';
+import {
+  createOrganizationPolicyViews,
+  createPolicyViews,
+  type PackageViewPolicy,
+} from '../../catalogue/policy-views.js';
+import { policyBoundReadme } from '../../catalogue/readme.js';
+import { contextPackageActorOf } from '../../internal/package-actor.js';
+import { policyErrorResponse } from '../../registry/policy/http.js';
+import { withPolicyRetry } from '../../registry/policy/session.js';
 import { auditCall, type ApiRouteDeps } from './context.js';
 import { PACKAGE_DETAIL_API_SPECS } from './package-detail-schemas.js';
+import { inspects } from './packages.js';
 
 export interface PackageDetailRouteDeps extends ApiRouteDeps {
   readonly repository: PackageDetailRepository;
@@ -27,6 +37,11 @@ export interface PackageDetailRouteDeps extends ApiRouteDeps {
       now: string,
     ): Promise<IdempotencyRecord | null>;
   };
+  /**
+   * Present only when `registry.policy.enabled`; the readme then follows its version's decision and
+   * the package detail counts permitted versions as the package list does.
+   */
+  readonly policy?: PackageViewPolicy;
 }
 
 export function packageDetailRoutes(deps: PackageDetailRouteDeps): readonly RouteDefinition[] {
@@ -35,10 +50,35 @@ export function packageDetailRoutes(deps: PackageDetailRouteDeps): readonly Rout
     apiRoute(spec, async ({ ctx, params }) => {
       if (ctx.org === null || (spec.boundary === 'project' && ctx.projectId === null))
         return { error: 'not_found' };
-      const item = await deps.repository.detail(ctx.org, {
-        packageId: params.package,
-        projectId: spec.boundary === 'project' ? ctx.projectId : null,
-      });
+      const org = ctx.org;
+      const read = () =>
+        deps.repository.detail(org, {
+          packageId: params.package,
+          projectId: spec.boundary === 'project' ? ctx.projectId : null,
+        });
+      const policy = deps.policy;
+      let item: Awaited<ReturnType<typeof read>>;
+      if (policy === undefined || (spec.boundary === 'organization' && inspects(ctx))) {
+        item = await read();
+      } else if (spec.boundary === 'project') {
+        const actor = contextPackageActorOf(ctx);
+        if (actor === null) return { error: 'not_found' };
+        item = await withPolicyRetry(async () => {
+          const views = createPolicyViews(policy, ctx, actor, 'listing');
+          const raw = await read();
+          const summary = raw === null ? null : await views.summarize(raw);
+          await views.seal();
+          return summary;
+        });
+      } else {
+        item = await withPolicyRetry(async () => {
+          const views = createOrganizationPolicyViews(policy, ctx);
+          const raw = await read();
+          const summary = raw === null ? null : await views.summarize(raw);
+          await views.seal();
+          return summary;
+        });
+      }
       if (item === null) return { error: 'not_found' };
       return { status: 200, body: item };
     }),
@@ -53,13 +93,23 @@ export function packageDetailRoutes(deps: PackageDetailRouteDeps): readonly Rout
           ...(query.version === undefined ? {} : { version: query.version }),
         });
         if (item === null) return { error: 'not_found' };
-        const sizeBytes = new TextEncoder().encode(item.body).byteLength;
+        let readme: { filename: string; body: string } | null = item;
+        if (deps.policy !== undefined) {
+          const actor = contextPackageActorOf(ctx);
+          readme =
+            actor === null
+              ? null
+              : await policyBoundReadme(deps.policy, ctx, actor, params.package, item);
+          if (readme === null) return { error: 'not_found' };
+        }
+        const sizeBytes = new TextEncoder().encode(readme.body).byteLength;
         if (sizeBytes > 524288) return { error: 'not_found' };
         return {
           status: 200,
           body: {
-            ...item,
-            contentType: /\.md$/i.test(item.filename) ? 'text/markdown' : 'text/plain',
+            filename: readme.filename,
+            body: readme.body,
+            contentType: /\.md$/i.test(readme.filename) ? 'text/markdown' : 'text/plain',
             sizeBytes,
           },
         };
@@ -151,7 +201,14 @@ export function packageDetailRoutes(deps: PackageDetailRouteDeps): readonly Rout
     const wrapped: RouteDefinition = {
       ...route,
       handler: async (ctx) => {
-        const response = await route.handler(ctx);
+        let response: Response;
+        try {
+          response = await route.handler(ctx);
+        } catch (error) {
+          const refused = policyErrorResponse(error, ctx.requestId);
+          if (refused !== null) return refused;
+          throw error;
+        }
         const result =
           response.status === 404
             ? envelopeResponse(404, 'not_found', 'Route not found', ctx.requestId)

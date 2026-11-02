@@ -348,6 +348,13 @@ describe('resolveDist winner and identity (AC2)', () => {
         npmIntegrity: null,
         npmShasum: null,
       },
+      facts: {
+        version: '1.0.0.0',
+        versionNormalized: '1.0.0.0',
+        publishedAt: T0,
+        publishedAtBasis: 'import_time',
+        createdAt: expect.any(String) as unknown as string,
+      },
     });
     expect(await resolver().resolveDist(ctx, byId('PA', 'acme/x', 'V1', 3))).toEqual(current);
 
@@ -374,6 +381,7 @@ describe('resolveDist winner and identity (AC2)', () => {
         npmIntegrity: null,
         npmShasum: null,
       },
+      facts: current?.facts,
     });
     const lost = await resolver().resolveDist(ctx, byId('PA', 'acme/x', 'V1', 1));
     expect(lost).toMatchObject({ revision: 1, current: false, blob: null });

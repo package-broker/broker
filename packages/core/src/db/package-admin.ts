@@ -95,6 +95,42 @@ export interface PackageAdminReader {
   ): Promise<ManagedVersion | null>;
 }
 
+/** The immutable policy facts of versions a project version list counts. */
+export interface PolicyVersionFacts {
+  readonly packageId: string;
+  readonly sourceId: string;
+  readonly ecosystem: NameEcosystem;
+  readonly packageKey: string;
+  readonly versionId: string;
+  readonly version: string;
+  readonly versionNormalized: string;
+  readonly revision: number;
+  readonly status: VersionStatus;
+  readonly publishedAt: string;
+  readonly publishedAtBasis: string;
+  readonly createdAt: string;
+}
+
+export const POLICY_FACTS_PAGE_MAX = 500;
+
+export interface PolicyVersionFactsReader {
+  /**
+   * Versions of one package in id order, publish-held versions excluded as the version lists
+   * exclude them. `versionIds` narrows the read to those ids.
+   */
+  versionFacts(
+    ctx: OrgContext,
+    query: {
+      readonly packageId: string;
+      readonly versionIds?: readonly string[];
+      readonly after?: string;
+      readonly limit: number;
+      /** Newest first by publish date, then id, instead of id order; never with `after`. */
+      readonly newest?: boolean;
+    },
+  ): Promise<readonly PolicyVersionFacts[]>;
+}
+
 export interface PackageAccessInput {
   readonly packageId: string;
   readonly visibleToNewProjects: boolean;
@@ -117,7 +153,7 @@ export interface PackageDetailRepository {
       readonly projectId: string;
       readonly version?: string;
     },
-  ): Promise<{ filename: string; body: string } | null>;
+  ): Promise<{ filename: string; body: string; versionId?: string } | null>;
   setAccess(
     ctx: OrgContext,
     fence: import('../authz/fence.js').MutationFence,

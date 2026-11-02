@@ -170,6 +170,7 @@ export function describeNpmIdentityMigrationContract(
           'core:0005_package_settings_revision',
           'core:0006_npm_login_handoff',
           'core:0007_npm_vcs_build_outcomes',
+          'core:0008_registry_policy',
         ]);
         await opened.executor.all({
           sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('new', 'revision-org', 'New', 'npm', 'hosted')",
@@ -210,6 +211,7 @@ export function describeNpmIdentityMigrationContract(
             'core:0005_package_settings_revision',
             'core:0006_npm_login_handoff',
             'core:0007_npm_vcs_build_outcomes',
+            'core:0008_registry_policy',
           ]);
           await migrate(opened.executor, sources.slice(0, baseline), { holder: 'baseline' });
           await seed(opened.executor);

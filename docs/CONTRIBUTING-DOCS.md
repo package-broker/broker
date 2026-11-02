@@ -27,6 +27,7 @@ This folder is the source of the 2.0 documentation site at package.broker.
 - Operations
   - [Backup and upgrades](operations/backup-and-upgrades.md)
   - [Observability](operations/observability.md)
+  - [Registry policy](operations/registry-policy.md)
   - [Restore rehearsal](operations/restore-rehearsal.md)
 - Reference
   - [Access model](reference/access-model.md)

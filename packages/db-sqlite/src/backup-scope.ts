@@ -49,6 +49,8 @@ export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   source_sync_package: 'exclude',
   token: 'include',
   trusted_publisher: 'include',
+  registry_policy_rule: 'include',
+  registry_policy_version: 'include',
   npm_login_session: 'exclude',
   npm_vcs_build_outcome: 'include',
   oidc_replay: 'exclude',

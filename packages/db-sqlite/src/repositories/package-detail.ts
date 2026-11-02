@@ -39,10 +39,10 @@ export function createPackageDetailRepository(
         query.version === undefined
           ? sql`v.id = (select dt.version_id from dist_tag dt where dt.org_id = ${ctx.orgId} and dt.package_id = w.package_id and dt.tag = 'latest')`
           : sql`v.version = ${query.version}`;
-      const [readme] = await executor.all<{ filename: string; body: string }>(
+      const [readme] = await executor.all<{ filename: string; body: string; versionId: string }>(
         statement(sql`
         with w as ${winner}
-        select r.filename, r.body from w
+        select r.filename, r.body, v.id as "versionId" from w
         join version v on v.package_id = w.package_id and v.org_id = ${ctx.orgId} and v.status = 'active'
         join version_readme r on r.version_id = v.id and r.org_id = ${ctx.orgId}
         where w.package_id = ${query.packageId} and ${version}`),

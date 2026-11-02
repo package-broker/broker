@@ -280,8 +280,66 @@ export interface AuthMapGroupsInput {
 /** Narrow-only: `keep` must be a subset of the groups passed in; undefined keeps them all. */
 export type MapGroupsResult = { readonly keep: readonly string[] } | undefined;
 
+/** Normalized compatibility hints; spoofable, never the raw User-Agent or any other header. */
+export type ClientHints = Readonly<{
+  family: 'npm' | 'pnpm' | 'yarn' | 'composer' | 'unknown';
+  /** A validated stable numeric version, or null when the family is unknown. */
+  version: string | null;
+}>;
+
+export type ReadKind = 'metadata' | 'version' | 'tags' | 'dist' | 'search' | 'listing' | 'readme';
+
+/** One authorized candidate version with the immutable facts a read policy may use. */
+export type VersionFact = Readonly<{
+  packageId: string;
+  sourceId: string;
+  packageKey: string;
+  versionId: string;
+  version: string;
+  normalizedVersion: string;
+  revision: number;
+  publishedAt: string;
+  ageBasis: 'published' | 'imported' | 'first_seen';
+}>;
+
+export type ReadPolicyBase = Readonly<{
+  org: Readonly<{ orgId: string }>;
+  projectId: string;
+  principal: Readonly<{ kind: 'user' | 'service' | 'customer'; id: string }>;
+  ecosystem: PackageEcosystem;
+  client: ClientHints;
+  now: string;
+  /** Aborted when the request or the remaining hook budget ends; a later result is ignored. */
+  signal: AbortSignal;
+}>;
+
+export type ReadPolicyInput = ReadPolicyBase &
+  (
+    | Readonly<{ phase: 'request'; kind: ReadKind; packageKey: string | null }>
+    | Readonly<{ phase: 'versions'; versions: readonly VersionFact[] }>
+  );
+
+export type ReadPolicyReason = 'restricted' | 'client_unsupported';
+
+/**
+ * Deny-only: undefined abstains, `deny` refuses the whole request, `deniedVersions` (versions phase
+ * only) names candidates of this call. There is no allow value.
+ */
+export type ReadPolicyResult =
+  | undefined
+  | Readonly<{ deny: true; reason: ReadPolicyReason }>
+  | Readonly<{
+      deniedVersions: readonly Readonly<{
+        versionId: string;
+        revision: number;
+        reason: ReadPolicyReason;
+      }>[];
+    }>;
+
 export interface HookMap {
   'access.check': (input: AccessCheckInput) => AccessCheckResult | Promise<AccessCheckResult>;
+  /** Plugin API 4: restricts package reads after authorization; it can never widen access. */
+  'registry.read': (input: ReadPolicyInput) => ReadPolicyResult | Promise<ReadPolicyResult>;
   'auth.resolveIdentity': (
     input: AuthResolveIdentityInput,
   ) => AccessCheckResult | Promise<AccessCheckResult>;

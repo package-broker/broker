@@ -646,6 +646,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ...(route.boundary === 'project' && route.allowArchived === true
           ? { allowArchived: true as const }
           : {}),
+        ...(route.boundary === 'project' && route.projectSession === true
+          ? { projectSession: true as const }
+          : {}),
       },
       params: Object.freeze({ ...c.req.param() }),
     };

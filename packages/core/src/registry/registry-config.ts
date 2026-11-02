@@ -1,6 +1,7 @@
 import { DEFAULT_MAX_BLOB_BYTES } from '../platform/blob.js';
 import type { Platform } from '../plugin.js';
 import { containsCredentialToken, looksLikeCredential } from '../platform/credential.js';
+import { DEFAULT_HOOK_TIMEOUT_MS, MAX_HOOK_TIMEOUT_MS } from '../kernel/access.js';
 
 export const MAX_METADATA_BYTES = 32 * 1024 * 1024;
 export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
@@ -34,6 +35,9 @@ export interface RegistryConfigInput {
     | undefined;
   readonly publish?: { readonly requireLicense?: boolean | undefined } | undefined;
   readonly npmAudit?: { readonly enabled?: boolean | undefined } | undefined;
+  readonly policy?:
+    | { readonly enabled?: boolean | undefined; readonly hookBudgetMs?: number | undefined }
+    | undefined;
 }
 
 export interface RegistryConfig {
@@ -57,6 +61,8 @@ export interface RegistryConfig {
   };
   readonly publish: { readonly requireLicense: boolean };
   readonly npmAudit: { readonly enabled: boolean };
+  /** Read policy enforcement; off by default. hookBudgetMs is one cumulative budget per request. */
+  readonly policy: { readonly enabled: boolean; readonly hookBudgetMs: number };
 }
 
 export type RegistryDefaults = Omit<RegistryConfig, 'outbound'>;
@@ -74,6 +80,7 @@ export const REGISTRY_DEFAULTS: RegistryDefaults = Object.freeze({
   }),
   publish: Object.freeze({ requireLicense: false }),
   npmAudit: Object.freeze({ enabled: true }),
+  policy: Object.freeze({ enabled: false, hookBudgetMs: DEFAULT_HOOK_TIMEOUT_MS }),
 });
 
 export class RegistryConfigError extends Error {
@@ -95,6 +102,7 @@ const ROOT_KEYS = [
   'caps',
   'publish',
   'npmAudit',
+  'policy',
 ];
 const SECTION_KEYS = {
   outbound: ['allowPrivateHosts', 'extraSelfOrigins'],
@@ -109,6 +117,7 @@ const SECTION_KEYS = {
   ],
   publish: ['requireLicense'],
   npmAudit: ['enabled'],
+  policy: ['enabled', 'hookBudgetMs'],
 } as const;
 const MAX_STRING_LENGTH = 200;
 const MAX_KEY_LENGTH = 64;
@@ -393,6 +402,20 @@ export function validateRegistryConfig(input: unknown, target: Platform): readon
     problems.push('registry.npmAudit.enabled: must be a boolean');
   }
 
+  const policy = section('policy');
+  const policyEnabled = policy ? own(policy, 'enabled') : undefined;
+  if (policyEnabled !== undefined && typeof policyEnabled !== 'boolean') {
+    problems.push('registry.policy.enabled: must be a boolean');
+  }
+  const budget = policy ? own(policy, 'hookBudgetMs') : undefined;
+  if (budget !== undefined) {
+    if (!positiveInteger(budget)) {
+      problems.push('registry.policy.hookBudgetMs: must be a positive integer');
+    } else if (budget > MAX_HOOK_TIMEOUT_MS) {
+      problems.push('registry.policy.hookBudgetMs: exceeds the maximum');
+    }
+  }
+
   return problems;
 }
 
@@ -452,6 +475,7 @@ export function resolveRegistryConfig(
   const c = sub('caps');
   const publish = sub('publish');
   const audit = sub('npmAudit');
+  const policy = sub('policy');
   const num = (o: Obj, k: string, fallback: number): number =>
     (own(o, k) as number | undefined) ?? fallback;
   const str = (o: Obj, k: string, fallback: string): string =>
@@ -485,6 +509,10 @@ export function resolveRegistryConfig(
     },
     npmAudit: {
       enabled: (own(audit, 'enabled') as boolean | undefined) ?? d.npmAudit.enabled,
+    },
+    policy: {
+      enabled: (own(policy, 'enabled') as boolean | undefined) ?? d.policy.enabled,
+      hookBudgetMs: num(policy, 'hookBudgetMs', d.policy.hookBudgetMs),
     },
   };
 }

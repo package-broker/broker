@@ -38,6 +38,8 @@ interface VersionRow extends Header {
   readonly npm_integrity: string | null;
   readonly deprecated_message: string | null;
   readonly metadata_json: string;
+  readonly published_at_basis: string;
+  readonly version_created_at: string;
 }
 
 interface TagRow extends Header {
@@ -52,7 +54,7 @@ const HEADER_COLUMNS = sql.raw(
 const VERSION_COLUMNS = sql.raw(
   `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,
    v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,
-   v.deprecated_message, v.metadata_json`,
+   v.deprecated_message, v.metadata_json, v.published_at_basis, v.created_at as version_created_at`,
 );
 
 function available(ctx: OrgContext): RawBuilder<unknown> {
@@ -117,6 +119,8 @@ function toLookup(query: PackageRef, row: VersionRow | undefined): VersionLookup
     npmIntegrity: row.npm_integrity,
     deprecatedMessage: row.deprecated_message,
     metadataJson: row.metadata_json,
+    publishedAtBasis: row.published_at_basis,
+    createdAt: row.version_created_at,
   };
   return { pkg: toPackage(query, row), version };
 }

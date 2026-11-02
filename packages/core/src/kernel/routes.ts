@@ -7,6 +7,11 @@ import type { PackageEcosystem, RouteDefinition as PluginRouteDefinition } from 
 export interface RouteDefinition extends PluginRouteDefinition {
   readonly bearerOnly?: true;
   readonly organizationAlternative?: string;
+  /**
+   * Core project routes only: a session holding any permission in the project passes the kernel
+   * gate, and the route itself decides by permission. The declared permission must be project:read.
+   */
+  readonly projectSession?: true;
   /** Core management URLs identify packages by id. */
   readonly corePackageName?: (
     ctx: import('../db/port.js').OrgContext,
@@ -128,6 +133,7 @@ interface BoundaryInput {
   readonly boundary?: unknown;
   readonly bearerOnly?: unknown;
   readonly organizationAlternative?: unknown;
+  readonly projectSession?: unknown;
   readonly allowArchived?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;
@@ -230,6 +236,13 @@ export function routeBoundaryProblems(
       )
     ) {
       fail('organizationAlternative requires a token-eligible organization permission');
+    }
+  }
+  if (route.projectSession !== undefined) {
+    if (route.projectSession !== true) fail('projectSession must be true when set');
+    if (options.allowSelf !== true) fail('projectSession is reserved for core routes');
+    if (boundary !== 'project' || permission !== 'project:read') {
+      fail('projectSession requires the project boundary with project:read');
     }
   }
   const allowArchived = route.allowArchived;

@@ -12,7 +12,6 @@ import {
   StaleFenceError,
   type JobClaim,
   type JobGuard,
-  type JobRepository,
   type JobSettle,
 } from '@package-broker/core/platform/job-repository';
 import { jobSourceError } from '@package-broker/core/platform/job-source-error';
@@ -20,7 +19,10 @@ import { jobFences } from '@package-broker/core/platform/job-fences';
 import { releaseDelayOf } from '@package-broker/core/platform/job-release';
 import { JobError, jobErrorCode } from '@package-broker/core/platform/jobs';
 import { safeErrorName, type Observability } from '@package-broker/core/platform/observability';
-import { createJobRepository } from '@package-broker/db-sqlite/repositories/job';
+import {
+  createJobRepository,
+  JOB_UNREGISTERED_GRACE_SECONDS,
+} from '@package-broker/db-sqlite/repositories/job';
 import {
   createJobScheduleRepository,
   type ScheduleDefinition,
@@ -37,6 +39,7 @@ export const JOB_EVENTS = Object.freeze([
   'job.schedule_sync_failed',
   'job.schedule_tick_failed',
   'job.reap_failed',
+  'job.bury_failed',
   'job.claim_failed',
   'job.handler_failed',
   'job.heartbeat_failed',
@@ -101,7 +104,7 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
   }
   const clock = input.clock ?? systemClock;
   const { observability } = input;
-  const repository: JobRepository = createJobRepository(input.executor);
+  const repository = createJobRepository(input.executor);
   const schedules = createJobScheduleRepository(input.executor);
   const resolveOrg = createOrgResolver(createOrganizationBootstrap(input.executor));
   const byType = new Map(input.jobs.map((job) => [job.qualifiedName, job]));
@@ -189,6 +192,13 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
       }
     }
     await stage('job.reap_failed', () => repository.reap(org, JOB_REAP_PAGE_LIMIT));
+    await stage('job.bury_failed', () =>
+      repository.buryUnregistered(org, {
+        types,
+        graceSeconds: JOB_UNREGISTERED_GRACE_SECONDS,
+        limit: JOB_REAP_PAGE_LIMIT,
+      }),
+    );
     while (!stopping && active.size < maxRunning && types.length > 0) {
       const claim = await stage('job.claim_failed', () =>
         repository.claim(org, ulid(), { types, leaseSeconds: JOB_LEASE_SECONDS, maxRunning }),

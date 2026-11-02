@@ -26,6 +26,7 @@ const declared: { [T in Table]: Columns<T> } = {
     token_nonce: 0,
     token_key_version: 0,
     consumed_at: 0,
+    delivering_at: 0,
   },
   trusted_publisher: {
     id: 1,

@@ -785,6 +785,7 @@ export function describeMigrationContract(
           'core:0003_npm_identity',
           'core:0004_source_revision',
           'core:0005_package_settings_revision',
+          'core:0006_npm_login_handoff',
         ]);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
@@ -803,6 +804,7 @@ export function describeMigrationContract(
           'core:0003_npm_identity',
           'core:0004_source_revision',
           'core:0005_package_settings_revision',
+          'core:0006_npm_login_handoff',
         ]);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
@@ -1112,6 +1114,7 @@ export function describeVulnerabilityMigrationContract(
           'core:0003_npm_identity',
           'core:0004_source_revision',
           'core:0005_package_settings_revision',
+          'core:0006_npm_login_handoff',
         ]);
         expect(
           await executor.all({

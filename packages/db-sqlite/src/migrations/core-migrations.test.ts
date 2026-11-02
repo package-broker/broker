@@ -161,7 +161,7 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 62 tables, four expand migrations', async () => {
+  it('1: a fresh database gets every core migration: 62 tables, four expand migrations and the login handoff migration', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
@@ -173,6 +173,7 @@ describe('core migrations', () => {
       'core:0003_npm_identity',
       'core:0004_source_revision',
       'core:0005_package_settings_revision',
+      'core:0006_npm_login_handoff',
     ]);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))

@@ -1,3 +1,4 @@
+import { createAnonymousAdmission } from '../anonymous-admission.js';
 import { envelopeResponse } from '../../kernel/errors.js';
 import * as z from 'zod';
 import type { RequestContext, RouteDefinition } from '../../plugin.js';
@@ -41,9 +42,11 @@ export interface NpmLoginStore {
     ctx: OrgContext,
     projectId: string,
     hash: string,
+    buildResponse: (token: string) => void,
   ): Promise<{ status: 'pending' | 'not_found' } | { status: 'token'; token: string }>;
 }
 export interface NpmLoginDeps extends ApiRouteDeps {
+  readonly admissionIp?: (request: Request) => string | null;
   readonly store: NpmLoginStore;
   readonly publicUrl: string;
   readonly projects: {
@@ -61,6 +64,7 @@ export async function npmLoginHash(secret: string): Promise<string> {
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
 const params = z.strictObject({ selector: z.string().regex(SECRET) });
 export function npmLoginRoutes(deps: NpmLoginDeps): readonly RouteDefinition[] {
+  const admit = createAnonymousAdmission(() => deps.clock.now().getTime());
   const fail = (ctx: RequestContext, code: keyof typeof API_ERROR_CODES) =>
     envelopeResponse(
       API_ERROR_CODES[code].status,
@@ -115,12 +119,17 @@ export function npmLoginRoutes(deps: NpmLoginDeps): readonly RouteDefinition[] {
           return fail(ctx, 'not_found');
         const project = await deps.projects.getBySlug(ctx.org, ctx.params['project'] ?? '');
         if (project === null || project.status !== 'active') return fail(ctx, 'not_found');
+        let delivered: Response | undefined;
         const result = await deps.store.poll(
           ctx.org,
           project.id,
           await npmLoginHash(ctx.params['session']!),
+          (token) => {
+            delivered = jsonResponse(200, { token });
+          },
         );
-        if (result.status === 'token') return jsonResponse(200, { token: result.token });
+        if (result.status === 'token')
+          return delivered ?? jsonResponse(200, { token: result.token });
         if (result.status === 'pending') {
           const response = jsonResponse(202, {});
           response.headers.set('Retry-After', '5');
@@ -227,6 +236,26 @@ export function npmLoginRoutes(deps: NpmLoginDeps): readonly RouteDefinition[] {
             API_ERROR_CODES.invalid_request.message,
             ctx.requestId,
           );
+          response.headers.set('Cache-Control', 'no-store');
+          return response;
+        }
+      }
+      if (!route.path.startsWith('/_pb/') && ctx.org !== null) {
+        const retry = admit(
+          ctx.org.orgId,
+          route.method === 'POST' ? 'login-start' : 'login-poll',
+          (deps.admissionIp ?? deps.clientIp)(ctx.request),
+        );
+        if (retry > 0) {
+          const response = envelopeResponse(
+            429,
+            'rate_limited',
+            'Rate limit exceeded',
+            ctx.requestId,
+            undefined,
+            'npm',
+          );
+          response.headers.set('Retry-After', String(retry));
           response.headers.set('Cache-Control', 'no-store');
           return response;
         }

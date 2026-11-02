@@ -369,8 +369,8 @@ function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
     const found: PlanEntry[] = [];
     for (const [file, ecosystem] of MANIFESTS) {
       if (options.ecosystem !== undefined && options.ecosystem !== ecosystem) continue;
-      if (ecosystem === 'npm' && repo.fork && options.includeForks !== true) {
-        found.push(skipped(repo.fullName, 'fork', 'npm'));
+      if (repo.fork && options.includeForks !== true) {
+        found.push(skipped(repo.fullName, 'fork', options.ecosystem ?? null));
         continue;
       }
       const result = await manifest(repo, file, bearer);
@@ -434,8 +434,8 @@ export async function planRepository(
     throw new DiscoveryError('invalid_response');
   }
   if (parsed.archived) return [skipped(options.repository, 'archived')];
-  if (parsed.fork && options.ecosystem === 'npm' && options.includeForks !== true)
-    return [skipped(options.repository, 'fork', 'npm')];
+  if (parsed.fork && options.includeForks !== true)
+    return [skipped(options.repository, 'fork', options.ecosystem ?? null)];
   let contentsToken;
   try {
     contentsToken = await options.tokens.forRepositories(options.installationId, [name]);
@@ -492,8 +492,8 @@ export async function discoverRepositories(options: DiscoveryOptions): Promise<D
       entries.set(repo.fullName, [skipped(repo.fullName, 'filtered_out')]);
     } else if (repo.archived) {
       entries.set(repo.fullName, [skipped(repo.fullName, 'archived')]);
-    } else if (repo.fork && options.ecosystem === 'npm' && options.includeForks !== true) {
-      entries.set(repo.fullName, [skipped(repo.fullName, 'fork', 'npm')]);
+    } else if (repo.fork && options.includeForks !== true) {
+      entries.set(repo.fullName, [skipped(repo.fullName, 'fork', options.ecosystem ?? null)]);
     } else {
       candidates.push(repo);
     }

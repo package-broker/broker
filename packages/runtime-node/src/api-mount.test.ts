@@ -87,6 +87,13 @@ interface ManagementAssemblyEntry {
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
+    dependency: 'sourceDiscovery',
+    constructed: 'configured GitHub discovery, credential store and repository reader',
+    routes: ['POST /_pb/sources/discovery/plan', 'POST /_pb/sources/discovery/apply'],
+    jobs: [],
+    ownerPacket: 'NPM19c',
+  },
+  {
     dependency: 'trustedPublishers',
     constructed: 'Trusted publisher store and configured GitHub repository lookup',
     routes: [
@@ -358,19 +365,21 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
     expect(entry.ownerPacket).toBe(
-      entry.dependency === 'trustedPublishers'
-        ? 'NPM17c'
-        : entry.dependency === 'packageDetail'
-          ? 'NPM13a'
-          : entry.dependency === 'publishes'
-            ? 'NPM10'
-            : entry.dependency === 'sourcePackages'
-              ? 'T1041'
-              : entry.dependency === 'npmLogin'
-                ? 'NPM16'
-                : entry.dependency === 'packageAccessRequests'
-                  ? 'NPM12'
-                  : 'T531',
+      entry.dependency === 'sourceDiscovery'
+        ? 'NPM19c'
+        : entry.dependency === 'trustedPublishers'
+          ? 'NPM17c'
+          : entry.dependency === 'packageDetail'
+            ? 'NPM13a'
+            : entry.dependency === 'publishes'
+              ? 'NPM10'
+              : entry.dependency === 'sourcePackages'
+                ? 'T1041'
+                : entry.dependency === 'npmLogin'
+                  ? 'NPM16'
+                  : entry.dependency === 'packageAccessRequests'
+                    ? 'NPM12'
+                    : 'T531',
     );
     for (const key of entry.routes) {
       expect(

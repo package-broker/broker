@@ -70,7 +70,10 @@ export interface DistServiceDeps {
     target: DistTarget,
     observability?: Observability,
   ) => Promise<DistFetchPlan | null>;
-  readonly enqueueNpmVcsBuild?: (ctx: OrgContext, target: DistTarget) => Promise<boolean>;
+  readonly enqueueNpmVcsBuild?: (
+    ctx: OrgContext,
+    target: DistTarget,
+  ) => Promise<boolean | 'terminal'>;
   readonly recorder: Pick<AccessRecorder, 'record'>;
   readonly coalesce?: Pick<CoalesceOptions, 'waitBudgetMs' | 'pollMs'>;
 }
@@ -275,12 +278,11 @@ export function createDistService(deps: DistServiceDeps): DistService {
       if (target === null) return NOT_FOUND;
 
       try {
-        if (
-          target.blob === null &&
-          request.ecosystem === 'npm' &&
-          (await deps.enqueueNpmVcsBuild?.(ctx, target))
-        )
-          return { kind: 'busy', retryAfterSeconds: 10 };
+        if (target.blob === null && request.ecosystem === 'npm') {
+          const build = await deps.enqueueNpmVcsBuild?.(ctx, target);
+          if (build === 'terminal') return GONE;
+          if (build) return { kind: 'busy', retryAfterSeconds: 10 };
+        }
       } catch (error) {
         if (error instanceof SourceUnavailableError)
           return { kind: 'busy', retryAfterSeconds: SOURCE_UNAVAILABLE_RETRY_SECONDS };

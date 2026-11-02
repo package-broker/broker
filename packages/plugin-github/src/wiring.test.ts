@@ -1087,3 +1087,23 @@ async function releaseFixture(defaultManifest: 'missing' | 'renamed' = 'missing'
     close: () => files.mockRestore(),
   };
 }
+
+it('lists a discovered npm GitHub App source using its configured npm name', async () => {
+  const provider = github().sourceProviders({
+    runtime: 'docker',
+    tokensFor: async (_org, _input, create) =>
+      create({ appId: '1', privateKeyPem: 'unused' }, '42'),
+  })[0]!;
+  const fetch = vi.fn();
+  const npmSource = {
+    ...source,
+    ecosystem: 'npm',
+    config: { ...source.config, packageName: '@acme/library' },
+  } as ProviderSource;
+  expect(await provider.listPackages!(invocation(fetch), npmSource, null)).toMatchObject({
+    names: ['@acme/library'],
+    last: true,
+  });
+  expect(provider.ecosystems).toContain('npm');
+  expect(fetch).not.toHaveBeenCalled();
+});

@@ -835,6 +835,7 @@ describe('lifecycle visibility', () => {
       'discard',
       'get',
       'head',
+      'maxStagingBytes',
       'openStaged',
       'promote',
       'put',

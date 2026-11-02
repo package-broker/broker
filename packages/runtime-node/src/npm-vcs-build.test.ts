@@ -1,3 +1,5 @@
+import { CodecLimitError } from '@package-broker/core/platform/codec';
+import { GitFetchError } from '@package-broker/core/sources/git/fetch';
 import { createBlobStore, createBlobUploadAdmission } from '@package-broker/core/platform/blob';
 import { createBlobRepository } from '@package-broker/db-sqlite/repositories/blob';
 import { openFilesystemByteStore } from './blob/filesystem.js';
@@ -53,7 +55,7 @@ function archive(...entries: Uint8Array[]): Uint8Array {
 import { orgContext } from '@package-broker/core/db/port';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
 import type { StagedBlob } from '@package-broker/core/platform/blob';
-import { parseSha256 } from '@package-broker/core/platform/blob';
+import { BlobTooLargeError, parseSha256 } from '@package-broker/core/platform/blob';
 import {
   buildNpmVcsDist,
   type DistFetchDeps,
@@ -126,9 +128,133 @@ function setup() {
     writer: { attachDist },
     maxBytes: 50_000_000,
   } as unknown as DistFetchDeps;
-  return { deps, attachDist, discard, promote };
+  return { deps, attachDist, discard, promote, repositoryBytes: bytes.length };
 }
 describe('npm VCS build dist', () => {
+  it('reserves the configured ceiling for input staging', async () => {
+    const h = setup();
+    await buildNpmVcsDist({ ...h.deps, repositoryArchiveBytes: 1024 * 1024 }, ctx, guard, target);
+    expect(h.deps.store.stage).toHaveBeenNthCalledWith(1, ctx, expect.anything(), {
+      maxBytes: 1024 * 1024,
+      mediaType: 'application/gzip',
+    });
+  });
+  it('packs an input larger than the publish cap when the packed output fits', async () => {
+    const h = setup();
+    const size = h.repositoryBytes;
+    expect(await buildNpmVcsDist({ ...h.deps, maxBytes: size - 1 }, ctx, guard, target)).toBe(
+      'attached',
+    );
+    expect(h.deps.store.stage).toHaveBeenNthCalledWith(1, ctx, expect.anything(), {
+      maxBytes: 64 * 1024 * 1024,
+      mediaType: 'application/gzip',
+    });
+  });
+  it('reports a fixed terminal too_large result for an oversized input', async () => {
+    const h = setup();
+    const reportSkipped = vi.fn();
+    vi.mocked(h.deps.provider.openDist).mockResolvedValue({
+      size: 1025,
+      body: stream(new Uint8Array()),
+    });
+    expect(
+      await buildNpmVcsDist(
+        { ...h.deps, repositoryArchiveBytes: 1024, reportSkipped },
+        ctx,
+        guard,
+        target,
+      ),
+    ).toBe('skipped');
+    expect(reportSkipped).toHaveBeenCalledExactlyOnceWith('too_large');
+    expect(h.deps.store.stage).not.toHaveBeenCalled();
+  });
+  it('uses the physical store ceiling and records a streaming overrun without attaching', async () => {
+    const h = setup();
+    const reportSkipped = vi.fn();
+    vi.mocked(h.deps.provider.openDist).mockResolvedValue({
+      body: stream(new Uint8Array()),
+      size: null,
+    });
+    vi.mocked(h.deps.store.stage).mockRejectedValueOnce(new BlobTooLargeError());
+    const store = { ...h.deps.store, maxStagingBytes: 1024 };
+    expect(await buildNpmVcsDist({ ...h.deps, store, reportSkipped }, ctx, guard, target)).toBe(
+      'skipped',
+    );
+    expect(store.stage).toHaveBeenCalledWith(ctx, expect.anything(), {
+      maxBytes: 1024,
+      mediaType: 'application/gzip',
+    });
+    expect(reportSkipped).toHaveBeenCalledExactlyOnceWith('too_large');
+    expect(h.attachDist).not.toHaveBeenCalled();
+  });
+  it('reports a Git tree or blob budget refusal as terminal too_large', async () => {
+    const h = setup();
+    const reportSkipped = vi.fn();
+    vi.mocked(h.deps.provider.openDist).mockRejectedValueOnce(new GitFetchError('tree_too_large'));
+    expect(await buildNpmVcsDist({ ...h.deps, reportSkipped }, ctx, guard, target)).toBe('skipped');
+    expect(reportSkipped).toHaveBeenCalledExactlyOnceWith('too_large');
+  });
+  it('packs successfully with a real one-MiB physical store ceiling', async () => {
+    const database = await openMigratedDatabase({ twoOrganizations: true });
+    const directory = await mkdtemp(join(await realpath(tmpdir()), 'pb-npm-small-store-'));
+    try {
+      const bytes = await openFilesystemByteStore({ root: directory });
+      const store = createBlobStore(bytes, createBlobRepository(database.executor), {
+        admission: createBlobUploadAdmission(),
+        maxBytes: 1024 * 1024,
+      });
+      const h = setup();
+      expect(await buildNpmVcsDist({ ...h.deps, store }, database.orgs!.a, guard, target)).toBe(
+        'attached',
+      );
+      expect(store.maxStagingBytes).toBe(1024 * 1024);
+      expect(h.attachDist).toHaveBeenCalledOnce();
+    } finally {
+      await database.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it('reports a gunzip budget refusal as too_large and discards the repository stage', async () => {
+    const h = setup();
+    const reportSkipped = vi.fn();
+    const providerContext = {
+      ...h.deps.providerContext,
+      codecs: {
+        ...nodeCodecs,
+        gunzip: () => {
+          throw new CodecLimitError('gunzip', 16);
+        },
+      },
+    };
+    expect(
+      await buildNpmVcsDist({ ...h.deps, providerContext, reportSkipped }, ctx, guard, target),
+    ).toBe('skipped');
+    expect(reportSkipped).toHaveBeenCalledExactlyOnceWith('too_large');
+    expect(h.discard).toHaveBeenCalledOnce();
+    expect(h.attachDist).not.toHaveBeenCalled();
+  });
+  it('does not persist a size refusal after cancellation', async () => {
+    const h = setup();
+    const abort = new AbortController();
+    const reportSkipped = vi.fn();
+    vi.mocked(h.deps.provider.openDist).mockImplementationOnce(async () => {
+      abort.abort();
+      throw new BlobTooLargeError();
+    });
+    await expect(
+      buildNpmVcsDist(
+        {
+          ...h.deps,
+          providerContext: { ...h.deps.providerContext, signal: abort.signal },
+          reportSkipped,
+        },
+        ctx,
+        guard,
+        target,
+      ),
+    ).rejects.toBeInstanceOf(BlobTooLargeError);
+    expect(reportSkipped).not.toHaveBeenCalled();
+  });
   it('stages, repacks, hashes and attaches a non-refetchable blob and readme under the lease guard', async () => {
     const h = setup();
     expect(await buildNpmVcsDist(h.deps, ctx, guard, target)).toBe('attached');
@@ -161,7 +287,7 @@ describe('npm VCS build dist', () => {
       50000000,
       'invalid_packlist',
     ],
-    ['output cap', '{"name":"fixture","version":"1.0.0"}', 'ok', 1, 'invalid_packlist'],
+    ['output cap', '{"name":"fixture","version":"1.0.0"}', 'ok', 1, 'too_large'],
     [
       'README controls',
       '{"name":"fixture","version":"1.0.0"}',

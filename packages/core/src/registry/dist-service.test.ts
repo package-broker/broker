@@ -803,3 +803,25 @@ describe('dist refusal on a digest mismatch', () => {
     expect(await r.service.serve(owner, request(9))).toEqual({ kind: 'not_found' });
   });
 });
+
+it('returns gone without retry advice or a fetch lease for a terminal npm build', async () => {
+  const planFetch = vi.fn();
+  const acquire = vi.fn();
+  const service = createDistService({
+    access: { dist: async () => ({ blob: null }) },
+    enqueueNpmVcsBuild: async () => 'terminal',
+    leases: { acquire },
+    clock: systemClock,
+    planFetch,
+  } as never);
+  const result = await service.serve(actor('project_a'), {
+    ecosystem: 'npm',
+    key: 'widget',
+    versionId: VERSION,
+    revision: 1,
+  });
+  expect(result).toEqual({ kind: 'gone' });
+  expect(result).not.toHaveProperty('retryAfterSeconds');
+  expect(planFetch).not.toHaveBeenCalled();
+  expect(acquire).not.toHaveBeenCalled();
+});

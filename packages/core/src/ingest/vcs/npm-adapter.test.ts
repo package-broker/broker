@@ -63,6 +63,18 @@ describe('npm VCS adapter', () => {
       expect(description.upstreamComplete).toBe(true);
     },
   );
+  it('completes a repository with only invalid npm tags without inventing a latest version', async () => {
+    const description = await npmVcsDescription(
+      '@scope/a',
+      undefined,
+      ['release', '1.0.0+build', 'v01.0.0'],
+      [],
+      snapshot,
+    );
+    expect(await collect(description.members)).toEqual([]);
+    expect(description.distTags).toEqual({});
+    expect(description.upstreamComplete).toBe(true);
+  });
   it('emits an npm-vcs candidate without upstream dist and chooses latest', async () => {
     const description = await npmVcsDescription(
       '@scope/a',

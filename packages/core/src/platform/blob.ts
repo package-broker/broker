@@ -49,6 +49,7 @@ export interface StagedByteObject {
  * on the same CoreBlobStore instance. They are not resumable across requests or isolates.
  */
 export interface CoreBlobStore extends BlobStore {
+  readonly maxStagingBytes?: number;
   stage(
     ctx: OrgContext,
     body: ReadableStream<Uint8Array>,
@@ -603,6 +604,7 @@ export function createBlobStore(
   if (!Number.isSafeInteger(waitMs) || waitMs < 0) throw new BlobValidationError();
 
   const store: CoreBlobStore = {
+    maxStagingBytes: maxBytes,
     async stage(ctx, body, input) {
       expire();
       try {

@@ -1450,6 +1450,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/sources/discovery/apply': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Import a bounded page of organization repositories */
+    post: operations['applySourceDiscovery'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/plan': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Discover configured organization repositories */
+    post: operations['planSourceDiscovery'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/sources/{source}': {
     parameters: {
       query?: never;
@@ -11386,6 +11420,210 @@ export interface operations {
       };
       /** @description Service unavailable */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  applySourceDiscovery: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId: string;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm';
+          includeForks?: boolean;
+          installationId: number;
+          nextCursor?: string | null;
+          repositories: string[];
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            created: number;
+            existing: number;
+            failed: number;
+            nextCursor: string | null;
+            remainingRepositories: string[];
+            results: {
+              error?: string;
+              /** @enum {string} */
+              outcome: 'created' | 'existing' | 'skipped' | 'failed';
+              /** @enum {string} */
+              reason?:
+                | 'archived'
+                | 'no_manifest'
+                | 'invalid_name'
+                | 'fork'
+                | 'name_public'
+                | 'name_public_unverified'
+                | 'claim_overlap'
+                | 'filtered_out'
+                | 'error_451'
+                | 'error_404'
+                | 'unsupported_ecosystem';
+              repository: string;
+            }[];
+            skipped: number;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  planSourceDiscovery: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId: string;
+          cursor: string | null;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm';
+          includeForks?: boolean;
+          installationId: number;
+          pattern: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            entries: {
+              /** @enum {string} */
+              action: 'new' | 'existing' | 'skipped';
+              ecosystem: ('composer' | 'npm') | null;
+              packageName: string | null;
+              reason:
+                | (
+                    | 'archived'
+                    | 'no_manifest'
+                    | 'invalid_name'
+                    | 'fork'
+                    | 'name_public'
+                    | 'name_public_unverified'
+                    | 'claim_overlap'
+                    | 'filtered_out'
+                    | 'error_451'
+                    | 'error_404'
+                    | 'unsupported_ecosystem'
+                  )
+                | null;
+              repository: string;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
         headers: {
           [name: string]: unknown;
         };

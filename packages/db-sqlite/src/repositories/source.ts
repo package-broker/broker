@@ -1,3 +1,4 @@
+import { npmVcsBuildRetryStatement } from './npm-vcs-build.js';
 import { NPM_PACK_SKIP_CODES } from '@package-broker/core/sources/source-error-codes';
 import { proxyClaimsVerified } from './proxy-claims.js';
 import type { VcsConfig } from '@package-broker/core/sources/config';
@@ -593,6 +594,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
               .where('id', '=', input.id)
               .where('status', '!=', 'paused'),
           ),
+          npmVcsBuildRetryStatement(ctx, input.id),
           auditPendingStatement(ctx, input.audit),
           ...(input.idempotency === undefined
             ? []

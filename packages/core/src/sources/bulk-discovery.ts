@@ -24,9 +24,14 @@ export interface DiscoveryCredential {
 type ExistsLookup = (candidate: DiscoveryCandidate) => boolean | Promise<boolean>;
 
 export interface BulkDiscoveryDeps {
+  readonly repositoriesPerInvocation?: number;
   readonly credentials: {
     /** Must return only an organization-level github_app credential owned by ctx's organization. */
-    resolve(ctx: OrgContext, credentialId: string): Promise<DiscoveryCredential | null>;
+    resolve(
+      ctx: OrgContext,
+      credentialId: string,
+      installationId?: number,
+    ): Promise<DiscoveryCredential | null>;
   };
   readonly discovery: {
     discover(
@@ -87,6 +92,7 @@ export interface BulkDiscovery {
     actor: ActorContext,
     input: {
       readonly credentialId: string;
+      readonly installationId?: number;
       readonly includeForks?: boolean;
       readonly ecosystem?: 'composer' | 'npm';
       readonly pattern: string;
@@ -99,6 +105,7 @@ export interface BulkDiscovery {
     fence: MutationFence,
     input: {
       readonly credentialId: string;
+      readonly installationId?: number;
       readonly includeForks?: boolean;
       readonly ecosystem?: 'composer' | 'npm';
       readonly repositories: readonly string[];
@@ -231,7 +238,11 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
     async dryRun(ctx, actor, input) {
       if (!permitted(actor)) return forbidden;
       try {
-        const credential = await deps.credentials.resolve(ctx, input.credentialId);
+        const credential = await deps.credentials.resolve(
+          ctx,
+          input.credentialId,
+          ...(input.installationId === undefined ? [] : [input.installationId]),
+        );
         if (credential === null) return { ok: false, error: 'credential_not_found' };
         const page = await deps.discovery.discover(ctx, credential, {
           pattern: input.pattern,
@@ -259,11 +270,16 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
       if (new Set(input.repositories).size !== input.repositories.length) {
         return { ok: false, error: 'invalid_repositories' };
       }
-      const credential = await deps.credentials.resolve(ctx, input.credentialId);
+      const credential = await deps.credentials.resolve(
+        ctx,
+        input.credentialId,
+        ...(input.installationId === undefined ? [] : [input.installationId]),
+      );
       if (credential === null) return { ok: false, error: 'credential_not_found' };
       const results: ApplyOutcome[] = [];
-      let remainingRepositories: readonly string[] = [];
-      for (const [index, repository] of input.repositories.entries()) {
+      const limit = deps.repositoriesPerInvocation ?? MAX_APPLY_REPOSITORIES;
+      let remainingRepositories: readonly string[] = input.repositories.slice(limit);
+      for (const [index, repository] of input.repositories.slice(0, limit).entries()) {
         try {
           const entries = await deps.discovery.plan(
             ctx,

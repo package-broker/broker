@@ -1,5 +1,5 @@
-import { withNpmVcsBuildEnqueue } from './npm-build-apply.js';
 import type { NpmTokenAdapters } from '../authz/token-read.js';
+import { createNpmVcsEagerWriter } from '../ingest/npm-vcs-enqueue.js';
 import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
 import { createOidcVerifier } from './npm/oidc/verify.js';
 import {
@@ -220,10 +220,28 @@ export interface RegistryModuleDeps {
     ) => CatalogueWriteGuard;
   };
   readonly npmVcsBuild?: {
+    readonly outcomes: {
+      terminal(
+        ctx: OrgContext,
+        payload: Pick<NpmVcsBuildPayload, 'sourceId' | 'packageId' | 'versionId' | 'packingPolicy'>,
+      ): Promise<boolean>;
+      start(ctx: OrgContext, lease: JobGuard, payload: NpmVcsBuildPayload): Promise<void>;
+      finish(
+        ctx: OrgContext,
+        lease: JobGuard,
+        payload: NpmVcsBuildPayload,
+        code: import('../sources/source-error-codes.js').NpmPackSkipCode,
+      ): Promise<void>;
+      writeGuard(
+        ctx: OrgContext,
+        lease: JobGuard,
+        payload: NpmVcsBuildPayload,
+      ): CatalogueWriteGuard;
+    };
     readonly pending: (ctx: OrgContext, versionId: string) => Promise<boolean>;
     readonly target: (
       ctx: OrgContext,
-      input: Pick<NpmVcsBuildPayload, 'packageId' | 'versionId' | 'sourceId'>,
+      input: Pick<NpmVcsBuildPayload, 'packageId' | 'versionId' | 'sourceId' | 'packingPolicy'>,
     ) => Promise<NpmVcsBuildTarget | null>;
     readonly writeGuard: (ctx: OrgContext, job: JobGuard) => CatalogueWriteGuard;
   };
@@ -547,23 +565,45 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
           ? {}
           : {
               enqueueNpmVcsBuild: async () => {
-                if (jobs === undefined) throw new PlatformUnavailableError();
-                const payload = {
-                  sourceId: record.id,
-                  packageId: target.packageId,
-                  versionId: target.versionId,
-                  version: row.version,
-                };
-                await jobs.enqueue(
-                  ctx,
-                  NPM_VCS_BUILD_JOB_TYPE,
-                  payload,
-                  npmVcsBuildEnqueueInput(payload, deps.clock.now().getTime()),
-                );
+                await enqueueNpmVcsBuild(ctx, target);
               },
             }),
       },
     };
+  }
+
+  async function enqueueNpmVcsBuild(
+    ctx: OrgContext,
+    target: Pick<DistTarget, 'sourceId' | 'packageId' | 'versionId'>,
+  ): Promise<boolean | 'terminal'> {
+    if (deps.npmVcsBuild === undefined || jobs === undefined) throw new PlatformUnavailableError();
+    const payload = {
+      sourceId: target.sourceId,
+      packageId: target.packageId,
+      versionId: target.versionId,
+      version: '',
+    };
+    const row = await deps.npmVcsBuild.target(ctx, { ...payload, packingPolicy });
+    if (row === null) {
+      if (await deps.npmVcsBuild.outcomes.terminal(ctx, { ...payload, packingPolicy }))
+        return 'terminal';
+      return deps.npmVcsBuild.pending(ctx, target.versionId);
+    }
+    if (await deps.npmVcsBuild.pending(ctx, target.versionId)) return true;
+    const identity = {
+      ...payload,
+      version: row.version,
+      sourceRef: row.sourceRef,
+      packingPolicy,
+      retryGeneration: row.retryGeneration,
+    };
+    await jobs.enqueue(
+      ctx,
+      NPM_VCS_BUILD_JOB_TYPE,
+      identity,
+      npmVcsBuildEnqueueInput(identity, deps.clock.now().getTime()),
+    );
+    return true;
   }
 
   async function enqueueSync(ctx: OrgContext, payload: PackageSyncPayload): Promise<void> {
@@ -589,13 +629,64 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     return { type: record.type };
   };
 
+  const repositoryInputCeiling = Math.min(
+    registry.caps.archiveBytes,
+    blob.maxStagingBytes ?? 64 * 1024 * 1024,
+  );
+  const packedOutputCeiling = Math.min(
+    registry.caps.publishTarballBytes,
+    blob.maxStagingBytes ?? 64 * 1024 * 1024,
+  );
+  const packingPolicy = `npm-pack-v1:${packedOutputCeiling}:${repositoryInputCeiling}`;
   const buildJob =
     deps.npmVcsBuild === undefined || jobs === undefined
       ? undefined
       : createNpmVcsBuildJob({
+          async exhausted(job, payload, lease) {
+            const row = await deps.npmVcsBuild!.target(job.org, { ...payload, packingPolicy });
+            if (
+              row === null ||
+              row.version !== payload.version ||
+              (payload.sourceRef !== undefined && payload.sourceRef !== row.sourceRef) ||
+              (payload.packingPolicy !== undefined && payload.packingPolicy !== packingPolicy) ||
+              (payload.retryGeneration !== undefined &&
+                payload.retryGeneration !== row.retryGeneration)
+            )
+              return;
+            await deps.npmVcsBuild!.outcomes.finish(
+              job.org,
+              lease,
+              {
+                ...payload,
+                sourceRef: row.sourceRef,
+                packingPolicy,
+                retryGeneration: row.retryGeneration,
+              },
+              'internal',
+            );
+            await deps.registryJobs!.sourceSync.sources.reportCandidateSkipped!(job.org, lease, {
+              id: payload.sourceId,
+              error: 'internal',
+            });
+          },
           async plan(job, payload, lease) {
-            const row = await deps.npmVcsBuild!.target(job.org, payload);
-            if (row === null || row.version !== payload.version) return null;
+            const row = await deps.npmVcsBuild!.target(job.org, { ...payload, packingPolicy });
+            if (
+              row === null ||
+              row.version !== payload.version ||
+              (payload.sourceRef !== undefined && payload.sourceRef !== row.sourceRef) ||
+              (payload.packingPolicy !== undefined && payload.packingPolicy !== packingPolicy) ||
+              (payload.retryGeneration !== undefined &&
+                payload.retryGeneration !== row.retryGeneration)
+            )
+              return null;
+            const identity = {
+              ...payload,
+              sourceRef: row.sourceRef,
+              packingPolicy,
+              retryGeneration: row.retryGeneration,
+            };
+            await deps.npmVcsBuild!.outcomes.start(job.org, lease, identity);
             const record = await catalogue.sources.get(job.org, payload.sourceId);
             if (
               record === null ||
@@ -607,7 +698,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
             const bound = await bind(job.org, record);
             if (bound === null || typeof bound === 'string') return null;
             return {
-              guard: deps.npmVcsBuild!.writeGuard(job.org, lease),
+              guard: deps.npmVcsBuild!.outcomes.writeGuard(job.org, lease, identity),
               deps: {
                 provider: bound.provider,
                 providerContext: providerContext(job.org, bound, job.signal),
@@ -615,8 +706,10 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
                 store: blob,
                 writer: deps.dist.writer,
                 blobReplacer: deps.dist.blobReplacer,
-                maxBytes: registry.caps.publishTarballBytes,
+                repositoryArchiveBytes: repositoryInputCeiling,
+                maxBytes: packedOutputCeiling,
                 reportSkipped: async (code) => {
+                  await deps.npmVcsBuild!.outcomes.finish(job.org, lease, identity, code);
                   await deps.registryJobs!.sourceSync.sources.reportCandidateSkipped!(
                     job.org,
                     lease,
@@ -642,12 +735,17 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
             };
           },
         });
-  const npmApply = withNpmVcsBuildEnqueue(ingest.apply, {
-    source: (ctx, id) => catalogue.sources.get(ctx, id),
-    target: deps.npmVcsBuild?.target,
-    jobs,
-    clock: deps.clock,
-  });
+  const npmApply: ApplyDeps = {
+    ...ingest.apply,
+    writer: createNpmVcsEagerWriter(ingest.apply.writer, {
+      sources: catalogue.sources,
+      existing: ingest.apply.existing,
+      target: deps.npmVcsBuild?.target,
+      jobs,
+      packingPolicy,
+      clock: deps.clock,
+    }),
+  };
   const packageSyncJob =
     sync === undefined || jobs === undefined
       ? undefined
@@ -701,11 +799,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     enqueueNpmVcsBuild: async (ctx, target) => {
       const record = await catalogue.sources.get(ctx, target.sourceId);
       if (record?.type !== 'vcs' || record.ecosystem !== 'npm') return false;
-      if (await deps.npmVcsBuild?.pending(ctx, target.versionId)) return true;
-      const plan = await planFetch(ctx, target);
-      if (plan?.deps.enqueueNpmVcsBuild === undefined) return false;
-      await plan.deps.enqueueNpmVcsBuild();
-      return true;
+      return enqueueNpmVcsBuild(ctx, target);
     },
     access: packageAccess,
     store: blob,

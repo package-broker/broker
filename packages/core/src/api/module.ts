@@ -1,3 +1,4 @@
+import { sourceDiscoveryRoutes } from './routes/source-discovery.js';
 import { trustedPublisherRoutes } from './routes/trusted-publishers.js';
 import { packageDetailRoutes } from './routes/package-detail.js';
 import { npmLoginRoutes } from './routes/npm-login.js';
@@ -25,6 +26,7 @@ import { tokenRoutes } from './routes/tokens.js';
 export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
+  readonly sourceDiscovery?: Parameters<typeof sourceDiscoveryRoutes>[0];
   readonly trustedPublishers?: Parameters<typeof trustedPublisherRoutes>[0];
   readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
   readonly publishes: Parameters<typeof publishRoutes>[0];
@@ -314,6 +316,7 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
       idempotency: deps.tokens.idempotency,
     }),
     ...sourceRoutes(deps.sources),
+    ...(deps.sourceDiscovery === undefined ? [] : sourceDiscoveryRoutes(deps.sourceDiscovery)),
     ...sourcePackageRoutes(deps.sourcePackages),
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),

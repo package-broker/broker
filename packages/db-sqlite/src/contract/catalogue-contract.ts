@@ -1,3 +1,8 @@
+import { createNpmVcsEagerWriter } from '@package-broker/core/ingest/npm-vcs-enqueue';
+import { applyChunk } from '@package-broker/core/ingest/apply-description';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
+import { createDiscoveryRepositoryReader } from '../repositories/discovery.js';
 import { createJobRepository } from '../repositories/job.js';
 import { npmVcsBuildEnqueueInput } from '@package-broker/core/ingest/npm-vcs-build-job';
 import { NPM_PACK_SKIP_CODES } from '@package-broker/core/sources/source-error-codes';
@@ -17,6 +22,8 @@ import { createPackageIdReads } from '../repositories/package-id.js';
 import { createSourceRepository } from '../repositories/source.js';
 import { createBlobReferenceReader } from '../repositories/blob-references.js';
 import {
+  npmVcsBuildRetryStatement,
+  createNpmVcsBuildOutcomes,
   createNpmVcsBuildReader,
   createNpmVcsBuildPendingReader,
 } from '../repositories/npm-vcs-build.js';
@@ -109,6 +116,88 @@ export function describeCatalogueContract(
 
     afterEach(async () => {
       await database.close();
+    });
+
+    it.each(['npm', 'composer'] as const)(
+      'scopes configured %s repository discovery by organization and source owner',
+      async (ecosystem) => {
+        const reader = createDiscoveryRepositoryReader(executor);
+        await executor.batch([
+          st(
+            "INSERT INTO source (id,org_id,name,type,ecosystem,config_json) VALUES ('DS',?,'discovery','vcs',?,?)",
+            orgs.a.orgId,
+            ecosystem,
+            JSON.stringify({ provider: 'github', repository: 'Owner/Repo' }),
+          ),
+        ]);
+        expect(await reader.has(orgs.a, 'owner/repo', ecosystem)).toBe(true);
+        expect(await reader.has(orgs.b, 'owner/repo', ecosystem)).toBe(false);
+        expect(
+          await reader.has(orgs.a, 'owner/repo', ecosystem === 'npm' ? 'composer' : 'npm'),
+        ).toBe(false);
+        expect(await reader.hasSourceName(orgs.a, 'discovery')).toBe(true);
+        expect(await reader.hasSourceName(orgs.b, 'discovery')).toBe(false);
+        await executor.batch([
+          st("UPDATE source SET project_id='P' WHERE org_id=? AND id='DS'", orgs.a.orgId),
+        ]);
+        expect(await reader.has(orgs.a, 'owner/repo', ecosystem)).toBe(false);
+        expect(await reader.hasSourceName(orgs.a, 'discovery')).toBe(false);
+      },
+    );
+
+    it('persists terminal build outcomes by commit and policy and fences deliberate retries', async () => {
+      const ctx = orgs.a;
+      const commit = 'a'.repeat(40);
+      await executor.batch([
+        st("UPDATE source SET type='vcs' WHERE org_id=? AND id='S'", ctx.orgId),
+        st(
+          "UPDATE version SET source_ref=?,dist_type='tgz' WHERE org_id=? AND id='V'",
+          commit,
+          ctx.orgId,
+        ),
+      ]);
+      const payload = {
+        sourceId: 'S',
+        packageId: 'K',
+        versionId: 'V',
+        version: '1.0.0',
+        sourceRef: commit,
+        packingPolicy: 'npm-pack-v1:1000',
+        retryGeneration: 0,
+      };
+      const reader = createNpmVcsBuildReader(executor);
+      const outcomes = createNpmVcsBuildOutcomes(executor);
+      const lease = { id: 'J', owner: 'owner', fence: 1 };
+      expect(await reader(ctx, payload)).not.toBeNull();
+      await expect(outcomes.finish(orgs.b, lease, payload, 'too_large')).rejects.toThrow();
+      await expect(
+        outcomes.finish(ctx, { ...lease, fence: 2 }, payload, 'too_large'),
+      ).rejects.toThrow();
+      expect(await outcomes.terminal(ctx, payload)).toBe(false);
+      await outcomes.start(ctx, lease, payload);
+      const oldWriteGuard = outcomes.writeGuard(ctx, lease, payload);
+      await outcomes.finish(ctx, lease, payload, 'too_large');
+      expect(await outcomes.terminal(ctx, payload)).toBe(true);
+      expect(await outcomes.terminal(orgs.b, payload)).toBe(false);
+      expect(await outcomes.terminal(ctx, { ...payload, sourceId: 'other' })).toBe(false);
+      expect(await outcomes.terminal(ctx, { ...payload, packageId: 'other' })).toBe(false);
+      expect(await outcomes.terminal(ctx, { ...payload, packingPolicy: 'other' })).toBe(false);
+      expect(await reader(ctx, payload)).toBeNull();
+      expect(await reader(ctx, { ...payload, packingPolicy: 'npm-pack-v2:1000' })).not.toBeNull();
+      await executor.batch([npmVcsBuildRetryStatement(orgs.b, 'S')]);
+      expect(await reader(ctx, payload)).toBeNull();
+      await executor.batch([npmVcsBuildRetryStatement(ctx, 'S')]);
+      expect(await outcomes.terminal(ctx, payload)).toBe(false);
+      await expect(executor.batch(oldWriteGuard)).rejects.toThrow();
+      expect(await reader(ctx, payload)).toMatchObject({ retryGeneration: 1 });
+      await expect(outcomes.finish(ctx, lease, payload, 'too_large')).rejects.toThrow();
+      await executor.batch([
+        st("UPDATE version SET source_ref=? WHERE org_id=? AND id='V'", 'b'.repeat(40), ctx.orgId),
+      ]);
+      await expect(
+        outcomes.finish(ctx, lease, { ...payload, retryGeneration: 1 }, 'too_large'),
+      ).rejects.toThrow();
+      expect(await reader(ctx, { ...payload, sourceRef: 'b'.repeat(40) })).not.toBeNull();
     });
 
     it.each(['dead', 'succeeded'] as const)(
@@ -228,6 +317,7 @@ export function describeCatalogueContract(
         version: '1.0.0',
         revision: 1,
         sourceRef: manifest.gitHead,
+        retryGeneration: 0,
       });
       expect(await targetReader(orgs.b, target)).toBeNull();
       expect(await targetReader(ctx, { ...target, sourceId: 'foreign' })).toBeNull();
@@ -292,6 +382,156 @@ export function describeCatalogueContract(
         '1.0.0',
       ]);
     });
+
+    it.each([false, true])(
+      'counts eager enqueue within the ceiling after terminal retry=%s',
+      async (retry) => {
+        const ctx = orgs.a;
+        await executor.batch([
+          st("UPDATE source SET type='vcs' WHERE org_id=? AND id='S'", ctx.orgId),
+          st(
+            "INSERT INTO registered_name (id,org_id,source_id,ecosystem,pattern) VALUES ('ER',?,'S','npm','widget')",
+            ctx.orgId,
+          ),
+        ]);
+        let count = 0;
+        const counted: SqlExecutor = {
+          driver: executor.driver,
+          all(statement) {
+            count++;
+            return executor.all(statement);
+          },
+          batch(statements) {
+            count += statements.length;
+            return executor.batch(statements);
+          },
+        };
+        const clock = { now: () => new Date() };
+        let ids = 0;
+        const jobs = createRepositoryJobs({
+          store: createJobRepository(counted),
+          jobs: [{ qualifiedName: 'core:npm-vcs-build:v1', definition: npmVcsBuildJob }],
+          clock,
+          ids: { ulid: () => `Eager${++ids}` },
+        })('core', { projectId: null, tokenId: null });
+        const existing = createExistingVersionsReader(counted);
+        const sessions = createIngestSessions(counted);
+        const writer = createNpmVcsEagerWriter(createCatalogueWriter(counted), {
+          sources: createSourceRepository(counted),
+          existing,
+          jobs,
+          target: createNpmVcsBuildReader(counted),
+          packingPolicy: 'npm-pack-v1:1000',
+          clock,
+        });
+        const scope = { scope: 'package', sourceId: 'S', packageKey: 'widget' } as const;
+        const initialSession = await sessions.acquire(ctx, scope, 'eager', 300);
+        if (initialSession === 'held') throw new Error('held');
+        let session = initialSession;
+        const tags = Array.from({ length: 50 }, (_, i) => `1.1.${i}`);
+        const description = () =>
+          npmVcsDescription(
+            'widget',
+            undefined,
+            tags,
+            tags.map((version) => ({
+              ref: `refs/tags/${version}`,
+              commit: 'a'.repeat(40),
+              text: JSON.stringify({ name: 'widget', version }),
+            })),
+            snapshotRef('sha256:' + 'b'.repeat(64)),
+          );
+        const deps = { writer, existing, sessions, finalizer: createIngestFinalizer(counted) };
+        const sync = async () => {
+          let invocations = 0;
+          for (;;) {
+            count = 0;
+            const result = await applyChunk(ctx, deps, {
+              session,
+              guard: createIngestSessionWriteGuard(ctx, session),
+              source: { id: 'S', key: 'widget', type: 'vcs', ecosystem: 'npm', covered: true },
+              description: await description(),
+              packageDescription: null,
+              validatorTtlSeconds: 0,
+              toVersion(candidate) {
+                const mapped = npmVersionInput(
+                  'widget',
+                  JSON.parse(candidate.raw),
+                  {},
+                  {
+                    kind: 'vcs',
+                    importedAt: '2026-01-01T00:00:00.000Z',
+                    probe: { secrets: [], queryParams: [] },
+                  },
+                );
+                if (!mapped.ok) throw new Error('unmapped');
+                return mapped.input;
+              },
+            });
+            invocations++;
+            expect(count).toBeLessThanOrEqual(result.planned);
+            expect(count).toBeLessThanOrEqual(450);
+            session = result.session;
+            if (result.done) {
+              expect(result.status).toBe('complete');
+              break;
+            }
+            expect(result.cursor).not.toBeNull();
+            if (invocations > 10) throw new Error('unbounded continuation');
+          }
+          return invocations;
+        };
+        expect(await sync()).toBeGreaterThan(1);
+        if (retry) {
+          const outcomes = createNpmVcsBuildOutcomes(executor);
+          const builds = await executor.all<{ payload_json: string }>(
+            st(
+              "SELECT payload_json FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+              ctx.orgId,
+            ),
+          );
+          expect(builds).toHaveLength(50);
+          for (const build of builds) {
+            const payload = JSON.parse(build.payload_json);
+            await outcomes.finish(ctx, { id: 'J', owner: 'owner', fence: 1 }, payload, 'too_large');
+            expect(await outcomes.terminal(ctx, payload)).toBe(true);
+          }
+          await executor.batch([
+            st(
+              "UPDATE job SET state='dead' WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+              ctx.orgId,
+            ),
+            npmVcsBuildRetryStatement(ctx, 'S'),
+          ]);
+          for (const build of builds) {
+            expect(await outcomes.terminal(ctx, JSON.parse(build.payload_json))).toBe(false);
+          }
+          const retrySession = await sessions.acquire(ctx, scope, 'retry', 300);
+          if (retrySession === 'held') throw new Error('held');
+          session = retrySession;
+          const retryInvocations = await sync();
+          const queued = await executor.all<{ payload_json: string }>(
+            st(
+              "SELECT payload_json FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1' AND state='queued'",
+              ctx.orgId,
+            ),
+          );
+          expect(queued).toHaveLength(50);
+          expect(retryInvocations).toBeGreaterThan(1);
+          for (const build of queued) {
+            expect(JSON.parse(build.payload_json)).toMatchObject({ retryGeneration: 1 });
+          }
+        }
+        expect(
+          await executor.all(
+            st(
+              "SELECT count(*) AS total FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+              ctx.orgId,
+            ),
+          ),
+        ).toEqual([{ total: retry ? 100 : 50 }]);
+      },
+    );
 
     it('configured npm VCS name mismatch yields zero versions and one source report', async () => {
       const ctx = orgs.a;

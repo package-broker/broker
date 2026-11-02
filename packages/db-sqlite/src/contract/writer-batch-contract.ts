@@ -1,4 +1,4 @@
-import { withNpmVcsBuildEnqueue } from '@package-broker/core/registry/npm-build-apply';
+import { createNpmVcsEagerWriter } from '@package-broker/core/ingest/npm-vcs-enqueue';
 import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
 import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { createJobRepository } from '../repositories/job.js';
@@ -593,20 +593,20 @@ export function describeWriterBatchContract(open: () => Promise<Fixture>): void 
             },
           ],
         })('core', { projectId: null, tokenId: null });
-        const apply = withNpmVcsBuildEnqueue(
-          {
-            writer: createCatalogueWriter(counter.executor),
-            sessions,
-            existing: createExistingVersionsReader(counter.executor),
-            finalizer: createIngestFinalizer(counter.executor),
-          },
-          {
-            source: createSourceRepository(counter.executor).get,
+        const existing = createExistingVersionsReader(counter.executor);
+        const apply = {
+          writer: createNpmVcsEagerWriter(createCatalogueWriter(counter.executor), {
+            sources: createSourceRepository(counter.executor),
+            existing,
             target: createNpmVcsBuildReader(counter.executor),
             jobs,
+            packingPolicy: 'npm-pack-v1',
             clock: fixedClock('2026-10-30T00:00:00.000Z'),
-          },
-        );
+          }),
+          sessions,
+          existing,
+          finalizer: createIngestFinalizer(counter.executor),
+        };
         let complete = false;
         let invocations = 0;
         for (; invocations < 30; invocations++) {

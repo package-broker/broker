@@ -713,7 +713,17 @@ export interface OidcReplayTable {
   expires_at: string;
 }
 
+export interface NpmVcsBuildOutcomeTable {
+  org_id: string;
+  version_id: string;
+  source_ref: string;
+  packing_policy: string;
+  retry_generation: number;
+  outcome: string | null;
+}
+
 export interface Database {
+  npm_vcs_build_outcome: NpmVcsBuildOutcomeTable;
   npm_login_session: NpmLoginSessionTable;
   trusted_publisher: TrustedPublisherTable;
   oidc_replay: OidcReplayTable;

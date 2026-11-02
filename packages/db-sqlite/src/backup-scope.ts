@@ -50,6 +50,7 @@ export const BACKUP_SCOPE: Readonly<Record<string, BackupScope>> = {
   token: 'include',
   trusted_publisher: 'include',
   npm_login_session: 'exclude',
+  npm_vcs_build_outcome: 'include',
   oidc_replay: 'exclude',
   token_project: 'include',
   upstream_state: 'exclude',

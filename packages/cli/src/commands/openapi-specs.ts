@@ -1,3 +1,4 @@
+import * as sourceDiscovery from '@package-broker/core/api/routes/source-discovery-schemas';
 import * as trustedPublishers from '@package-broker/core/api/routes/trusted-publishers-schemas';
 import * as packageDetail from '@package-broker/core/api/routes/package-detail-schemas';
 import * as packageAccessRequests from '@package-broker/core/api/routes/package-access-requests-schemas';
@@ -25,6 +26,7 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 function stubDependencies(): ApiModuleDeps {
   const deps: Record<string, unknown> = {
     imports: {},
+    sourceDiscovery: { discovery: {}, ids: {}, clock: {} },
     trustedPublishers: {},
     packageAccessRequests: {},
     packageDetail: {},
@@ -70,6 +72,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
     servicePrincipals,
     sourceAttachments,
     sourceNames,
+    sourceDiscovery,
     sources,
     tokens,
     publishes,

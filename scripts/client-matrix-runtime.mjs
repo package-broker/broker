@@ -1,10 +1,20 @@
+import github from '../packages/plugin-github/dist/index.js';
+import matrixScanner from '../fixtures/client-matrix-scanner.mjs';
+import { createJobLoop } from '../packages/runtime-node/dist/jobs/loop.js';
+import { runJoinedJourneys } from './client-matrix-joined.mjs';
+import { createJoinedFixture } from './client-matrix-joined-fixture.mjs';
 import { runManagement } from './client-matrix-management.mjs';
-import { runApiGate, assertRuntimeParity } from './client-matrix-api.mjs';
+import {
+  runApiGate,
+  assertRuntimeParity,
+  assertIntegrationEvidence,
+} from './client-matrix-api.mjs';
 import { runLogin, saveLoginCapture } from './client-matrix-login.mjs';
 import { hashPassword } from '../packages/core/dist/auth/password.js';
 import { sha256Hex } from '../packages/core/dist/auth/primitives.js';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { glob, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
@@ -55,7 +65,7 @@ const require = createRequire(
 );
 const { Miniflare, convertV4MiniflareOptions } = require('miniflare');
 
-export async function seed(executor) {
+export async function seed(executor, { joined = false } = {}) {
   await verifyKeyring(keyring, createKeyringVerifierStore(executor));
   const orgId = ulid();
   const projectId = ulid();
@@ -168,21 +178,21 @@ export async function seed(executor) {
     ],
   );
   const oidcPublisherId = ulid();
-  const oidcPrincipal = ulid();
-  await sql('INSERT INTO service_principal (id,org_id,name,created_by_user_id) VALUES (?,?,?,?)', [
-    oidcPrincipal,
-    orgId,
-    'Trusted publisher',
-    userId,
-  ]);
-  await sql(
-    "INSERT INTO service_principal_permission (org_id,service_principal_id,permission) VALUES (?,?,'org:packages:publish')",
-    [orgId, oidcPrincipal],
-  );
-  await sql(
-    "INSERT INTO trusted_publisher (id,org_id,package_name,repository_id,repository_owner_id,repository,workflow,environment,service_principal_id,created_by_user_id) VALUES (?,?,'matrix-publish-active','123','456','fixture/repository','publish.yml','',?,?)",
-    [oidcPublisherId, orgId, oidcPrincipal, userId],
-  );
+  if (!joined) {
+    const oidcPrincipal = ulid();
+    await sql(
+      'INSERT INTO service_principal (id,org_id,name,created_by_user_id) VALUES (?,?,?,?)',
+      [oidcPrincipal, orgId, 'Trusted publisher', userId],
+    );
+    await sql(
+      "INSERT INTO service_principal_permission (org_id,service_principal_id,permission) VALUES (?,?,'org:packages:publish')",
+      [orgId, oidcPrincipal],
+    );
+    await sql(
+      "INSERT INTO trusted_publisher (id,org_id,package_name,repository_id,repository_owner_id,repository,workflow,environment,service_principal_id,created_by_user_id) VALUES (?,?,'matrix-publish-active','123','456','fixture/repository','publish.yml','',?,?)",
+      [oidcPublisherId, orgId, oidcPrincipal, userId],
+    );
+  }
   const sessionSecret = 's'.repeat(43);
   const csrf = 'c'.repeat(43);
   const roleId = ulid();
@@ -289,6 +299,17 @@ export async function seed(executor) {
           params: [orgId],
         },
       ]),
+    backendVersion: () => executor.all({ sql: 'SELECT sqlite_version() AS version', params: [] }),
+    inspectRepositoryBuild: (sourceId) =>
+      executor.all({
+        sql: `SELECT j.state AS status, b.refetchable FROM job j
+        JOIN source s ON s.org_id=j.org_id AND s.id=json_extract(j.payload_json, '$.sourceId')
+        LEFT JOIN package p ON p.org_id=s.org_id AND p.source_id=s.id
+        LEFT JOIN version v ON v.org_id=p.org_id AND v.package_id=p.id AND v.id=json_extract(j.payload_json, '$.versionId')
+        LEFT JOIN blob b ON b.org_id=v.org_id AND b.id=v.blob_id
+        WHERE j.org_id=? AND s.id=? AND j.type='core:npm-vcs-build:v1' AND j.state IN ('succeeded','dead')`,
+        params: [orgId, sourceId],
+      }),
     inspectPublish: async (name) =>
       executor.all({
         sql: `SELECT v.status, b.refetchable FROM version v JOIN package p ON p.id = v.package_id AND p.org_id = v.org_id JOIN blob b ON b.id = v.blob_id AND b.org_id = v.org_id WHERE v.org_id = ? AND p.name = ?`,
@@ -303,7 +324,7 @@ export async function seed(executor) {
   };
 }
 
-async function frontServer(routes) {
+async function frontServer(routes, observe = async () => {}, { checkRoutes = true } = {}) {
   let dispatch;
   let onLogin;
   let failure;
@@ -325,8 +346,9 @@ async function frontServer(routes) {
         onLogin && /\/-\/v1\/(?:login|done\/)/.test(url.pathname) ? request.clone() : null;
       const response = await dispatch(request);
       if (loginRequest) await onLogin(loginRequest, response);
-      if (!(onLogin && url.pathname.endsWith('/-/whoami')))
+      if (checkRoutes && !(onLogin && url.pathname.endsWith('/-/whoami')))
         await observeResponse(routes, request, response, auditStatus);
+      await observe(request, response);
       const bytes = new Uint8Array(await response.arrayBuffer());
       const headers = Object.fromEntries(response.headers);
       delete headers['transfer-encoding'];
@@ -373,12 +395,13 @@ export async function openMatrixBlobStore(executor, directory, origin) {
   );
 }
 
-async function bootNode(directory, origin, audits, cleanup) {
+async function bootNode(directory, origin, audits, cleanup, options = {}) {
   const db = await openMigratedDatabase();
   cleanup.push(() => db.close());
-  const seeded = await seed(db.executor);
+  const seeded = await seed(db.executor, options);
+  const transport = options.fixture?.fetch ?? ((request) => fixtureReply(request, audits));
   const broker = createNodeServerWithSeams(
-    [],
+    options.joined ? [github(), matrixScanner(transport)] : [],
     {
       executor: db.executor,
       auth: { keyring, publicOrigin: origin, env: {} },
@@ -390,15 +413,27 @@ async function bootNode(directory, origin, audits, cleanup) {
       registry: { config: resolveRegistryConfig(undefined, 'node', origin) },
       log: () => undefined,
     },
-    { transport: (input, init) => fixtureReply(new Request(input, init), audits) },
+    { transport: (input, init) => transport(new Request(input, init)) },
   );
   cleanup.push(() => broker.close());
-  await broker.ready();
+  const kernel = await broker.ready();
+  if (options.joined) {
+    const loop = createJobLoop({
+      executor: db.executor,
+      jobs: kernel.registration.jobs,
+      scope: kernel.jobScope,
+      maxRunning: 2,
+      observability: { log() {}, counter() {}, histogram() {} },
+    });
+    loop.start();
+    cleanup.push(() => loop.stop());
+  }
   broker.server.listen(0, '127.0.0.1');
   await once(broker.server, 'listening');
   const base = `http://127.0.0.1:${broker.server.address().port}`;
   return {
     ...seeded,
+    tick: async () => {},
     dispatch: async (request) =>
       fetch(base + new URL(request.url).pathname + new URL(request.url).search, {
         method: request.method,
@@ -417,7 +452,9 @@ async function bootWorker(directory, origin, audits, cleanup, options) {
       join(root, 'packages/cli/dist/bin.js'),
       'build',
       '--config',
-      'fixtures/client-matrix.config.ts',
+      options.joined
+        ? 'fixtures/client-matrix-joined.config.ts'
+        : 'fixtures/client-matrix.config.ts',
       '--target',
       'cloudflare',
       '--out',
@@ -438,17 +475,24 @@ async function bootWorker(directory, origin, audits, cleanup, options) {
       d1Databases: ['DB'],
       r2Buckets: ['STORAGE'],
       queueProducers: { JOBS: 'matrix-jobs' },
+      ...(options.joined
+        ? { queueConsumers: { 'matrix-jobs': { maxBatchSize: 1, maxBatchTimeout: 0 } } }
+        : {}),
       bindings: { PB_MASTER_KEY: KEY, PB_PUBLIC_URL: origin, DEPLOYMENT_ID: 'client-matrix' },
-      outboundService: (request) => fixtureReply(request, audits),
+      outboundService: options.fixture?.fetch ?? ((request) => fixtureReply(request, audits)),
       handleStructuredLogs: () => undefined,
     }),
   );
   cleanup.push(() => mf.dispose());
   const executor = createD1Executor(await mf.getD1Database('DB'));
   await migrate(executor, await discoveredMigrations(), { holder: 'client-matrix' });
-  const seeded = await seed(executor);
+  const seeded = await seed(executor, options);
   return {
     ...seeded,
+    tick: async () => {
+      const worker = await mf.getWorker();
+      await worker.scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
+    },
     dispatch: (request) =>
       mf.dispatchFetch(request.url, {
         method: request.method,
@@ -460,7 +504,78 @@ async function bootWorker(directory, origin, audits, cleanup, options) {
   };
 }
 
+export async function fingerprintBuiltInputs(directory = root) {
+  const entries = [];
+  for await (const path of glob('packages/*/dist/**/*', {
+    cwd: directory,
+    exclude: ['**/*.map'],
+  })) {
+    if (!/\.(js|json)$/.test(path)) continue;
+    entries.push([
+      path,
+      createHash('sha256')
+        .update(await readFile(join(directory, path)))
+        .digest('hex'),
+    ]);
+  }
+  entries.sort(([a], [b]) => a.localeCompare(b));
+  assert.ok(entries.length > 0, 'Built input fingerprint missing');
+  return Object.fromEntries(entries);
+}
+
+export function acceptanceIdentity(head, status, builtInputs, env = process.env) {
+  const workingTreeDirty = status.trim().length > 0;
+  return {
+    head: head.trim(),
+    workingTreeDirty,
+    acceptance: !workingTreeDirty,
+    reason: workingTreeDirty ? 'Working tree is dirty' : null,
+    builtInputs,
+    runId: env.PB_GATE_RUN_ID ?? env.GITHUB_RUN_ID ?? null,
+  };
+}
+
+export async function verifyClientVersion(
+  client,
+  version,
+  prepared,
+  options,
+  command = runCommand,
+) {
+  const installed = await command(client, ['--version'], prepared.project, prepared.env, options);
+  checkVersion(installed, client, version);
+}
+
+export function blockYaml(settings) {
+  return Object.entries(settings)
+    .map(([key, value]) =>
+      Array.isArray(value) && value.length > 0
+        ? `${key}:\n${value.map((item) => `  - ${JSON.stringify(item)}`).join('\n')}`
+        : `${key}: ${JSON.stringify(value)}`,
+    )
+    .join('\n')
+    .concat('\n');
+}
+
+export async function configureJoinedConsumer(consumer, name) {
+  // pnpm records fresh packages under minimumReleaseAgeExclude and cannot edit a flow-style mapping.
+  const workspace = join(consumer.project, 'pnpm-workspace.yaml');
+  await writeFile(workspace, blockYaml(JSON.parse(await readFile(workspace, 'utf8'))));
+  const path = join(consumer.project, 'package.json');
+  const manifest = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(
+    path,
+    JSON.stringify({
+      ...manifest,
+      name: 'joined-consumer',
+      dependencies: { [name]: '1.0.0' },
+    }),
+  );
+}
+
 export async function runMatrix({ client, version, verboseSteps = false, debug = false }) {
+  await rm(join(root, '.pb', 'client-matrix', `acceptance-${client}.json`), { force: true });
+  const builtInputs = await fingerprintBuiltInputs();
   const integrationEvidence = [];
   let nodeEvidence;
   let nodeLogin;
@@ -526,8 +641,7 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
         prepareClient(directory, client, `${front.origin}/alpha/npm/`, broker.token),
       );
       await step('version', async () => {
-        const installed = await runCommand(client, ['--version'], project, env, { debug });
-        checkVersion(installed, client, version);
+        await verifyClientVersion(client, version, { project, env }, { debug });
       });
       await step('login', async () => {
         const loginClient = await prepareClient(
@@ -652,7 +766,27 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
         front.assertHealthy();
         checkTraffic(routes, audits, client);
       });
-      integrationEvidence.push({ target, login: nodeLogin.status, routesVerified: true });
+      const joined = await step('joined GA journeys', () =>
+        runJoinedRuntime({
+          boot,
+          directory: join(directory, 'joined'),
+          client,
+          version,
+          cleanup,
+          debug,
+        }),
+      );
+      // D1 refuses sqlite_version(); the workerd version in the artifact identifies its SQLite.
+      const [backend] = target === 'node' ? await broker.backendVersion() : [{ version: null }];
+      integrationEvidence.push({
+        target,
+        login: nodeLogin.status,
+        routesVerified: true,
+        joined,
+        database: target === 'node' ? 'node:sqlite' : 'D1 (miniflare)',
+        sqliteVersion: backend.version,
+        blob: target === 'node' ? 'filesystem' : 'R2 (miniflare)',
+      });
       console.log(
         `client-matrix: ${target} ${client} audit without proxy refused; all route evidence verified`,
       );
@@ -671,5 +805,159 @@ export async function runMatrix({ client, version, verboseSteps = false, debug =
       });
     }
   }
+  assertIntegrationEvidence(integrationEvidence);
+  const head = await runCommand('git', ['rev-parse', 'HEAD'], root, process.env, { debug });
+  checkResult(head, 'acceptance head');
+  const status = await runCommand('git', ['status', '--porcelain'], root, process.env, { debug });
+  checkResult(status, 'acceptance working tree');
+  assert.equal(
+    JSON.stringify(await fingerprintBuiltInputs()),
+    JSON.stringify(builtInputs),
+    'Built inputs changed during gate',
+  );
+  await writeFile(
+    join(root, '.pb', 'client-matrix', `acceptance-${client}.json`),
+    JSON.stringify(
+      {
+        ...acceptanceIdentity(head.stdout, status.stdout, builtInputs),
+        recordedAt: new Date().toISOString(),
+        node: process.version,
+        miniflare: require('miniflare/package.json').version,
+        workerd: createRequire(require.resolve('miniflare'))('workerd/package.json').version,
+        client,
+        version,
+        runtimes: integrationEvidence,
+      },
+      null,
+      2,
+    ) + '\n',
+  );
   return integrationEvidence;
+}
+
+async function runJoinedRuntime({ boot, directory, client, version, cleanup, debug }) {
+  const traffic = [];
+  const front = await frontServer(
+    [],
+    async (request, response) => {
+      traffic.push({
+        method: request.method,
+        path: decodeURIComponent(new URL(request.url).pathname),
+        status: response.status,
+      });
+    },
+    { checkRoutes: false },
+  );
+  cleanup.push(() => front.close());
+  const fixture = createJoinedFixture([]);
+  try {
+    const broker = await boot(directory, front.origin, [], cleanup, {
+      debug,
+      joined: true,
+      fixture,
+    });
+    front.bind(broker.dispatch);
+    let sequence = 0;
+    const execute = async (command, prepared) => {
+      const result = await runCommand(
+        command.command,
+        command.args,
+        prepared.project,
+        prepared.env,
+        {
+          debug,
+        },
+      );
+      front.assertHealthy();
+      return result;
+    };
+    const evidence = await runJoinedJourneys({
+      broker,
+      origin: front.origin,
+      scanner: fixture.scanner,
+      repositoryTag: fixture.tag,
+      publish: async (name, token, accepted = true) => {
+        const publisher = await preparePublisher(
+          join(directory, `publish-${sequence++}`),
+          client,
+          `${front.origin}/alpha/npm/`,
+          token,
+          name,
+          { debug },
+        );
+        const start = traffic.length;
+        const result = await execute(clientCommands(client).publish, publisher);
+        const sent = traffic
+          .slice(start)
+          .filter((entry) => entry.method === 'PUT' && entry.path === `/alpha/npm/${name}`);
+        assert.equal(sent.length, 1, 'Joined native publish traffic missing');
+        assert.equal(
+          accepted ? sent[0].status === 202 : [401, 403].includes(sent[0].status),
+          true,
+          'Joined publish result differs',
+        );
+        assert.equal(result.code === 0, accepted, 'Joined native publish outcome differs');
+        if (sent[0].status === 401)
+          assert.ok(
+            traffic
+              .slice(start)
+              .filter((entry) => entry.path === '/alpha/npm/-/whoami')
+              .every((entry) => entry.status === 401),
+            'Refused publish token still authenticates',
+          );
+      },
+      install: async (name, accepted) => {
+        const consumer = await prepareClient(
+          join(directory, `install-${sequence++}`),
+          client,
+          `${front.origin}/alpha/npm/`,
+          broker.token,
+        );
+        await configureJoinedConsumer(consumer, name);
+        await verifyClientVersion(client, version, consumer, { debug });
+        const start = traffic.length;
+        const result = await execute(clientCommands(client).install, consumer);
+        const sent = traffic.slice(start);
+        assert.ok(
+          sent.some(
+            (entry) =>
+              entry.path === `/alpha/npm/${name}` && entry.status === (accepted ? 200 : 404),
+          ),
+          'Joined native metadata traffic missing',
+        );
+        assert.equal(result.code === 0, accepted, 'Joined native install outcome differs');
+        if (accepted) {
+          assert.ok(
+            sent.some(
+              (entry) => entry.path.startsWith(`/alpha/npm/${name}/-/`) && entry.status === 200,
+            ),
+            'Joined native archive traffic missing',
+          );
+          const metadata = JSON.parse(
+            await readFile(join(consumer.project, 'node_modules', name, 'package.json'), 'utf8'),
+          );
+          assert.equal(metadata.name, name, 'Joined installed package name differs');
+          assert.equal(metadata.version, '1.0.0', 'Joined installed package version differs');
+          assert.equal(
+            await readFile(join(consumer.project, 'node_modules', name, 'index.js'), 'utf8'),
+            'module.exports = true;\n',
+            'Joined installed package bytes differ',
+          );
+        }
+      },
+    });
+    fixture.assertHealthy();
+    fixture.assertTagListing();
+    assert.ok(
+      fixture.requests.some((request) =>
+        request.startsWith('GET /repos/fixture/repository/tarball/'),
+      ),
+      'Repository archive fetch missing',
+    );
+    console.log(`client-matrix: ${client} joined GA journeys verified`);
+    return evidence;
+  } finally {
+    fixture.dispose();
+    fixture.assertHealthy();
+  }
 }

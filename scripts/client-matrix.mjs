@@ -218,7 +218,7 @@ export async function observeResponse(routes, request, response, auditStatus) {
   }
 }
 
-function tarEntry(path, text) {
+export function tarEntry(path, text) {
   const body = Buffer.from(text);
   const header = Buffer.alloc(512);
   header.write(path);

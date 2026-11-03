@@ -19,8 +19,18 @@ test('runtime parity retains status and public behaviour while removing generate
 
 test('client integration gate requires login and route evidence from both runtimes', async () => {
   const { assertIntegrationEvidence } = await import('./client-matrix-api.mjs');
-  const node = { target: 'node', login: 'captured', routesVerified: true };
-  const worker = { target: 'cloudflare', login: 'refused', routesVerified: true };
+  const joined = Object.fromEntries(
+    [
+      'approval-first',
+      'scan-first',
+      'failed-scan',
+      'scan-only-failure',
+      'workload',
+      'repository-tag',
+    ].map((name) => [name, true]),
+  );
+  const node = { target: 'node', login: 'captured', routesVerified: true, joined };
+  const worker = { target: 'cloudflare', login: 'refused', routesVerified: true, joined };
   assertIntegrationEvidence([node, worker]);
   for (const evidence of [
     [],
@@ -29,6 +39,7 @@ test('client integration gate requires login and route evidence from both runtim
     [node, worker, node],
     [node, { ...worker, login: 'skipped' }],
     [node, { ...worker, routesVerified: false }],
+    [node, { ...worker, joined: undefined }],
   ])
     assert.throws(() => assertIntegrationEvidence(evidence));
 });

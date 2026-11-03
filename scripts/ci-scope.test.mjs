@@ -423,10 +423,10 @@ test('workflow gates every expensive job and preserves metadata checks on pull r
   assert.ok(jobs['commit-gate'].includes('if: always()'));
 });
 
-test('scoped unit runner executes a one-file selection across both workflow shards', () => {
+test('scoped unit runner executes a one-file selection across every workflow shard', () => {
   const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
   const command = workflow.match(/run: node scripts\/ci-scope.mjs --check unit (.+)/)[1];
-  for (const shard of [1, 2]) {
+  for (const shard of [1, 2, 3]) {
     const args = command
       .replace('${{ matrix.shard }}', shard)
       .match(/'[^']*'|\S+/g)

@@ -20,6 +20,8 @@ This folder is the source of the 2.0 documentation site at package.broker.
   - [Request package access](guides/package-access-requests.md)
   - [Magento Marketplace keys per client project (repo.magento.com)](guides/mirror-vendor-repositories.md)
   - [Packagist and npmjs proxy sources](guides/public-registry-proxy.md)
+- Integrations
+  - [Notification receiver](integrations/notification-receiver.md)
 - Migration
   - [Migrate from Private Packagist](migration/from-private-packagist.md)
   - [Migrate from Satis](migration/from-satis.md)
@@ -28,6 +30,7 @@ This folder is the source of the 2.0 documentation site at package.broker.
   - [Backup and upgrades](operations/backup-and-upgrades.md)
   - [Observability](operations/observability.md)
   - [Registry policy](operations/registry-policy.md)
+  - [Outbound notifications](operations/notifications.md)
   - [Restore rehearsal](operations/restore-rehearsal.md)
 - Reference
   - [Access model](reference/access-model.md)

@@ -2,6 +2,12 @@ import { createConfiguredGithubDiscovery } from '@package-broker/core/sources/co
 import { UpstreamError, type PolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createDiscoveryRepositoryReader } from './discovery.js';
 import { createTrustedPublisherStore, createTrustedPublisherLookup } from './trusted-publishers.js';
+import {
+  createNotificationCredentials,
+  createNotificationEndpointService,
+} from '@package-broker/core/runtime/notification-jobs';
+import { createNotificationReadRepository } from './notification-read.js';
+import { createNotificationWriteRepository } from './notification-write.js';
 import type { TrustedPublisherRouteDeps } from '@package-broker/core/api/routes/trusted-publishers';
 import { createPackageDetailRepository } from './package-detail.js';
 import { npmLoginRoutes } from '@package-broker/core/api/routes/npm-login';
@@ -113,6 +119,12 @@ export interface ApiRoutesOptions {
     /** Present only when registry policy is enabled: the package views filter through it. */
     readonly serving?: PolicyServing;
   };
+  /** Approval releases capture notification work; only true while notifications are on. */
+  readonly notifications?: boolean;
+  /** Mount endpoint management whenever the notification schema is applied. */
+  readonly notificationRoutes?: boolean;
+  /** Origins a notification destination may never name; the broker's own public origins. */
+  readonly notificationSelfOrigins?: readonly string[];
 }
 
 function registryPolicyApi(
@@ -183,6 +195,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
   }
   try {
+    const notificationReads = createNotificationReadRepository(executor);
     const module = createApiModule({
       sourceDiscovery: {
         ...common,
@@ -211,6 +224,27 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
             },
           }),
       npmLogin: access.npmLogin,
+      ...(input.notificationRoutes === true
+        ? {
+            notifications: {
+              ...common,
+              reads: notificationReads,
+              sessions: services.sessions,
+              service: createNotificationEndpointService({
+                reads: notificationReads,
+                writes: createNotificationWriteRepository(executor, anchors),
+                credentials: createNotificationCredentials({
+                  repository: credentialRepository,
+                  store: credentialStore,
+                }),
+                ids: { ulid },
+                clock: systemClock,
+                selfOrigins: input.notificationSelfOrigins ?? [],
+                transportAvailable: true,
+              }),
+            },
+          }
+        : {}),
       trustedPublishers: {
         ...common,
         store: createTrustedPublisherStore(executor, anchors),
@@ -219,7 +253,12 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
           input.trustedPublisherLookup ?? (async () => null),
         ),
       },
-      publishes: { ...common, publishes: createPublishesRepository(executor, anchors) },
+      publishes: {
+        ...common,
+        publishes: createPublishesRepository(executor, anchors, {
+          notifications: input.notifications === true,
+        }),
+      },
       packageAccessRequests: {
         ...common,
         repository: createPackageAccessRequestRepository(executor, anchors),
@@ -375,4 +414,25 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     }
     throw error;
   }
+}
+
+export async function notificationRoutesAvailable(
+  executor: SqlExecutor,
+  enabled: boolean,
+  log: ApiRoutesOptions['log'],
+): Promise<boolean> {
+  let available: boolean;
+  try {
+    const rows = await executor.all<{ name: string }>({
+      sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('notification_endpoint', 'notification_event', 'notification_delivery', 'notification_attempt')",
+      params: [],
+    });
+    available = rows.length === 4;
+  } catch {
+    if (enabled) throw new KernelConfigError(['notifications: schema is unavailable']);
+    log({ level: 'warn', event: 'notifications.schema_probe_failed' });
+    return false;
+  }
+  if (enabled && !available) throw new KernelConfigError(['notifications: schema is unavailable']);
+  return available;
 }

@@ -32,6 +32,9 @@ const API_ERROR_CODES = [
   'source_paused',
   'upstream_refused',
   'bad_gateway',
+  'invalid_configuration',
+  'endpoint_limit',
+  'transport_unavailable',
 ] as const;
 
 const DETAIL_CODES = [

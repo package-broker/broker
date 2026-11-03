@@ -17,6 +17,7 @@ const EXPECTED_MATCHES: Record<string, number> = {
   'db-sqlite/src/repositories/catalogue-list.ts': 1,
   'db-sqlite/src/repositories/catalogue-predicates.ts': 5,
   'db-sqlite/src/repositories/job-schedule.ts': 2,
+  'db-sqlite/src/repositories/notification-filter.ts': 3,
   'db-sqlite/src/repositories/registered-name.ts': 3,
   'db-sqlite/src/repositories/source-selection.ts': 2,
 };
@@ -34,6 +35,8 @@ const DYNAMIC: Record<string, string> = {
     'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
   "db-sqlite/src/repositories/catalogue-predicates.ts:${at(a.x, 'pattern')}":
     'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
+  'db-sqlite/src/repositories/notification-filter.ts:${pattern}':
+    'notification endpoint pattern; CASE refuses non-ASCII, over MAX_PATTERN_BYTES or more than MAX_PATTERN_WILDCARDS before GLOB',
   'db-sqlite/src/repositories/registered-name.ts:rn_cov.pattern':
     'registered-name pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
 };

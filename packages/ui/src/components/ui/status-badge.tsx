@@ -21,6 +21,11 @@ export const STATUS_LABELS = {
   verified: 'Verified',
   rolled_back: 'Rolled back',
   cancelled: 'Cancelled',
+  enabled: 'Enabled',
+  disabled: 'Disabled',
+  pending: 'Waiting',
+  sending: 'Sending',
+  delivered: 'Delivered',
 } as const;
 export type Status = keyof typeof STATUS_LABELS;
 export const STATUS_COLORS: Record<Status, string> = {
@@ -44,6 +49,11 @@ export const STATUS_COLORS: Record<Status, string> = {
   planned: 'border-blue-200 bg-blue-50 text-blue-800',
   rolled_back: 'border-neutral-200 bg-neutral-100 text-neutral-700',
   cancelled: 'border-neutral-200 bg-neutral-100 text-neutral-700',
+  enabled: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  disabled: 'border-neutral-200 bg-neutral-100 text-neutral-700',
+  pending: 'border-blue-200 bg-blue-50 text-blue-800',
+  sending: 'border-amber-300 bg-amber-50 text-amber-900',
+  delivered: 'border-emerald-200 bg-emerald-50 text-emerald-800',
 };
 export function StatusBadge({ status }: { status: Status }) {
   return (

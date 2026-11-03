@@ -208,6 +208,7 @@ describe('runEntry', () => {
         'core:0006_npm_login_handoff',
         'core:0007_npm_vcs_build_outcomes',
         'core:0008_registry_policy',
+        'core:0009_npm_notifications',
       ]);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
@@ -253,6 +254,12 @@ describe('runEntry', () => {
           level: 'info',
           message: 'applied core:0008_registry_policy',
           id: 'core:0008_registry_policy',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0009_npm_notifications',
+          id: 'core:0009_npm_notifications',
           holder,
         },
       ]);
@@ -755,3 +762,26 @@ it.each([undefined, true, false])('forwards the mcp deployment switch %s', async
   if (mcp === undefined)
     expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('mcp');
 });
+
+it.each([undefined, true, false])(
+  'forwards the notifications deployment switch %s',
+  async (enabled) => {
+    const { broker } = fakeBroker();
+    const h = harness(async () => broker);
+    const notifications = enabled === undefined ? undefined : { enabled };
+    await runEntry(
+      Promise.resolve({
+        plugins: [],
+        migrations: [],
+        ...(notifications === undefined ? {} : { notifications }),
+      }),
+      {},
+      h.runtime,
+    );
+    expect(h.runtime.start).toHaveBeenCalledWith(
+      expect.objectContaining(notifications === undefined ? {} : { notifications }),
+    );
+    if (notifications === undefined)
+      expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('notifications');
+  },
+);

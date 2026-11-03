@@ -87,6 +87,23 @@ interface ManagementAssemblyEntry {
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
+    dependency: 'notifications',
+    constructed: 'notification endpoint service, read repository and human sessions',
+    routes: [
+      'GET /_pb/projects/:project/notifications',
+      'POST /_pb/projects/:project/notifications',
+      'GET /_pb/projects/:project/notifications/:id',
+      'PATCH /_pb/projects/:project/notifications/:id',
+      'POST /_pb/projects/:project/notifications/:id/enable',
+      'POST /_pb/projects/:project/notifications/:id/disable',
+      'DELETE /_pb/projects/:project/notifications/:id',
+      'GET /_pb/projects/:project/notifications/:id/deliveries',
+      'GET /_pb/projects/:project/notifications/:id/deliveries/:delivery',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM26I',
+  },
+  {
     dependency: 'sourceDiscovery',
     constructed: 'configured GitHub discovery, credential store and repository reader',
     routes: ['POST /_pb/sources/discovery/plan', 'POST /_pb/sources/discovery/apply'],
@@ -383,23 +400,25 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
     expect(entry.ownerPacket).toBe(
-      entry.dependency === 'sourceDiscovery'
-        ? 'NPM19c'
-        : entry.dependency === 'registryPolicy'
-          ? 'NPM27'
-          : entry.dependency === 'trustedPublishers'
-            ? 'NPM17c'
-            : entry.dependency === 'packageDetail'
-              ? 'NPM13a'
-              : entry.dependency === 'publishes'
-                ? 'NPM10'
-                : entry.dependency === 'sourcePackages'
-                  ? 'T1041'
-                  : entry.dependency === 'npmLogin'
-                    ? 'NPM16'
-                    : entry.dependency === 'packageAccessRequests'
-                      ? 'NPM12'
-                      : 'T531',
+      entry.dependency === 'notifications'
+        ? 'NPM26I'
+        : entry.dependency === 'sourceDiscovery'
+          ? 'NPM19c'
+          : entry.dependency === 'registryPolicy'
+            ? 'NPM27'
+            : entry.dependency === 'trustedPublishers'
+              ? 'NPM17c'
+              : entry.dependency === 'packageDetail'
+                ? 'NPM13a'
+                : entry.dependency === 'publishes'
+                  ? 'NPM10'
+                  : entry.dependency === 'sourcePackages'
+                    ? 'T1041'
+                    : entry.dependency === 'npmLogin'
+                      ? 'NPM16'
+                      : entry.dependency === 'packageAccessRequests'
+                        ? 'NPM12'
+                        : 'T531',
     );
     for (const key of entry.routes) {
       expect(

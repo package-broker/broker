@@ -3,6 +3,8 @@ import { trustedPublisherRoutes } from './routes/trusted-publishers.js';
 import { policyReadRoutes, type PolicyRouteDeps } from './routes/policies-read.js';
 import { policyWriteRoutes } from './routes/policies-write.js';
 import type { PackageViewPolicy } from '../catalogue/policy-views.js';
+import { notificationReadRoutes, type NotificationRouteDeps } from './routes/notifications-read.js';
+import { notificationWriteRoutes } from './routes/notifications-write.js';
 import { packageDetailRoutes } from './routes/package-detail.js';
 import { npmLoginRoutes } from './routes/npm-login.js';
 import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
@@ -31,6 +33,8 @@ export type ApiRouteFactory = () => readonly RouteDefinition[];
 export interface ApiModuleDeps {
   readonly sourceDiscovery?: Parameters<typeof sourceDiscoveryRoutes>[0];
   readonly trustedPublishers?: Parameters<typeof trustedPublisherRoutes>[0];
+  /** Mounted only while `notifications.enabled` is on. */
+  readonly notifications?: NotificationRouteDeps;
   readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
   readonly publishes: Parameters<typeof publishRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
@@ -71,6 +75,7 @@ type RouteDependencies = Omit<
   ApiModuleDeps,
   | 'extensions'
   | 'imports'
+  | 'notifications'
   | 'packageAccessRequests'
   | 'packageDetail'
   | 'trustedPublishers'
@@ -326,7 +331,24 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
       },
       'dependencies.registryPolicy',
     );
+  if (deps.notifications !== undefined)
+    requireDependencies(
+      deps.notifications,
+      {
+        ...CONTEXT_METHODS,
+        reads: { listEndpoints: true, getEndpoint: true, listDeliveries: true, getDelivery: true },
+        service: { create: true, update: true, enable: true, disable: true, delete: true },
+        sessions: { authenticate: true, isReauthFresh: true },
+      },
+      'dependencies.notifications',
+    );
   const routes = [
+    ...(deps.notifications === undefined
+      ? []
+      : [
+          ...notificationReadRoutes(deps.notifications),
+          ...notificationWriteRoutes(deps.notifications),
+        ]),
     ...(deps.trustedPublishers === undefined ? [] : trustedPublisherRoutes(deps.trustedPublishers)),
     ...(deps.registryPolicy === undefined
       ? []

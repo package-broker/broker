@@ -130,6 +130,16 @@ import { entries as webhookDeliveryEntries } from './mutation-table/webhook-deli
 import { entries as sourceSyncReadsEntries } from './mutation-table/source-sync-reads.js';
 import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
 import { entries as sourceRemovalEntries } from './mutation-table/source-removal.js';
+import { entries as notificationReadEntries } from './mutation-table/notification-read.js';
+import { entries as notificationWriteEntries } from './mutation-table/notification-write.js';
+import {
+  entries as notificationCaptureEntries,
+  overflowEntries as notificationOverflowEntries,
+} from './mutation-table/notification-capture.js';
+import { entries as notificationDispatchEntries } from './mutation-table/notification-dispatch.js';
+import { entries as notificationAttemptEntries } from './mutation-table/notification-attempt.js';
+import { entries as notificationRetentionEntries } from './mutation-table/notification-retention.js';
+import { entries as notificationPrepareEntries } from './mutation-table/notification-prepare.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -272,6 +282,14 @@ export const mutationTable: readonly MutationEntry[] = [
   ...selectedKeysEntries,
   ...oidcEntries,
   ...workloadTokenEntries,
+  ...notificationReadEntries,
+  ...notificationWriteEntries,
+  ...notificationCaptureEntries,
+  ...notificationOverflowEntries,
+  ...notificationDispatchEntries,
+  ...notificationAttemptEntries,
+  ...notificationRetentionEntries,
+  ...notificationPrepareEntries,
 ];
 
 export function checkCompleteness(

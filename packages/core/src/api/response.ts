@@ -7,6 +7,7 @@ import type { ServiceTokenError } from '../authz/service-token-service.js';
 import type { ServicePrincipalError } from '../authz/service-principal-service.js';
 import type { TokenRevokeError } from '../authz/token-revoke.js';
 import type { ProjectListError } from '../authz/project-list.js';
+import type { NotificationErrorCode } from '../notifications/endpoints.js';
 import { errorEnvelope } from '../envelope.js';
 import type { ValidationDetail } from './validate.js';
 
@@ -91,6 +92,13 @@ export const API_ERROR_CODES = {
   invalid_dist_tag: { status: 400, message: 'Invalid dist-tag mutation' },
   invalid_deprecation: { status: 400, message: 'Only deprecated may change' },
   deprecation_too_long: { status: 400, message: 'Deprecation message is too long' },
+  deprecation_too_many: {
+    status: 400,
+    message: 'Too many versions in one deprecation request',
+  },
+  invalid_configuration: { status: 400, message: 'Invalid notification configuration' },
+  endpoint_limit: { status: 409, message: 'Notification endpoint limit reached' },
+  transport_unavailable: { status: 503, message: 'Notification delivery is unavailable' },
   unpublish_blocked: {
     status: 409,
     message: 'A version that is not active blocks removal of the whole package',
@@ -224,6 +232,15 @@ export const SERVICE_ERROR_TABLE = {
     invalid_query: { status: 400, code: 'invalid_request' },
     source_invalid: { status: 503, code: 'unavailable' },
   } satisfies Record<ProjectListError, ServiceErrorMapping>,
+  NotificationError: {
+    invalid_configuration: { status: 400, code: 'invalid_configuration' },
+    endpoint_limit: { status: 409, code: 'endpoint_limit' },
+    transport_unavailable: { status: 503, code: 'transport_unavailable' },
+    revision_conflict: { status: 409, code: 'conflict' },
+    forbidden: { status: 403, code: 'forbidden' },
+    not_found: { status: 404, code: 'not_found' },
+    unavailable: { status: 503, code: 'unavailable' },
+  } satisfies Record<NotificationErrorCode, ServiceErrorMapping>,
 } as const;
 
 export function revisionEtag(revision: number): string {

@@ -161,15 +161,15 @@ export function canary(): string {
 }
 
 export function disablePolicyFetch(bundle: string): string {
-  const target = /function createPolicyFetch\(options\) \{/g;
+  const target = /function createPolicyFetch\((options\d*)\) \{/g;
   assert([...bundle.matchAll(target)].length === 1, 'PolicyMutationTargetMissing');
   return bundle.replace(
     target,
-    `function createPolicyFetch(options) {
+    (_match, options: string) => `function createPolicyFetch(${options}) {
     return async (request) => {
       let url = request.url;
       for (let hop = 0; hop < 6; hop++) {
-        const response = await options.fetchImpl(url, {
+        const response = await ${options}.fetchImpl(url, {
           method: request.method, headers: request.headers, redirect: 'manual',
           signal: AbortSignal.timeout(5000)
         });

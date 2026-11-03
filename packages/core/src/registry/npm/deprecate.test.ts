@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deprecationChanges } from './deprecate.js';
+import { MAX_DEPRECATION_VERSIONS, deprecationChanges } from './deprecate.js';
 
 const body = {
   name: 'widget',
@@ -50,5 +50,29 @@ describe('npm deprecate manifest validation', () => {
   });
   it('compares nested objects independently of key order', () => {
     expect(deprecationChanges(body, JSON.parse(JSON.stringify(body)))).toEqual([]);
+  });
+});
+
+describe('deprecation request cap', () => {
+  const doc = (count: number, deprecated?: string) => ({
+    name: 'widget',
+    versions: Object.fromEntries(
+      Array.from({ length: count }, (_, i) => [
+        `1.0.${i}`,
+        {
+          name: 'widget',
+          version: `1.0.${i}`,
+          ...(deprecated === undefined ? {} : { deprecated }),
+        },
+      ]),
+    ),
+  });
+
+  it('accepts 64 changed versions and refuses 65 with a fixed code', () => {
+    expect(deprecationChanges(doc(64), doc(64, 'old'))).toHaveLength(MAX_DEPRECATION_VERSIONS);
+    expect(() => deprecationChanges(doc(65), doc(65, 'old'))).toThrow(
+      expect.objectContaining({ code: 'deprecation_too_many' }),
+    );
+    expect(deprecationChanges(doc(65, 'old'), doc(65, 'old'))).toEqual([]);
   });
 });

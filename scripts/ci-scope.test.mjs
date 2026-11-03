@@ -42,6 +42,13 @@ test('changed packages include every transitive dependent, without unrelated pac
   );
 });
 
+test('notification receiver documentation selects the core scope', () => {
+  assert.deepEqual(
+    scope(['docs/integrations/notification-receiver.md']),
+    scope(['packages/core/src/notifications/signature.ts']),
+  );
+});
+
 test('documentation outside packages and an empty diff select nothing', () => {
   for (const paths of [[], ['docs/new.md'], ['README.md'], ['design/notes.md']])
     assert.deepEqual(scope(paths), empty);

@@ -112,7 +112,9 @@ export function selectScope(paths, graph, { headBranch = '', forceFull = false }
     full: forceFull || headBranch.startsWith('release-please--'),
   };
   const selected = new Set();
-  for (const path of paths) {
+  for (let path of paths) {
+    if (path === 'docs/integrations/notification-receiver.md')
+      path = 'packages/core/src/notifications/signature.ts';
     if (shared.test(path)) output.full = true;
     const pkg = graph.find((entry) => path.startsWith(`${entry.path}/`));
     if (pkg) selected.add(pkg.name);

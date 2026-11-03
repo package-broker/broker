@@ -1,18 +1,24 @@
 import { sql, type RawBuilder } from 'kysely';
 import type { SqlExecutor, Statement } from '@package-broker/core/db/port';
-import type {
-  DeprecationStore,
-  DeprecationVersion,
+import {
+  MAX_DEPRECATION_VERSIONS,
+  type DeprecationStore,
+  type DeprecationVersion,
 } from '@package-broker/core/registry/npm/deprecate';
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import { monotonicNow } from '../internal/catalogue-write-guard.js';
 import { assertPublishBinding } from './catalogue-publish-guard.js';
 import { assertAuditPendingEvent } from './audit-pending.js';
+import { assertCaptureBudget } from '@package-broker/core/db/notifications';
+import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 
 const statement = (query: RawBuilder<unknown>): Statement =>
   compile({ compile: () => query.compile(db) });
 
-export function createDeprecationStore(executor: SqlExecutor): DeprecationStore {
+export function createDeprecationStore(
+  executor: SqlExecutor,
+  options: { readonly notifications?: boolean } = {},
+): DeprecationStore {
   return {
     async snapshot(ctx, sourceId, key) {
       const rows = await executor.all<
@@ -64,7 +70,10 @@ export function createDeprecationStore(executor: SqlExecutor): DeprecationStore 
           and p.source_id = ${input.sourceId} and p.name = ${input.key} and p.ecosystem = 'npm'
           and s.type = 'hosted' and s.status = 'active')`),
       ];
-      if (new Set(edits.map((edit) => edit.version)).size !== edits.length)
+      if (
+        edits.length > MAX_DEPRECATION_VERSIONS ||
+        new Set(edits.map((edit) => edit.version)).size !== edits.length
+      )
         throw new TypeError('invalid deprecation snapshot');
       const records = edits.map((change) => {
         const version = snapshot.versions.find((v) => v.version === change.version);
@@ -107,6 +116,30 @@ export function createDeprecationStore(executor: SqlExecutor): DeprecationStore 
             json_extract(edit.value,'$.event.action'),json_extract(edit.value,'$.event.target.type'),json_extract(edit.value,'$.event.target.id'),
             json_extract(edit.value,'$.event.projectId'),json_extract(edit.value,'$.event.payloadJson') from json_each(${json}) edit`),
         );
+      const changed = edits.filter((edit) => (edit.old ?? '') !== edit.message);
+      const opId =
+        (JSON.parse(changed[0]?.event.payloadJson ?? '{}') as { op_id?: string }).op_id ?? '';
+      const capture =
+        options.notifications === true && changed.length
+          ? notificationCaptureStatements(
+              ctx,
+              {
+                operationId: opId,
+                occurredAt: changed[0]!.event.occurredAt,
+                events: changed.map((edit) => ({
+                  type: 'npm.package.deprecation_changed' as const,
+                  projectId: input.routeProjectId,
+                  sourceId: input.sourceId,
+                  packageKey: input.key,
+                  packageName: npmDisplayName(input.key),
+                  version: edit.version,
+                  data: { deprecated: edit.message !== '' },
+                })),
+              },
+              sql<boolean>`exists (select 1 from version where org_id=${ctx.orgId} and package_id=${snapshot.packageId} and last_op_id=${opId})`,
+            )
+          : [];
+      statements.push(...capture);
       if (edits.length)
         statements.push(
           statement(sql`update package set rev = rev + 1, modified_at = ${monotonicNow}
@@ -115,6 +148,8 @@ export function createDeprecationStore(executor: SqlExecutor): DeprecationStore 
             sql`update cache_epoch set version = hex(randomblob(16)) where org_id = ${ctx.orgId}`,
           ),
         );
+      if (capture.length > 0)
+        assertCaptureBudget(statements.length - capture.length, capture.length);
       await executor.batch(statements);
     },
   };

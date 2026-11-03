@@ -804,7 +804,10 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/access.ts:SQL template: sql<SqlBool>`exists ${loose.selectFrom(tokenLookupQuery(ctx, input).as('pa')).select(sql.lit(1).as('one')).where(condition)}` #1",
         'db-sqlite/src/repositories/blob.ts:builder variable: const [before, written, current] = await executor.batch([\n        statement(previous),\n        statement(upsert),\n        statement(existing),\n      ]); #1',
-        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`(SELECT version.id FROM version\n    WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n      AND version.version_normalized = ${target} AND ${request.mode === 'patch' ? sql<boolean>`version.status = 'active'` : sql<boolean>`version.status != 'tombstoned'`})` #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`version.status = 'active'` #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`version.status != 'tombstoned'` #1",
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`(SELECT version.id FROM version\n    WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n      AND version.version_normalized = ${target} AND ${live})` #1',
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(\n            valid.map(([, target]) => target),\n          )}) AS wanted WHERE NOT EXISTS (SELECT 1 FROM version\n            WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n              AND version.version_normalized = wanted.value AND ${live}))` #1',
       ],
     },
     {
@@ -1084,6 +1087,50 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Org-scoped source/project visibility SELECT used by the batch guard; it performs no mutation or count read.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as visible_source\n    where visible_source.id = ${sourceId} and visible_source.org_id = ${ctx.orgId}\n      and (visible_source.project_id is null or exists (\n        select 1 from project as visible_project\n        where visible_project.id = visible_source.project_id\n          and visible_project.org_id = ${ctx.orgId} and visible_project.status = 'active')))` #1",
+      ],
+    },
+    {
+      reason:
+        'Binds fixture column values for a notification migration INSERT; reads no executor count.',
+      sites: [
+        'db-sqlite/src/contract/notification-migration-contract.ts:opaque object access: Object.values(values) #1',
+      ],
+    },
+    {
+      reason:
+        'Notification fixtures and mutation entries build audit fields, twin rows and locator lists; they read no executor count.',
+      sites: [
+        'db-sqlite/src/contract/notification-delivery-contract.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/contract/notification-prepare-contract.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-prepare.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-prepare.ts:opaque object access: Object.values(copy) #1',
+        'db-sqlite/src/testing/mutation-table/notification-prepare.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-attempt.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-attempt.ts:opaque object access: Object.values(copy) #1',
+        'db-sqlite/src/testing/mutation-table/notification-attempt.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-capture.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-capture.ts:opaque object access: Object.entries(GUARDS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-dispatch.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/contract/notification-retention-contract.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-retention.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-retention.ts:opaque object access: Object.values(copy) #1',
+        'db-sqlite/src/testing/mutation-table/notification-retention.ts:opaque object access: Object.values(LOCATORS) #1',
+      ],
+    },
+    {
+      reason:
+        'Writers take returned rows by the index they recorded for the statement; mutation entries list locators. None reads executor change counts.',
+      sites: [
+        'db-sqlite/src/repositories/catalogue-publish.ts:unresolved computed access: results[index] #1',
+        'db-sqlite/src/repositories/notification-attempt.ts:unresolved computed access: results?.[head.length] #1',
+        'db-sqlite/src/testing/mutation-table/notification-capture.ts:opaque object access: Object.values(OVERFLOW_LOCATORS) #1',
+      ],
+    },
+    {
+      reason:
+        'Reads the previous target of a dist-tag from the package snapshot map; no executor count.',
+      sites: [
+        'db-sqlite/src/repositories/npm-dist-tags.ts:unresolved computed access: snapshot.tags[tag] #1',
       ],
     },
     {
@@ -1940,7 +1987,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM package\n      WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}\n        AND package.ecosystem = 'npm')` #1",
-        'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`${targetOf(target)} IS NOT NULL` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`${tag}` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`${targetOf(target)} IS NULL` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`${newOpId()}` #1',

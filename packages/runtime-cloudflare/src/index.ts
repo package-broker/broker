@@ -30,7 +30,10 @@ import { createUserRepository } from '@package-broker/db-sqlite/repositories/use
 import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
-import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
+import {
+  createApiRoutes,
+  notificationRoutesAvailable,
+} from '@package-broker/db-sqlite/repositories/api-services';
 import {
   REGISTRY_POLICY_JOB_EVENTS,
   registryPolicyJobs,
@@ -226,6 +229,17 @@ import {
   type TokenWiring,
 } from './token-jobs.js';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
+import {
+  NotificationRuntimeConfigError,
+  notificationRuntime,
+  notificationsSwitch,
+} from '@package-broker/core/runtime/notification-jobs';
+import type { CoreJobs } from '@package-broker/core/platform/jobs';
+import { createNotificationAttemptRepository } from '@package-broker/db-sqlite/repositories/notification-attempt';
+import { createNotificationDispatchRepository } from '@package-broker/db-sqlite/repositories/notification-dispatch';
+import { createNotificationPrepareRepository } from '@package-broker/db-sqlite/repositories/notification-prepare';
+import { createNotificationRetentionRepository } from '@package-broker/db-sqlite/repositories/notification-retention';
+import { createWorkersNotificationTransport } from './notifications/transport.js';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type {
   PluginDefinition,
@@ -389,6 +403,8 @@ export interface WorkerOptions {
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
+  /** Outbound publish notifications; off unless `enabled` is exactly true. */
+  readonly notifications?: BrokerConfig['notifications'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -472,6 +488,7 @@ async function buildAuth(
   dispatch: (run: () => Promise<void>) => void,
   collectRegistration: () => Registration,
   tokens: TokenWiring,
+  keyring: Keyring,
 ): Promise<{
   assembly: AccessAssembly;
   auth: AuthModule;
@@ -481,9 +498,6 @@ async function buildAuth(
   access: WorkerAccessServices;
   keyring: Keyring;
 }> {
-  const keyring = createKeyring(
-    readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
-  );
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
   const localAuth = parseLocalAuthPolicy(read(env, 'PB_AUTH_LOCAL'));
   await selfTestPasswordHashing(keyring);
@@ -539,13 +553,14 @@ function buildCatalogue(
   reads: ReturnType<typeof buildPackageReads>,
   anchors: readonly ConfiguredProviderAnchor[],
   log: KernelLog,
+  notifications: boolean,
 ): WorkerCatalogueServices {
   return Object.freeze<WorkerCatalogueServices>({
     reader: reads.reader,
-    writer: createCatalogueWriter(executor),
+    writer: createCatalogueWriter(executor, { notifications }),
     packageAccess: reads.packageAccess,
     visibility: createVisibilityService({
-      store: createVisibilityStore(executor, { providerAnchors: anchors }),
+      store: createVisibilityStore(executor, { providerAnchors: anchors, notifications }),
       log,
     }),
     closureReport: (actor, organizationPermissions, ecosystem) =>
@@ -738,6 +753,7 @@ function buildRegistryModule(input: {
   readonly dispatch: (run: () => Promise<void>) => void;
   readonly anchors: ProviderAnchorReader;
   readonly requiredScanners: () => readonly string[];
+  readonly notifications: boolean;
 }): {
   readonly policy: OutboundPolicy;
   readonly module: RegistryModule;
@@ -750,7 +766,7 @@ function buildRegistryModule(input: {
     runtime: 'cloudflare',
     selfOrigins: registry.outbound.selfOrigins,
   });
-  const writer = createCatalogueWriter(executor);
+  const writer = createCatalogueWriter(executor, { notifications: input.notifications });
   const sessions = createIngestSessions(executor);
   const registryReads = createRegistryReads(executor);
   const registrySources = createSourceRepository(executor);
@@ -808,9 +824,9 @@ function buildRegistryModule(input: {
     },
     npmTokens: createNpmTokenAdapters(executor, (ctx) => input.anchors.anchors(ctx)),
     npmPublish: {
-      deprecations: createDeprecationStore(executor),
-      distTags: createDistTagStore(executor),
-      unpublish: createUnpublishStore(executor),
+      deprecations: createDeprecationStore(executor, { notifications: input.notifications }),
+      distTags: createDistTagStore(executor, { notifications: input.notifications }),
+      unpublish: createUnpublishStore(executor, { notifications: input.notifications }),
       reads: createPublishReads(executor),
       lookupToken: createAccessRepository(executor).lookupToken,
       anchors: (ctx) => input.anchors.anchors(ctx),
@@ -1728,6 +1744,14 @@ export function createWorker(
       ...(options.observability === undefined ? {} : { observability: options.observability }),
     });
     if (observabilityProblems.length > 0) throw new KernelConfigError(observabilityProblems);
+    let notificationsOn: boolean;
+    try {
+      notificationsOn = notificationsSwitch(options.notifications);
+    } catch (error) {
+      if (error instanceof NotificationRuntimeConfigError)
+        throw new KernelConfigError([...error.problems]);
+      throw error;
+    }
     const lifetime = resolveTokenLifetime(options.tokens);
     const patJobs = createPatJobHolder();
     const config = stanza;
@@ -1778,6 +1802,59 @@ export function createWorker(
       }
     };
 
+    if (
+      notificationsOn &&
+      (config === null ||
+        db === undefined ||
+        publicUrl === undefined ||
+        env?.PB_MASTER_KEY === undefined)
+    )
+      throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
+    const keyring =
+      db === undefined
+        ? undefined
+        : createKeyring(
+            readMasterKeys({ current: env?.PB_MASTER_KEY, previous: env?.PB_MASTER_KEY_PREVIOUS }),
+          );
+    const notificationRoutes =
+      db !== undefined &&
+      (await notificationRoutesAvailable(executor as SqlExecutor, notificationsOn, log));
+    const captureNotifications = notificationsOn;
+    const notificationBindings: { keyring?: Keyring; jobs?: CoreJobs } = {};
+    const notifications = !captureNotifications
+      ? { enabled: false, jobs: [] }
+      : notificationRuntime({
+          notifications: options.notifications,
+          transport: createWorkersNotificationTransport({
+            selfOrigins:
+              registryConfig?.outbound.selfOrigins ?? (publicUrl === undefined ? [] : [publicUrl]),
+          }),
+          repositories: () => ({
+            dispatch: createNotificationDispatchRepository(executor as SqlExecutor),
+            attempts: createNotificationAttemptRepository(executor as SqlExecutor),
+            prepare: createNotificationPrepareRepository(executor as SqlExecutor),
+            retention: createNotificationRetentionRepository(executor as SqlExecutor),
+          }),
+          credentials: () => {
+            const keyring = notificationBindings.keyring;
+            if (keyring === undefined) throw new PlatformUnavailableError();
+            const repository = createCredentialRepository(executor as SqlExecutor);
+            return {
+              repository,
+              store: createCredentialStore({
+                repository,
+                cipher: createSecretCipher(keyring, 'credential-encryption'),
+                ids: { ulid },
+                clock: systemClock,
+              }),
+            };
+          },
+          clock: systemClock,
+          ids: { ulid },
+          wake: async (ctx, id) => notificationBindings.jobs?.notify?.(ctx, id),
+        });
+    if (notifications.enabled !== notificationsOn)
+      throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
     const coreJobBindings: {
       services: ReturnType<typeof buildPlatform> | undefined;
       registry: ReturnType<typeof buildRegistryModule> | undefined;
@@ -1880,7 +1957,9 @@ export function createWorker(
                     ]),
                 registerObservedJob(
                   createPublishScanJob({
-                    publishes: createPublishesRepository(executor as SqlExecutor),
+                    publishes: createPublishesRepository(executor as SqlExecutor, [], {
+                      notifications: captureNotifications,
+                    }),
                     scanners: plugins.flatMap((plugin) =>
                       plugin.publishPolicy ? [plugin.publishPolicy] : [],
                     ),
@@ -1895,12 +1974,16 @@ export function createWorker(
                 ),
                 registerObservedJob(
                   createPublishScanSweepJob({
-                    publishes: createPublishesRepository(executor as SqlExecutor),
+                    publishes: createPublishesRepository(executor as SqlExecutor, [], {
+                      notifications: captureNotifications,
+                    }),
                   }),
                 ),
                 registerObservedJob(
                   createPublishApprovalExpireJob({
-                    publishes: createPublishesRepository(executor as SqlExecutor),
+                    publishes: createPublishesRepository(executor as SqlExecutor, [], {
+                      notifications: captureNotifications,
+                    }),
                   }),
                 ),
                 registerObservedJob(
@@ -1913,6 +1996,7 @@ export function createWorker(
                 ...(db === undefined
                   ? []
                   : tokenJobRegistrations(executor as SqlExecutor, patJobs, log)),
+                ...notifications.jobs,
                 ...(db === undefined || registryConfig === undefined
                   ? []
                   : registryPolicyJobs(registryConfig, () =>
@@ -1981,6 +2065,7 @@ export function createWorker(
             dispatch,
             collectRegistration,
             tokenWiring(lifetime, patJobs, config !== null),
+            keyring!,
           );
     const registration = built?.registration ?? collectRegistration();
     const auth = built?.auth;
@@ -2012,6 +2097,15 @@ export function createWorker(
         }),
         blobs: services.platformServices.blob,
       });
+    }
+    if (built !== undefined) notificationBindings.keyring = built.keyring;
+    if (notifications.enabled && services !== undefined) {
+      notificationBindings.jobs = createRepositoryJobs({
+        store: services.platformServices.jobStore,
+        jobs: registration.jobs,
+        clock: systemClock,
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null });
     }
     if (services !== undefined && built !== undefined) {
       patJobs.set(
@@ -2045,6 +2139,7 @@ export function createWorker(
             anchors: built.providerAnchors,
             requiredScanners: () =>
               plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
+            notifications: captureNotifications,
           });
     coreJobBindings.registry = registryModule;
     const policyEnabled = registryConfig?.policy.enabled === true;
@@ -2070,7 +2165,7 @@ export function createWorker(
     const packages =
       built === undefined || reads === undefined
         ? null
-        : buildCatalogue(executor as SqlExecutor, reads, built.anchors, log);
+        : buildCatalogue(executor as SqlExecutor, reads, built.anchors, log, captureNotifications);
     const applicationServices: WorkerServices = Object.freeze({
       providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
       dispatch,
@@ -2091,6 +2186,10 @@ export function createWorker(
               }),
               userAgent: 'PackageBroker/2.0',
             }),
+            notifications: captureNotifications,
+            notificationRoutes,
+            notificationSelfOrigins:
+              registryConfig?.outbound.selfOrigins ?? (publicUrl === undefined ? [] : [publicUrl]),
             ...(registryModule?.module.lookupTrustedPublisherRepository === undefined
               ? {}
               : {

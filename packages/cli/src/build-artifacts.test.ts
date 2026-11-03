@@ -184,6 +184,7 @@ describe('renderBuildManifest', () => {
         'export const tokens = config.tokens;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
+        'export const notifications = config.notifications;',
         '',
       ].join('\n'),
     );
@@ -209,6 +210,7 @@ describe('renderBuildManifest', () => {
         'export const tokens = config.tokens;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
+        'export const notifications = config.notifications;',
         '',
       ].join('\n'),
     );
@@ -236,6 +238,7 @@ describe('renderBuildManifest', () => {
         'export const tokens = config.tokens;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
+        'export const notifications = config.notifications;',
         '',
       ].join('\n'),
     );

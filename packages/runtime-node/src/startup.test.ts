@@ -436,6 +436,50 @@ describe('startNode', () => {
     },
   );
 
+  it.each([
+    [undefined, false],
+    [{ enabled: false }, false],
+    [{ enabled: true }, true],
+  ] as const)('notifications %j register delivery jobs: %s', async (notifications, registered) => {
+    const directory = await realpath(await mkdtemp(join(process.cwd(), '.pb-notifications-')));
+    const { discoveredMigrations } =
+      await import('@package-broker/db-sqlite/testing/migrated-database');
+    let broker: Awaited<ReturnType<typeof startNode>> | undefined;
+    try {
+      broker = await startNode({
+        plugins: [],
+        migrations: await discoveredMigrations(),
+        ...(notifications === undefined ? {} : { notifications }),
+        env: {
+          PB_SQLITE_PATH: join(directory, 'broker.sqlite'),
+          PB_BLOB_ROOT: join(directory, 'blobs'),
+          PB_ORG_SLUG: 'acme',
+          PB_ORG_NAME: 'Acme',
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'https://broker.test',
+          DEPLOYMENT_ID: 'notifications-test',
+        },
+        platformPorts: {
+          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
+          cache: { adapter: 'lru', maxBytes: 1024 },
+          jobs: { adapter: 'database', maxRunning: 1 },
+          observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
+        },
+        stdout: { write: () => true, on: () => undefined },
+        stderr: { write: () => true, on: () => undefined },
+      });
+      const kernel = await broker.ready();
+      expect(
+        kernel.registration.jobs.some(
+          (job) => job.qualifiedName === 'core:notification-deliver:v1',
+        ),
+      ).toBe(registered);
+    } finally {
+      await broker?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('MCP enabled initializes with a read token and dispatches the runtime tools', async () => {
     const key = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
     const path = databasePath();

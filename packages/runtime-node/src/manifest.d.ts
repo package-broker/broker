@@ -6,6 +6,7 @@ declare module '#pb-manifest' {
   export const migrations: readonly MigrationSource[];
   export const platformPorts: PlatformPortConfig | null;
   export const mcp: import('@package-broker/core/config').BrokerConfig['mcp'];
+  export const notifications: import('@package-broker/core/config').BrokerConfig['notifications'];
   export const vulnerability: import('@package-broker/core/config').BrokerConfig['vulnerability'];
   export const tokens: import('@package-broker/core/config').BrokerConfig['tokens'];
   export const registry: import('@package-broker/core/config').BrokerConfig['registry'];

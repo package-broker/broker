@@ -160,12 +160,23 @@ describe('security evidence helpers', () => {
     expect(connects).toEqual([[10002, '127.0.0.1']]);
   });
 
-  it('patches exactly one built policy factory and fails closed when the target drifts', () => {
-    const source = 'function createPolicyFetch(options) { return original; }';
-    expect(disablePolicyFetch(source)).toContain('return async (request)');
-    expect(() => disablePolicyFetch('no factory')).toThrow('PolicyMutationTargetMissing');
-    expect(() => disablePolicyFetch(source + source)).toThrow('PolicyMutationTargetMissing');
-  });
+  it.each(['options', 'options4'])(
+    'patches exactly one built policy factory with %s and fails closed when the target drifts',
+    async (parameter) => {
+      const source = `function createPolicyFetch(${parameter}) { throw new Error('PolicyRefused'); }`;
+      expect(disablePolicyFetch(source)).toContain('return async (request)');
+      expect(() => disablePolicyFetch('no factory')).toThrow('PolicyMutationTargetMissing');
+      expect(() => disablePolicyFetch(source + source)).toThrow('PolicyMutationTargetMissing');
+      const fetchImpl = async () => new Response('sentinel');
+      const create = runInNewContext(disablePolicyFetch(source) + '\ncreatePolicyFetch;', {
+        AbortSignal,
+        URL,
+      }) as (options: { fetchImpl: typeof fetchImpl }) => (request: Request) => Promise<Response>;
+      expect(await (await create({ fetchImpl })(new Request('https://127.0.0.1/'))).text()).toBe(
+        'sentinel',
+      );
+    },
+  );
 });
 
 const notRunTitles: string[] = [];
@@ -184,9 +195,18 @@ afterAll(() => {
 });
 
 describe('security oracles on built bundles', () => {
-  it('can patch the emitted Node bundle without touching the original', async () => {
-    const built = await readFile(new URL('../../../.pb/node/server.js', import.meta.url), 'utf8');
-    expect(disablePolicyFetch(built)).not.toBe(built);
+  it.each(['node', 'cloudflare'])('can patch the emitted %s bundle', async (runtime) => {
+    const entry = runtime === 'node' ? 'server.js' : 'worker.js';
+    const built = await readFile(
+      new URL(`../../../.pb/${runtime}/${entry}`, import.meta.url),
+      'utf8',
+    );
+    const patched = disablePolicyFetch(built);
+    expect(patched).not.toBe(built);
+    if (runtime === 'node') {
+      expect(disableDnsGuard(patched)).not.toBe(patched);
+      expect(connectToUnguardedResolution(built)).not.toBe(built);
+    }
   });
 
   for (const runtime of ['node', 'cloudflare'] as const) {

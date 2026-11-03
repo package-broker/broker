@@ -18,6 +18,8 @@ export interface RegistrySeams {
   readonly jobs?: Jobs;
   readonly observeCredentials?: (access: CredentialAccessSeam) => void;
   readonly shutdownDeadlineMs?: number;
+  /** Replaces the guarded notification connector; tests only. */
+  readonly notificationConnector?: FetchLike;
 }
 
 export function createNodeServerWithSeams(

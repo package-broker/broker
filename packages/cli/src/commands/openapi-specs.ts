@@ -1,5 +1,6 @@
 import * as sourceDiscovery from '@package-broker/core/api/routes/source-discovery-schemas';
 import * as trustedPublishers from '@package-broker/core/api/routes/trusted-publishers-schemas';
+import * as notifications from '@package-broker/core/api/routes/notifications-schemas';
 import * as packageDetail from '@package-broker/core/api/routes/package-detail-schemas';
 import * as packageAccessRequests from '@package-broker/core/api/routes/package-access-requests-schemas';
 import { createApiModule, type ApiModuleDeps } from '@package-broker/core/api/module';
@@ -29,6 +30,7 @@ function stubDependencies(): ApiModuleDeps {
     imports: {},
     sourceDiscovery: { discovery: {}, ids: {}, clock: {} },
     trustedPublishers: {},
+    notifications: {},
     packageAccessRequests: {},
     packageDetail: {},
     registryPolicy: {},
@@ -64,6 +66,7 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
   for (const module of [
     access,
     trustedPublishers,
+    notifications,
     imports,
     organization,
     packages,

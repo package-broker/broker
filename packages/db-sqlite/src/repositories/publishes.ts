@@ -21,6 +21,8 @@ import { createJobRepository } from './job.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
+import { assertCaptureBudget } from '@package-broker/core/db/notifications';
+import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 import { compile as compiled, newOpId, type ProtectedHolderProvider } from '../kysely.js';
 import { compareNpmVersions } from '@package-broker/core/catalogue/versions';
 import {
@@ -70,6 +72,7 @@ function approval(row: Row): PublishApproval {
 export function createPublishesRepository(
   executor: ScalarSqlExecutor,
   providerAnchors: readonly ProtectedHolderProvider[] = [],
+  options: { readonly notifications?: boolean } = {},
 ): PublishesRepository {
   const statement = (value: RawBuilder<unknown>) =>
     compiled({ compile: () => value.compile(db) }) as ScalarStatement;
@@ -133,9 +136,16 @@ export function createPublishesRepository(
       latest_id: string | null;
       latest: string | null;
       dist_tags_json: string;
+      hold_approval: number;
+      hold_scan: number;
+      route_project_id: string | null;
+      source_id: string;
+      package_key: string;
     }>(
       statement(sql`
-      select pa.package_id, pa.version_id, v.version, dt.version_id as latest_id, lv.version as latest, pa.dist_tags_json
+      select pa.package_id, pa.version_id, v.version, dt.version_id as latest_id, lv.version as latest, pa.dist_tags_json,
+        pa.hold_approval, pa.hold_scan, pa.route_project_id, pa.source_id,
+        (select name from package where org_id=pa.org_id and id=pa.package_id) as package_key
       from publish_approval pa join version v on v.org_id=pa.org_id and v.id=pa.version_id
       left join dist_tag dt on dt.org_id=pa.org_id and dt.package_id=pa.package_id and dt.tag='latest'
       left join version lv on lv.org_id=dt.org_id and lv.id=dt.version_id
@@ -242,6 +252,36 @@ export function createPublishesRepository(
       );
       statements.push(...(queued.statements as ScalarStatement[]));
     }
+    const capture =
+      options.notifications === true && canActivate && row.route_project_id !== null
+        ? (notificationCaptureStatements(
+            ctx,
+            {
+              operationId: opId,
+              occurredAt: input.now,
+              events: [
+                {
+                  type: 'npm.package.released',
+                  projectId: row.route_project_id,
+                  sourceId: row.source_id,
+                  packageKey: row.package_key,
+                  packageName: npmDisplayName(row.package_key),
+                  version: row.version,
+                  data: {
+                    releaseCause:
+                      row.hold_approval === 1 && row.hold_scan === 1
+                        ? 'approval_and_scan'
+                        : row.hold_scan === 1
+                          ? 'scan'
+                          : 'approval',
+                  },
+                },
+              ],
+            },
+            active,
+          ) as ScalarStatement[])
+        : [];
+    statements.push(...capture);
     statements.push(
       auditPendingStatement(ctx, input.event, statement(succeeded)) as ScalarStatement,
       statement(
@@ -251,6 +291,7 @@ export function createPublishesRepository(
         sql`select revision, ${succeeded} as changed, ${active} as active from publish_approval where org_id=${ctx.orgId} and id=${input.id}`,
       ),
     );
+    if (capture.length > 0) assertCaptureBudget(statements.length - capture.length, capture.length);
     const result = (await executor.batch(statements)).at(-1)?.rows[0];
     if (
       scan?.scanState === 'allowed' &&

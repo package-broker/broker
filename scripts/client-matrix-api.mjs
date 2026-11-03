@@ -1,3 +1,4 @@
+import { assertJoinedEvidence } from './client-matrix-joined.mjs';
 import { matrixOidcToken } from './client-matrix-oidc.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { harnessAssert as assert, redactClientOutput } from './client-matrix.mjs';
@@ -243,5 +244,6 @@ export function assertIntegrationEvidence(evidence) {
       'Missing runtime login evidence',
     );
     assert.equal(result.routesVerified, true, 'Missing runtime route evidence');
+    assertJoinedEvidence(result.joined);
   }
 }

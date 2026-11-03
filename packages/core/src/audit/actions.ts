@@ -1,5 +1,6 @@
 import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
+import { isValidPattern } from '../catalogue/patterns.js';
 import { isUlid } from '../ids.js';
 import { isWorkflowFilename } from '../registry/npm/oidc/claim-values.js';
 import {
@@ -100,6 +101,17 @@ export const AUDIT_ACTIONS = [
   'registry_policy.expire',
   'policy.read_denied',
   'policy.inspect',
+  'notification.create',
+  'notification.update',
+  'notification.enable',
+  'notification.disable',
+  'notification.delete',
+  'notification.credential_set',
+  'notification.auto_disable',
+  'notification.delivery_started',
+  'notification.delivery_finished',
+  'notification.delivery_cancelled',
+  'notification.overflow',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -145,6 +157,17 @@ const IMPORT_ROLLBACK_FIELDS = [...IMPORT_RUN_FIELDS, 'restored', 'conflict', 'e
 const ATTACH_FIELDS = ['project_id', 'position'] as const;
 const REGISTERED_NAME_FIELDS = ['pattern'] as const;
 const IDENTITY_FIELDS = ['provider'] as const;
+const NOTIFICATION_CONFIG_FIELDS = [
+  'revision',
+  'method',
+  'events',
+  'pattern',
+  'changed',
+  'headers_configured',
+  'template_configured',
+] as const;
+const NOTIFICATION_STATE_FIELDS = ['revision', 'reason'] as const;
+const NOTIFICATION_DELIVERY_FIELDS = ['endpoint_id', 'event_id', 'delivery_id', 'attempt'] as const;
 const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
   'identity.unblock',
   'identity.unlink',
@@ -270,7 +293,124 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'reasons',
   ],
   'policy.inspect': ['scope', 'ecosystem', 'package_key', 'result_count'],
+  'notification.create': NOTIFICATION_CONFIG_FIELDS,
+  'notification.update': NOTIFICATION_CONFIG_FIELDS,
+  'notification.credential_set': NOTIFICATION_CONFIG_FIELDS,
+  'notification.enable': NOTIFICATION_STATE_FIELDS,
+  'notification.disable': NOTIFICATION_STATE_FIELDS,
+  'notification.delete': NOTIFICATION_STATE_FIELDS,
+  'notification.auto_disable': [...NOTIFICATION_STATE_FIELDS, 'failure_streak'],
+  'notification.delivery_started': NOTIFICATION_DELIVERY_FIELDS,
+  'notification.delivery_finished': [
+    ...NOTIFICATION_DELIVERY_FIELDS,
+    'outcome',
+    'reason',
+    'status',
+    'duration_ms',
+    'delivery_state',
+  ],
+  'notification.delivery_cancelled': ['endpoint_id', 'event_id', 'delivery_id', 'reason'],
+  'notification.overflow': ['operation_id', 'event_type', 'event_count'],
 };
+
+const NOTIFICATION_EVENTS = [
+  'npm.package.published',
+  'npm.package.released',
+  'npm.package.unpublished',
+  'npm.package.deprecation_changed',
+  'npm.package.dist_tag_changed',
+];
+const NOTIFICATION_DISABLE_REASONS = [
+  'manual',
+  'configuration_changed',
+  'failures',
+  'credentials',
+  'policy',
+  'gone',
+];
+const NOTIFICATION_ATTEMPT_CODES = [
+  'ok',
+  'network',
+  'timeout',
+  'http_retry',
+  'http_permanent',
+  'redirect',
+  'policy',
+  'credentials',
+  'template',
+  'unknown',
+];
+const NOTIFICATION_REASONS: Readonly<Record<string, readonly string[]>> = {
+  'notification.disable': NOTIFICATION_DISABLE_REASONS,
+  'notification.auto_disable': ['failures', 'credentials', 'policy', 'gone'],
+  'notification.delete': ['deleted'],
+  'notification.delivery_finished': [...NOTIFICATION_ATTEMPT_CODES, 'expired', 'attempt_limit'],
+  'notification.delivery_cancelled': [
+    'disabled',
+    'superseded',
+    'project_inactive',
+    'admission_lost',
+    'deleted',
+  ],
+};
+const NOTIFICATION_CHANGED = [
+  'name',
+  'method',
+  'events',
+  'package_pattern',
+  'destination',
+  'headers',
+  'signing_key',
+  'template',
+];
+
+function count(min: number, max: number): (value: unknown) => boolean {
+  return (value) =>
+    Number.isSafeInteger(value) && (value as number) >= min && (value as number) <= max;
+}
+
+function oneOf(values: readonly string[]): (value: unknown) => boolean {
+  return (value) => typeof value === 'string' && values.includes(value);
+}
+
+function distinctOf(values: readonly string[]): (value: unknown) => boolean {
+  return (value) =>
+    Array.isArray(value) &&
+    value.length <= values.length &&
+    new Set(value).size === value.length &&
+    value.every(oneOf(values));
+}
+
+/** Notification audit carries only identifiers, counts and fixed codes, never receiver or user text. */
+const NOTIFICATION_VALUES: Readonly<Record<string, (value: unknown) => boolean>> = {
+  revision: count(1, Number.MAX_SAFE_INTEGER),
+  method: oneOf(['POST', 'PUT']),
+  events: (value) => distinctOf(NOTIFICATION_EVENTS)(value) && (value as unknown[]).length > 0,
+  pattern: (value) => typeof value === 'string' && isValidPattern(value),
+  changed: distinctOf(NOTIFICATION_CHANGED),
+  headers_configured: (value) => typeof value === 'boolean',
+  template_configured: (value) => typeof value === 'boolean',
+  failure_streak: count(0, Number.MAX_SAFE_INTEGER),
+  endpoint_id: isBrokerId,
+  event_id: isBrokerId,
+  delivery_id: isBrokerId,
+  operation_id: isBrokerId,
+  attempt: count(1, 8),
+  outcome: oneOf(['started', 'delivered', 'retry', 'failed', 'unknown']),
+  status: (value) => value === null || count(100, 599)(value),
+  duration_ms: count(0, 3_600_000),
+  delivery_state: oneOf(['pending', 'sending', 'delivered', 'failed', 'cancelled']),
+  event_type: oneOf(NOTIFICATION_EVENTS),
+  event_count: count(1, 10_000),
+};
+
+function cleanNotificationValue(value: unknown, field: string, action: string): Cleaned {
+  const valid =
+    field === 'reason' ? oneOf(NOTIFICATION_REASONS[action] ?? []) : NOTIFICATION_VALUES[field];
+  return valid?.(value) === true
+    ? { ok: true, value: value as AuditValue }
+    : { ok: false, reason: 'bad_value' };
+}
 
 export type AuditValue = string | number | boolean | null | readonly string[];
 
@@ -661,24 +801,26 @@ function cleanChanges(
         action === 'package.deprecate' &&
         field === 'deprecated' &&
         (value === null || typeof value === 'string');
-      const cleaned = publicDeprecation
-        ? { ok: true as const, value: value as string | null }
-        : workloadLimit !== undefined &&
-            !(value === null && action.startsWith('trusted_publisher.'))
-          ? cleanWorkloadClaim(value, field, workloadLimit)
-          : accessReason && typeof value === 'string'
-            ? new TextEncoder().encode(value).length <= 1000
-              ? cleanString(value, 1000, field)
-              : { ok: false as const, reason: 'bad_value' as const }
-            : integrity
-              ? validIntegrity
-                ? { ok: true as const, value: value as string }
+      const cleaned = action.startsWith('notification.')
+        ? cleanNotificationValue(value, field, action)
+        : publicDeprecation
+          ? { ok: true as const, value: value as string | null }
+          : workloadLimit !== undefined &&
+              !(value === null && action.startsWith('trusted_publisher.'))
+            ? cleanWorkloadClaim(value, field, workloadLimit)
+            : accessReason && typeof value === 'string'
+              ? new TextEncoder().encode(value).length <= 1000
+                ? cleanString(value, 1000, field)
                 : { ok: false as const, reason: 'bad_value' as const }
-              : field === 'provider' && IDENTITY_ACTIONS.has(action)
-                ? cleanProviderId(entry[key])
-                : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
-                  ? cleanString(value, 1000, field)
-                  : cleanValue(entry[key], field);
+              : integrity
+                ? validIntegrity
+                  ? { ok: true as const, value: value as string }
+                  : { ok: false as const, reason: 'bad_value' as const }
+                : field === 'provider' && IDENTITY_ACTIONS.has(action)
+                  ? cleanProviderId(entry[key])
+                  : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
+                    ? cleanString(value, 1000, field)
+                    : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
       if (accessReason && cleaned.value !== value) return { ok: false, reason: 'bad_value' };
       cleanedEntry[key] = cleaned.value;

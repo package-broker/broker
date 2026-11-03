@@ -7,6 +7,7 @@ let fixture: Awaited<ReturnType<typeof createBrowserFixture>>;
 let script: string;
 let status = 409;
 let code = 'duplicate';
+let showProjectRows = false;
 let details: { path: string; code: string }[] = [];
 const requests: { method: string; body: unknown }[] = [];
 const project = {
@@ -65,7 +66,13 @@ beforeAll(async () => {
         return Response.json({ project: ['project:settings:write'] });
       if (path === '/_pb/projects/saved')
         return Response.json(project, { headers: { ETag: '"r7"' } });
-      return Response.json({ items: [], next: null });
+      return Response.json({
+        items:
+          showProjectRows && new URL(request.url).searchParams.get('status') === 'active'
+            ? [project]
+            : [],
+        next: null,
+      });
     },
   });
 }, 60_000);
@@ -82,6 +89,18 @@ async function mount(editing = false) {
   if (!editing) await fixture!.page.getByText('New project', { exact: true }).click();
 }
 describe('project form browser interactions', () => {
+  it('opens Notifications from the project row with that project selected', async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    showProjectRows = true;
+    await fixture!.mount(script);
+    const link = page.getByRole('link', { name: 'Notifications', exact: true }).first();
+    await browserExpect(link).toHaveAttribute('href', '#/notifications?project=saved');
+    await link.click();
+    await browserExpect(page).toHaveURL(/#\/notifications\?project=saved$/);
+    showProjectRows = false;
+  });
+
   for (const editing of [false, true]) {
     it(`keeps ${editing ? 'settings' : 'create'} fields aligned and URLs contained at responsive widths`, async (context) => {
       if (!fixture) context.skip('Chromium cannot start in this environment');

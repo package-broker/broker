@@ -147,6 +147,31 @@ describe('build vulnerability configuration', () => {
   );
 });
 
+describe('build notifications configuration', () => {
+  it.each([undefined, {}, { enabled: false }, { enabled: true }])(
+    'accepts %j',
+    async (notifications) => {
+      const options = await fixture(routeSource(''));
+      await writeFile(
+        options.configPath,
+        `export default { platform: 'node', plugins: [], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} }, notifications: ${JSON.stringify(notifications)} };`,
+      );
+      await expect(build(options)).resolves.toBeDefined();
+    },
+  );
+  it.each([false, null, { enabled: 'true' }, { enabled: true, extra: true }])(
+    'rejects invalid %j before emitting a build',
+    async (notifications) => {
+      const options = await fixture(routeSource(''));
+      await writeFile(
+        options.configPath,
+        `export default { platform: 'node', plugins: [], notifications: ${JSON.stringify(notifications)} };`,
+      );
+      await expect(build(options)).rejects.toBeInstanceOf(BuildDiagnosticsError);
+    },
+  );
+});
+
 describe('build source provenance', () => {
   it('records HEAD and clean, tracked and untracked worktree changes, with a CI override', async () => {
     vi.stubEnv('GITHUB_SHA', undefined);

@@ -117,7 +117,9 @@ describe('shell markup', () => {
       'Import',
     ]);
     expect(nav.match(/<li>/g)).toHaveLength(7);
-    for (const route of PAGE_ROUTES) expect(nav).toContain(`href="#/${route}?project=acme"`);
+    expect(nav).not.toContain('Notifications');
+    for (const route of PAGE_ROUTES.filter((route) => route !== 'notifications'))
+      expect(nav).toContain(`href="#/${route}?project=acme"`);
     expect(html.indexOf('</nav>')).toBeLessThan(html.indexOf('<select'));
     expect(html.indexOf('<select')).toBeLessThan(html.indexOf('>Account</button>'));
   });

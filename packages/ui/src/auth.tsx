@@ -102,7 +102,9 @@ export function safePageHash(hash: string): string {
     );
   if (/^#\/npm-login\/[A-Za-z0-9_-]{43}$/.test(hash)) return hash;
   const match =
-    /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?([\s\S]*))?$/.exec(hash);
+    /^#\/(projects|access|sources|packages|tokens|notifications|audit|import|login)(?:\?([\s\S]*))?$/.exec(
+      hash,
+    );
   if (match === null || match[0] !== hash) return '#/projects';
   const query = new URLSearchParams(match[2]);
   return buildListFilterHash((match[1] === 'login' ? 'projects' : match[1]) as HashRoute, {

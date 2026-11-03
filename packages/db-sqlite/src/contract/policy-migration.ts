@@ -327,8 +327,10 @@ export function describePolicyMigrationContract(
       const opened = await open();
       try {
         const sources = await discoveredMigrations();
-        expect(sources.at(-1)?.id).toBe('core:0008_registry_policy');
-        await migrate(opened.executor, sources.slice(0, -1), { holder: 'policy-baseline' });
+        const index = sources.findIndex(({ id }) => id === 'core:0008_registry_policy');
+        expect(index).toBeGreaterThan(0);
+        const throughPolicy = sources.slice(0, index + 1);
+        await migrate(opened.executor, sources.slice(0, index), { holder: 'policy-baseline' });
         await dropDuplicateOrganizationGuard(opened.executor);
         await seed(opened.executor);
         const before = await opened.executor.all({
@@ -336,7 +338,7 @@ export function describePolicyMigrationContract(
           params: [],
         });
         expect(
-          (await migrate(opened.executor, sources, { holder: 'policy-upgrade' })).applied,
+          (await migrate(opened.executor, throughPolicy, { holder: 'policy-upgrade' })).applied,
         ).toEqual(['core:0008_registry_policy']);
         expect(
           await opened.executor.all({
@@ -351,7 +353,7 @@ export function describePolicyMigrationContract(
           }),
         ).toEqual([{ n: 0 }]);
         expect(
-          (await migrate(opened.executor, sources, { holder: 'policy-rerun' })).applied,
+          (await migrate(opened.executor, throughPolicy, { holder: 'policy-rerun' })).applied,
         ).toEqual([]);
       } finally {
         await opened.close();

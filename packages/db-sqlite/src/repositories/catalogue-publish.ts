@@ -15,12 +15,15 @@ import { distTagStatements } from './catalogue-write-tags.js';
 import { rederiveStatements } from './visibility-derive.js';
 import { bindPackage } from './catalogue-writer.js';
 import { auditPendingStatement } from './audit-pending.js';
+import { assertCaptureBudget } from '@package-broker/core/db/notifications';
+import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 
 export async function publishVersion(
   executor: SqlExecutor,
   ctx: OrgContext,
   guard: CatalogueWriteGuard,
   input: PublishVersionInput,
+  notifications = false,
 ): Promise<PublishVersionResult> {
   assertPublishBinding(ctx, guard, input);
   const { version: v, approval: a } = input;
@@ -150,6 +153,7 @@ export async function publishVersion(
         .where('id', '=', packageId),
     ),
   ];
+  const packageUpdates = [statements.length - 1];
   if (input.readme)
     statements.push(
       compile(
@@ -204,7 +208,31 @@ export async function publishVersion(
         bindPackage(statement, placeholder, compile({ compile: () => packageId.compile(db) })),
       );
     }
+    packageUpdates.push(statements.length - 1);
   }
+  const capture =
+    notifications && !isHeld
+      ? notificationCaptureStatements(
+          ctx,
+          {
+            operationId: opId,
+            occurredAt: input.now,
+            events: [
+              {
+                type: 'npm.package.published',
+                projectId: input.routeProjectId,
+                sourceId: input.sourceId,
+                packageKey: input.key,
+                packageName: npmDisplayName(input.key),
+                version: v.version,
+                data: {},
+              },
+            ],
+          },
+          sql<boolean>`exists (select 1 from version where org_id = ${ctx.orgId} and id = ${input.versionId}
+          and last_op_id = ${opId} and status = 'active')`,
+        )
+      : [];
   statements.push(
     ...input.scanJobStatements,
     bindPackage(
@@ -223,17 +251,39 @@ export async function publishVersion(
       placeholder,
       compile({ compile: () => packageId.compile(db) }),
     ),
-    compile(
-      db
-        .selectFrom('package')
-        .select(['id', 'rev'])
-        .where('org_id', '=', ctx.orgId)
-        .where('id', '=', packageId),
-    ),
   );
-  if (statements.length > 40) throw new RangeError('publish batch budget exceeded');
-  const results = await executor.batch(statements);
-  const row = results.at(-1)?.rows[0];
+  // The trailing select would take a captured publish over the statement budget; the package
+  // updates return the row instead, the tag advance only when a tag changed.
+  const planned =
+    capture.length === 0
+      ? [
+          ...statements,
+          compile(
+            db
+              .selectFrom('package')
+              .select(['id', 'rev'])
+              .where('org_id', '=', ctx.orgId)
+              .where('id', '=', packageId),
+          ),
+        ]
+      : [
+          ...statements.map((statement, index) =>
+            packageUpdates.includes(index)
+              ? { sql: `${statement.sql} returning "id", "rev"`, params: statement.params }
+              : statement,
+          ),
+          ...capture,
+        ];
+  if (capture.length === 0) {
+    if (planned.length > 40) throw new RangeError('publish batch budget exceeded');
+  } else assertCaptureBudget(statements.length, capture.length);
+  const results = await executor.batch(planned);
+  const row =
+    capture.length === 0
+      ? results.at(-1)?.rows[0]
+      : packageUpdates
+          .map((index) => results[index]?.rows[0])
+          .reduce((latest, current) => current ?? latest, undefined);
   if (!row || typeof row.id !== 'string' || typeof row.rev !== 'number')
     throw new TypeError('missing publish result');
   return {

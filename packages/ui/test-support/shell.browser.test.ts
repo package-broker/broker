@@ -39,6 +39,10 @@ describe('shell navigation', () => {
     await page.setViewportSize({ width: 1440, height: 800 });
     await fixture!.mount(script, { fixtureRoute: 'audit' });
     const nav = page.getByRole('navigation', { name: 'Main', exact: true });
+    await browserExpect(nav.getByRole('link')).toHaveCount(7);
+    await browserExpect(nav.getByRole('link', { name: 'Notifications', exact: true })).toHaveCount(
+      0,
+    );
     await browserExpect(page.getByRole('navigation')).toHaveCount(1);
     await browserExpect(nav.getByRole('list')).toHaveCount(2);
     await browserExpect(nav.getByRole('list').first().getByRole('link')).toHaveText([

@@ -644,6 +644,10 @@ describe('package reauth integration', () => {
       );
     },
   );
+  it('returns to the notifications page of the same project after reauthentication', () => {
+    const hash = '#/notifications?project=demo';
+    expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(hash.slice(1))}`)).toBe(hash);
+  });
   it('preserves package filters and opaque cursor through the reauth return URL', () => {
     const hash =
       '#/packages?project=web&status=active&source=01ARZ3NDEKTSV4RRFFQ69G5FAV&q=%40example&after=npm%3A%2B%2F%25%3F%3D';

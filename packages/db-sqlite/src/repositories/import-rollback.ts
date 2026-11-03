@@ -110,6 +110,10 @@ export const ROLLBACK_ENTITIES: Readonly<Record<string, RollbackEntity>> = {
       ['package_access_request', 'project_id'],
       ['npm_login_session', 'project_id'],
       ['registry_policy_rule', 'project_id'],
+      ['notification_endpoint', 'project_id'],
+      ['notification_event', 'project_id'],
+      ['notification_delivery', 'project_id'],
+      ['notification_attempt', 'project_id'],
     ],
   },
   role: {

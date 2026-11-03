@@ -435,20 +435,23 @@ export function describeNpmPublishWriterContract(
           ),
         );
         let snapshot = (await h.store.snapshot(ctx, 'source', 'widget'))!;
-        await h.store.update(ctx, h.guard, {
-          ...h.input,
-          snapshot,
-          edits: snapshot.versions.map((v) => ({
-            version: v.version,
-            old: null,
-            message: 'use v3',
-            event: {
-              ...h.input.edits[0]!.event,
-              id: ulid(),
-              target: { type: 'version', id: v.id },
-            },
-          })),
-        });
+        for (const part of [snapshot.versions.slice(0, 64), snapshot.versions.slice(64)]) {
+          snapshot = (await h.store.snapshot(ctx, 'source', 'widget'))!;
+          await h.store.update(ctx, h.guard, {
+            ...h.input,
+            snapshot,
+            edits: part.map((v) => ({
+              version: v.version,
+              old: null,
+              message: 'use v3',
+              event: {
+                ...h.input.edits[0]!.event,
+                id: ulid(),
+                target: { type: 'version', id: v.id },
+              },
+            })),
+          });
+        }
         snapshot = (await h.store.snapshot(ctx, 'source', 'widget'))!;
         expect(snapshot.versions).toHaveLength(82);
         expect(snapshot.versions.every((v) => v.deprecatedMessage === 'use v3')).toBe(true);
@@ -4156,7 +4159,7 @@ export function describeNpmPublishWriterContract(
           }
         }));
     }
-    it('publishes eight tags with readme and audit in exactly 37 statements', () =>
+    it('publishes eight tags with readme and audit in exactly 30 statements', () =>
       run(async (e, w) => {
         let count = 0;
         const writer = createCatalogueWriter({
@@ -4170,7 +4173,7 @@ export function describeNpmPublishWriterContract(
           ...w.input(),
           distTags: Object.fromEntries(Array.from({ length: 8 }, (_, n) => [`tag${n}`, '1.0.0'])),
         });
-        expect(count).toBe(37);
+        expect(count).toBe(30);
         expect(Object.keys((await w.reader.distTags(ctx, ref))!.tags)).toHaveLength(8);
       }));
     for (const [label, sql] of [

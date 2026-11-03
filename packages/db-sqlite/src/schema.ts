@@ -1,4 +1,14 @@
 import type { Generated } from 'kysely';
+import type {
+  NotificationAttemptCode,
+  NotificationAttemptOutcome,
+  NotificationDeliveryCode,
+  NotificationDeliveryState,
+  NotificationDisabledReason,
+  NotificationEndpointState,
+  NotificationEventType,
+  NotificationMethod,
+} from '@package-broker/core/db/notifications';
 import type { UpstreamForm } from '@package-broker/core/ingest/validators';
 import type { VersionStability } from '@package-broker/core/catalogue/versions';
 import type { VersionStatus } from '@package-broker/core/catalogue/version-rules';
@@ -761,6 +771,10 @@ export interface Database {
   oidc_replay: OidcReplayTable;
   publish_approval: PublishApprovalTable;
   package_access_request: PackageAccessRequestTable;
+  notification_endpoint: NotificationEndpointTable;
+  notification_event: NotificationEventTable;
+  notification_delivery: NotificationDeliveryTable;
+  notification_attempt: NotificationAttemptTable;
   version_readme: VersionReadmeTable;
   vulnerability_result: VulnerabilityResultTable;
   vulnerability_match: VulnerabilityMatchTable;
@@ -922,6 +936,79 @@ export interface PackageAccessRequestTable {
   revision: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
+}
+
+export interface NotificationEndpointTable {
+  org_id: string;
+  project_id: string;
+  id: string;
+  name: string;
+  method: NotificationMethod;
+  events_json: string;
+  package_pattern: string;
+  credential_id: string;
+  headers_configured: Generated<0 | 1>;
+  template_configured: Generated<0 | 1>;
+  revision: Generated<number>;
+  state: Generated<NotificationEndpointState>;
+  disabled_reason: NotificationDisabledReason | null;
+  failure_streak: Generated<number>;
+  last_op_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationEventTable {
+  org_id: string;
+  project_id: string;
+  id: string;
+  operation_id: string;
+  ordinal: Generated<number>;
+  event_type: NotificationEventType;
+  source_id: string;
+  package_key: string;
+  payload_json: string;
+  occurred_at: string;
+  dispatched_at: string | null;
+  dispatch_generation: Generated<number>;
+}
+
+export interface NotificationDeliveryTable {
+  org_id: string;
+  project_id: string;
+  id: string;
+  event_id: string;
+  endpoint_id: string;
+  endpoint_revision: number;
+  configuration_credential_id: string;
+  body_credential_id: string | null;
+  state: Generated<NotificationDeliveryState>;
+  attempts: Generated<number>;
+  job_generation: Generated<number>;
+  active_job_id: string | null;
+  active_fence: number | null;
+  revision: Generated<number>;
+  next_attempt_at: string;
+  expires_at: string;
+  last_status: number | null;
+  outcome_code: NotificationDeliveryCode | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface NotificationAttemptTable {
+  org_id: string;
+  project_id: string;
+  delivery_id: string;
+  attempt: number;
+  job_id: string;
+  fence: number;
+  outcome: NotificationAttemptOutcome;
+  outcome_code: NotificationAttemptCode | null;
+  status: number | null;
+  duration_ms: number | null;
+  started_at: string;
+  finished_at: string | null;
 }
 
 export interface VersionReadmeTable {

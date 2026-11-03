@@ -146,7 +146,7 @@ describe('generateOpenApi', () => {
     );
     expect(responses).toHaveProperty(
       '503.description',
-      'Service unavailable; Publish staging failed; Publishing is busy, try again later',
+      'Service unavailable; Publish staging failed; Publishing is busy, try again later; Notification delivery is unavailable',
     );
   });
 
@@ -597,9 +597,12 @@ describe('OpenAPI follow-ups', () => {
   it.each([
     [
       409,
-      'The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; A version that is not active blocks removal of the whole package',
+      'The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package',
     ],
-    [503, 'Service unavailable; Publish staging failed; Publishing is busy, try again later'],
+    [
+      503,
+      'Service unavailable; Publish staging failed; Publishing is busy, try again later; Notification delivery is unavailable',
+    ],
     [418, 'Error'],
   ] as const)(
     'describes declared error %s from the code table when available',

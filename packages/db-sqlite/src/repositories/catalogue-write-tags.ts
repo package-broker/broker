@@ -94,17 +94,28 @@ export function distTagStatementGroups(
       WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}
         AND package.ecosystem = 'npm')`,
   );
+  const live =
+    request.mode === 'patch'
+      ? sql<boolean>`version.status = 'active'`
+      : sql<boolean>`version.status != 'tombstoned'`;
   const targetOf = (target: string) => sql<string>`(SELECT version.id FROM version
     WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}
-      AND version.version_normalized = ${target} AND ${request.mode === 'patch' ? sql<boolean>`version.status = 'active'` : sql<boolean>`version.status != 'tombstoned'`})`;
+      AND version.version_normalized = ${target} AND ${live})`;
 
-  const checks: Statement[] = [];
+  const checks: Statement[] =
+    user && valid.length > 0
+      ? [
+          ...assertCheck(sql<boolean>`NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(
+            valid.map(([, target]) => target),
+          )}) AS wanted WHERE NOT EXISTS (SELECT 1 FROM version
+            WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}
+              AND version.version_normalized = wanted.value AND ${live}))`),
+        ]
+      : [];
   const probes: Statement[] = [];
   const sets: Statement[] = [];
   for (const [tag, target] of valid) {
-    if (user) {
-      checks.push(...assertCheck(sql<boolean>`${targetOf(target)} IS NOT NULL`));
-    } else {
+    if (!user) {
       probes.push(
         compile(
           db

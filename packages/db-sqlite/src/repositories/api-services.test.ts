@@ -5,7 +5,11 @@ import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { apiContext, apiOptions } from '../testing/api-services-fixture.js';
-import { createApiRoutes, type ApiRoutesOptions } from './api-services.js';
+import {
+  createApiRoutes,
+  notificationRoutesAvailable,
+  type ApiRoutesOptions,
+} from './api-services.js';
 
 describe('shared API assembly', () => {
   let database: MigratedDatabase;
@@ -18,6 +22,40 @@ describe('shared API assembly', () => {
     vi.restoreAllMocks();
     await database.close();
   });
+
+  it.each([true, false])(
+    'probes the notification migration and mounts management with enabled=%s',
+    async (enabled) => {
+      const notificationRoutes = await notificationRoutesAvailable(
+        database.executor,
+        enabled,
+        options.log,
+      );
+      const routes = createApiRoutes({ ...options, notifications: enabled, notificationRoutes });
+      expect(routes.some((route) => route.path === '/_pb/projects/:project/notifications')).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each([true, false])(
+    'handles a throwing notification schema probe with enabled=%s',
+    async (enabled) => {
+      vi.spyOn(database.executor, 'all').mockRejectedValueOnce(new Error('database read failed'));
+      const log = vi.fn();
+      if (enabled)
+        await expect(
+          notificationRoutesAvailable(database.executor, enabled, log),
+        ).rejects.toBeInstanceOf(KernelConfigError);
+      else {
+        expect(await notificationRoutesAvailable(database.executor, enabled, log)).toBe(false);
+        expect(log).toHaveBeenCalledExactlyOnceWith({
+          level: 'warn',
+          event: 'notifications.schema_probe_failed',
+        });
+      }
+    },
+  );
 
   it.each(['node', 'cloudflare'] as const)(
     'mounts %s routes with shared access repositories and the supplied IP resolver',

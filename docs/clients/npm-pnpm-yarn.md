@@ -198,7 +198,7 @@ npm dist-tag ls pkg
 npm dist-tag rm pkg beta
 ```
 
-An empty deprecation message clears the warning; a message may be at most 1024 bytes. Dist-tags must point to an active version; semver ranges cannot be tag names, `latest` cannot be deleted, and removing a tag that does not exist is refused. pnpm supports the equivalent `pnpm dist-tag add`, `pnpm dist-tag ls` and `pnpm dist-tag rm` commands. Yarn Berry uses `yarn npm tag add`, `yarn npm tag list` and `yarn npm tag remove`.
+An empty deprecation message clears the warning; a message may be at most 1024 bytes. One `npm deprecate` call may change at most 64 versions; for a wider range, run it for narrower ranges in turn. Dist-tags must point to an active version; semver ranges cannot be tag names, `latest` cannot be deleted, and removing a tag that does not exist is refused. pnpm supports the equivalent `pnpm dist-tag add`, `pnpm dist-tag ls` and `pnpm dist-tag rm` commands. Yarn Berry uses `yarn npm tag add`, `yarn npm tag list` and `yarn npm tag remove`.
 
 A project package manager may unpublish within 72 hours of publication:
 

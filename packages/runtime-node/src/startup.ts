@@ -91,6 +91,7 @@ export interface StartOptions {
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
+  readonly notifications?: BrokerConfig['notifications'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -820,6 +821,7 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      ...(options.notifications === undefined ? {} : { notifications: options.notifications }),
       auth: { keyring, publicOrigin: origin, env: authEnv(options.env) },
       ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined

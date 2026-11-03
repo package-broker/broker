@@ -77,17 +77,22 @@ describe('local production assembly', () => {
     ).not.toThrow();
   });
 
-  it('removes the built webhook registration, leaving the handler code and other registrations', () => {
-    const input =
-      'function createWebhookIntake(deps) { return deps; }\n' +
-      'coreRoutes: Object.freeze([createWebhookIntake({ ...deps.webhook, jobs })]),\njobs: registered';
-    const mutated = removeWebhookRegistration(input);
-    expect(mutated).toContain('function createWebhookIntake');
-    expect(mutated).toContain('coreRoutes: Object.freeze([])');
-    expect(mutated).toContain('jobs: registered');
-    expect(() => removeWebhookRegistration(mutated)).toThrow('WebhookMutationTargetMissing');
-    expect(() => removeWebhookRegistration(input + input)).toThrow('WebhookMutationTargetMissing');
-  });
+  it.each(['jobs', 'jobs: jobs2'])(
+    'removes the built webhook registration with %s, leaving the handler code and other registrations',
+    (jobs) => {
+      const input =
+        'function createWebhookIntake(deps) { return deps; }\n' +
+        `coreRoutes: Object.freeze([createWebhookIntake({ ...deps.webhook, ${jobs} })]),\njobs: registered`;
+      const mutated = removeWebhookRegistration(input);
+      expect(mutated).toContain('function createWebhookIntake');
+      expect(mutated).toContain('coreRoutes: Object.freeze([])');
+      expect(mutated).toContain('jobs: registered');
+      expect(() => removeWebhookRegistration(mutated)).toThrow('WebhookMutationTargetMissing');
+      expect(() => removeWebhookRegistration(input + input)).toThrow(
+        'WebhookMutationTargetMissing',
+      );
+    },
+  );
 
   it('has no runtime workspace source imports in the launcher', async () => {
     const source = await readFile(new URL('./local.ts', import.meta.url), 'utf8');
@@ -243,6 +248,7 @@ describe('production bundle HTTP scenario', () => {
         'utf8',
       );
       expect(() => injectSourcePollClock(bundle)).not.toThrow();
+      expect(removeWebhookRegistration(bundle)).toContain('coreRoutes: Object.freeze([])');
     },
   );
 

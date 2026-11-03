@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { BrokerConfig } from '@package-broker/core';
 import {
+  brokerNotificationsProblems,
   brokerObservabilityProblems,
   brokerVulnerabilityProblems,
 } from '@package-broker/core/config';
@@ -172,6 +173,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const observabilityProblems = [
     ...brokerObservabilityProblems(config),
     ...brokerVulnerabilityProblems(config),
+    ...brokerNotificationsProblems(config),
   ];
   if (observabilityProblems.length > 0) throw new BuildDiagnosticsError(observabilityProblems);
   const pluginKeys: string[] = [];

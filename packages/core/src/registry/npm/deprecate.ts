@@ -45,6 +45,8 @@ export interface DeprecationStore {
 
 /** UTF-8 message limit before lossless audit encoding. */
 export const DEPRECATION_MESSAGE_MAX_BYTES = 1024;
+/** Versions one request may change; each change is one audit record and one notification event. */
+export const MAX_DEPRECATION_VERSIONS = 64;
 
 export class ManifestUpdate extends PublishValidationError {
   constructor(readonly metadata: Record<string, unknown>) {
@@ -94,6 +96,8 @@ export function deprecationChanges(
       });
     }
   }
+  if (changes.length > MAX_DEPRECATION_VERSIONS)
+    throw new PublishValidationError('deprecation_too_many');
   const envelope = (v: Record<string, unknown>) =>
     Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'versions'));
   if (!equal(envelope(before), envelope(after))) return fail();

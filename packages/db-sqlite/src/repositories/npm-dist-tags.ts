@@ -6,11 +6,16 @@ import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import { monotonicNow } from '../internal/catalogue-write-guard.js';
 import { assertPublishBinding } from './catalogue-publish-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
+import { assertCaptureBudget } from '@package-broker/core/db/notifications';
+import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 
 const statement = (query: RawBuilder<unknown>): Statement =>
   compile({ compile: () => query.compile(db) });
 
-export function createDistTagStore(executor: SqlExecutor): DistTagStore {
+export function createDistTagStore(
+  executor: SqlExecutor,
+  options: { readonly notifications?: boolean } = {},
+): DistTagStore {
   return {
     async update(ctx, guard, input) {
       assertPublishBinding(ctx, guard, input, true);
@@ -58,10 +63,39 @@ export function createDistTagStore(executor: SqlExecutor): DistTagStore {
         statement(sql`update package set rev=rev+1, modified_at=${monotonicNow}
         where org_id=${ctx.orgId} and id=${snapshot.packageId} and rev=${snapshot.rev}`),
         auditPendingStatement(ctx, input.event),
+      );
+      const previous = snapshot.tags[tag] ?? null;
+      const next = target?.version ?? null;
+      const capture =
+        options.notifications === true && previous !== next
+          ? notificationCaptureStatements(
+              ctx,
+              {
+                operationId: opId,
+                occurredAt: input.event.occurredAt,
+                events: [
+                  {
+                    type: 'npm.package.dist_tag_changed',
+                    projectId: input.routeProjectId,
+                    sourceId: input.sourceId,
+                    packageKey: input.key,
+                    packageName: npmDisplayName(input.key),
+                    version: next,
+                    data: { tag, previousVersion: previous, version: next, cause: 'explicit' },
+                  },
+                ],
+              },
+              sql<boolean>`exists (select 1 from dist_tag_history where org_id=${ctx.orgId} and package_id=${snapshot.packageId} and op_id=${opId})`,
+            )
+          : [];
+      statements.push(...capture);
+      statements.push(
         statement(
           sql`update cache_epoch set version=hex(randomblob(16)) where org_id=${ctx.orgId}`,
         ),
       );
+      if (capture.length > 0)
+        assertCaptureBudget(statements.length - capture.length, capture.length);
       await executor.batch(statements);
     },
   };

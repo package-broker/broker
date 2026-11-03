@@ -6,11 +6,16 @@ import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import { monotonicNow } from '../internal/catalogue-write-guard.js';
 import { assertPublishBinding } from './catalogue-publish-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
+import { assertCaptureBudget } from '@package-broker/core/db/notifications';
+import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 
 const statement = (query: RawBuilder<unknown>): Statement =>
   compile({ compile: () => query.compile(db) });
 
-export function createUnpublishStore(executor: SqlExecutor): UnpublishStore {
+export function createUnpublishStore(
+  executor: SqlExecutor,
+  options: { readonly notifications?: boolean } = {},
+): UnpublishStore {
   return {
     async tarballRemoved(ctx, sourceId, key, file, revision) {
       const rows = await executor.all<{ file: string }>(
@@ -47,6 +52,7 @@ export function createUnpublishStore(executor: SqlExecutor): UnpublishStore {
         and p.source_id=${input.sourceId} and p.name=${input.key} and p.ecosystem='npm'
         and s.type='hosted' and s.status='active')`),
       ];
+      let captured = 0;
       if (input.whole)
         statements.push(
           ...assertCheck(sql<boolean>`(
@@ -98,10 +104,63 @@ export function createUnpublishStore(executor: SqlExecutor): UnpublishStore {
           sql`update package set rev=rev+1,modified_at=${monotonicNow} where org_id=${ctx.orgId} and id=${snapshot.packageId} and rev=${snapshot.rev}`,
         ),
         auditPendingStatement(ctx, input.event),
+      );
+      if (options.notifications === true) {
+        const common = {
+          projectId: input.routeProjectId,
+          sourceId: input.sourceId,
+          packageKey: input.key,
+          packageName: npmDisplayName(input.key),
+        };
+        const moved = history.map(({ tag, previous }) => ({
+          tag,
+          previous: removed.find((v) => v.id === previous)!.version,
+        }));
+        const capture = notificationCaptureStatements(
+          ctx,
+          {
+            operationId: opId,
+            occurredAt: input.event.occurredAt,
+            events: [
+              ...(input.whole
+                ? [
+                    {
+                      ...common,
+                      type: 'npm.package.unpublished' as const,
+                      version: null,
+                      data: { removalScope: 'package' as const, removalKind: 'window' as const },
+                    },
+                  ]
+                : removed.map((v) => ({
+                    ...common,
+                    type: 'npm.package.unpublished' as const,
+                    version: v.version,
+                    data: { removalScope: 'version' as const, removalKind: 'window' as const },
+                  }))),
+              ...moved.map(({ tag, previous }) => ({
+                ...common,
+                type: 'npm.package.dist_tag_changed' as const,
+                version: next?.version ?? null,
+                data: {
+                  tag,
+                  previousVersion: previous,
+                  version: next?.version ?? null,
+                  cause: 'unpublish' as const,
+                },
+              })),
+            ],
+          },
+          sql<boolean>`exists (select 1 from version where org_id=${ctx.orgId} and package_id=${snapshot.packageId} and last_op_id=${opId} and status='tombstoned')`,
+        );
+        statements.push(...capture);
+        captured = capture.length;
+      }
+      statements.push(
         statement(
           sql`update cache_epoch set version=hex(randomblob(16)) where org_id=${ctx.orgId}`,
         ),
       );
+      if (captured > 0) assertCaptureBudget(statements.length - captured, captured);
       await executor.batch(statements);
     },
   };

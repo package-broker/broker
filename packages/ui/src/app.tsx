@@ -36,6 +36,7 @@ import { Label } from './components/ui/label.js';
 import { Select } from './components/ui/select.js';
 import { cn } from './lib/utils.js';
 import { buildListFilterHash } from './page-hash.js';
+import { clearNotificationDraft } from './pages/notification-draft.js';
 import { clearPendingTokenIssue } from './token-pending.js';
 import type { PendingStorage } from './pending.js';
 import { PageLoader } from './page-loader.js';
@@ -47,6 +48,7 @@ export const PAGES = {
   packages: () => import('./pages/packages.js').then((page) => page.PackagesPage),
   'npm-login': () => import('./pages/npm-login.js').then((page) => page.NpmLoginPage),
   tokens: () => import('./pages/tokens.js').then((page) => page.TokensPage),
+  notifications: () => import('./pages/notifications.js').then((page) => page.NotificationsPage),
   audit: () => import('./pages/audit.js').then((page) => page.AuditPage),
   import: () => import('./pages/import.js').then((page) => page.ImportPage),
 } as const satisfies Record<string, () => Promise<ComponentType>>;
@@ -467,7 +469,10 @@ function AppContent(props: { client?: AuthClient }) {
           setSignOutError(false);
           void signOut({
             client,
-            clearPending: () => flow.clear(),
+            clearPending: () => {
+              flow.clear();
+              clearNotificationDraft();
+            },
             storage,
             onSignedOut: () => {
               setProjects([]);

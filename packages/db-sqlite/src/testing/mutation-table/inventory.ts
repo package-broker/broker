@@ -120,6 +120,8 @@ export const builderAllowlist: Readonly<Record<string, string>> = {
     'NOT_A_MUTATION: builds slug and name range predicates without tables or organization columns; callers supply organization scoping.',
   'internal/lease-time.ts#until':
     'NOT_A_MUTATION: builds a lease timestamp expression without tables or organization predicates.',
+  'repositories/notification-filter.ts#notificationFilterCondition':
+    'NOT_A_MUTATION: compares supplied pattern and stored key expressions without tables or organization columns; callers supply organization and project scoping.',
   'repositories/catalogue-predicates.ts#npmClaimCover':
     'NOT_A_MUTATION: compares supplied ecosystem, pattern and key expressions without tables or organization columns; callers supply organization scoping.',
   'repositories/catalogue-predicates.ts#winnerOrder':

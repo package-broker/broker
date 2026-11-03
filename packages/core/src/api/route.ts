@@ -48,6 +48,7 @@ const STALE_REVISION_ERROR: {
 } = {
   AdminError: 'conflict',
   ServicePrincipalError: 'conflict',
+  NotificationError: 'revision_conflict',
 };
 
 type Parsed<S extends $ZodType | undefined, Fallback> = S extends $ZodType ? output<S> : Fallback;

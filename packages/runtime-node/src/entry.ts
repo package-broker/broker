@@ -19,6 +19,7 @@ export interface EntryManifest {
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
+  readonly notifications?: BrokerConfig['notifications'];
   readonly plugins: readonly PluginDefinition[];
   readonly migrations: readonly MigrationSource[];
   readonly platformPorts?: PlatformPortConfig | null;
@@ -115,6 +116,7 @@ export async function runEntry(
       tokens,
       vulnerability,
       mcp,
+      notifications,
     } = await manifest;
     try {
       port = parsePort(env['PORT']);
@@ -135,6 +137,7 @@ export async function runEntry(
       ...(tokens === undefined ? {} : { tokens }),
       ...(vulnerability === undefined ? {} : { vulnerability }),
       ...(mcp === undefined ? {} : { mcp }),
+      ...(notifications === undefined ? {} : { notifications }),
     });
   } catch (error) {
     runtime.error(failureRecord('startup.failed', error));

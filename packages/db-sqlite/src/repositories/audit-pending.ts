@@ -29,11 +29,15 @@ export function assertAuditPendingEvent(event: AuditEvent): void {
   }
 }
 
-/** The optional condition is trusted repository SQL, never request input. */
+/**
+ * The optional condition is trusted repository SQL, never request input. `patch` sets one JSON
+ * path of the payload from a trusted scalar subquery evaluated in the same statement.
+ */
 export function auditPendingStatement(
   ctx: OrgContext,
   event: AuditEvent,
   when?: { sql: string; params: readonly SqlValue[] },
+  patch?: { readonly path: string; readonly value: Statement },
 ): Statement {
   assertAuditPendingEvent(event);
   const params: SqlValue[] = [
@@ -49,10 +53,12 @@ export function auditPendingStatement(
     event.target.id,
     event.projectId,
     event.payloadJson,
+    ...(patch === undefined ? [] : [patch.path, ...patch.value.params]),
     ...(when?.params ?? []),
   ];
   if (params.length > 100) throw new TypeError('audit insert must bind at most 100 parameters');
-  const values = '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?';
+  const payload = patch === undefined ? '?' : `json_set(?, ?, (${patch.value.sql}))`;
+  const values = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${payload}`;
   return {
     sql:
       when === undefined

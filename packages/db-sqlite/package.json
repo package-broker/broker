@@ -1,6 +1,6 @@
 {
   "name": "@package-broker/db-sqlite",
-  "version": "2.0.0-rc.3",
+  "version": "2.0.0-rc.4",
   "description": "Package Broker SQLite data layer",
   "license": "AGPL-3.0-only",
   "type": "module",

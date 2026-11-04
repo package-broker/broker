@@ -294,6 +294,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/catalogue.ts',
   'db-sqlite/src/repositories/closure-edges.ts',
   'db-sqlite/src/repositories/credential.ts',
+  'db-sqlite/src/repositories/discovery-rule-authority.ts',
   'db-sqlite/src/repositories/fetch-lease.ts',
   'db-sqlite/src/repositories/idempotency.ts',
   'db-sqlite/src/repositories/ingest-session.ts',
@@ -325,6 +326,7 @@ const REVIEWED_IMPORTS: readonly string[] = [
 
 // Mutation targets in readers and imported statement builders; no whole-source pins.
 const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
+  'db-sqlite/src/repositories/discovery-rule-authority.ts': '',
   'db-sqlite/src/contract/catalogue-read-contract.ts':
     'DELETE FROM package; DELETE FROM project_package x2; DELETE FROM project_package_pattern; DELETE FROM project_source; DELETE FROM registered_name x2; DELETE FROM version; INSERT INTO blob; INSERT INTO dist_tag; INSERT INTO package; INSERT INTO project x3; INSERT INTO project_package; INSERT INTO project_package_pattern; INSERT INTO project_source; INSERT INTO registered_name x2; INSERT INTO source x2; INSERT INTO version; INSERT INTO version_revision x2; UPDATE package; UPDATE project x3; UPDATE project_package; UPDATE project_source x3; UPDATE source x6; UPDATE version x5; UPDATE version_revision',
   'db-sqlite/src/contract/count-calls.ts': '',
@@ -402,7 +404,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/proxy-admission.ts': '',
   'db-sqlite/src/repositories/proxy-claims.ts': '',
   'db-sqlite/src/repositories/registered-name.ts':
-    "deleteFrom('registered_name'); insertInto('registered_name'); updateTable('registered_name'); updateTable('source') x2",
+    "DELETE FROM source_discovery_admission; deleteFrom('registered_name'); insertInto('registered_name'); updateTable('registered_name'); updateTable('source') x2",
   'db-sqlite/src/repositories/session-liveness.ts': '',
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
@@ -411,7 +413,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
   'db-sqlite/src/repositories/source.ts':
-    "DELETE FROM source_sync_package; deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x10",
+    "DELETE FROM source_sync_package; INSERT INTO source_discovery_admission; deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x10",
   'db-sqlite/src/repositories/upstream-state.ts':
     "insertInto('upstream_state') [onConflict:doUpdateSet]; updateTable('upstream_state') x2",
   'db-sqlite/src/repositories/visibility-attach.ts':
@@ -500,6 +502,8 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'publish_approval(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'registered_name(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'registered_name(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'source_discovery_admission(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'source_discovery_admission(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'source_sync_package(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'webhook_delivery(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
   ],
@@ -687,12 +691,35 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Discovery admission writes add only a cascading ownership row; SELECT-only ownership and credential guards and type imports do not inspect executor row counts. Contracts cover lease recovery and deletion refusal.',
+      sites: [
+        "db-sqlite/src/kysely.ts:opaque dependency: import {\n  fenceGuard,\n  runFenced,\n  type FailureProbes,\n  type FencedOutcome,\n  type FenceGuard,\n  type MutationFence,\n  type TokenMutationFence,\n  type DiscoveryRuleFence,\n} from '@package-broker/core/authz/fence'; #1",
+        "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n          executor,\n          db\n            .deleteFrom('credential')\n            .where('org_id', '=', ctx.orgId)\n            .where('id', '=', id)\n            .returning('id'),\n        ); #1",
+        "db-sqlite/src/repositories/credential.ts:SQL input: sql: 'select 1 from source_discovery_rule where org_id=? and credential_id=? limit 1' #1",
+        'db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`exists(select 1 from source_discovery_admission da join source_discovery_rule dr\n    on dr.org_id=da.org_id and dr.id=da.rule_id where da.org_id=${ctx.orgId} and da.source_id=${sourceId}\n    and da.rule_id=${fence.ruleId})` #1',
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`(${held} and ${discoverySourceOwned(ctx, fence, discoverySourceId ?? '')} and exists(select 1 from source ds\n      where ds.org_id=${ctx.orgId} and ds.id=${discoverySourceId ?? ''} and ds.project_id is null\n        and ds.type='vcs' and ds.status='paused' and ds.credential_id=${fence.credentialId}\n        and json_extract(ds.config_json,'$.provider')='github'\n        and json_extract(ds.config_json,'$.installationId')=${fence.installationId}))` #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.credential !== null && 'statement' in input.credential\n            ? [input.credential.statement]\n            : []),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          ...assertCheck(claimsVerified),\n          insert,\n          ...('ruleId' in fence\n            ? [\n                compile({\n                  compile: () =>\n                    sql`insert into source_discovery_admission(org_id,source_id,rule_id,run_started_at)\n            select ${ctx.orgId},${input.id},${fence.ruleId},last_run_at from source_discovery_rule where org_id=${ctx.orgId} and id=${fence.ruleId}`.compile(\n                      db,\n                    ),\n                }),\n              ]\n            : []),\n          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),\n        ],\n        probes,\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`(${authorized} and ${discoverySourceOwned(ctx, fence, input.id)} and exists(select 1 from source ds\n        where ds.org_id=${ctx.orgId} and ds.id=${input.id} and ds.status='paused'\n          and ds.project_id is null and ds.type='vcs' and ds.credential_id=${fence.credentialId}\n          and json_extract(ds.config_json,'$.installationId')=${fence.installationId}))` #1",
+      ],
+    },
+    {
+      reason:
         'Management fixtures load the existing Node codec and index contract-case names; unpublish enumerates public dist-tags to record history. These operations do not inspect SQL affected-row counts.',
       sites: [
         "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n          new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n        ) #1",
         'db-sqlite/src/repositories/npm-unpublish.ts:opaque object access: Object.entries(snapshot.tags) #1',
         'db-sqlite/src/testing/mutation-table/npm-management-cases.ts:unresolved computed access: writeCases[index] #1',
         "db-sqlite/src/testing/mutation-table/npm-management-cases.ts:unresolved computed access: ['p', 's', 'v'][index] #1",
+      ],
+    },
+    {
+      reason:
+        'Discovery rule authority imports and SELECT-only guards introduce no executor changes reads or mutation targets; exact predicates are contract and mutation tested.',
+      sites: [
+        "db-sqlite/src/repositories/discovery-rule-authority.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/repositories/discovery-rule-authority.ts:opaque dependency: import {\n  fenceKind,\n  type DiscoveryRuleFence,\n  type SourceMutationFence,\n} from '@package-broker/core/authz/fence'; #1",
+        "db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`exists (\n    select 1 from source_discovery_rule dr\n    join credential dc on dc.org_id = dr.org_id and dc.id = dr.credential_id\n    join job dj on dj.org_id = dr.org_id\n    where dr.org_id = ${ctx.orgId} and dr.id = ${fence.ruleId}\n      and dr.revision = ${fence.revision} and dr.enabled = 1\n      and dr.credential_id = ${fence.credentialId} and dr.installation_id = ${fence.installationId}\n      and dc.kind = 'github_app' and dc.project_id is null\n      and dj.id = ${fence.job.id} and dj.lease_owner = ${fence.job.owner}\n      and dj.fence = ${fence.job.fence} and dj.state = 'running'\n      and dj.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now')\n      and dj.type = 'core:discovery-rule:v1'\n      and dj.resource_key = ${`discovery-rule:${fence.ruleId}`}\n      and json_extract(dj.payload_json, '$.ruleId') = dr.id\n      and json_extract(dj.payload_json, '$.revision') = dr.revision)` #1",
+        'db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`0` #1',
       ],
     },
     {
@@ -1090,10 +1117,10 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       ],
     },
     {
-      reason:
-        'Binds fixture column values for a notification migration INSERT; reads no executor count.',
+      reason: 'Binds fixture column values for migration INSERTs; reads no executor count.',
       sites: [
         'db-sqlite/src/contract/notification-migration-contract.ts:opaque object access: Object.values(values) #1',
+        'db-sqlite/src/contract/discovery-rules-migration-contract.ts:opaque object access: Object.values(values) #1',
       ],
     },
     {
@@ -2156,7 +2183,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .updateTable('credential')\n          .set({\n            ciphertext: sealed.ciphertext,\n            nonce: sealed.nonce,\n            key_version: nextVersion,\n            rotated_at: now,\n            updated_at: now,\n          })\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .where('key_version', '=', expectedVersion)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/credential.ts:builder variable: return rows.length > 0; #1',
-        "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .deleteFrom('credential')\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/credential.ts:builder variable: return rows.length > 0; #2',
       ],
     },
@@ -2611,7 +2637,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #2",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'conflict') return 'conflict'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'indeterminate') return 'indeterminate'; #2",
-        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(paused),\n          ...assertCheck(activatable),\n          compile(\n            db\n              .updateTable('source')\n              .set({\n                status: 'active',\n                next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n                updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n              })\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId)\n              .where('status', '=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,\n            false,\n          ),\n          collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),\n        },\n      ); #1",
+        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(paused),\n          ...assertCheck(activatable),\n          compile(\n            db\n              .updateTable('source')\n              .set({\n                status: 'active',\n                next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n                updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n              })\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId)\n              .where('status', '=', 'paused'),\n          ),\n          compile({\n            compile: () =>\n              sql`delete from source_discovery_admission where org_id=${ctx.orgId} and source_id=${input.id}`.compile(\n                db,\n              ),\n          }),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,\n            false,\n          ),\n          collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),\n        },\n      ); #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) return 'enabled'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #3",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (\n        outcome.reason === 'conflict' &&\n        input.idempotency !== undefined &&\n        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))\n      )\n        return 'conflict'; #2",
@@ -2730,7 +2756,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Local builder in source; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
         "db-sqlite/src/repositories/source.ts:builder variable: const insert = compile(\n        db.insertInto('source').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          project_id: input.projectId,\n          name: input.name,\n          ecosystem: input.ecosystem,\n          type: input.type,\n          url: input.url,\n          credential_id: input.credential?.id ?? null,\n          config_json: jsonConfig,\n          require_publish_approval: input.requirePublishApproval ? 1 : 0,\n          user_agent: input.userAgent ?? null,\n          status: isProxy(input.type) ? 'active' : 'paused',\n          ...(interval === undefined ? {} : { poll_interval_seconds: interval }),\n          ...(policy === undefined ? {} : { removal_policy: policy }),\n          ...(retention === undefined ? {} : { retention_days_override: retention }),\n          ...(input.defaultVisibleToNewProjects === undefined\n            ? {}\n            : { default_visible_to_new_projects: input.defaultVisibleToNewProjects ? 1 : 0 }),\n          next_poll_at: DB_NOW,\n        }),\n      ); #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.credential !== null && 'statement' in input.credential\n            ? [input.credential.statement]\n            : []),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          ...assertCheck(claimsVerified),\n          insert,\n          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),\n        ],\n        probes,\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'created'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'conflict') return 'credential_scope_mismatch'; #1",
@@ -3451,7 +3476,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/contract/two-organizations.ts:opaque dependency: import { orgContext } from '@package-broker/core/db/port'; #1",
         "db-sqlite/src/internal/catalogue-status-statements.ts:opaque dependency: import {\n  statusRevisionReason,\n  versionTransition,\n  type StatusReason,\n  type VersionStatus,\n} from '@package-broker/core/catalogue/version-rules'; #1",
         "db-sqlite/src/internal/catalogue-write-guard.ts:opaque dependency: import { catalogueWriteGuard, type CatalogueWriteGuard } from '@package-broker/core/db/catalogue'; #1",
-        "db-sqlite/src/kysely.ts:opaque dependency: import {\n  fenceGuard,\n  runFenced,\n  type FailureProbes,\n  type FencedOutcome,\n  type FenceGuard,\n  type MutationFence,\n  type TokenMutationFence,\n} from '@package-broker/core/authz/fence'; #1",
         "db-sqlite/src/kysely.ts:opaque dependency: import { ulid } from '@package-broker/core/ids'; #1",
         "db-sqlite/src/kysely.ts:opaque dependency: import { isValidDomain } from '@package-broker/core/identity/policy'; #1",
         "db-sqlite/src/kysely.ts:opaque dependency: import { isValidProviderId } from '@package-broker/core/identity/port'; #1",

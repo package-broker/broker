@@ -7,6 +7,7 @@ import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError, classifySqliteError } from '
 import type { SqlExecutor, Statement, StatementResult } from '../db/port.js';
 import {
   classifyFailure,
+  discoveryRuleFence,
   delegatedMutationFence,
   fenceGuard,
   fenceKind,
@@ -417,6 +418,7 @@ const tokenActor = {
 } as unknown as AuthenticatedTokenActor;
 const tokenPermission = 'project:packages:write';
 const issuedFences = (): Record<FenceKind, AnyMutationFence> => ({
+  discovery: discoveryRuleFence('rule', 1, 'credential', 41, job),
   session: mutationFence(actor, { 'role:r1': 1 }),
   system: systemMutationFence('audit-seal', job, { 'audit:head': 1 }),
   token: tokenMutationFence(tokenActor, tokenPermission, {}),

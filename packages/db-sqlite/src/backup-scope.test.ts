@@ -69,6 +69,8 @@ describe('backup scope manifest', () => {
       token_project: 'include',
       credential: 'include',
       source: 'include',
+      source_discovery_rule: 'include',
+      source_discovery_admission: 'include',
       source_sync_package: 'exclude',
       registered_name: 'include',
       project_source: 'include',

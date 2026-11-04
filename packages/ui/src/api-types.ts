@@ -1712,6 +1712,77 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/sources/discovery/rules': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List organization discovery rules */
+    get: operations['listDiscoveryRules'];
+    put?: never;
+    /** Add an organization discovery rule */
+    post: operations['createDiscoveryRule'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a discovery rule and its last run results */
+    get: operations['getDiscoveryRule'];
+    put?: never;
+    post?: never;
+    /** Remove a rule while preserving discovered sources */
+    delete: operations['deleteDiscoveryRule'];
+    options?: never;
+    head?: never;
+    /** Change a discovery rule and invalidate its current run */
+    patch: operations['updateDiscoveryRule'];
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules/{id}/results': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read bounded last-run results and skip reasons */
+    get: operations['getDiscoveryRuleResults'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules/{id}/run': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request a scan on the next scheduler tick */
+    post: operations['runDiscoveryRule'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/sources/{source}': {
     parameters: {
       query?: never;
@@ -5193,7 +5264,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -5772,7 +5843,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -6095,7 +6166,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7285,7 +7356,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8267,7 +8338,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -9178,7 +9249,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -9504,7 +9575,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10487,7 +10558,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10867,7 +10938,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11171,7 +11242,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11405,7 +11476,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11836,7 +11907,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -13102,7 +13173,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -13829,7 +13900,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -14151,6 +14222,723 @@ export interface operations {
       };
     };
   };
+  listDiscoveryRules: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: (
+              | {
+                  completed?: {
+                    created: number;
+                    existing: number;
+                    failed: number;
+                    failureReason?: string | null;
+                    lastRunAt: string | null;
+                    outcome: ('succeeded' | 'failed') | null;
+                    skipped: number;
+                    skips: {
+                      reason: string | null;
+                      repository: string;
+                    }[];
+                  } | null;
+                  consecutiveFailures?: number;
+                  created: number;
+                  createdAt: string;
+                  credentialId: string;
+                  cursor: string | null;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm' | 'both';
+                  enabled: boolean;
+                  existing: number;
+                  failed: number;
+                  failureReason?: string | null;
+                  id: string;
+                  includeForks: boolean;
+                  installationId: number;
+                  intervalSeconds: number;
+                  lastRunAt: string | null;
+                  name: string & (unknown & unknown);
+                  nextRunAt: string | null;
+                  outcome: ('running' | 'succeeded' | 'failed' | 'rate_limited') | null;
+                  pattern: string;
+                  pendingResults?: {
+                    ecosystem?: ('composer' | 'npm') | null;
+                    error?: string;
+                    /** @enum {string} */
+                    outcome: 'created' | 'existing' | 'skipped' | 'failed';
+                    reason?:
+                      | (
+                          | 'archived'
+                          | 'no_manifest'
+                          | 'invalid_name'
+                          | 'fork'
+                          | 'name_public'
+                          | 'name_public_unverified'
+                          | 'claim_overlap'
+                          | 'filtered_out'
+                          | 'error_451'
+                          | 'error_404'
+                          | 'unsupported_ecosystem'
+                        )
+                      | null;
+                    repository: string;
+                    retryable?: boolean;
+                  }[];
+                  remaining: string[];
+                  revision: number;
+                  skipped: number;
+                  skips: {
+                    reason: string | null;
+                    repository: string;
+                  }[];
+                  updatedAt: string;
+                }
+              | {
+                  completed?: {
+                    created: number;
+                    existing: number;
+                    failed: number;
+                    failureReason?: string | null;
+                    lastRunAt: string | null;
+                    outcome: ('succeeded' | 'failed') | null;
+                    skipped: number;
+                    skips: {
+                      reason: string | null;
+                      repository: string;
+                    }[];
+                  } | null;
+                  createdAt: string;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm' | 'both';
+                  enabled: boolean;
+                  id: string;
+                  includeForks: boolean;
+                  intervalSeconds: number;
+                  name: string & (unknown & unknown);
+                  pattern: string;
+                  revision: number;
+                  updatedAt: string;
+                }
+            )[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId: string;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm' | 'both';
+          enabled?: boolean;
+          includeForks?: boolean;
+          installationId: number;
+          intervalSeconds?: number;
+          name: string & (unknown & unknown);
+          pattern: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json':
+            | {
+                completed?: {
+                  created: number;
+                  existing: number;
+                  failed: number;
+                  failureReason?: string | null;
+                  lastRunAt: string | null;
+                  outcome: ('succeeded' | 'failed') | null;
+                  skipped: number;
+                  skips: {
+                    reason: string | null;
+                    repository: string;
+                  }[];
+                } | null;
+                consecutiveFailures?: number;
+                created: number;
+                createdAt: string;
+                credentialId: string;
+                cursor: string | null;
+                /** @enum {string} */
+                ecosystem: 'composer' | 'npm' | 'both';
+                enabled: boolean;
+                existing: number;
+                failed: number;
+                failureReason?: string | null;
+                id: string;
+                includeForks: boolean;
+                installationId: number;
+                intervalSeconds: number;
+                lastRunAt: string | null;
+                name: string & (unknown & unknown);
+                nextRunAt: string | null;
+                outcome: ('running' | 'succeeded' | 'failed' | 'rate_limited') | null;
+                pattern: string;
+                pendingResults?: {
+                  ecosystem?: ('composer' | 'npm') | null;
+                  error?: string;
+                  /** @enum {string} */
+                  outcome: 'created' | 'existing' | 'skipped' | 'failed';
+                  reason?:
+                    | (
+                        | 'archived'
+                        | 'no_manifest'
+                        | 'invalid_name'
+                        | 'fork'
+                        | 'name_public'
+                        | 'name_public_unverified'
+                        | 'claim_overlap'
+                        | 'filtered_out'
+                        | 'error_451'
+                        | 'error_404'
+                        | 'unsupported_ecosystem'
+                      )
+                    | null;
+                  repository: string;
+                  retryable?: boolean;
+                }[];
+                remaining: string[];
+                revision: number;
+                skipped: number;
+                skips: {
+                  reason: string | null;
+                  repository: string;
+                }[];
+                updatedAt: string;
+              }
+            | {
+                completed?: {
+                  created: number;
+                  existing: number;
+                  failed: number;
+                  failureReason?: string | null;
+                  lastRunAt: string | null;
+                  outcome: ('succeeded' | 'failed') | null;
+                  skipped: number;
+                  skips: {
+                    reason: string | null;
+                    repository: string;
+                  }[];
+                } | null;
+                createdAt: string;
+                /** @enum {string} */
+                ecosystem: 'composer' | 'npm' | 'both';
+                enabled: boolean;
+                id: string;
+                includeForks: boolean;
+                intervalSeconds: number;
+                name: string & (unknown & unknown);
+                pattern: string;
+                revision: number;
+                updatedAt: string;
+              };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  deleteDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId?: string;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm' | 'both';
+          enabled?: boolean;
+          includeForks?: boolean;
+          installationId?: number;
+          intervalSeconds?: number;
+          name?: string & (unknown & unknown);
+          pattern?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getDiscoveryRuleResults: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            created: number;
+            existing: number;
+            failed: number;
+            failureReason?: string | null;
+            lastRunAt: string | null;
+            outcome: ('succeeded' | 'failed') | null;
+            skipped: number;
+            skips: {
+              reason: string | null;
+              repository: string;
+            }[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  runDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': Record<string, never>;
+      };
+    };
+    responses: {
+      /** @description Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   updateOrganizationSource: {
     parameters: {
       query?: never;
@@ -14350,7 +15138,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -14671,7 +15459,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -14853,7 +15641,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -15075,7 +15863,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -15482,7 +16270,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -15671,7 +16459,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -15785,7 +16573,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -15888,7 +16676,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description The hosted source must be attached to the project first; Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;

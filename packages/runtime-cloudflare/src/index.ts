@@ -1,3 +1,7 @@
+import {
+  discoveryRuleJobs,
+  type DiscoveryRuleJobDeps,
+} from '@package-broker/core/runtime/discovery-rule-jobs';
 import { createNpmTokenAdapters } from '@package-broker/db-sqlite/repositories/npm-tokens';
 import { createUnpublishStore } from '@package-broker/db-sqlite/repositories/npm-unpublish';
 import { createDistTagStore } from '@package-broker/db-sqlite/repositories/npm-dist-tags';
@@ -1810,6 +1814,7 @@ export function createWorker(
         env?.PB_MASTER_KEY === undefined)
     )
       throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
+    let discoveryRules: DiscoveryRuleJobDeps | undefined;
     const keyring =
       db === undefined
         ? undefined
@@ -1931,6 +1936,12 @@ export function createWorker(
           config === null
             ? []
             : [
+                ...(db === undefined || reads === undefined
+                  ? []
+                  : discoveryRuleJobs(() => {
+                      if (discoveryRules === undefined) throw new JobError('handler_error');
+                      return discoveryRules;
+                    })),
                 ...(db === undefined
                   ? []
                   : vulnerability().jobs.map((job) =>
@@ -2177,6 +2188,9 @@ export function createWorker(
       built === undefined || packages === null
         ? []
         : createApiRoutes({
+            onDiscoveryRules: (deps) => {
+              discoveryRules = deps;
+            },
             discoveryFetch: createPolicyFetch({
               fetchImpl: (...args) => globalThis.fetch(...args),
               policy: createOutboundPolicy({

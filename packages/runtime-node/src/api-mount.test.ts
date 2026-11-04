@@ -110,9 +110,16 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/sources/discovery/connections',
       'POST /_pb/sources/discovery/plan',
       'POST /_pb/sources/discovery/apply',
+      'POST /_pb/sources/discovery/rules',
+      'GET /_pb/sources/discovery/rules',
+      'GET /_pb/sources/discovery/rules/:id',
+      'PATCH /_pb/sources/discovery/rules/:id',
+      'DELETE /_pb/sources/discovery/rules/:id',
+      'POST /_pb/sources/discovery/rules/:id/run',
+      'GET /_pb/sources/discovery/rules/:id/results',
     ],
-    jobs: [],
-    ownerPacket: 'NPM19c',
+    jobs: ['discovery-rules', 'discovery-rule'],
+    ownerPacket: 'DISC2',
   },
   {
     dependency: 'registryPolicy',
@@ -407,7 +414,7 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
       entry.dependency === 'notifications'
         ? 'NPM26I'
         : entry.dependency === 'sourceDiscovery'
-          ? 'NPM19c'
+          ? 'DISC2'
           : entry.dependency === 'registryPolicy'
             ? 'NPM27'
             : entry.dependency === 'trustedPublishers'
@@ -693,6 +700,21 @@ describe('Node management API mount', () => {
     expect(error?.message).toContain('API module requires dependency');
     expect(error?.message).not.toContain(KEY);
     expect(error?.message).not.toContain('broker.test');
+  });
+
+  it('omits discovery jobs when source management dependencies are absent', async () => {
+    broker = createNodeServer([], {
+      executor: db.executor,
+      platformServices: platformServices(),
+      log: () => {},
+    });
+    const kernel = await broker.ready();
+    expect(
+      kernel.registration.jobs.filter(
+        (job) =>
+          job.definition.name === 'discovery-rule' || job.definition.name === 'discovery-rules',
+      ),
+    ).toEqual([]);
   });
 
   it('builds the source service outbound policy from the registry config', async () => {

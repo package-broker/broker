@@ -46,9 +46,11 @@ export interface DiscoveryOptions {
   readonly ecosystem?: DiscoveryEcosystem;
   readonly exists: (candidate: ExistingCandidate) => boolean | Promise<boolean>;
   readonly pattern?: string;
+  readonly pageSize?: number;
   readonly cursor?: string;
   readonly apiOrigin?: string;
   readonly timeoutMs?: number;
+  readonly now?: () => number;
 }
 
 export interface PlanRepositoryOptions {
@@ -61,6 +63,7 @@ export interface PlanRepositoryOptions {
   readonly exists: DiscoveryOptions['exists'];
   readonly apiOrigin?: string;
   readonly timeoutMs?: number;
+  readonly now?: () => number;
 }
 
 export interface DiscoveryPage {
@@ -287,19 +290,34 @@ function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
     return response;
   }
 
-  function failure(response: Awaited<ReturnType<PolicyFetch>>): DiscoveryError {
-    void response.body?.cancel().catch(() => undefined);
+  async function failure(response: Awaited<ReturnType<PolicyFetch>>): Promise<DiscoveryError> {
+    let secondary = false;
+    if (response.status === 403) {
+      try {
+        secondary = /secondary rate limit|abuse detection/i.test(
+          (await readCapped(response.body, 8192)) ?? '',
+        );
+      } catch {
+        /* Unusable bodies do not establish throttling. */
+      }
+    } else void response.body?.cancel().catch(() => undefined);
     const after = response.headers.get('retry-after')?.trim();
-    const retryAfter = after !== undefined && UNSIGNED.test(after) ? Number(after) : undefined;
+    const headerWait = after !== undefined && UNSIGNED.test(after) ? Number(after) : undefined;
+    const reset = response.headers.get('x-ratelimit-reset')?.trim();
+    const resetWait =
+      reset !== undefined && UNSIGNED.test(reset)
+        ? Math.ceil(Number(reset) - (options.now?.() ?? Date.now()) / 1000)
+        : 0;
+    const retryAfter =
+      headerWait === undefined && resetWait <= 0 ? undefined : Math.max(headerWait ?? 0, resetWait);
     const limited =
       response.status === 429 ||
       (response.status === 403 &&
-        (retryAfter !== undefined ||
-          response.headers.get('x-ratelimit-remaining')?.trim() === '0'));
+        (secondary || response.headers.get('x-ratelimit-remaining')?.trim() === '0'));
     return new DiscoveryError(
       limited ? 'rate_limited' : 'upstream_status',
       response.status,
-      retryAfter,
+      limited ? Math.min(3600, Math.max(300, retryAfter ?? 0)) : undefined,
     );
   }
 
@@ -332,7 +350,7 @@ function discoveryClient(options: DiscoveryOptions | PlanRepositoryOptions) {
         ? { kind: 'error', reason: 'error_404' }
         : { kind: 'absent' };
     }
-    if (response.status !== 200) throw failure(response);
+    if (response.status !== 200) throw await failure(response);
     const text = await readCapped(response.body, MAX_MANIFEST_BYTES);
     if (text === undefined) return { kind: 'invalid' };
     try {
@@ -417,7 +435,7 @@ export async function planRepository(
     void response.body?.cancel().catch(() => undefined);
     return [skipped(options.repository, response.status === 404 ? 'error_404' : 'error_451')];
   }
-  if (response.status !== 200) throw client.failure(response);
+  if (response.status !== 200) throw await client.failure(response);
   let parsed: unknown;
   try {
     parsed = JSON.parse((await readCapped(response.body, MAX_LISTING_BYTES)) ?? '');
@@ -471,19 +489,21 @@ export async function discoverRepositories(options: DiscoveryOptions): Promise<D
   if (options.cursor !== undefined && !CURSOR.test(options.cursor)) {
     throw new DiscoveryError('invalid_request');
   }
+  const pageSize = options.pageSize ?? PAGE_SIZE;
   const page = options.cursor === undefined ? 1 : Number(options.cursor);
   const matches = patternMatcher(options.pattern);
 
   const listingToken = await tokens.forListing(installationId);
   const listingResponse = await request(
-    `${apiOrigin}/installation/repositories?per_page=${PAGE_SIZE}&page=${page}`,
+    `${apiOrigin}/installation/repositories?per_page=${pageSize}&page=${page}`,
     'application/vnd.github+json',
     listingToken.value,
     MAX_LISTING_BYTES,
   );
-  if (listingResponse.status !== 200) throw failure(listingResponse);
+  if (listingResponse.status !== 200) throw await failure(listingResponse);
   const { listed, total } = parseListing(await readCapped(listingResponse.body, MAX_LISTING_BYTES));
-  const nextCursor = page * PAGE_SIZE < total ? String(page + 1) : null;
+  if (listed.length > pageSize) throw new DiscoveryError('invalid_response');
+  const nextCursor = page * pageSize < total ? String(page + 1) : null;
 
   const entries = new Map<string, readonly PlanEntry[]>();
   const candidates: Listed[] = [];

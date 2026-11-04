@@ -1,4 +1,16 @@
 import { createDiscoveryConnections } from './discovery-connections.js';
+import { createOrganizationRepository } from './organization.js';
+import { createCatalogueReader } from './catalogue.js';
+import { createJobRepository } from './job.js';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { sql } from 'kysely';
+import { compile, db } from '../kysely.js';
+import { discoveryRuleAuthority } from './discovery-rule-authority.js';
+import { createDiscoveryRuleRepository } from './discovery-rules.js';
+import {
+  discoveryRuleJobs,
+  type DiscoveryRuleJobDeps,
+} from '@package-broker/core/runtime/discovery-rule-jobs';
 import { createConfiguredGithubDiscovery } from '@package-broker/core/sources/configured-discovery';
 import { UpstreamError, type PolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createDiscoveryRepositoryReader } from './discovery.js';
@@ -93,6 +105,7 @@ function auditReader(executor: SqlExecutor): AuditReader {
 
 export interface ApiRoutesOptions {
   readonly runtime: 'node' | 'cloudflare';
+  readonly onDiscoveryRules?: (deps: DiscoveryRuleJobDeps) => void;
   readonly discoveryFetch?: PolicyFetch;
   readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
@@ -164,7 +177,8 @@ function registryPolicyApi(
 }
 
 export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefinition[] {
-  const { executor, access, packages, lifetime, log, blob } = input;
+  const { access, packages, lifetime, log, blob } = input;
+  const executor = input.executor;
   const { services } = access;
   const anchors = access.anchors;
   const common = { ids: { ulid }, clock: systemClock, clientIp: input.clientIp };
@@ -192,6 +206,105 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     ids: { ulid },
     log,
   });
+  const rules = createDiscoveryRuleRepository(executor, anchors);
+  function forInvocation(): DiscoveryRuleJobDeps {
+    let statements = 0;
+    const counted: SqlExecutor = {
+      driver: input.executor.driver,
+      all(statement) {
+        statements++;
+        return input.executor.all(statement);
+      },
+      batch(batch) {
+        statements += batch.length;
+        return input.executor.batch(batch);
+      },
+    };
+    const credentials = createCredentialRepository(counted);
+    const store = createCredentialStore({
+      repository: credentials,
+      cipher: createSecretCipher(input.keyring, 'credential-encryption'),
+      ...common,
+    });
+    const invocationSources = createSourceRepository(counted);
+    const claimProbe: SourcePackageProbe | undefined =
+      input.sourcePackageProbe === undefined
+        ? undefined
+        : async (ctx, target, key, signal, mode) => {
+            if (mode !== 'claim' || typeof target !== 'string') return 'unavailable';
+            const source = await invocationSources.get(ctx, target);
+            if (source === null || source.type !== 'npmjs_proxy' || source.ecosystem !== 'npm')
+              return 'unavailable';
+            // Resolve the source through the invocation executor before the public-name probe.
+            return input.sourcePackageProbe!(
+              ctx,
+              { type: 'new_npmjs_proxy', userAgent: source.userAgent },
+              key,
+              signal,
+              'claim',
+            );
+          };
+    const service = createSourceService({
+      ...(claimProbe === undefined ? {} : { claimProbe }),
+      sources: invocationSources,
+      organizations: createOrganizationRepository(counted),
+      registeredNames: createRegisteredNameRepository(counted),
+      credentials: store,
+      credentialRepository: credentials,
+      catalogue: createCatalogueReader(counted),
+      policy: input.policy,
+      providerAnchors: anchors,
+      ids: common.ids,
+      log,
+    });
+    const invocation: DiscoveryRuleJobDeps = {
+      ...common,
+      rules: createDiscoveryRuleRepository(counted, anchors),
+      discovery: createConfiguredGithubDiscovery({
+        credentials,
+        store,
+        sources: service,
+        existingRepository: createDiscoveryRepositoryReader(counted),
+        clock: systemClock,
+        scheduled: true,
+        statementCount: () => statements,
+        fetch:
+          input.discoveryFetch ??
+          (async () => {
+            throw new UpstreamError('refused');
+          }),
+        authority: async (ctx, fence) => {
+          const [row] = await counted.all<{ held: number }>(
+            compile(
+              db.selectNoFrom(sql<number>`(${discoveryRuleAuthority(ctx, fence)})`.as('held')),
+            ),
+          );
+          return row?.held === 1;
+        },
+      }),
+    };
+    return {
+      ...invocation,
+      jobs: createRepositoryJobs({
+        store: createJobRepository(counted),
+        jobs: discoveryRuleJobs(() => invocation),
+        ...common,
+      })('core', { projectId: null, tokenId: null }),
+    };
+  }
+  const discovery = createConfiguredGithubDiscovery({
+    credentials: credentialRepository,
+    store: credentialStore,
+    sources: sourceService,
+    existingRepository: createDiscoveryRepositoryReader(executor),
+    clock: systemClock,
+    fetch:
+      input.discoveryFetch ??
+      (async () => {
+        throw new UpstreamError('refused');
+      }),
+  });
+  input.onDiscoveryRules?.({ ...common, rules, discovery, forInvocation });
   if (blob === undefined) {
     log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
   }
@@ -201,18 +314,8 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
       sourceDiscovery: {
         connections: createDiscoveryConnections(executor),
         ...common,
-        discovery: createConfiguredGithubDiscovery({
-          credentials: credentialRepository,
-          store: credentialStore,
-          sources: sourceService,
-          existingRepository: createDiscoveryRepositoryReader(executor),
-          clock: systemClock,
-          fetch:
-            input.discoveryFetch ??
-            (async () => {
-              throw new UpstreamError('refused');
-            }),
-        }),
+        savedRules: { ...common, rules, sessions: services.sessions, idempotency },
+        discovery,
       },
       ...(input.registryPolicy?.management === true
         ? { registryPolicy: registryPolicyApi(executor, anchors, common, idempotency) }

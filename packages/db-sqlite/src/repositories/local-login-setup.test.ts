@@ -495,7 +495,7 @@ describe('stagePendingTotp', () => {
     );
     expect(failure).toBeInstanceOf(DbError);
     expect((failure as DbError).kind).toBe('unique');
-    expect((failure as DbError).constraint).toBe('credential.id');
+    expect((failure as DbError).constraint).toBe('credential.org_id, credential.id');
     expect(await credentialIds()).toEqual([OLD_CREDENTIAL, THIRD_CREDENTIAL].sort());
     expect(await loginRow()).toEqual(admin);
     expect(await loginRow(PLAIN)).toEqual(plain);

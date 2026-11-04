@@ -2,7 +2,7 @@ import type { NpmPackSkipCode } from '../sources/source-error-codes.js';
 import type { SOURCE_ERROR_CODES } from '../sources/source-error-codes.js';
 import type { IdempotencyRecord } from '../api/idempotency.js';
 import type { AuditEvent } from '../audit/actions.js';
-import type { MutationFence } from '../authz/fence.js';
+import type { SourceMutationFence } from '../authz/fence.js';
 import type { JobGuard } from '../platform/job-repository.js';
 import type { OrgContext, Statement } from './port.js';
 
@@ -183,7 +183,7 @@ export type PollOutcome =
 export interface SourceRepository {
   syncNow(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
   ): Promise<
     'requested' | 'source_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
@@ -191,7 +191,7 @@ export interface SourceRepository {
 
   acceptRemoval(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly refusal: RemovalRefusal; readonly audit: AuditEvent },
   ): Promise<'accepted' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'>;
 
@@ -217,7 +217,7 @@ export interface SourceRepository {
   ): Promise<ReadonlyMap<string, number>>;
   pause(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
   ): Promise<'paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'>;
   /**
@@ -228,7 +228,7 @@ export interface SourceRepository {
    */
   create(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: NewSource,
   ): Promise<
     | 'created'
@@ -240,7 +240,7 @@ export interface SourceRepository {
   >;
   update(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceUpdate,
   ): Promise<
     | 'updated'
@@ -257,7 +257,7 @@ export interface SourceRepository {
    */
   resume(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly audit: AuditEvent },
   ): Promise<
     | 'resumed'
@@ -270,7 +270,7 @@ export interface SourceRepository {
   /** `has_packages` while a package references the source, `has_history` while webhook deliveries do. */
   delete(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget,
   ): Promise<
     | 'deleted'
@@ -378,7 +378,7 @@ export interface RegisteredNameRepository {
   ): Promise<{ readonly sourceId: string; readonly projectId: string | null } | null>;
   add(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: NewRegisteredName,
   ): Promise<
     | 'added'
@@ -398,7 +398,7 @@ export interface RegisteredNameRepository {
   /** An active non-proxy source left without coverage is paused in the same batch. */
   remove(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: RegisteredNameTarget & { readonly pauseAudit: AuditEvent },
   ): Promise<
     'removed' | 'removed_and_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
@@ -410,7 +410,7 @@ export interface RegisteredNameRepository {
    */
   enable(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: RegisteredNameTarget,
   ): Promise<
     | 'enabled'

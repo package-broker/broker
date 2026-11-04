@@ -12,7 +12,7 @@ import {
 } from '../audit/actions.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 import type { ActorContext, AdminLog } from '../authz/administration.js';
-import type { MutationFence } from '../authz/fence.js';
+import { fenceKind, type SourceMutationFence } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { PackageNameError, packageKey } from '../catalogue/names.js';
 import type { CatalogueReader, WinnerCandidate } from '../db/catalogue.js';
@@ -42,7 +42,8 @@ export type SourceActor =
       readonly servicePrincipalId?: string;
       readonly restrictTo?: readonly string[];
     }
-  | { readonly kind: 'project'; readonly actor: ProjectActor };
+  | { readonly kind: 'project'; readonly actor: ProjectActor }
+  | { readonly kind: 'rule'; readonly ruleId: string };
 
 export interface SourceCredentialInput {
   readonly kind: CredentialKind;
@@ -91,7 +92,7 @@ export type SourceServiceResult<T> =
       readonly conflictingClaims?: readonly string[];
     };
 
-type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: MutationFence];
+type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: SourceMutationFence];
 
 export type SourceDto = Pick<
   SourceRecord,
@@ -419,6 +420,7 @@ function cursorAfter(ctx: OrgContext, projectId: string | null, cursor: string):
 
 export function createSourceService(deps: SourceServiceDeps): SourceService {
   function permitted(ctx: OrgContext, who: SourceActor, projectId: string | null): boolean {
+    if (who.kind === 'rule') return projectId === null;
     if (who.kind === 'org') {
       return (
         projectId === null &&
@@ -434,17 +436,23 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     );
   }
 
-  function requireFence(who: SourceActor, fence: MutationFence): void {
-    if (fence.userId !== who.actor.userId) {
+  function requireFence(who: SourceActor, fence: SourceMutationFence): void {
+    if (who.kind === 'rule') {
+      if (fenceKind(fence) !== 'discovery' || !('ruleId' in fence) || fence.ruleId !== who.ruleId)
+        throw new TypeError('the discovery fence must belong to the rule');
+      return;
+    }
+    if (!('userId' in fence) || fence.userId !== who.actor.userId) {
       throw new TypeError('the mutation fence must belong to the acting user');
     }
   }
 
   function orgOnly(who: SourceActor): boolean {
     return (
-      who.kind === 'org' &&
-      who.actor.kind === 'organization' &&
-      who.actor.permissions.has('org:sources:write')
+      who.kind === 'rule' ||
+      (who.kind === 'org' &&
+        who.actor.kind === 'organization' &&
+        who.actor.permissions.has('org:sources:write'))
     );
   }
 
@@ -454,7 +462,8 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     id: string,
   ): Promise<SourceRecord | null> {
     const source = await deps.sources.get(ctx, id);
-    return source !== null && source.projectId === (who.kind === 'org' ? null : who.actor.projectId)
+    return source !== null &&
+      source.projectId === (who.kind !== 'project' ? null : who.actor.projectId)
       ? source
       : null;
   }
@@ -673,7 +682,10 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       id: deps.ids.ulid(),
       now: new Date().toISOString(),
       action,
-      actor: { type: 'user', id: who.actor.userId },
+      actor:
+        who.kind === 'rule'
+          ? { type: 'system', id: who.ruleId }
+          : { type: 'user', id: who.actor.userId },
       context: call.audit,
       target: { type, id },
       projectId,
@@ -691,7 +703,10 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       id: deps.ids.ulid(),
       now: new Date().toISOString(),
       action: 'source.create',
-      actor: { type: 'user', id: who.actor.userId },
+      actor:
+        who.kind === 'rule'
+          ? { type: 'system', id: who.ruleId }
+          : { type: 'user', id: who.actor.userId },
       context: call.audit,
       target: { type: 'source', id },
       projectId: input.projectId,
@@ -769,6 +784,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
 
   return {
     async syncNow(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -825,6 +841,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'accepted' ? success(null) : fail(answer);
     },
     async listRegisteredNames(ctx, who, input) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (
         who.kind === 'org'
           ? who.actor.kind !== 'organization' || !who.actor.permissions.has('org:sources:read')
@@ -862,6 +879,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         : success(sourceDto(source, permitted(ctx, who, source.projectId)));
     },
     async list(ctx, who, input) {
+      if (who.kind === 'rule') return fail('forbidden');
       const projectId = input.projectId ?? null;
       if (
         !who.actor.permissions.has(
@@ -932,6 +950,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
     },
     async pause(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -1024,6 +1043,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'created' ? success({ id }, validated.warnings) : fail(answer);
     },
     async update(ctx, who, fence, id, input, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -1129,6 +1149,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'deleted' ? success(null) : fail(answer);
     },
     async resume(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -1239,6 +1260,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         : fail(answer);
     },
     async removeRegisteredName(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!orgOnly(who)) return fail('forbidden');
       requireFence(who, fence);
       const owner = await deps.registeredNames.owner(ctx, id);
@@ -1261,6 +1283,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         : fail(answer);
     },
     async preview(ctx, who, input) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (
         !who.actor.permissions.has('project:sources:read') ||
         (who.kind === 'org'

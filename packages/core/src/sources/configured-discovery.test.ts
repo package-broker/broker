@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
+import { discoveryRuleFence } from '../authz/fence.js';
 import { createConfiguredGithubDiscovery } from './configured-discovery.js';
 
 describe('configured organization discovery', () => {
@@ -71,7 +72,8 @@ const call = {
   audit: { opId: 'operation', requestId: 'request', sourceIp: null, tokenSelector: null },
 };
 
-function productionHarness(runtime: 'node' | 'cloudflare', fork = false) {
+function productionHarness(runtime: 'node' | 'cloudflare', fork = false, scheduled = false) {
+  let instant = Date.now();
   const requests: string[] = [];
   const fetch = createPolicyFetch({
     policy: createOutboundPolicy({ runtime, allowPrivateHosts: [], selfOrigins: [] }),
@@ -99,14 +101,17 @@ function productionHarness(runtime: 'node' | 'cloudflare', fork = false) {
       if (url.pathname === '/installation/repositories')
         return Response.json({
           total_count: 50,
-          repositories: Array.from({ length: 49 }, (_, index) => ({
-            name: `repo${index}`,
-            full_name: `acme/repo${index}`,
-            owner: { login: 'acme' },
-            archived: false,
-            fork,
-            default_branch: 'main',
-          })),
+          repositories: Array.from(
+            { length: Number(url.searchParams.get('per_page')) },
+            (_, index) => ({
+              name: `repo${index}`,
+              full_name: `acme/repo${index}`,
+              owner: { login: 'acme' },
+              archived: false,
+              fork,
+              default_branch: 'main',
+            }),
+          ),
         });
       if (url.pathname === '/repos/acme/limited')
         return new Response(null, { status: 429, headers: { 'retry-after': '30' } });
@@ -126,6 +131,8 @@ function productionHarness(runtime: 'node' | 'cloudflare', fork = false) {
     ctx.orgId === 'own' ? { projectId: null, kind: 'github_app' } : null,
   );
   const service = createConfiguredGithubDiscovery({
+    scheduled,
+    authority: async () => true,
     credentials: { get } as never,
     store: {
       read: async () =>
@@ -136,9 +143,20 @@ function productionHarness(runtime: 'node' | 'cloudflare', fork = false) {
     sources: { create, addRegisteredName, enable, delete: remove } as never,
     existingRepository: { has: async () => false, hasSourceName: async () => false },
     fetch,
-    clock: { now: () => new Date() },
+    clock: { now: () => new Date(instant) },
   });
-  return { service, create, addRegisteredName, enable, remove, get, requests };
+  return {
+    service,
+    create,
+    addRegisteredName,
+    enable,
+    remove,
+    get,
+    requests,
+    advance: (ms: number) => {
+      instant += ms;
+    },
+  };
 }
 
 it.each(['node', 'cloudflare'] as const)(
@@ -233,3 +251,69 @@ it.each(['name_public', 'name_public_unverified', 'claim_overlap'] as const)(
     expect(h.enable).not.toHaveBeenCalled();
   },
 );
+
+it.each(['node', 'cloudflare'] as const)(
+  'bounds scheduled planning to three repositories and both manifests on %s',
+  async (runtime) => {
+    const h = productionHarness(runtime, false, true);
+    const plan = await h.service.dryRun(
+      orgContext('own'),
+      { kind: 'rule', ruleId: 'rule' },
+      { credentialId: 'C', installationId: 42, pattern: '*', cursor: null },
+      discoveryRuleFence('rule', 1, 'C', 42, { id: 'job', owner: 'worker', fence: 1 }),
+    );
+    expect(plan).toMatchObject({ ok: true, value: { nextCursor: '2' } });
+    if (!plan.ok) throw new Error('plan failed');
+    expect(plan.value.entries).toHaveLength(6);
+    expect(new Set(plan.value.entries.map((e) => e.repository))).toEqual(
+      new Set(['acme/repo0', 'acme/repo1', 'acme/repo2']),
+    );
+    expect(
+      h.requests.filter((p) => p.endsWith('/composer.json') || p.endsWith('/package.json')),
+    ).toHaveLength(6);
+    expect(h.requests.length).toBeLessThanOrEqual(10);
+  },
+);
+
+it('reuses resolved credentials and a bounded contents token across a scheduled invocation', async () => {
+  const h = productionHarness('node', false, true);
+  const invocation = h.service.forInvocation?.() ?? h.service;
+  const f = discoveryRuleFence('rule', 1, 'C', 42, { id: 'job', owner: 'worker', fence: 1 });
+  await invocation.dryRun(
+    orgContext('own'),
+    { kind: 'rule', ruleId: 'rule' },
+    { credentialId: 'C', installationId: 42, ecosystem: 'npm', pattern: '*', cursor: null },
+    f,
+  );
+  await invocation.apply(
+    orgContext('own'),
+    { kind: 'rule', ruleId: 'rule' },
+    f,
+    {
+      credentialId: 'C',
+      installationId: 42,
+      ecosystem: 'npm',
+      repositories: ['acme/repo0', 'acme/repo1', 'acme/repo2'],
+    },
+    call,
+  );
+  expect(h.get).toHaveBeenCalledTimes(1);
+  expect(h.requests.filter((path) => path.endsWith('/access_tokens'))).toHaveLength(2);
+  expect(h.create).toHaveBeenCalledTimes(3);
+});
+
+it('stops scheduled upstream work when the invocation wall-time budget expires', async () => {
+  const h = productionHarness('node', false, true);
+  const invocation = h.service.forInvocation?.() ?? h.service;
+  h.advance(21000);
+  const f = discoveryRuleFence('rule', 1, 'C', 42, { id: 'job', owner: 'worker', fence: 1 });
+  expect(
+    await invocation.dryRun(
+      orgContext('own'),
+      { kind: 'rule', ruleId: 'rule' },
+      { credentialId: 'C', installationId: 42, pattern: '*', cursor: null },
+      f,
+    ),
+  ).toMatchObject({ ok: false, error: 'timeout' });
+  expect(h.requests).toEqual([]);
+});

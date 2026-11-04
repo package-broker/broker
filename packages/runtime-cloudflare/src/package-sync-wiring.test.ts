@@ -489,6 +489,8 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
 }
 
 const BASE_JOBS = [
+  'core:discovery-rules:v1',
+  'core:discovery-rule:v1',
   'core:publish-approval-expire:v1',
   'core:publish-scan:v1',
   'core:publish-scan-sweep:v1',

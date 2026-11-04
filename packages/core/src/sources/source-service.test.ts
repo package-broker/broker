@@ -2,7 +2,7 @@ import type { ApiCall } from '../api/idempotency.js';
 import { Buffer } from 'node:buffer';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { ActorContext } from '../authz/administration.js';
-import { mutationFence, type AuthenticatedActor } from '../authz/fence.js';
+import { discoveryRuleFence, mutationFence, type AuthenticatedActor } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { orgContext } from '../db/port.js';
 import type { SourceRecord } from '../db/source.js';
@@ -2827,3 +2827,24 @@ it('warns when an npm VCS scope claim shadows public packages', async () => {
     ],
   });
 });
+
+it.each(['pause', 'syncNow', 'resume', 'removeRegisteredName', 'update'] as const)(
+  'denies rule actors organization %s at service entry',
+  async (method) => {
+    const h = setup();
+    const who = { kind: 'rule', ruleId: 'rule' } as const;
+    const f = discoveryRuleFence('rule', 1, 'C', 41, { id: 'job', owner: 'worker', fence: 1 });
+    h.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      projectId: null,
+      credentialId: null,
+    });
+    const result =
+      method === 'update'
+        ? await h.service.update(ctx, who, f, 'source', { pollIntervalSeconds: 600 }, call)
+        : await h.service[method](ctx, who, f, 'source', call);
+    expect(result).toEqual({ ok: false, error: 'forbidden' });
+    expect(h.sources.get).not.toHaveBeenCalled();
+  },
+);

@@ -143,9 +143,16 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/sources/discovery/connections',
       'POST /_pb/sources/discovery/plan',
       'POST /_pb/sources/discovery/apply',
+      'POST /_pb/sources/discovery/rules',
+      'GET /_pb/sources/discovery/rules',
+      'GET /_pb/sources/discovery/rules/:id',
+      'PATCH /_pb/sources/discovery/rules/:id',
+      'DELETE /_pb/sources/discovery/rules/:id',
+      'POST /_pb/sources/discovery/rules/:id/run',
+      'GET /_pb/sources/discovery/rules/:id/results',
     ],
-    jobs: [],
-    ownerPacket: 'NPM19c',
+    jobs: ['discovery-rules', 'discovery-rule'],
+    ownerPacket: 'DISC2',
   },
   {
     dependency: 'registryPolicy',
@@ -440,7 +447,7 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
       entry.dependency === 'notifications'
         ? 'NPM26I'
         : entry.dependency === 'sourceDiscovery'
-          ? 'NPM19c'
+          ? 'DISC2'
           : entry.dependency === 'registryPolicy'
             ? 'NPM27'
             : entry.dependency === 'trustedPublishers'

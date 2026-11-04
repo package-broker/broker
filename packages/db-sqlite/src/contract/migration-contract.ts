@@ -613,7 +613,7 @@ export function describeMigrationContract(
         expect(await readLock(executor)).toEqual(lockBefore);
       });
     });
-    it('8. fresh schema with foreign keys on: nine bookkeeping rows, all tables, lock free', async () => {
+    it('8. fresh schema with foreign keys on: ten bookkeeping rows, all tables, lock free', async () => {
       await withPair(open, async ({ executor }) => {
         await enableForeignKeys(executor);
         const sources = await discoveredMigrations();
@@ -626,7 +626,7 @@ export function describeMigrationContract(
         );
         const names = await tableNames(executor);
         for (const table of NEW_TABLES) expect(names).toContain(table);
-        expect(names).toHaveLength(69);
+        expect(names).toHaveLength(71);
         expect(await lockHolder(executor)).toBeNull();
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
         for (const table of ['token_project', 'service_principal_permission']) {
@@ -789,6 +789,7 @@ export function describeMigrationContract(
           'core:0007_npm_vcs_build_outcomes',
           'core:0008_registry_policy',
           'core:0009_npm_notifications',
+          'core:0010_source_discovery_rules',
         ]);
         expect(await count(executor, 'SELECT count(*) AS n FROM role')).toBe(0);
         expect(await count(executor, 'SELECT count(*) AS n FROM role_permission')).toBe(0);
@@ -811,6 +812,7 @@ export function describeMigrationContract(
           'core:0007_npm_vcs_build_outcomes',
           'core:0008_registry_policy',
           'core:0009_npm_notifications',
+          'core:0010_source_discovery_rules',
         ]);
         expect((await attemptShape(executor)).strict).toEqual([{ strict: 1 }]);
         expect(await tableInfo(executor, 'job', 'project_id')).toEqual([
@@ -829,7 +831,7 @@ export function describeMigrationContract(
           { from: 'project_id', table: 'project', to: 'id' },
         ]);
         expect(await tableNames(executor)).not.toContain('job_attempt_0006');
-        expect(await countTables(executor)).toBe(69);
+        expect(await countTables(executor)).toBe(71);
         expect(await rows(executor, 'PRAGMA foreign_key_check')).toEqual([]);
 
         await seedPopulated(executor);
@@ -1124,6 +1126,7 @@ export function describeVulnerabilityMigrationContract(
           'core:0007_npm_vcs_build_outcomes',
           'core:0008_registry_policy',
           'core:0009_npm_notifications',
+          'core:0010_source_discovery_rules',
         ]);
         expect(
           await executor.all({

@@ -209,6 +209,7 @@ describe('runEntry', () => {
         'core:0007_npm_vcs_build_outcomes',
         'core:0008_registry_policy',
         'core:0009_npm_notifications',
+        'core:0010_source_discovery_rules',
       ]);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
@@ -260,6 +261,12 @@ describe('runEntry', () => {
           level: 'info',
           message: 'applied core:0009_npm_notifications',
           id: 'core:0009_npm_notifications',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0010_source_discovery_rules',
+          id: 'core:0010_source_discovery_rules',
           holder,
         },
       ]);

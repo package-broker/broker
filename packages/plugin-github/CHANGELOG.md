@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.0-rc.5](https://github.com/package-broker/broker/compare/plugin-github-v0.1.0-rc.4...plugin-github-v0.1.0-rc.5) (2026-11-04)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+
 ## [0.1.0-rc.4](https://github.com/package-broker/broker/compare/plugin-github-v0.1.0-rc.3...plugin-github-v0.1.0-rc.4) (2026-11-03)
 
 

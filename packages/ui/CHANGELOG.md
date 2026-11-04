@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.4...ui-v2.0.0-rc.5) (2026-11-04)
+
+
+### Features
+
+* **core:** saved GitHub discovery rules with scheduled rescans ([#1048](https://github.com/package-broker/broker/issues/1048)) ([9a04483](https://github.com/package-broker/broker/commit/9a044833e906798fb60517a0cd719023e7a8f1a6))
+* **ui:** discovery rules on the Sources page ([#1049](https://github.com/package-broker/broker/issues/1049)) ([3be59e4](https://github.com/package-broker/broker/commit/3be59e46f6f41c5937efe36529fa51207e75413b))
+* **ui:** GitHub organization picker for npm and Composer packages ([#1046](https://github.com/package-broker/broker/issues/1046)) ([196ac80](https://github.com/package-broker/broker/commit/196ac80d9c1579c0817806d9f07bc2a07f8be9a8))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+
 ## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.3...ui-v2.0.0-rc.4) (2026-11-03)
 
 

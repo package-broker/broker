@@ -82,4 +82,29 @@ export const SOURCE_DISCOVERY_API_SPECS = [
       },
     },
   },
+  {
+    method: 'GET',
+    boundary: 'organization',
+    permission: 'org:sources:write',
+    path: '/_pb/sources/discovery/connections',
+    api: {
+      operationId: 'listSourceDiscoveryConnections',
+      summary: 'List organization GitHub App connections already used by sources',
+      tags: ['sources'],
+      responses: {
+        200: z.strictObject({
+          items: z
+            .array(
+              z.strictObject({
+                credentialId: common.credentialId,
+                installationId: common.installationId,
+                sourceNames: z.array(z.string()).max(5),
+                sourceCount: z.number().int().positive(),
+              }),
+            )
+            .max(100),
+        }),
+      },
+    },
+  },
 ] as const satisfies readonly ApiRouteSpec[];

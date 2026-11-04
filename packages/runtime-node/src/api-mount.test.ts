@@ -106,7 +106,11 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
     dependency: 'sourceDiscovery',
     constructed: 'configured GitHub discovery, credential store and repository reader',
-    routes: ['POST /_pb/sources/discovery/plan', 'POST /_pb/sources/discovery/apply'],
+    routes: [
+      'GET /_pb/sources/discovery/connections',
+      'POST /_pb/sources/discovery/plan',
+      'POST /_pb/sources/discovery/apply',
+    ],
     jobs: [],
     ownerPacket: 'NPM19c',
   },

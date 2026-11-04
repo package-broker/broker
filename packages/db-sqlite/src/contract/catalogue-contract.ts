@@ -2,6 +2,7 @@ import { createNpmVcsEagerWriter } from '@package-broker/core/ingest/npm-vcs-enq
 import { applyChunk } from '@package-broker/core/ingest/apply-description';
 import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
+import { createDiscoveryConnections } from '../repositories/discovery-connections.js';
 import { createDiscoveryRepositoryReader } from '../repositories/discovery.js';
 import { createJobRepository } from '../repositories/job.js';
 import { npmVcsBuildEnqueueInput } from '@package-broker/core/ingest/npm-vcs-build-job';
@@ -116,6 +117,98 @@ export function describeCatalogueContract(
 
     afterEach(async () => {
       await database.close();
+    });
+
+    it('lists distinct organization GitHub App connections with bounded source names and no secret fields', async () => {
+      const seedCredential = (
+        id: string,
+        org: string,
+        kind = 'github_app',
+        project: string | null = null,
+      ) =>
+        st(
+          "INSERT INTO credential(id,org_id,kind,project_id,ciphertext,nonce,key_version,aad) VALUES (?,?,?,?,X'736563726574',zeroblob(12),1,'secret')",
+          id,
+          org,
+          kind,
+          project,
+        );
+      await executor.batch([
+        seedCredential('APP', orgs.a.orgId),
+        seedCredential('FOREIGN', orgs.b.orgId),
+        seedCredential('PROJECT', orgs.a.orgId, 'github_app', 'P'),
+        seedCredential('TOKEN', orgs.a.orgId, 'bearer'),
+        seedCredential('UNUSED', orgs.a.orgId),
+      ]);
+      const source = (
+        id: string,
+        credential: string,
+        config: unknown,
+        project: string | null = null,
+        org = orgs.a.orgId,
+      ) =>
+        st(
+          "INSERT INTO source(id,org_id,project_id,name,type,ecosystem,credential_id,config_json) VALUES (?,?,?,?,'vcs','npm',?,?)",
+          id,
+          org,
+          project,
+          id,
+          credential,
+          JSON.stringify(config),
+        );
+      const config = { provider: 'github', installationId: 42 };
+      await executor.batch([
+        ...Array.from({ length: 7 }, (_, i) => source(`Named ${6 - i}`, 'APP', config)),
+        source('Other installation', 'APP', { ...config, installationId: 43 }),
+        source('Project credential', 'PROJECT', config),
+        source('Wrong kind', 'TOKEN', config),
+        source('Project source', 'APP', config, 'P'),
+        source('Wrong provider', 'APP', { ...config, provider: 'git' }),
+        source('Missing installation', 'APP', { provider: 'github' }),
+        source('Invalid installation', 'APP', { ...config, installationId: '42' }),
+        source('Zero installation', 'APP', { ...config, installationId: 0 }),
+        source('Fractional installation', 'APP', { ...config, installationId: 42.5 }),
+        source('Unsafe installation', 'APP', { ...config, installationId: 9007199254740992 }),
+        source('Foreign source', 'FOREIGN', config, null, orgs.b.orgId),
+      ]);
+      await executor.batch([
+        st(
+          "INSERT INTO source(id,org_id,name,type,ecosystem,credential_id,config_json) VALUES ('WRONGTYPE',?,'Wrong source type','composer_repository','composer','APP',?)",
+          orgs.a.orgId,
+          JSON.stringify(config),
+        ),
+      ]);
+      const reader = createDiscoveryConnections(executor);
+      expect(await reader.list(orgs.a)).toEqual([
+        {
+          credentialId: 'APP',
+          installationId: 42,
+          sourceNames: Array.from({ length: 5 }, (_, i) => `Named ${i}`),
+          sourceCount: 7,
+        },
+        {
+          credentialId: 'APP',
+          installationId: 43,
+          sourceNames: ['Other installation'],
+          sourceCount: 1,
+        },
+      ]);
+      expect(await reader.list(orgs.b)).toEqual([
+        {
+          credentialId: 'FOREIGN',
+          installationId: 42,
+          sourceNames: ['Foreign source'],
+          sourceCount: 1,
+        },
+      ]);
+      await executor.batch(
+        Array.from({ length: 101 }, (_, i) =>
+          source(`Extra ${i}`, 'APP', { ...config, installationId: 100 + i }),
+        ),
+      );
+      const bounded = await reader.list(orgs.a);
+      expect(bounded).toHaveLength(100);
+      expect(bounded[0]?.sourceCount).toBe(7);
     });
 
     it.each(['npm', 'composer'] as const)(

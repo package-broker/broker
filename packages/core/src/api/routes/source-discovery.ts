@@ -1,3 +1,4 @@
+import type { OrgContext } from '../../db/port.js';
 import type { BulkDiscovery } from '../../sources/bulk-discovery.js';
 import { apiRoute, type ApiOutcome } from '../route.js';
 import { callContext, type ApiRouteDeps } from './context.js';
@@ -11,8 +12,26 @@ function failure(error: string): ApiOutcome {
   return { error: 'unavailable' };
 }
 
-export function sourceDiscoveryRoutes(deps: ApiRouteDeps & { readonly discovery: BulkDiscovery }) {
+export function sourceDiscoveryRoutes(
+  deps: ApiRouteDeps & {
+    readonly discovery: BulkDiscovery;
+    readonly connections: {
+      list(ctx: OrgContext): Promise<
+        readonly {
+          credentialId: string;
+          installationId: number;
+          sourceNames: string[];
+          sourceCount: number;
+        }[]
+      >;
+    };
+  },
+) {
   return [
+    apiRoute(SOURCE_DISCOVERY_API_SPECS[2], async ({ ctx }) => {
+      const c = callContext(ctx, deps);
+      return { status: 200, body: { items: await deps.connections.list(c.org) } };
+    }),
     apiRoute(SOURCE_DISCOVERY_API_SPECS[0], async ({ ctx, body }) => {
       const c = callContext(ctx, deps);
       const result = await deps.discovery.dryRun(c.org, c.actor, {

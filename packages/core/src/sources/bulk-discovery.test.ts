@@ -1,7 +1,9 @@
+import { DiscoveryError } from './github-discovery.js';
+import { InstallationTokenError } from './github-installation-token.js';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { ApiCall } from '../api/idempotency.js';
 import type { ActorContext } from '../authz/administration.js';
-import { mutationFence, type AuthenticatedActor } from '../authz/fence.js';
+import { discoveryRuleFence, mutationFence, type AuthenticatedActor } from '../authz/fence.js';
 import { DbError } from '../db/errors.js';
 import { orgContext, type OrgContext } from '../db/port.js';
 import type { DiscoveryCandidate, PlanEntry, SkipReason } from '../plugin.js';
@@ -663,34 +665,38 @@ describe('bulk discovery', () => {
       'upstream_status',
     ],
     [new DbError('busy', 'private database detail'), 'busy'],
-  ] as const)('records a thrown error code and continues: %s', async (error, code) => {
-    const { bulk, plan, service } = setup();
-    if (error instanceof DbError) vi.mocked(service.create).mockRejectedValueOnce(error);
-    else plan.mockRejectedValueOnce(error);
-    expect(
-      await bulk.apply(
-        ctx,
-        admin,
-        fence,
-        {
-          credentialId: 'c',
-          repositories: ['acme/one', 'acme/two'],
+  ] as const)(
+    'records transient database errors and continues manual apply: %s',
+    async (error, code) => {
+      const { bulk, plan, service } = setup();
+      if (error instanceof DbError) vi.mocked(service.create).mockRejectedValueOnce(error);
+      else plan.mockRejectedValueOnce(error);
+      expect(
+        await bulk.apply(
+          ctx,
+          admin,
+          fence,
+          {
+            credentialId: 'c',
+            repositories: ['acme/one', 'acme/two'],
+          },
+          call,
+        ),
+      ).toMatchObject({
+        ok: true,
+        value: {
+          created: 1,
+          failed: 1,
+          results: [
+            { repository: 'acme/one', outcome: 'failed', error: code },
+            { repository: 'acme/two', outcome: 'created' },
+          ],
+          remainingRepositories: [],
         },
-        call,
-      ),
-    ).toMatchObject({
-      ok: true,
-      value: {
-        created: 1,
-        failed: 1,
-        results: [
-          { repository: 'acme/one', outcome: 'failed', error: code },
-          { repository: 'acme/two', outcome: 'created' },
-        ],
-      },
-    });
-    expect(plan).toHaveBeenCalledTimes(2);
-  });
+      });
+      expect(plan).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('stops on rate_limited and returns partial counters and cursor', async () => {
     const { bulk, plan } = setup();
@@ -1011,3 +1017,237 @@ it.each(['composer', 'npm'] as const)(
     ).toMatchObject({ ok: true, value: { existing: 1, created: 1, failed: 0 } });
   },
 );
+
+it('retains upstream backoff outside the public discovery summary', async () => {
+  const h = setup();
+  h.discover.mockRejectedValueOnce(new DiscoveryError('rate_limited', 429, 3600));
+  expect(
+    await h.bulk.dryRun(ctx, admin, { credentialId: 'C', pattern: '*', cursor: null }),
+  ).toEqual({ ok: false, error: 'rate_limited', retryAfterSeconds: 3600 });
+  h.plan.mockRejectedValueOnce(
+    new InstallationTokenError('rate_limited', 403, { retryAfter: 7200 }),
+  );
+  const result = await h.bulk.apply(
+    ctx,
+    admin,
+    fence,
+    { credentialId: 'C', repositories: ['acme/limited'] },
+    call,
+  );
+  expect(result).toMatchObject({
+    ok: true,
+    retryAfterSeconds: 3600,
+    value: { remainingRepositories: ['acme/limited'] },
+  });
+  if (result.ok) expect(result.value).not.toHaveProperty('retryAfterSeconds');
+});
+
+it('requires a discovery fence before a rule dry-run can resolve credentials', async () => {
+  const resolve = vi.fn(async () => null);
+  const bulk = createBulkDiscovery({ credentials: { resolve } } as never);
+  const result = await bulk.dryRun(
+    ctx,
+    { kind: 'rule', ruleId: 'rule' },
+    { credentialId: 'c', installationId: 1, pattern: '*', cursor: null },
+  );
+  expect(result).toEqual({ ok: false, error: 'forbidden' });
+  expect(resolve).not.toHaveBeenCalled();
+});
+
+it('probes live rule authority and binds both discovery calls to its credential and installation', async () => {
+  const resolve = vi.fn(async () => null);
+  const authority = vi.fn(async () => false);
+  const bulk = createBulkDiscovery({ credentials: { resolve }, authority } as never);
+  const f = discoveryRuleFence('rule', 1, 'C', 41, { id: 'job', owner: 'worker', fence: 1 });
+  const who = { kind: 'rule', ruleId: 'rule' } as const;
+  const input = { credentialId: 'C', installationId: 41, pattern: '*', cursor: null };
+  expect(await bulk.dryRun(ctx, who, input, f)).toEqual({ ok: false, error: 'forbidden' });
+  expect(authority).toHaveBeenCalledOnce();
+  expect(resolve).not.toHaveBeenCalled();
+  authority.mockResolvedValue(true);
+  for (const binding of [
+    { credentialId: 'other', installationId: 41 },
+    { credentialId: 'C', installationId: 42 },
+  ]) {
+    expect(await bulk.dryRun(ctx, who, { ...input, ...binding }, f)).toEqual({
+      ok: false,
+      error: 'forbidden',
+    });
+    expect(
+      await bulk.apply(ctx, who, f, { ...binding, repositories: ['acme/library'] }, call),
+    ).toEqual({ ok: false, error: 'forbidden' });
+  }
+  expect(resolve).not.toHaveBeenCalled();
+});
+
+it('uses the injected clock for installation-token reset deadlines', async () => {
+  const now = Date.parse('2026-11-04T12:00:00.000Z');
+  const bulk = createBulkDiscovery({
+    clock: { now: () => new Date(now) },
+    credentials: {
+      resolve: async () => {
+        throw new InstallationTokenError('rate_limited', 403, {
+          rateLimit: { limit: 5000, remaining: 0, reset: now / 1000 + 600 },
+        });
+      },
+    },
+  } as never);
+  expect(
+    await bulk.dryRun(ctx, admin, {
+      credentialId: 'C',
+      installationId: 41,
+      pattern: '*',
+      cursor: null,
+    }),
+  ).toEqual({ ok: false, error: 'rate_limited', retryAfterSeconds: 600 });
+});
+
+it('includes planning and checkpoint statements in the invocation admission budget', async () => {
+  const plan = vi.fn(async () => []);
+  const bulk = createBulkDiscovery({
+    statementCount: () => 550,
+    invocationStatementStart: 100,
+    credentials: { resolve: async () => ({ credentialId: 'C', installationId: 41, upstream: {} }) },
+    discovery: { plan },
+  } as never);
+  const result = await bulk.apply(
+    ctx,
+    admin,
+    fence,
+    { credentialId: 'C', installationId: 41, ecosystem: 'npm', repositories: ['acme/library'] },
+    call,
+  );
+  expect(result).toMatchObject({
+    ok: true,
+    value: { created: 0, remainingRepositories: ['acme/library'] },
+  });
+  expect(plan).not.toHaveBeenCalled();
+});
+
+it.each(['claim_overlap', 'name_public'] as const)(
+  'cleans up rule admission refused by %s',
+  async (reason) => {
+    const h = setup();
+    vi.mocked(h.service.addRegisteredName).mockResolvedValueOnce({ ok: false, error: reason });
+    const bulk = createBulkDiscovery({
+      authority: async () => true,
+      credentials: { resolve: h.resolve },
+      sources: h.service,
+      discovery: { plan: h.plan },
+      existingRepository: { has: async () => false, hasSourceName: async () => false },
+    } as never);
+    const f = discoveryRuleFence('rule', 1, 'app-credential', 7, {
+      id: 'job',
+      owner: 'worker',
+      fence: 1,
+    });
+    const result = await bulk.apply(
+      ctx,
+      { kind: 'rule', ruleId: 'rule' },
+      f,
+      { credentialId: 'app-credential', installationId: 7, repositories: ['acme/one'] },
+      call,
+    );
+    expect(result).toMatchObject({ ok: true, value: { skipped: 1, results: [{ reason }] } });
+    expect(h.service.delete).toHaveBeenCalledWith(
+      ctx,
+      { kind: 'rule', ruleId: 'rule' },
+      f,
+      'src-1',
+    );
+    expect(h.sources.size).toBe(0);
+  },
+);
+it.each([401, 403, 404])('does not back off a permanent listing status %s', async (status) => {
+  const h = setup();
+  h.discover.mockRejectedValueOnce(new DiscoveryError('upstream_status', status));
+  expect(
+    await h.bulk.dryRun(ctx, admin, { credentialId: 'C', pattern: '*', cursor: null }),
+  ).toMatchObject({
+    ok: false,
+    error: status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'not_found',
+  });
+});
+
+it('reuses successful ecosystem results when retrying the other ecosystem', async () => {
+  const h = setup();
+  h.plan.mockResolvedValue([
+    {
+      repository: 'acme/one',
+      ecosystem: 'composer',
+      packageName: 'acme/one',
+      action: 'new',
+      reason: null,
+    },
+    { repository: 'acme/one', ecosystem: 'npm', packageName: 'one', action: 'new', reason: null },
+  ]);
+  vi.mocked(h.service.create)
+    .mockImplementationOnce(async () => ({ ok: true, value: { id: 's' } }))
+    .mockRejectedValueOnce(new DbError('busy', 'fixed'));
+  const bulk = createBulkDiscovery({
+    authority: async () => true,
+    sources: h.service,
+    credentials: { resolve: h.resolve },
+    discovery: { plan: h.plan },
+    existingRepository: { has: async () => false, hasSourceName: async () => false },
+  } as never);
+  const f = discoveryRuleFence('rule', 1, 'app-credential', 7, {
+    id: 'job',
+    owner: 'worker',
+    fence: 1,
+  });
+  const input = { credentialId: 'app-credential', installationId: 7, repositories: ['acme/one'] };
+  // Let the first ecosystem activate even though this fixture did not persist its source.
+  vi.mocked(h.service.enable).mockResolvedValue({ ok: true, value: null });
+  const first = await bulk.apply(ctx, { kind: 'rule', ruleId: 'rule' }, f, input, call);
+  expect(first).toMatchObject({
+    ok: true,
+    value: { created: 1, remainingRepositories: ['acme/one'] },
+  });
+  if (!first.ok) return;
+  const second = await bulk.apply(
+    ctx,
+    { kind: 'rule', ruleId: 'rule' },
+    f,
+    { ...input, completedResults: first.value.results.filter((r) => r.outcome !== 'failed') },
+    call,
+  );
+  expect(second).toMatchObject({
+    ok: true,
+    value: { created: 2, existing: 0, failed: 0, remainingRepositories: [] },
+  });
+  expect(h.service.create).toHaveBeenCalledTimes(3);
+});
+
+it('retains completed ecosystem results if preparation consumes the admission reserve', async () => {
+  let statements = 319;
+  const prior = { repository: 'acme/one', ecosystem: 'composer', outcome: 'created' } as const;
+  const plan = vi.fn();
+  const bulk = createBulkDiscovery({
+    invocationStatementStart: 0,
+    statementCount: () => statements,
+    authority: async () => true,
+    credentials: { resolve: async () => ({ credentialId: 'C', installationId: 41, upstream: {} }) },
+    discovery: {
+      plan,
+      prepare: async () => {
+        statements = 320;
+      },
+    },
+  } as never);
+  expect(
+    await bulk.apply(
+      ctx,
+      { kind: 'rule', ruleId: 'rule' },
+      discoveryRuleFence('rule', 1, 'C', 41, { id: 'job', owner: 'worker', fence: 1 }),
+      {
+        credentialId: 'C',
+        installationId: 41,
+        repositories: ['acme/one'],
+        completedResults: [prior],
+      },
+      call,
+    ),
+  ).toMatchObject({ ok: true, value: { results: [prior], remainingRepositories: ['acme/one'] } });
+  expect(plan).not.toHaveBeenCalled();
+});

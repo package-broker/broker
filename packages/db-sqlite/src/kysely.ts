@@ -22,6 +22,7 @@ import {
   type FenceGuard,
   type MutationFence,
   type TokenMutationFence,
+  type DiscoveryRuleFence,
 } from '@package-broker/core/authz/fence';
 import { ulid } from '@package-broker/core/ids';
 import { isValidDomain } from '@package-broker/core/identity/policy';
@@ -785,7 +786,7 @@ export function assertGuard(condition: Guard, ctx: OrgContext, changed?: Guard):
 export async function runOrgFenced(
   executor: SqlExecutor,
   ctx: OrgContext,
-  fence: MutationFence | TokenMutationFence,
+  fence: MutationFence | TokenMutationFence | DiscoveryRuleFence,
   guard: FenceGuard,
   mutations: readonly Statement[],
   probes: FailureProbes,

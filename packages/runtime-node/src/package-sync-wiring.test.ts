@@ -912,6 +912,8 @@ describe('Node package-sync wiring', () => {
       [
         ...AUDIT,
         ...AUTH_JOBS,
+        'core:discovery-rules:v1',
+        'core:discovery-rule:v1',
         'core:publish-approval-expire:v1',
         'core:publish-scan:v1',
         'core:publish-scan-sweep:v1',
@@ -931,6 +933,8 @@ describe('Node package-sync wiring', () => {
       [
         ...AUDIT,
         ...AUTH_JOBS,
+        'core:discovery-rules:v1',
+        'core:discovery-rule:v1',
         'core:publish-approval-expire:v1',
         'core:publish-scan:v1',
         'core:publish-scan-sweep:v1',

@@ -1,3 +1,7 @@
+import {
+  discoveryRuleJobs,
+  type DiscoveryRuleJobDeps,
+} from '@package-broker/core/runtime/discovery-rule-jobs';
 import { createNpmTokenAdapters } from '@package-broker/db-sqlite/repositories/npm-tokens';
 import { createUnpublishStore } from '@package-broker/db-sqlite/repositories/npm-unpublish';
 import { createDistTagStore } from '@package-broker/db-sqlite/repositories/npm-dist-tags';
@@ -1106,6 +1110,7 @@ export function createNodeServer(
       options.auth === undefined)
   )
     throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
+  let discoveryRules: DiscoveryRuleJobDeps | undefined;
   let notificationJobs: Jobs | undefined;
   const remoteAddress = new AsyncLocalStorage<string | null>();
   const clientIp = (request: Request): string | null =>
@@ -1341,6 +1346,12 @@ export function createNodeServer(
         options.platformServices === undefined
           ? []
           : [
+              ...(auth === undefined || reads === undefined
+                ? []
+                : discoveryRuleJobs(() => {
+                    if (discoveryRules === undefined) throw new JobError('handler_error');
+                    return discoveryRules;
+                  })),
               ...vulnerability.jobs.map((job) =>
                 registerIngestJob(job.definition, {
                   events: new Set([VULNERABILITY_EVENT]),
@@ -1461,6 +1472,9 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : createApiRoutes({
+            onDiscoveryRules: (deps) => {
+              discoveryRules = deps;
+            },
             discoveryFetch: createPolicyFetch({
               fetchImpl:
                 registry?.services.outboundFetch ??

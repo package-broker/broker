@@ -7,6 +7,7 @@ declare const MUTATION_FENCE: unique symbol;
 declare const SYSTEM_MUTATION_FENCE: unique symbol;
 declare const TOKEN_MUTATION_FENCE: unique symbol;
 declare const DELEGATED_MUTATION_FENCE: unique symbol;
+declare const DISCOVERY_FENCE: unique symbol;
 declare const AUTHENTICATED_ACTOR: unique symbol;
 declare const AUTHENTICATED_TOKEN_ACTOR: unique symbol;
 declare const FENCE_GUARD: unique symbol;
@@ -70,10 +71,51 @@ export interface DelegatedMutationFence {
   readonly expected: Readonly<Record<string, number>>;
 }
 
+/** Organization-owned discovery authority, revoked by rule or credential changes. */
+export interface DiscoveryRuleFence {
+  readonly [DISCOVERY_FENCE]: true;
+  readonly ruleId: string;
+  readonly revision: number;
+  readonly credentialId: string;
+  readonly installationId: number;
+  readonly job: Readonly<JobGuard>;
+  readonly expected: Readonly<Record<string, number>>;
+}
+export type SourceMutationFence = MutationFence | DiscoveryRuleFence;
+
+export function discoveryRuleFence(
+  ruleId: string,
+  revision: number,
+  credentialId: string,
+  installationId: number,
+  job: JobGuard,
+): DiscoveryRuleFence {
+  if (
+    !Number.isSafeInteger(revision) ||
+    revision < 1 ||
+    !Number.isSafeInteger(installationId) ||
+    installationId < 1
+  )
+    throw new TypeError('invalid discovery authority');
+  return issue('discovery', {
+    ruleId: requireText(ruleId, 'ruleId'),
+    revision,
+    credentialId: requireText(credentialId, 'credentialId'),
+    installationId,
+    job: leaseOf(job),
+    expected: Object.freeze({}),
+  });
+}
+
 export type AnyMutationFence =
-  MutationFence | SystemMutationFence | TokenMutationFence | DelegatedMutationFence;
+  | MutationFence
+  | SystemMutationFence
+  | TokenMutationFence
+  | DelegatedMutationFence
+  | DiscoveryRuleFence;
 
 interface FenceByKind {
+  readonly discovery: DiscoveryRuleFence;
   readonly session: MutationFence;
   readonly system: SystemMutationFence;
   readonly token: TokenMutationFence;
@@ -84,6 +126,7 @@ export type FenceKind = keyof FenceByKind;
 
 type FenceFields<K extends FenceKind> = Omit<
   FenceByKind[K],
+  | typeof DISCOVERY_FENCE
   | typeof MUTATION_FENCE
   | typeof SYSTEM_MUTATION_FENCE
   | typeof TOKEN_MUTATION_FENCE

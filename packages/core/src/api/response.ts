@@ -26,6 +26,7 @@ export const API_ERROR_CODES = {
   reauth_required: { status: 403, message: 'Reauthentication required' },
   not_found: { status: 404, message: 'Not found' },
   conflict: { status: 409, message: 'Conflict' },
+  discovery_rule_disabled: { status: 409, message: 'Discovery rule is disabled' },
   source_paused: { status: 409, message: 'Source is paused' },
   duplicate: { status: 409, message: 'Already exists' },
   last_holder: { status: 409, message: 'Last holder cannot be removed' },

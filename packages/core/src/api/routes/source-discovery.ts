@@ -1,4 +1,5 @@
 import type { OrgContext } from '../../db/port.js';
+import { discoveryRuleRoutes, type DiscoveryRuleRouteDeps } from './discovery-rules.js';
 import type { BulkDiscovery } from '../../sources/bulk-discovery.js';
 import { apiRoute, type ApiOutcome } from '../route.js';
 import { callContext, type ApiRouteDeps } from './context.js';
@@ -25,9 +26,11 @@ export function sourceDiscoveryRoutes(
         }[]
       >;
     };
+    readonly savedRules?: DiscoveryRuleRouteDeps;
   },
 ) {
   return [
+    ...(deps.savedRules === undefined ? [] : discoveryRuleRoutes(deps.savedRules)),
     apiRoute(SOURCE_DISCOVERY_API_SPECS[2], async ({ ctx }) => {
       const c = callContext(ctx, deps);
       return { status: 200, body: { items: await deps.connections.list(c.org) } };

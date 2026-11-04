@@ -71,6 +71,7 @@ const statuses = {
   reauth_required: 403,
   not_found: 404,
   conflict: 409,
+  discovery_rule_disabled: 409,
   source_paused: 409,
   duplicate: 409,
   last_holder: 409,

@@ -201,15 +201,27 @@ export function createCredentialRepository(executor: SqlExecutor): CredentialRep
     },
 
     async delete(ctx: OrgContext, id: string): Promise<boolean> {
-      const rows = await run<{ readonly id: string }>(
-        executor,
-        db
-          .deleteFrom('credential')
-          .where('org_id', '=', ctx.orgId)
-          .where('id', '=', id)
-          .returning('id'),
-      );
-      return rows.length > 0;
+      try {
+        const rows = await run<{ readonly id: string }>(
+          executor,
+          db
+            .deleteFrom('credential')
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', id)
+            .returning('id'),
+        );
+        return rows.length > 0;
+      } catch (error) {
+        if (error instanceof DbError && error.kind === 'foreign_key') {
+          const referenced = await executor.all({
+            sql: 'select 1 from source_discovery_rule where org_id=? and credential_id=? limit 1',
+            params: [ctx.orgId, id],
+          });
+          if (referenced.length > 0)
+            throw new DbError('foreign_key', 'Credential is referenced by discovery rules');
+        }
+        throw error;
+      }
     },
   };
 }

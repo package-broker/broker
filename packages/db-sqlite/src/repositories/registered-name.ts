@@ -1,7 +1,7 @@
 import { npmClaimCover } from './catalogue-predicates.js';
 import { isNpmClaim } from '@package-broker/core/sources/claim-admission';
 import { sql, type Expression, type SqlBool } from 'kysely';
-import type { MutationFence } from '@package-broker/core/authz/fence';
+import type { SourceMutationFence } from '@package-broker/core/authz/fence';
 import {
   MAX_PATTERN_BYTES,
   MAX_PATTERN_WILDCARDS,
@@ -23,7 +23,7 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
-import { actorHolds } from './actor-authority.js';
+import { sourceAuthority, discoverySourceOwned } from './discovery-rule-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 
@@ -115,12 +115,19 @@ function isProxy(type: string): boolean {
 export function createRegisteredNameRepository(executor: SqlExecutor): RegisteredNameRepository {
   function authority(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     projectId: string | null,
     providerAnchors: readonly ProtectedHolderProvider[],
+    discoverySourceId?: string,
   ): Guard {
     const permission = projectId === null ? 'org:sources:write' : 'project:sources:write';
-    return actorHolds(ctx, fence, { permission, projectId, providerAnchors });
+    const held = sourceAuthority(ctx, fence, { permission, projectId, providerAnchors });
+    if (!('ruleId' in fence)) return held;
+    return sql<SqlBool>`(${held} and ${discoverySourceOwned(ctx, fence, discoverySourceId ?? '')} and exists(select 1 from source ds
+      where ds.org_id=${ctx.orgId} and ds.id=${discoverySourceId ?? ''} and ds.project_id is null
+        and ds.type='vcs' and ds.status='paused' and ds.credential_id=${fence.credentialId}
+        and json_extract(ds.config_json,'$.provider')='github'
+        and json_extract(ds.config_json,'$.installationId')=${fence.installationId}))`;
   }
 
   async function holds(condition: Guard): Promise<boolean> {
@@ -231,7 +238,8 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
     },
 
     async add(ctx, fence, input) {
-      const held = authority(ctx, fence, null, input.providerAnchors);
+      if ('ruleId' in fence && input.replace) return 'forbidden';
+      const held = authority(ctx, fence, null, input.providerAnchors, input.sourceId);
       if (!(await holds(held))) return 'forbidden';
       if (
         input.idempotency !== undefined &&
@@ -396,6 +404,7 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
     },
 
     async remove(ctx, fence, input) {
+      if ('ruleId' in fence) return 'forbidden';
       const held = authority(ctx, fence, null, input.providerAnchors);
       if (!(await holds(held))) return 'forbidden';
       if (
@@ -460,7 +469,13 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
 
     async enable(ctx, fence, input) {
       const source = await readSource(ctx, input.id);
-      const held = authority(ctx, fence, source?.project_id ?? null, input.providerAnchors);
+      const held = authority(
+        ctx,
+        fence,
+        source?.project_id ?? null,
+        input.providerAnchors,
+        input.id,
+      );
       if (!(await holds(held))) return 'forbidden';
       if (
         input.idempotency !== undefined &&
@@ -495,6 +510,12 @@ export function createRegisteredNameRepository(executor: SqlExecutor): Registere
               .where('org_id', '=', ctx.orgId)
               .where('status', '=', 'paused'),
           ),
+          compile({
+            compile: () =>
+              sql`delete from source_discovery_admission where org_id=${ctx.orgId} and source_id=${input.id}`.compile(
+                db,
+              ),
+          }),
           auditPendingStatement(ctx, input.audit),
           ...(input.idempotency === undefined
             ? []

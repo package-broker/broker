@@ -28,7 +28,7 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 function stubDependencies(): ApiModuleDeps {
   const deps: Record<string, unknown> = {
     imports: {},
-    sourceDiscovery: { discovery: {}, ids: {}, clock: {} },
+    sourceDiscovery: { discovery: {}, savedRules: {}, ids: {}, clock: {} },
     trustedPublishers: {},
     notifications: {},
     packageAccessRequests: {},

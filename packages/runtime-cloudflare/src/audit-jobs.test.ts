@@ -177,6 +177,8 @@ describe.each([
           definition.schedule,
         ]),
       ).toEqual([
+        ['core:discovery-rules:v1', { everySeconds: 60 }],
+        ['core:discovery-rule:v1', undefined],
         ['core:vulnerability-sync:v1', { everySeconds: 300 }],
         ['core:retention-scan:v1', { everySeconds: 86400 }],
         ['core:blob-purge:v1', { everySeconds: 3600 }],

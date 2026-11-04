@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.4...cli-v2.0.0-rc.5) (2026-11-04)
+
+
+### Features
+
+* **core:** saved GitHub discovery rules with scheduled rescans ([#1048](https://github.com/package-broker/broker/issues/1048)) ([9a04483](https://github.com/package-broker/broker/commit/9a044833e906798fb60517a0cd719023e7a8f1a6))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.5
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.5
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.5
+    * @package-broker/runtime-node bumped to 2.0.0-rc.5
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.5
+
 ## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.3...cli-v2.0.0-rc.4) (2026-11-03)
 
 

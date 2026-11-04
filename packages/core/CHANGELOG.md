@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.4...core-v2.0.0-rc.5) (2026-11-04)
+
+
+### Features
+
+* **core:** saved GitHub discovery rules with scheduled rescans ([#1048](https://github.com/package-broker/broker/issues/1048)) ([9a04483](https://github.com/package-broker/broker/commit/9a044833e906798fb60517a0cd719023e7a8f1a6))
+* **ui:** GitHub organization picker for npm and Composer packages ([#1046](https://github.com/package-broker/broker/issues/1046)) ([196ac80](https://github.com/package-broker/broker/commit/196ac80d9c1579c0817806d9f07bc2a07f8be9a8))
+
 ## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/core-v2.0.0-rc.3...core-v2.0.0-rc.4) (2026-11-03)
 
 

@@ -1,3 +1,4 @@
+import { DiscoveryRules } from './sources/discovery-rules-view.js';
 import { MAX_NPM_NAME_LENGTH, MAX_PATTERN_BYTES } from '../package-limits.js';
 import { mirrorOutcome, sourceSyncResponse, SYNC_REQUESTED } from './sources/sync-copy.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
@@ -568,6 +569,7 @@ export function createSourcesModel(
       );
     },
     async replayed(result: ReplayResult) {
+      if (result.path.startsWith('/_pb/sources/discovery/')) return;
       const prefix =
         project === null ? '/_pb/sources' : `/_pb/projects/${encodeURIComponent(project)}/sources`;
       const namesChange = /^\/_pb\/sources\/[^/]+\/names(?:\/[^/]+)?$/.test(result.path);
@@ -1916,5 +1918,10 @@ export function SourcesPage() {
       }),
     [services, model],
   );
-  return <SourcesView key={project ?? 'organization'} model={model} />;
+  return (
+    <>
+      <SourcesView key={project ?? 'organization'} model={model} />
+      {project === null ? <DiscoveryRules services={services} /> : null}
+    </>
+  );
 }

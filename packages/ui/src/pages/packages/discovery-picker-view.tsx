@@ -4,6 +4,8 @@ import { Button } from '../../components/ui/button.js';
 import { Input } from '../../components/ui/input.js';
 import { Label } from '../../components/ui/label.js';
 import { Select } from '../../components/ui/select.js';
+import { connectionLabel, PATTERN_HELP } from './discovery-labels.js';
+import { prefillDiscoveryRule } from '../sources/discovery-rule-prefill.js';
 import { createDiscoveryPicker, discoveryReason } from './discovery-picker.js';
 
 export function DiscoveryPicker({
@@ -128,11 +130,7 @@ export function DiscoveryPicker({
               >
                 {state.connections.map((c, i) => (
                   <option key={`${c.credentialId}:${c.installationId}`} value={String(i)}>
-                    {c.sourceNames.join(', ')}
-                    {c.sourceCount > c.sourceNames.length
-                      ? ` and ${c.sourceCount - c.sourceNames.length} more sources`
-                      : ''}{' '}
-                    · Installation {c.installationId}
+                    {connectionLabel(c)}
                   </option>
                 ))}
               </Select>
@@ -156,9 +154,7 @@ export function DiscoveryPicker({
                   {state.patternError}
                 </p>
               ) : null}
-              <p id="discovery-pattern-help">
-                Use * for any name or ? for one character. The default * includes all names.
-              </p>
+              <p id="discovery-pattern-help">{PATTERN_HELP}</p>
             </div>
             <label className="flex min-h-11 items-center gap-2">
               <input
@@ -177,6 +173,35 @@ export function DiscoveryPicker({
               </Button>
             </div>
           </form>
+          <a
+            className="inline-flex min-h-11 items-center underline"
+            href="#/sources?discovery=new"
+            aria-disabled={state.busy || !state.connections[Number(state.connection)]}
+            aria-describedby="rule-prefill-help"
+            onClick={(event) => {
+              const chosen = state.connections[Number(state.connection)];
+              if (state.busy || !chosen) {
+                event.preventDefault();
+                return;
+              }
+              prefillDiscoveryRule(services, {
+                credentialId: chosen.credentialId,
+                installationId: chosen.installationId,
+                ecosystem,
+                pattern: state.pattern || '*',
+                includeForks: state.includeForks,
+              });
+            }}
+          >
+            Keep this selection up to date
+          </a>
+          <p id="rule-prefill-help">
+            {state.connections[Number(state.connection)] === undefined
+              ? 'Choose a connection to keep this selection up to date. '
+              : ''}
+            A rule scans all repositories matching these settings, including future matches.
+            Individual checkboxes do not limit the rule.
+          </p>
           {state.reviewed ? (
             <div className="space-y-4">
               <h3 ref={previewHeading} tabIndex={-1} className="font-semibold">

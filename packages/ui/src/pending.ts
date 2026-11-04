@@ -23,7 +23,9 @@ type RequestFields = Pick<
   'method' | 'path' | 'idempotencyKey' | 'body' | 'headers'
 >;
 
-export interface PendingDisplay {
+export type PendingDisplay = { label: string; effect: string; scope: string } | PackageDisplay;
+
+interface PackageDisplay {
   packageName: string;
   version: string;
   scope: string;
@@ -111,7 +113,7 @@ function validDisplay(value: unknown): value is PendingDisplay {
   return (
     isRecord(value) &&
     Object.keys(value).length === 3 &&
-    ['packageName', 'version', 'scope'].every(
+    ('label' in value ? ['label', 'effect', 'scope'] : ['packageName', 'version', 'scope']).every(
       (key) => typeof value[key] === 'string' && value[key].length > 0 && value[key].length <= 256,
     )
   );

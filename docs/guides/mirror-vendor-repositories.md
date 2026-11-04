@@ -166,6 +166,18 @@ Select up to 20 repositories per import, individually or with **Select all on pa
 
 API callers first use `GET /_pb/sources/discovery/connections` with an organization session holding `org:sources:write`. It returns up to 100 connection `items` containing an opaque `credentialId`, numeric `installationId`, up to five `sourceNames`, and the full `sourceCount`. Only organization-owned, organization-level GitHub App credentials referenced by organization GitHub sources appear. Credential material is never decrypted by this read. Pass the selected credential and installation to `POST /_pb/sources/discovery/plan`, then import the reviewed repositories with `POST /_pb/sources/discovery/apply`. Set `ecosystem` to `composer` in both calls. <!-- source: packages/core/src/api/routes/source-discovery-schemas.ts --> <!-- source: packages/db-sqlite/src/repositories/discovery-connections.ts --> <!-- source: packages/ui/src/pages/packages/discovery-picker.ts -->
 
+## Manage saved discovery rules in the admin UI
+
+Open **Sources** at organization scope and find **Discovery rules**. Source managers can choose **Create discovery rule**, enter a name, select a named GitHub connection, choose the ecosystem and repository pattern, include forks if needed, and set the interval and enabled state. The interval ranges from one hour to 30 days. Saving a new rule or changing its GitHub connection may ask you to sign in again; review and explicitly confirm the held action afterward.
+
+From the GitHub repository picker, **Keep this selection up to date** opens a new rule with the selected connection, ecosystem, pattern and forks. A rule covers every matching repository, including future matches; the picker's individual checkboxes do not limit it. Rules create shared organization sources. Attach those sources to projects to use their packages.
+
+The list shows the schedule, last completed counts and skipped repositories with explanations. Source managers also see current-run counts, repositories remaining in the current page, whether more pages remain, and GitHub rate-limit deadlines. Members with source-read permission see a summary without connection or progress details and cannot change rules. **Run now** requests a scan on a scheduler tick; it does not mean the scan finished and does not bypass GitHub backoff. Reload the list to check progress.
+
+Use **More** to edit, enable, disable or delete a rule. Changing the connection, ecosystem, pattern or forks restarts its scan; changing its name or interval preserves progress. Disabling stops an active scan. Deletion asks for confirmation and leaves imported sources in place. If someone changes the rule while you edit, your draft stays visible beside the newer rule; choose **Use latest settings and review** before saving again. Duplicate names require another name.
+
+Last-run details retain up to 50 skip explanations. The saved-rule API retains failure counts and a run-level failure reason, but no completed per-repository failure list. Per-repository failures are not retained.
+
 ## Next
 
 Use [Access model](../reference/access-model.md) to check roles and token scopes, [Composer](../clients/composer.md) for client setup, or return to [Troubleshoot credentials](#troubleshoot-credentials) for vendor credential failures. See [Troubleshooting Composer and npm installs](../troubleshooting/index.md) for error-specific checks.

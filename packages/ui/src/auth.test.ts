@@ -931,3 +931,70 @@ it.each([
   const returnTo = (request.mock.calls[0]![2] as { body: { returnTo: string } }).body.returnTo;
   expect(reauthReturnHash(returnTo.slice(returnTo.indexOf('#')))).toBe(expected);
 });
+
+it('stores discovery confirmation labels, hides rule IDs, and replays the same idempotency key', async () => {
+  const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const { storage } = memoryStorage();
+  const { client, request } = fakeClient();
+  const flow = createReauthFlow({ client, storage, now: Date.now, navigate: vi.fn() });
+  flow.requireReauth(
+    {
+      method: 'POST',
+      path: '/_pb/sources/discovery/rules/' + id + '/run',
+      idempotencyKey: 'discovery-key',
+      body: {},
+    },
+    {
+      credential: false,
+      secretFields: [],
+      display: {
+        label: 'Change discovery rule Acme libraries',
+        effect: 'Request a scan on the next scheduler tick.',
+        scope: 'Organization sources',
+      },
+    },
+    '#/sources',
+  );
+  flow.restore();
+  const html = renderToString(
+    createElement(ReauthConfirmContent, {
+      action: flow.snapshot().action,
+      onConfirm: vi.fn(),
+      onDecline: vi.fn(),
+    }),
+  );
+  expect(html).toContain('Change discovery rule Acme libraries');
+  expect(html).toContain('Request a scan on the next scheduler tick.');
+  expect(html).not.toContain(id);
+  await flow.confirm();
+  expect(request).toHaveBeenCalledWith(
+    'post',
+    '/_pb/sources/discovery/rules/' + id + '/run',
+    expect.objectContaining({ idempotencyKey: 'discovery-key' }),
+  );
+});
+
+it('notifies a held discovery form when confirmation is declined', () => {
+  const { storage } = memoryStorage();
+  const flow = createReauthFlow({
+    client: fakeClient().client,
+    storage,
+    now: Date.now,
+    navigate: vi.fn(),
+  });
+  const listener = vi.fn();
+  flow.subscribeReplay(listener);
+  flow.requireReauth(
+    { method: 'POST', path: '/_pb/sources/discovery/rules' },
+    { credential: false, secretFields: [] },
+    '#/sources',
+  );
+  flow.restore();
+  flow.decline();
+  expect(listener).toHaveBeenCalledWith({
+    path: '/_pb/sources/discovery/rules',
+    ok: false,
+    status: 0,
+    cancelled: true,
+  });
+});

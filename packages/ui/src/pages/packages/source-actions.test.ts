@@ -131,7 +131,24 @@ describe('Add package choices', () => {
     expect(html).toContain('Coming soon');
     expect(html).toContain('#947');
   });
-  it('omits Composer Git choices for npm', () => {
+  it('does not give project source managers organization discovery controls', () => {
+    const html = renderToString(
+      createElement(AddChoices, {
+        ecosystem: 'npm',
+        mirror: true,
+        setup: true,
+        orgManager: false,
+        imported: false,
+        onMirror: vi.fn(),
+        onDiscovery: vi.fn(),
+        sourceLink: '#/sources?create=vcs&project=demo',
+      }),
+    );
+    expect(html).toContain('Ask an organization source manager to connect GitHub.');
+    expect(html).not.toContain('Choose GitHub repositories');
+    expect(html).toContain('href="#/sources?create=vcs&amp;project=demo&amp;provider=github"');
+  });
+  it('offers GitHub discovery and omits Composer imports for npm', () => {
     const html = renderToString(
       createElement(AddChoices, {
         ecosystem: 'npm',
@@ -142,8 +159,11 @@ describe('Add package choices', () => {
         sourceLink: '#/sources?create=vcs',
       }),
     );
+    expect(html).not.toContain('Choose GitHub repositories');
     expect(html).not.toContain('By repository URL');
-    expect(html).not.toContain('GitHub organization');
+    expect(html).toContain('GitHub organization');
+    expect(html).not.toContain('Import configuration');
+    expect(html).not.toContain('pb import satis plan');
     expect(html).toContain('connected npm registry');
   });
 });

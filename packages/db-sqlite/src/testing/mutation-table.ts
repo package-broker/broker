@@ -1,3 +1,4 @@
+import { entries as discoveryConnectionsEntries } from './mutation-table/discovery-connections.js';
 import { entries as npmTokensEntries } from './mutation-table/npm-tokens.js';
 import { entries as npmDistTagEntries } from './mutation-table/npm-dist-tags.js';
 import { entries as npmUnpublishEntries } from './mutation-table/npm-unpublish.js';
@@ -160,6 +161,7 @@ export const mutationTable: readonly MutationEntry[] = [
   ...npmTokensEntries,
   ...npmVcsBuildEntries,
   ...discoveryEntries,
+  ...discoveryConnectionsEntries,
   ...publishGuardEntries,
   ...publishesEntries,
   ...readmeEntries,

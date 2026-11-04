@@ -1,3 +1,4 @@
+import { createDiscoveryConnections } from './discovery-connections.js';
 import { createConfiguredGithubDiscovery } from '@package-broker/core/sources/configured-discovery';
 import { UpstreamError, type PolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createDiscoveryRepositoryReader } from './discovery.js';
@@ -198,6 +199,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     const notificationReads = createNotificationReadRepository(executor);
     const module = createApiModule({
       sourceDiscovery: {
+        connections: createDiscoveryConnections(executor),
         ...common,
         discovery: createConfiguredGithubDiscovery({
           credentials: credentialRepository,

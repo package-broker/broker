@@ -26,11 +26,17 @@ async function harness(platform: 'node' | 'cloudflare', permissions = ['org:sour
       nextCursor: '2',
     },
   });
+  const list = vi
+    .fn()
+    .mockResolvedValue([
+      { credentialId, installationId: 42, sourceNames: ['Acme'], sourceCount: 1 },
+    ]);
   const app = await createKernel({
     platform,
     plugins: [],
     coreRoutes: sourceDiscoveryRoutes({
       discovery: { dryRun, apply },
+      connections: { list },
       ids: { ulid },
       clock,
       clientIp: () => null,
@@ -67,20 +73,20 @@ async function harness(platform: 'node' | 'cloudflare', permissions = ['org:sour
       providerAnchors: async () => [],
     }),
   });
-  const request = (path: string, body: unknown) =>
+  const request = (path: string, body: unknown, authenticated = true) =>
     app.fetch(
       new Request(origin + path, {
-        method: 'POST',
+        method: body === undefined ? 'GET' : 'POST',
         headers: {
           origin,
           'content-type': 'application/json',
-          cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}`,
+          ...(authenticated ? { cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` } : {}),
           'x-csrf-token': csrf,
         },
-        body: JSON.stringify(body),
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
     );
-  return { request, dryRun, apply };
+  return { request, dryRun, apply, list };
 }
 
 it.each(['node', 'cloudflare'] as const)(
@@ -140,3 +146,32 @@ it('rejects oversized repository pages before invoking discovery', async () => {
   ).toBe(400);
   expect(h.apply).not.toHaveBeenCalled();
 });
+
+it.each(['node', 'cloudflare'] as const)(
+  'lists connections only for organization source managers on %s',
+  async (platform) => {
+    const allowed = await harness(platform);
+    const response = await allowed.request('/_pb/sources/discovery/connections', undefined);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      items: [{ credentialId, installationId: 42, sourceNames: ['Acme'], sourceCount: 1 }],
+    });
+    expect(allowed.list).toHaveBeenCalledExactlyOnceWith(orgContext('org'));
+    const denied = await harness(platform, ['org:sources:read']);
+    expect((await denied.request('/_pb/sources/discovery/connections', undefined)).status).toBe(
+      403,
+    );
+    expect(denied.list).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['node', 'cloudflare'] as const)(
+  'does not list connections without a session on %s',
+  async (platform) => {
+    const h = await harness(platform);
+    expect((await h.request('/_pb/sources/discovery/connections', undefined, false)).status).toBe(
+      401,
+    );
+    expect(h.list).not.toHaveBeenCalled();
+  },
+);

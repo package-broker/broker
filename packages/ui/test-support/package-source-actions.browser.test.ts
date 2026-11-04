@@ -97,6 +97,23 @@ afterAll(async () => {
 });
 
 describe('Packages source actions in Chromium', () => {
+  it('offers the organization picker and organization setup link to organization managers', async (context) => {
+    context.skip(!fixture, 'Chromium unavailable');
+    if (!fixture) return;
+    write = true;
+    await fixture.mount(script, { fixtureProject: null });
+    await fixture.page.getByRole('button', { name: 'Add package', exact: true }).click();
+    await fixture
+      .browserExpect(
+        fixture.page.getByRole('button', { name: 'Choose GitHub repositories', exact: true }),
+      )
+      .toBeVisible();
+    await fixture
+      .browserExpect(
+        fixture.page.getByRole('link', { name: 'Set up a GitHub repository source', exact: true }),
+      )
+      .toHaveAttribute('href', '#/sources?create=vcs&provider=github');
+  });
   it.for([1440, 1024, 768, 390])(
     'supports keyboard requests and contained layouts at %i px',
     { timeout: 30_000 },

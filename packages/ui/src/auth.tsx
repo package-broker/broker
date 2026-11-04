@@ -208,6 +208,7 @@ export interface ReauthState {
 }
 
 export interface ReplayResult {
+  readonly cancelled?: boolean;
   readonly createdSourceId?: string;
   readonly path: string;
   readonly ok: boolean;
@@ -279,7 +280,12 @@ export function createReauthFlow(deps: {
     },
 
     decline(): void {
+      const { action } = store.get();
       store.set({ dialog: 'closed', action: null, outcome: null });
+      if (action?.path.startsWith('/_pb/sources/discovery/rules')) {
+        for (const listener of replayListeners)
+          listener({ path: action.path, ok: false, status: 0, cancelled: true });
+      }
     },
 
     async confirm(): Promise<void> {
@@ -854,6 +860,12 @@ function restoredProjectSlug(action: PendingAction | null) {
 }
 
 export function pendingActionDescription(action: PendingAction | null) {
+  if (action?.display && 'label' in action.display)
+    return {
+      label: action.display.label,
+      effect: action.display.effect,
+      destructive: action.method === 'DELETE',
+    };
   if (restoredProjectSlug(action)) {
     return {
       label: 'Restore project',
@@ -923,7 +935,7 @@ export function ReauthConfirmContent(props: {
             <dd>{projectSlug}</dd>
           </>
         ) : null}
-        {display ? (
+        {display && 'packageName' in display ? (
           <>
             <dt>Package</dt>
             <dd>{display.packageName}</dd>
@@ -958,7 +970,7 @@ export function ReauthConfirmContent(props: {
         <dt>Effect</dt>
         <dd>{description.effect}</dd>
       </dl>
-      {request ? (
+      {request && !(display && 'label' in display) ? (
         <details>
           <summary className="cursor-pointer text-sm text-blue-700">Request details</summary>
           <div className="mt-2 flex min-w-0 items-start gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-3">

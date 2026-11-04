@@ -3042,3 +3042,16 @@ it('keeps the source draft open on a stale revision and sends the displayed revi
     'This source changed while you were editing. Reload the latest settings before saving.',
   );
 });
+
+it('ignores discovery replays without changing a Sources draft or loading its list', async () => {
+  const fetch = vi.fn();
+  const model = createSourcesModel(
+    { client: createApiClient({ fetch, readCookie: () => undefined }), requireReauth: vi.fn() },
+    null,
+  );
+  model.openEditor();
+  const before = model.snapshot();
+  await model.replayed({ ok: true, status: 201, path: '/_pb/sources/discovery/rules' });
+  expect(model.snapshot()).toBe(before);
+  expect(fetch).not.toHaveBeenCalled();
+});

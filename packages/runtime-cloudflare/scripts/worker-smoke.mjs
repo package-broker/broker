@@ -693,9 +693,8 @@ async function run() {
     assert.deepEqual(
       schedules.map((row) => [row.name, row.every_seconds]),
       [
-        ['core:audit-export-otlp:v1', 60],
-        ['core:audit-export-webhook:v1', 60],
         ['core:audit-frontier:v1', 86400],
+        ['core:audit-head:v1', 86400],
         ['core:audit-health-observe:v1', 60],
         ['core:audit-maintain:v1', 60],
         ['core:audit-seal:v1', 60],
@@ -921,6 +920,39 @@ async function run() {
     console.log(
       `smoke:cloudflare bundle excludes vitest (${bundled.length} files, ${Object.keys(metafile.inputs).length} inputs)`,
     );
+
+    step = 'checking audit schedules with destinations';
+    const active = await createMiniflare(workerScript, basename(workerScript), {
+      PB_AUDIT_OTLP_ENDPOINT: 'https://audit.example.test/v1/logs',
+      PB_AUDIT_OTLP_HEADERS: 'Authorization=smoke',
+      PB_AUDIT_WEBHOOK_URL: 'https://audit.example.test/archive',
+      PB_AUDIT_WEBHOOK_HEADERS: 'Authorization=smoke',
+    });
+    try {
+      const activeExecutor = createD1Executor(await active.getD1Database('DB'));
+      await migrate(activeExecutor, migrations, { holder: 'smoke' });
+      const activeOrgId = ulid();
+      await createOrganizationBootstrap(activeExecutor).bootstrap({
+        id: activeOrgId,
+        slug: 'smoke',
+        name: 'Smoke',
+        now: new Date().toISOString(),
+      });
+      await (await active.getWorker()).scheduled();
+      const exportSchedules = await activeExecutor.all({
+        sql: "SELECT name, every_seconds FROM job_schedule WHERE org_id = ? AND enabled = 1 AND name LIKE 'core:audit-export-%' ORDER BY name",
+        params: [activeOrgId],
+      });
+      assert.deepEqual(
+        exportSchedules.map((row) => [row.name, row.every_seconds]),
+        [
+          ['core:audit-export-otlp:v1', 60],
+          ['core:audit-export-webhook:v1', 60],
+        ],
+      );
+    } finally {
+      await disposeMiniflare(active);
+    }
 
     if (PREBUILT) {
       await checkRuntimeSsoProviders(limitMs);

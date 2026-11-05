@@ -95,6 +95,27 @@ export function auditLogs(output: string): Record<string, unknown>[] {
   );
 }
 
+export async function verifierLogs(readLogs: () => string, jobId: string) {
+  const logs = () => auditLogs(readLogs()).filter((log) => log['job_id'] === jobId);
+  // Health alerts precede the verdict and can arrive in a separate stdout chunk.
+  await until(
+    async () =>
+      logs().some((log) =>
+        [
+          'audit.verified',
+          'audit.chain_broken',
+          'audit.verify_partial',
+          'audit.verify_continued',
+        ].includes(String(log['event'])),
+      ),
+    'audit-verifier-log',
+    10_000,
+  ).catch((error: unknown) => {
+    throw new Error('MissingRuntimeVerifierEvidence', { cause: error });
+  });
+  return logs();
+}
+
 function dispatcher(broker: LocalBroker, orgId: string, deadline: number) {
   return async (kind: 'seal' | 'verify') => {
     const id = await broker.jobs.enqueue(`core:audit-${kind}:v1`);
@@ -164,15 +185,8 @@ export async function auditScenario(runtime: Runtime) {
         const verify = async () => {
           const offset = broker.logs().length;
           const jobId = await job('verify');
-          const logs = () =>
-            auditLogs(broker.logs().slice(offset)).filter((log) => log['job_id'] === jobId);
           // The Node child's stdout can trail the job row reaching its settled state.
-          await until(async () => logs().length > 0, 'audit-verifier-log', 10_000).catch(
-            (error: unknown) => {
-              throw new Error('MissingRuntimeVerifierEvidence', { cause: error });
-            },
-          );
-          return logs();
+          return verifierLogs(() => broker.logs().slice(offset), jobId);
         };
         const baseline = await verify();
         assert(

@@ -171,16 +171,29 @@ export const staleSealRace = `
           throw new Error('FixtureStaleSealNotReached');
         const winner = await createAuditSealRepository(executor).seal(org);
         const sealed = await readChain();
-        await run('UPDATE audit_sink SET next_attempt_at = NULL WHERE org_id = ? AND sink_id = ?', [orgId, 'webhook']);
-        const delivered = await exportOnce(port, options, lease, new AbortController().signal);
-        const ack = (await port.read(org, 'webhook')).sink;
+        let ack = (await port.read(org, 'webhook')).sink;
+        let delivered;
+        let deliveries = 0;
+        const deadline = Date.now() + 20000;
+        while (ack.progressSeq < sealed.head_seq || ack.custodySeq < sealed.head_seq) {
+          if (Date.now() >= deadline) throw new Error('FixtureCustodyDeadline');
+          const before = ack;
+          await run('UPDATE audit_sink SET next_attempt_at = NULL WHERE org_id = ? AND sink_id = ?', [orgId, 'webhook']);
+          delivered = await exportOnce(port, options, lease, new AbortController().signal);
+          deliveries++;
+          ack = (await port.read(org, 'webhook')).sink;
+          if (delivered !== 'accepted' ||
+              (ack.progressSeq <= before.progressSeq && ack.custodySeq <= before.custodySeq &&
+               ack.inflightBody === before.inflightBody && ack.inflightRepr === before.inflightRepr))
+            throw new Error('FixtureDurableCustodyNotAdvancing');
+        }
         const prune = await pruneAudit(createAuditPruneRepository(executor), org, {
           generation: options.generation, configuredSinkIds: ['webhook'], trailActive: false
         });
         const pruned = await readChain();
         release.resolve();
         const outcome = await stale;
-        return c.json({ outcome: outcome.outcome, attempted, winner: winner.outcome, delivered,
+        return c.json({ outcome: outcome.outcome, attempted, winner: winner.outcome, delivered, deliveries,
           sealed, ack: { progress_seq: ack.progressSeq, custody_seq: ack.custodySeq },
           prune: prune.outcome, pruned, afterStale: await readChain() });
       } finally {

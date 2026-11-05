@@ -6,6 +6,7 @@ export interface StaleSealOutcome {
   attempted: number;
   winner: string;
   delivered: string;
+  deliveries: number;
   sealed: Record<string, unknown> & { head_seq: number };
   ack: { progress_seq: number; custody_seq: number };
   prune: string;

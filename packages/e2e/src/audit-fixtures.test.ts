@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { retentionBundle } from './audit-retention-fixture.js';
 import { deliveryBuild, deliveryEntry } from './audit-delivery-fixture.js';
 import { assertWireIdentity, decodeOtlp } from './audit-wire-fixture.js';
+import { captureWorkerLogs } from './local.js';
 import {
   postponeRequiredSchedules,
   requiredBundle,
@@ -75,6 +76,69 @@ function bundleTransport(bundle: string): ResolveDestination {
 }
 
 describe('audit bundle fixtures', () => {
+  it('captures real Workers warning objects as JSON while preserving log projection', async () => {
+    const original = await source('cloudflare');
+    const patched = captureWorkerLogs(original);
+    const execute = (bundle: string) => {
+      const declaration = (name: string) => {
+        const start = bundle.indexOf(`function ${name}(`);
+        assert(start >= 0, 'WorkerLogFunctionMissing');
+        return bundle.slice(start, bundle.indexOf('\n}', start) + 2);
+      };
+      const prelude = [
+        /var LOG_FIELDS = \[[\s\S]*?\];/,
+        /var AE_BLOB_BUDGET_BYTES = [^;]+;/,
+        /var DEPLOYMENT_ID\d* = [^;]+;/,
+        /var ENCODER\d* = new TextEncoder\(\);/g,
+      ]
+        .flatMap((pattern) => [...bundle.matchAll(new RegExp(pattern, 'g'))].map((m) => m[0]))
+        .join('\n');
+      const logs: string[] = [];
+      const errors: string[] = [];
+      const create = runInNewContext(
+        prelude +
+          declaration('projectLogFields') +
+          declaration('createWorkersSink') +
+          ';createWorkersSink',
+        {
+          TextEncoder,
+          console: {
+            log: (v: unknown) => logs.push(String(v)),
+            error: (v: unknown) => errors.push(String(v)),
+          },
+        },
+      );
+      const sink = create({ deploymentId: 'fixture', analytics: { writeDataPoint() {} } });
+      sink.emit({
+        kind: 'log',
+        record: {
+          level: 'warn',
+          event: 'audit.delivery_partial_success',
+          reason_code: 'audit.partial_success',
+          sink_id: 'otlp',
+          email: 'private@example.test',
+          receiver_message: 'receiver-canary',
+        },
+      });
+      return { logs, errors };
+    };
+    expect(execute(original).errors).toEqual(['[object Object]']);
+    const { logs, errors } = execute(patched);
+    expect(logs).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(JSON.parse(errors[0]!)).toEqual({
+      level: 'warn',
+      event: 'audit.delivery_partial_success',
+      reason_code: 'audit.partial_success',
+      sink_id: 'otlp',
+    });
+    expect(errors[0]).not.toContain('private@example.test');
+    expect(errors[0]).not.toContain('receiver-canary');
+    expect(() => captureWorkerLogs(patched)).toThrow('WorkerLogCaptureTargetMissing');
+    expect(() => captureWorkerLogs('')).toThrow('WorkerLogCaptureTargetMissing');
+    expect(() => captureWorkerLogs(original + original)).toThrow('WorkerLogCaptureTargetMissing');
+  });
+
   it.each(['node', 'cloudflare'] as const)(
     '%s delivery starts with valid destinations and preserves the real transport',
     async (runtime) => {

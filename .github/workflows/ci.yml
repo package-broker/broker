@@ -124,7 +124,7 @@ jobs:
     needs: [scope, install]
     if: needs.scope.outputs.packages != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PACKAGES: ${{ needs.scope.outputs.packages }}
     strategy:

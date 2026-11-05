@@ -201,6 +201,25 @@ describe('OTLP audit sink', () => {
     );
   });
 
+  it.each([
+    ['', '/v1/logs'],
+    ['/tenant/', '/tenant/v1/logs'],
+    ['/v1/logs', '/v1/logs'],
+    ['/tenant/v1/logs', '/tenant/v1/logs'],
+    ['/tenant/v1/logs///', '/tenant/v1/logs'],
+    ['/v1/logs-other', '/v1/logs-other/v1/logs'],
+  ])('appends the generic endpoint suffix once for %s', (path, expected) => {
+    const destination = auditOtlp({ id: 'archive' }).auditSinks[0]!.destination;
+    if (destination.protocol !== 'otlp-http-json') throw new Error('Unexpected protocol');
+    expect(
+      parseAuditOtelEnvironment(
+        (name) =>
+          name === 'OTEL_EXPORTER_OTLP_ENDPOINT' ? `https://collector.example${path}` : undefined,
+        destination,
+      )?.endpoint,
+    ).toBe(`https://collector.example${expected}`);
+  });
+
   it('uses core endpoint precedence and isolates PB credentials', () => {
     const destination = auditOtlp({ id: 'archive' }).auditSinks[0]!.destination;
     if (destination.protocol !== 'otlp-http-json') throw new Error('Unexpected protocol');

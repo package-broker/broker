@@ -286,7 +286,8 @@ export function parseAuditOtelEnvironment(
       throw new AuditSinkConfigError('invalid_endpoint');
     }
     if (name === 'OTEL_EXPORTER_OTLP_ENDPOINT') {
-      url.pathname = url.pathname.replace(/\/+$/, '') + '/v1/logs';
+      const path = url.pathname.replace(/\/+$/, '');
+      url.pathname = path.endsWith('/v1/logs') ? path : path + '/v1/logs';
     }
     const rawHeaders =
       name === endpointName

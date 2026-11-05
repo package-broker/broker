@@ -13,15 +13,18 @@ Visit [package.broker](https://package.broker), follow the [Cloudflare quickstar
 
 ## Packages
 
-| Package                              | Purpose                                                                                                                    |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `@package-broker/core`               | Plugin API (`./plugin`) and config API (`./config`)                                                                        |
-| `@package-broker/runtime-cloudflare` | Worker entry                                                                                                               |
-| `@package-broker/runtime-node`       | Node HTTP entry                                                                                                            |
-| `@package-broker/cli`                | `pb` commands: `build`, `migrate`, `bootstrap`, `cloudflare`, `secrets`, `admin`, `import`, `source`, `openapi`, `version` |
-| `@package-broker/ui`                 | Static UI assets                                                                                                           |
-| `@package-broker/ui-assets`          | Build-time bridge that hands the UI to `pb build`                                                                          |
-| `@package-broker/plugin-*`           | First-party plugins (`sso-oidc`, `github`)                                                                                 |
+| Package                                | Purpose                                                                                                                    |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `@package-broker/core`                 | Plugin API (`./plugin`) and config API (`./config`)                                                                        |
+| `@package-broker/runtime-cloudflare`   | Worker entry                                                                                                               |
+| `@package-broker/runtime-node`         | Node HTTP entry                                                                                                            |
+| `@package-broker/cli`                  | `pb` commands: `build`, `migrate`, `bootstrap`, `cloudflare`, `secrets`, `admin`, `import`, `source`, `openapi`, `version` |
+| `@package-broker/ui`                   | Static UI assets                                                                                                           |
+| `@package-broker/ui-assets`            | Build-time bridge that hands the UI to `pb build`                                                                          |
+| `@package-broker/plugin-*`             | First-party identity and source plugins (`sso-oidc`, `github`)                                                             |
+| `@package-broker/plugin-audit-trail`   | Audit browsing and verification access                                                                                     |
+| `@package-broker/plugin-audit-otlp`    | Audit export to OTLP/HTTP JSON collectors                                                                                  |
+| `@package-broker/plugin-audit-webhook` | Audit export to a receiver with ACK and frontier support                                                                   |
 
 ## Source selection
 

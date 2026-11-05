@@ -130,7 +130,7 @@ describe('audit OTEL environment', () => {
     });
     expect(
       parse({ OTEL_EXPORTER_OTLP_ENDPOINT: 'https://generic.example/v1/logs/' })?.endpoint,
-    ).toBe('https://generic.example/v1/logs/v1/logs');
+    ).toBe('https://generic.example/v1/logs');
     expect(parse({})).toBeNull();
   });
 

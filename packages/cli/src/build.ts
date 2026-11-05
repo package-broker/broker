@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -95,7 +95,7 @@ async function loadConfig(configPath: string, cwd: string): Promise<BrokerConfig
     cwd,
     '.pb',
     'config',
-    `${createHash('sha256').update(configPath).digest('hex').slice(0, 12)}.mjs`,
+    `${createHash('sha256').update(configPath).digest('hex').slice(0, 12)}-${process.pid}-${randomUUID()}.mjs`,
   );
   await esbuild({
     entryPoints: [configPath],

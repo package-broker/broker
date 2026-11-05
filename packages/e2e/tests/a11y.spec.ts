@@ -26,7 +26,7 @@ const test = base.extend<{ broker: Fixture; admin: Admin; adminPage: Page }>({
     async ({}, use) => {
       const broker = await startNodeFixture();
       try {
-        seedLists(broker);
+        await seedLists(broker);
         await use(broker);
       } finally {
         await broker.stop();

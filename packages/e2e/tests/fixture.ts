@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { seedAuditList } from '../dist/browser/audit-list-fixture.js';
 import type { Fixture } from '../dist/browser/fixtures.js';
 import {
   expect,
@@ -224,9 +225,9 @@ export function fixtureDatabase<T>(fixture: Fixture, run: (db: DatabaseSync, org
   }
 }
 
-export function seedLists(fixture: Fixture): void {
-  fixtureDatabase(fixture, (db, org) => {
-    const project = '01J00000000000000000000001';
+export async function seedLists(fixture: Fixture): Promise<void> {
+  const project = '01J00000000000000000000001';
+  const orgId = fixtureDatabase(fixture, (db, org) => {
     const source = '01J00000000000000000000002';
     db.prepare('INSERT INTO project (id, org_id, slug, name) VALUES (?, ?, ?, ?)').run(
       project,
@@ -259,15 +260,7 @@ export function seedLists(fixture: Fixture): void {
     db.prepare(
       "INSERT INTO import_run (id, org_id, source_system, state, plan_hash, planned_count) VALUES (?, ?, 'satis', 'planned', ?, 1)",
     ).run('01J00000000000000000000004', org, 'a'.repeat(64));
-    db.prepare(
-      "INSERT INTO audit_event (id, org_id, seq, prev_hash, hash, created_at, actor_type, action, target_type, target_id) VALUES (?, ?, 1, ?, ?, ?, 'system', 'project.create', 'project', ?)",
-    ).run(
-      '01J00000000000000000000005',
-      org,
-      '0'.repeat(64),
-      '1'.repeat(64),
-      new Date().toISOString(),
-      project,
-    );
+    return org;
   });
+  await seedAuditList(fixture.database!, orgId, project);
 }

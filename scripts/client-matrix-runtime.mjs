@@ -1,4 +1,5 @@
 import github from '../packages/plugin-github/dist/index.js';
+import { auditTrail } from '../packages/plugin-audit-trail/dist/index.js';
 import matrixScanner from '../fixtures/client-matrix-scanner.mjs';
 import { createJobLoop } from '../packages/runtime-node/dist/jobs/loop.js';
 import { runJoinedJourneys } from './client-matrix-joined.mjs';
@@ -400,21 +401,7 @@ async function bootNode(directory, origin, audits, cleanup, options = {}) {
   cleanup.push(() => db.close());
   const seeded = await seed(db.executor, options);
   const transport = options.fixture?.fetch ?? ((request) => fixtureReply(request, audits));
-  const broker = createNodeServerWithSeams(
-    options.joined ? [github(), matrixScanner(transport)] : [],
-    {
-      executor: db.executor,
-      auth: { keyring, publicOrigin: origin, env: {} },
-      platformServices: {
-        blob: await openMatrixBlobStore(db.executor, directory, origin),
-        cache: createLruCache({}),
-        jobStore: createJobRepository(db.executor),
-      },
-      registry: { config: resolveRegistryConfig(undefined, 'node', origin) },
-      log: () => undefined,
-    },
-    { transport: (input, init) => transport(new Request(input, init)) },
-  );
+  const broker = await createMatrixNodeBroker(db.executor, directory, origin, transport, options);
   cleanup.push(() => broker.close());
   const kernel = await broker.ready();
   if (options.joined) {
@@ -442,6 +429,24 @@ async function bootNode(directory, origin, audits, cleanup, options = {}) {
         signal: AbortSignal.timeout(30_000),
       }),
   };
+}
+
+export async function createMatrixNodeBroker(executor, directory, origin, transport, options = {}) {
+  return createNodeServerWithSeams(
+    [auditTrail(), ...(options.joined ? [github(), matrixScanner(transport)] : [])],
+    {
+      executor,
+      auth: { keyring, publicOrigin: origin, env: {} },
+      platformServices: {
+        blob: await openMatrixBlobStore(executor, directory, origin),
+        cache: createLruCache({}),
+        jobStore: createJobRepository(executor),
+      },
+      registry: { config: resolveRegistryConfig(undefined, 'node', origin) },
+      log: () => undefined,
+    },
+    { transport: (input, init) => transport(new Request(input, init)) },
+  );
 }
 
 async function bootWorker(directory, origin, audits, cleanup, options) {

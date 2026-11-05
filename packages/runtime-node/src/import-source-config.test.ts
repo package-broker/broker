@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { newSessionSecrets } from '@package-broker/core/auth/session';
 import type { Statement } from '@package-broker/core/db/port';
@@ -187,8 +188,9 @@ async function testImport(legacy: boolean) {
     ],
   };
   const records: Readonly<Record<string, unknown>>[] = [];
-  const broker = createNodeServer([plugin], {
+  const broker = createNodeServer([plugin, auditTrail()], {
     executor: db.executor,
+    audit: { capacity: { maxJournalBytes: 67108864 } },
     auth: { keyring, publicOrigin: ORIGIN, env: {} },
     platformServices: {
       blob: blobs,

@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { expect, it, vi } from 'vitest';
 import { orgContext } from '@package-broker/core/db/port';
 import { createUnlinkRepository } from '@package-broker/db-sqlite/repositories/unlink';
@@ -37,6 +38,7 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
       };
     }
     if (/from (?:local_login|credential|token)\b/i.test(sql)) return { results: [] };
+    if (/from "organization"/i.test(sql)) return { results: [] };
     throw new Error('unexpected SQL');
   };
   const make = (sql: string, values: unknown[]): Recorded => ({
@@ -53,7 +55,10 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
 }
 
 it('builds unlink holder checks without a host freshness clock', async () => {
-  const worker = createWorker([], { log: () => undefined });
+  const worker = createWorker([auditTrail()], {
+    audit: {},
+    log: () => undefined,
+  });
   const response = await worker.fetch(
     new Request('https://broker.example.test/_pb/auth/providers'),
     {

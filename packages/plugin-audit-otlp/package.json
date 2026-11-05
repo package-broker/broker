@@ -1,0 +1,30 @@
+{
+  "name": "@package-broker/plugin-audit-otlp",
+  "version": "0.1.0-rc.0",
+  "description": "OTLP/HTTP JSON audit sink plugin",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "peerDependencies": {
+    "@package-broker/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@package-broker/core": "workspace:^"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/package-broker/broker.git",
+    "directory": "packages/plugin-audit-otlp"
+  }
+}

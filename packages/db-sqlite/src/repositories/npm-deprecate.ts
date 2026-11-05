@@ -8,7 +8,7 @@ import {
 import { assertCheck, compile, db, newOpId } from '../kysely.js';
 import { monotonicNow } from '../internal/catalogue-write-guard.js';
 import { assertPublishBinding } from './catalogue-publish-guard.js';
-import { assertAuditPendingEvent } from './audit-pending.js';
+import { assertAuditPendingEvent, auditPendingStatement } from './audit-pending.js';
 import { assertCaptureBudget } from '@package-broker/core/db/notifications';
 import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 
@@ -109,12 +109,7 @@ export function createDeprecationStore(
             from json_each(${json}) edit where v.id=json_extract(edit.value,'$.id'))
           where v.org_id=${ctx.orgId} and v.package_id=${snapshot.packageId}
           and exists (select 1 from json_each(${json}) edit where ${eligible})`),
-          statement(sql`insert into audit_pending (id,org_id,created_at,actor_type,actor_id,token_selector,source_ip,action,target_type,target_id,project_id,payload_json)
-          select json_extract(edit.value,'$.event.id'),${ctx.orgId},json_extract(edit.value,'$.event.occurredAt'),
-            json_extract(edit.value,'$.event.actor.type'),json_extract(edit.value,'$.event.actor.id'),
-            json_extract(edit.value,'$.event.tokenSelector'),json_extract(edit.value,'$.event.sourceIp'),
-            json_extract(edit.value,'$.event.action'),json_extract(edit.value,'$.event.target.type'),json_extract(edit.value,'$.event.target.id'),
-            json_extract(edit.value,'$.event.projectId'),json_extract(edit.value,'$.event.payloadJson') from json_each(${json}) edit`),
+          ...records.map((record) => auditPendingStatement(ctx, record.event)),
         );
       const changed = edits.filter((edit) => (edit.old ?? '') !== edit.message);
       const opId =

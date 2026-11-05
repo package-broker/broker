@@ -1,3 +1,6 @@
+import { auditTrail } from './audit-trail.test.support.js';
+import * as sealModule from '@package-broker/db-sqlite/repositories/audit-seal';
+import { MIN_AUDIT_JOURNAL_BYTES } from '@package-broker/core/audit/config';
 import { describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { ulid } from '@package-broker/core/ids';
@@ -135,12 +138,16 @@ describe.each([
   it('registers both schedules and verifies bounded sealed pages, then detects tampering', async () => {
     const { db, close } = await open();
     const spy = vi.spyOn(kernelModule, 'createKernel');
+    const seal = vi.spyOn(sealModule, 'createAuditSealRepository');
     try {
       const executor = createD1Executor(db);
       await migrate(executor, await discoveredMigrations(), { holder: 'audit-jobs-test' });
       const { a, b } = await seedTwoOrganizations(executor);
       const records: unknown[] = [];
-      const worker = createWorker([], {
+      const worker = createWorker([auditTrail()], {
+        audit: {
+          capacity: { maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES },
+        },
         platformPorts,
         console: {
           log: (record) => void records.push(record),
@@ -170,6 +177,9 @@ describe.each([
       expect((await worker.fetch(new Request('https://broker.test/health/live'), env)).status).toBe(
         200,
       );
+      expect(seal).toHaveBeenCalledWith(expect.anything(), {
+        maxJournalBytes: MIN_AUDIT_JOURNAL_BYTES,
+      });
       const registration = spy.mock.calls.at(-1)![0].registration!;
       expect(
         registration.jobs.map(({ qualifiedName, definition }) => [
@@ -187,7 +197,7 @@ describe.each([
         ['core:publish-scan-sweep:v1', { everySeconds: 300 }],
         ['core:publish-approval-expire:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
-        ['core:audit-verify:v1', { everySeconds: 86400 }],
+        ['core:audit-verify:v1', { everySeconds: 86400, resourceKey: 'audit-verify' }],
         ['core:import-verify:v1', undefined],
         ['core:import-apply:v1', undefined],
         ['core:import-rollback:v1', undefined],
@@ -199,7 +209,25 @@ describe.each([
         ['core:source-poll:v1', { everySeconds: 60 }],
         ['core:npm-vcs-build:v1', undefined],
         ['core:package-sync:v1', undefined],
+        ['core:audit-maintain:v1', { everySeconds: 60, resourceKey: 'audit-maintain' }],
+        ['core:audit-health-observe:v1', { everySeconds: 60, resourceKey: 'audit-health-observe' }],
+        ['core:audit-frontier:v1', { everySeconds: 86400, resourceKey: 'audit-frontier' }],
+        ['core:audit-head:v1', { everySeconds: 86400, resourceKey: 'audit-head' }],
       ]);
+      await worker.scheduled({}, env);
+      await executor.batch([
+        {
+          sql: "UPDATE job_schedule SET next_run_at = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND name = 'core:audit-verify:v1'",
+          params: [a.orgId],
+        },
+      ]);
+      await worker.scheduled({}, env);
+      expect(
+        await executor.all({
+          sql: "SELECT resource_key FROM job WHERE org_id = ? AND type = 'core:audit-verify:v1' AND idempotency_key LIKE 'schedule:%'",
+          params: [a.orgId],
+        }),
+      ).toEqual([{ resource_key: 'audit-verify' }]);
       await executor.batch(
         [a, b].map((org) => ({
           sql: `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 502)
@@ -266,6 +294,7 @@ describe.each([
       );
       expect(records).not.toContainEqual(expect.objectContaining({ event: 'audit.verified' }));
     } finally {
+      seal.mockRestore();
       spy.mockRestore();
       await close();
     }

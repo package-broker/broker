@@ -182,11 +182,10 @@ async function harness(mode: FailureMode, extra: readonly RouteDefinition[] = []
   const coreRoutes = [
     ...auth.coreRoutes,
     ...auditRoutes({
-      list: async () => {
-        await read();
-        return { items: [], next: null };
-      },
-      head: failure,
+      trail: { definition: { create: () => ({ handle: failure }) } },
+      effective: async () => ({ trailActive: true, policy: 'availability' }),
+      services: { journal: { list: failure, head: failure }, requestVerification: failure },
+      log: () => undefined,
     }),
     myPermissionsRoute(),
     myProjectPermissionsRoute(),

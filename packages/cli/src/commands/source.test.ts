@@ -1,3 +1,6 @@
+import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
+import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
+import { errorResponse } from '@package-broker/core/kernel/errors';
 import { describe, expect, it, vi } from 'vitest';
 import { runSourceAcceptRemoval } from './source.js';
 
@@ -8,6 +11,46 @@ const options = {
 };
 
 describe('source accept-removal', () => {
+  it('reports an audited write refusal as backlog rather than contention', async () => {
+    const database = await openMigratedDatabase({ twoOrganizations: true });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const ctx = database.orgs!.a;
+      await database.executor.batch([
+        {
+          sql: "UPDATE audit_chain SET policy = 'required', capacity_state = 'refusing' WHERE org_id = ?",
+          params: [ctx.orgId],
+        },
+      ]);
+      let failure: unknown;
+      try {
+        await database.executor.batch([
+          auditPendingStatement(ctx, {
+            id: '01K7R5V0000000000000000001',
+            occurredAt: '2026-10-30T10:00:00.000Z',
+            actor: { type: 'system', id: null },
+            tokenSelector: null,
+            sourceIp: null,
+            action: 'source.removal_accepted',
+            target: { type: 'source', id: options.source },
+            projectId: null,
+            payloadJson: '{}',
+          }),
+        ]);
+      } catch (caught) {
+        failure = caught;
+      }
+      expect(failure).toMatchObject({ kind: 'backlog_full' });
+      const fetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValue(errorResponse(failure, 'request', () => {}));
+      expect(await runSourceAcceptRemoval({ ...options, fetch })).toBe(1);
+      expect(error).toHaveBeenCalledExactlyOnceWith('source accept-removal: audit backlog is full');
+    } finally {
+      await database.close();
+      error.mockRestore();
+    }
+  });
   it('sends the acceptance with session and CSRF authentication', async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()

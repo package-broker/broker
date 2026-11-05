@@ -1,3 +1,4 @@
+import type { AuditSinkContext } from '../audit/plugin-api.js';
 import { INGEST_EVENTS, INGEST_REASON_CODES } from '../ingest/finalize-guard.js';
 import { parsePublicOrigin } from './public-origin.js';
 import { setAccessContext } from '../authz/access-context.js';
@@ -100,7 +101,7 @@ export interface KernelOptions {
   readonly plugins: readonly PluginDefinition[];
   readonly registration?: Registration;
   readonly ports: PluginPorts;
-  readonly resolveOrg: () => Promise<OrgContext>;
+  readonly resolveOrg: (request?: Request) => Promise<OrgContext>;
   /** Uncached database probe, called on every readiness request. */
   readonly health: () => Promise<boolean>;
   /** Bundled migration comparison; a pass is cached for this kernel lifetime. */
@@ -413,6 +414,26 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   if (!portAccepts('deployment_id', deploymentId)) {
     throw new KernelConfigError(['observability.deploymentId does not match the port pattern']);
   }
+  if (registration.audit.sinks.length > 0) {
+    registration = Object.freeze({
+      ...registration,
+      audit: Object.freeze({
+        ...registration.audit,
+        sinks: Object.freeze(
+          registration.audit.sinks.map((sink) =>
+            Object.freeze({
+              ...sink,
+              definition: Object.freeze({
+                ...sink.definition,
+                create: (ctx: AuditSinkContext) =>
+                  sink.definition.create(Object.freeze({ ...ctx, deploymentId })),
+              }),
+            }),
+          ),
+        ),
+      }),
+    });
+  }
   const routeTemplates = frozenSet(
     [
       '/',
@@ -556,7 +577,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ? AUTHENTICATED_PLACEHOLDER
         : null);
     if (permission === null) {
-      let org = route.needsOrg === false ? null : await resolveOrg();
+      let org = route.needsOrg === false ? null : await resolveOrg(c.req.raw);
       // The public provider list can resolve capabilities only for an existing organization.
       if (
         route.needsOrg === false &&
@@ -564,7 +585,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         route.path === '/_pb/auth/providers'
       ) {
         try {
-          org = await resolveOrg();
+          org = await resolveOrg(c.req.raw);
         } catch {
           org = null;
         }
@@ -580,7 +601,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       });
     }
 
-    const org = await resolveOrg();
+    const org = await resolveOrg(c.req.raw);
     let accepted: EngineCopy | undefined;
     let engineOpen = true;
     let engineFailed = false;
@@ -792,7 +813,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   });
   app.get('/health/ready', async (c) => {
     c.env.scope.set({ route: '/health/ready' });
-    const response = await readyResponse(health, resolveOrg, c.env.requestId, {
+    const response = await readyResponse(health, () => resolveOrg(c.req.raw), c.env.requestId, {
       log: c.env.log,
       ...(schemaMatches === undefined ? {} : { schemaMatches }),
     });

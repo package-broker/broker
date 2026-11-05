@@ -289,6 +289,15 @@ importers:
       '@package-broker/db-sqlite':
         specifier: workspace:^
         version: link:packages/db-sqlite
+      '@package-broker/plugin-audit-otlp':
+        specifier: workspace:^
+        version: link:packages/plugin-audit-otlp
+      '@package-broker/plugin-audit-trail':
+        specifier: workspace:^
+        version: link:packages/plugin-audit-trail
+      '@package-broker/plugin-audit-webhook':
+        specifier: workspace:^
+        version: link:packages/plugin-audit-webhook
       '@package-broker/plugin-github':
         specifier: workspace:^
         version: link:packages/plugin-github
@@ -334,6 +343,9 @@ importers:
       '@package-broker/db-sqlite':
         specifier: workspace:*
         version: link:../db-sqlite
+      '@package-broker/plugin-audit-trail':
+        specifier: workspace:*
+        version: link:../plugin-audit-trail
       '@package-broker/plugin-sso-oidc':
         specifier: workspace:*
         version: link:../plugin-sso-oidc
@@ -387,6 +399,24 @@ importers:
       jsqr:
         specifier: 'catalog:'
         version: 1.4.0
+
+  packages/plugin-audit-otlp:
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
+
+  packages/plugin-audit-trail:
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
+
+  packages/plugin-audit-webhook:
+    devDependencies:
+      '@package-broker/core':
+        specifier: workspace:^
+        version: link:../core
 
   packages/plugin-github:
     devDependencies:

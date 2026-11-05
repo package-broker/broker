@@ -677,6 +677,109 @@ export interface ApiIdempotencyTable {
   expires_at: string;
 }
 
+export interface AuditChainTable {
+  org_id: string;
+  chain_id: Generated<string>;
+  epoch: Generated<number>;
+  incarnation: Generated<number>;
+  head_seq: Generated<number>;
+  head_hash: Generated<string>;
+  boundary_seq: Generated<number>;
+  boundary_prev_hash: Generated<string>;
+  boundary_reason: string | null;
+  mode: Generated<'trail' | 'export' | 'none'>;
+  mode_generation: Generated<number>;
+  policy: Generated<'availability' | 'required'>;
+  pending_mode: 'trail' | 'export' | 'none' | null;
+  cutover_seq: number | null;
+  capacity_state: Generated<'ok' | 'warning' | 'refusing'>;
+  capacity_evict_to: number | null;
+  journal_rows: Generated<number>;
+  journal_bytes: Generated<number>;
+  restore_pending: Generated<0 | 1>;
+  integrity_incidents: Generated<number>;
+  verified_from_seq: number | null;
+  verified_through_seq: number | null;
+  verified_bodies: number | null;
+  verified_withheld: number | null;
+  verified_at: string | null;
+}
+
+export interface AuditSinkTable {
+  org_id: string;
+  sink_id: string;
+  plugin_id: string;
+  kind: string;
+  generation: number;
+  receiver_fingerprint: string;
+  durable_ack: 0 | 1;
+  activation_source: string;
+  state: 'active' | 'inactive' | 'blocked' | 'disabled' | 'retired';
+  progress_seq: number;
+  progress_hash: string;
+  custody_seq: number;
+  inflight_from: number | null;
+  inflight_to: number | null;
+  inflight_body: string | null;
+  inflight_repr: string | null;
+  next_attempt_at: string | null;
+  attempt: Generated<number>;
+  retry_count_for_seq: Generated<number>;
+  body_version: Generated<number>;
+  blocked_reason: string | null;
+  last_error_code: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface AuditLedgerTable {
+  org_id: string;
+  id: string;
+  kind:
+    | 'skipped'
+    | 'uncertain'
+    | 'gap'
+    | 'withheld'
+    | 'mode_change'
+    | 'policy_change'
+    | 'cutover'
+    | 'rebind'
+    | 'retire'
+    | 'unblock'
+    | 'restore_confirmed'
+    | 'export'
+    | 'replay'
+    | 'chain_reset'
+    | 'epoch_bump';
+  chain_id: string;
+  epoch: number;
+  from_seq: number;
+  to_seq: number;
+  count: number;
+  sink_id: string | null;
+  reason_code: string;
+  policy: 'availability' | 'required';
+  mode_generation: number;
+  actor_type: 'user' | 'service_principal' | 'customer' | 'system';
+  actor_id: string | null;
+  created_at: Generated<string>;
+  superseded_by: string | null;
+  /** The withheld or uncertain ledger row covered by this sink’s durable ACK. */
+  resolves_id: string | null;
+  capacity_json: string | null;
+}
+
+export interface AuditHealthTable {
+  org_id: string;
+  code: string;
+  origin: 'ledger' | 'live' | 'source';
+  fingerprint: string;
+  revision: number;
+  acknowledged_revision: number;
+  active: number;
+  failing: number;
+}
+
 export interface NpmLoginSessionTable {
   id: string;
   selector_hash: string;
@@ -776,6 +879,10 @@ export interface Database {
   notification_delivery: NotificationDeliveryTable;
   notification_attempt: NotificationAttemptTable;
   version_readme: VersionReadmeTable;
+  audit_health: AuditHealthTable;
+  audit_chain: AuditChainTable;
+  audit_sink: AuditSinkTable;
+  audit_ledger: AuditLedgerTable;
   vulnerability_result: VulnerabilityResultTable;
   vulnerability_match: VulnerabilityMatchTable;
   vulnerability_advisory: VulnerabilityAdvisoryTable;

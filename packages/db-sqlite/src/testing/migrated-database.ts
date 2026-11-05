@@ -156,4 +156,64 @@ export async function openMigratedDatabase(
   }
 }
 
+export async function auditLedgerRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditLedgerRepositorySuite: run } = await import('./audit-ledger-suite.js');
+  run(open);
+}
+
+export async function auditExportRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditExportRepositorySuite: run } = await import('./audit-export-suite.js');
+  run(open);
+}
+
+export async function auditForkRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditForkRepositorySuite: run } = await import('./audit-fork-suite.js');
+  await run(open);
+}
+
+export async function auditNoneRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditNoneRepositorySuite: run } = await import('./audit-none-suite.js');
+  run(open);
+}
+
+export async function auditApiExportSuite(open: () => Promise<MigratedDatabase>): Promise<void> {
+  const { auditApiExportSuite: run } = await import('./audit-api-export-suite.js');
+  run(open);
+}
+
+export async function auditCutoverRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditCutoverRepositorySuite: run } = await import('./audit-cutover-suite.js');
+  run(open);
+}
+
+export async function auditBackpressureSuite(open: () => Promise<MigratedDatabase>): Promise<void> {
+  const { auditBackpressureSuite: run } = await import('./audit-backpressure-suite.js');
+  run(open);
+}
+
+export async function auditEffectiveRepositorySuite(
+  open: () => Promise<MigratedDatabase>,
+): Promise<void> {
+  const { auditEffectiveRepositorySuite: run } = await import('./audit-effective-suite.js');
+  run(open);
+}
+
+export async function auditAlertAcknowledgementContract(
+  executor: SqlExecutor,
+  a: OrgContext,
+  b: OrgContext,
+): Promise<void> {
+  const { auditAlertAcknowledgementContract: run } = await import('./audit-alert-ack.js');
+  await run(executor, a, b);
+}
 export { bindSnapshot, restoreDatabase, type SnapshotStatement } from './sql-snapshot.js';

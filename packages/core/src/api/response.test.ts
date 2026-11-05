@@ -17,6 +17,7 @@ import {
 } from './response.js';
 
 const statuses = {
+  rate_limited: 429,
   invalid_unpublish: 400,
   unpublish_window: 409,
   invalid_dist_tag: 400,
@@ -70,6 +71,8 @@ const statuses = {
   local_auth_disabled: 403,
   reauth_required: 403,
   not_found: 404,
+  audit_trail_unavailable: 404,
+  audit_trail_invalid_response: 500,
   conflict: 409,
   discovery_rule_disabled: 409,
   source_paused: 409,
@@ -512,7 +515,7 @@ describe('VisibilityError', () => {
 describe('npm error messages', () => {
   it('appends new error codes after the existing catalogue', () => {
     const codes = Object.keys(API_ERROR_CODES);
-    expect(codes[0]).toBe('unsupported_package');
+    expect(codes.slice(0, 2)).toEqual(['rate_limited', 'unsupported_package']);
     expect(codes.indexOf('invalid_version')).toBe(codes.indexOf('unavailable') + 1);
     expect(API_ERROR_CODES.claim_overlap.message).toBe(
       'This package name is already published or proxied',

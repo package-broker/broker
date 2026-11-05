@@ -24,7 +24,7 @@ async function fixture(observability: unknown) {
   const configPath = path.join(cwd, 'broker.config.ts');
   await writeFile(
     configPath,
-    `export default ${JSON.stringify({ platform: 'node', plugins: [], observability })};`,
+    `export default ${JSON.stringify({ platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [], observability })};`,
   );
   const runtimeEntry = path.join(cwd, 'entry.ts');
   await writeFile(runtimeEntry, "export { observability } from '#pb-manifest';");

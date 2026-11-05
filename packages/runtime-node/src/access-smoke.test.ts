@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 const call = {
   audit: {
     opId: '01K00000000000000000000001',
@@ -218,7 +219,8 @@ describe('node access smoke over HTTP', () => {
 
   async function boot(): Promise<string> {
     const broker = await startNode({
-      plugins: [plugin],
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [plugin, auditTrail()],
       migrations: await migrationSources(),
       env: {
         PB_SQLITE_PATH: path,

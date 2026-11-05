@@ -700,7 +700,7 @@ describe('logout audit', () => {
     });
   }
 
-  async function logoutFixture(overrides: Partial<Seed> = {}) {
+  async function logoutFixture(overrides: Partial<Seed> = {}, requestId = ulid()) {
     const secret = randomToken(32);
     await seed({ id: 's1', lastSeenAt: RECENT, ...overrides });
     await executor.batch([
@@ -719,7 +719,7 @@ describe('logout audit', () => {
       service.logout(
         a,
         new Request('https://broker.example.test/_pb/auth/logout', { headers: { cookie } }),
-        { requestId: ulid(), ip: '203.0.113.7' },
+        { requestId, ip: '203.0.113.7' },
       );
     return { logout, service, counted };
   }
@@ -740,6 +740,48 @@ describe('logout audit', () => {
     expect((await row('s1'))?.last_seen_at).toBe(RECENT);
   });
 
+  it('atomically stages the fallback and revokes when the request id is unsafe', async () => {
+    const h = await logoutFixture({}, 'private@example.test');
+    expect(await h.logout()).toEqual(h.service.clearCookies());
+    expect(h.counted.counts()).toEqual({ all: 1, batch: 1 });
+    const rows = await pending();
+    expect(rows).toEqual([
+      expect.objectContaining({
+        action: 'session.logout',
+        actor_id: USER_A,
+        target_id: 's1',
+        created_at: NOW,
+        token_selector: null,
+        source_ip: null,
+      }),
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('private@example.test');
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+    expect((await row('s1'))?.last_seen_at).toBe(RECENT);
+    await h.logout();
+    expect(await pending()).toHaveLength(1);
+  });
+
+  it.each(['audit_pending', 'session'] as const)(
+    'rolls back fallback logout when the %s write fails',
+    async (table) => {
+      const h = await logoutFixture({}, 'invalid-request-id');
+      await executor.batch([
+        {
+          sql:
+            table === 'audit_pending'
+              ? "CREATE TRIGGER refuse_fallback BEFORE INSERT ON audit_pending BEGIN SELECT RAISE(ABORT, 'refused'); END"
+              : "CREATE TRIGGER refuse_fallback BEFORE UPDATE OF revoked_at ON session BEGIN SELECT RAISE(ABORT, 'refused'); END",
+          params: [],
+        },
+      ]);
+      await expect(h.logout()).rejects.toThrow(DbError);
+      expect(h.counted.counts()).toEqual({ all: 1, batch: 1 });
+      expect(await pending()).toEqual([]);
+      expect((await row('s1'))?.revoked_at).toBeNull();
+    },
+  );
+
   it('does not stage a second row for an already revoked session', async () => {
     const h = await logoutFixture();
     await h.logout();
@@ -751,12 +793,16 @@ describe('logout audit', () => {
     const h = await logoutFixture({ expiresAt: NOW });
     expect(await h.logout()).toEqual(h.service.clearCookies());
     expect(await pending()).toEqual([]);
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+    expect(h.counted.counts()).toEqual({ all: 2, batch: 0 });
   });
 
   it('stages nothing for an idle session', async () => {
     const h = await logoutFixture({ lastSeenAt: IDLE_SINCE });
     expect(await h.logout()).toEqual(h.service.clearCookies());
     expect(await pending()).toEqual([]);
+    expect((await row('s1'))?.revoked_at).toBe(NOW);
+    expect(h.counted.counts()).toEqual({ all: 2, batch: 0 });
   });
 
   it('stages nothing and clears cookies for an unknown cookie', async () => {

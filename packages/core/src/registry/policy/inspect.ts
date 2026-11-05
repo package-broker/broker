@@ -1,3 +1,4 @@
+import { DbError } from '../../db/errors.js';
 import { auditEvent } from '../../audit/actions.js';
 import { displayName } from '../../catalogue/names.js';
 import type { VersionStatus } from '../../catalogue/version-rules.js';
@@ -121,7 +122,8 @@ export function createPolicyInspectService(deps: PolicyInspectDeps): PolicyInspe
             projectId: caller.routeProjectId,
             packageKey: first.packageKey,
           });
-        } catch {
+        } catch (error) {
+          if (error instanceof DbError && error.kind === 'backlog_full') throw error;
           return { ok: false, error: 'unavailable' };
         }
         const organizationRules = new Set(
@@ -174,7 +176,8 @@ export function createPolicyInspectService(deps: PolicyInspectDeps): PolicyInspe
       if (!built.ok) return { ok: false, error: 'unavailable' };
       try {
         await deps.audit.record(caller.org, [built.event]);
-      } catch {
+      } catch (error) {
+        if (error instanceof DbError && error.kind === 'backlog_full') throw error;
         return { ok: false, error: 'unavailable' };
       }
       return {

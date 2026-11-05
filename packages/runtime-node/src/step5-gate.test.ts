@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -259,7 +260,8 @@ describe('step 5 release gate on the node runtime', () => {
 
   async function boot(): Promise<string> {
     const broker = await startNode({
-      plugins: [plugin],
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [plugin, auditTrail()],
       migrations: await migrationSources(),
       env: {
         PB_SQLITE_PATH: path,

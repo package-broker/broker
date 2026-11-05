@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { OrgContext, Statement } from '@package-broker/core/db/port';
-import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
-import { auditPendingStatement } from './audit-pending.js';
+import {
+  discoveredMigrations,
+  openMigratedDatabase,
+  type MigratedDatabase,
+} from '../testing/migrated-database.js';
+import { openNodeSqliteExecutor } from '../testing/node-sqlite-executor.js';
+import { migrate } from '../migrations/runner.js';
+import { auditPendingStatement, auditOperationStatement } from './audit-pending.js';
 
 const event: AuditEvent = {
   id: '01K7R5V0000000000000000001',
@@ -39,6 +45,42 @@ function business(): Statement {
 }
 
 describe('auditPendingStatement', () => {
+  it('requires the audit migration for capacity-checked staging and succeeds after upgrading', async () => {
+    const opened = openNodeSqliteExecutor();
+    try {
+      const sources = await discoveredMigrations();
+      await migrate(
+        opened.executor,
+        sources.filter((source) => source.sequence === 1),
+        {
+          holder: 'audit-staging-test',
+        },
+      );
+      await opened.executor.batch([
+        {
+          sql: 'INSERT INTO organization (id, slug, name) VALUES (?, ?, ?)',
+          params: [ctx.orgId, 'setup', 'Setup'],
+        },
+      ]);
+      const statement = auditPendingStatement(ctx, { ...event, action: 'role.create' });
+      await expect(opened.executor.batch([statement])).rejects.toMatchObject({
+        kind: 'unknown',
+        constraint: undefined,
+        message: expect.stringContaining('no such table: audit_chain'),
+      });
+      await migrate(opened.executor, sources, { holder: 'audit-staging-test' });
+      await opened.executor.batch([statement]);
+      expect(
+        await opened.executor.all({
+          sql: 'SELECT id FROM audit_pending WHERE org_id = ?',
+          params: [ctx.orgId],
+        }),
+      ).toEqual([{ id: event.id }]);
+    } finally {
+      await opened.close();
+    }
+  });
+
   it('commits all event columns alongside a business change', async () => {
     await database.executor.batch([business(), auditPendingStatement(ctx, event)]);
     expect(await rows()).toEqual([
@@ -175,3 +217,26 @@ describe('auditPendingStatement', () => {
     ).toThrow(TypeError);
   });
 });
+
+it.each([null, 0, 1])(
+  'reserve evidence must be true, including nullable proof %s',
+  async (proof) => {
+    await database.executor.batch([
+      {
+        sql: "UPDATE audit_chain SET policy='required',capacity_state='refusing' WHERE org_id=?",
+        params: [ctx.orgId],
+      },
+    ]);
+    const write = database.executor.batch([
+      business(),
+      auditOperationStatement(ctx, event, { sql: '?', params: [proof] }),
+    ]);
+    if (proof === 1) {
+      await write;
+      expect(await rows()).toHaveLength(1);
+    } else {
+      await expect(write).rejects.toMatchObject({ kind: 'backlog_full' });
+      expect(await rows()).toEqual([]);
+    }
+  },
+);

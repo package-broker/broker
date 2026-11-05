@@ -1,3 +1,6 @@
+import { isPermission } from '../authz/permissions.js';
+import { isIpLiteral } from '../audit/actions.js';
+import type { FailureAttempt } from '../audit/failure-events.js';
 import { reauthenticateWithIdentity } from './identity-reauth.js';
 import type { IdentityReauthDeps } from './identity-reauth.js';
 import { completeIdentityLogin } from './identity-login.js';
@@ -64,6 +67,7 @@ export function validateLocalAuthPolicy(policy: LocalAuthPolicy, providers: Prov
 }
 
 export interface AuthModuleOptions {
+  readonly recordFailure?: (ctx: OrgContext, attempt: FailureAttempt) => void;
   readonly repositories: AuthRepositories;
   readonly keyring: Keyring;
   readonly clock: Clock;
@@ -221,6 +225,34 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     options.access === undefined
       ? denyAllEngine
       : createAuthorizationEngine({
+          recordDenied: (request, principal, projectId) => {
+            const boundary = request.route.boundary;
+            if (
+              boundary !== 'organization' &&
+              boundary !== 'project' &&
+              boundary !== 'authenticated' &&
+              boundary !== 'self'
+            )
+              return;
+            const ip = options.clientIp(request.request);
+            options.recordFailure?.(request.org, {
+              action: 'access.denied',
+              actor: {
+                type: principal.kind === 'service' ? 'service_principal' : principal.kind,
+                id: principal.id,
+              },
+              routeTemplate: request.route.path,
+              permission:
+                boundary === 'authenticated' || boundary === 'self'
+                  ? null
+                  : isPermission(request.route.permission)
+                    ? request.route.permission
+                    : null,
+              boundary: boundary === 'self' ? 'authenticated' : boundary,
+              projectId,
+              context: { sourceIp: isIpLiteral(ip) ? ip : null },
+            });
+          },
           access: options.access.access,
           providerAnchors: options.access.providerAnchors,
           publicOrigin,
@@ -244,7 +276,10 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   });
   const stateCipher = createSecretCipher(keyring, 'login-state');
 
+  const failure =
+    options.recordFailure === undefined ? {} : { recordFailure: options.recordFailure };
   const loginDeps: IdentityLoginDeps = {
+    ...failure,
     users: repositories.users,
     writer: repositories.login,
     sessions,
@@ -253,6 +288,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
     ids,
   };
   const reauthDeps: IdentityReauthDeps = {
+    ...failure,
     users: repositories.users,
     sessions: repositories.sessions,
     clock,
@@ -260,6 +296,7 @@ export function createAuthModule(options: AuthModuleOptions): AuthModule {
   };
 
   const localService = createLocalLoginService({
+    ...failure,
     reader: localReader,
     writer: repositories.localSuccess,
     credentials,

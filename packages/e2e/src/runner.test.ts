@@ -203,6 +203,11 @@ describe('release runner', () => {
       ['mirror-proxy-assembly', 'L'],
       ['authz-project-isolation', 'L'],
       ['audit-integrity', 'L'],
+      ['audit-delivery', 'L'],
+      ['audit-retention', 'L'],
+      ['audit-restore-tooling', 'L'],
+      ['audit-restore-frontier', 'L'],
+      ['audit-required', 'L'],
     ]);
   });
 

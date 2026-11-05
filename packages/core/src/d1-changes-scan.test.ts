@@ -691,6 +691,23 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Static capacity classifications are action names, not executed SQL; they never read driver changes metadata.',
+      sites: [
+        "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'discovery_rule.delete' #1",
+        "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'registry_policy.update' #1",
+        "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'notification.delete' #1",
+      ],
+    },
+    {
+      reason:
+        'Loads the effective transition suite; persistence counts RETURNING rows without changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-effective-suite.js') #1",
+      ],
+    },
+
+    {
+      reason:
         'Discovery admission writes add only a cascading ownership row; SELECT-only ownership and credential guards and type imports do not inspect executor row counts. Contracts cover lease recovery and deletion refusal.',
       sites: [
         "db-sqlite/src/kysely.ts:opaque dependency: import {\n  fenceGuard,\n  runFenced,\n  type FailureProbes,\n  type FencedOutcome,\n  type FenceGuard,\n  type MutationFence,\n  type TokenMutationFence,\n  type DiscoveryRuleFence,\n} from '@package-broker/core/authz/fence'; #1",
@@ -704,6 +721,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Loads the shared alert acknowledgement contract for Node and D1 tests; assertions use health state and RETURNING rows, never executor changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-alert-ack.js') #1",
+      ],
+    },
+
+    {
+      reason:
         'Management fixtures load the existing Node codec and index contract-case names; unpublish enumerates public dist-tags to record history. These operations do not inspect SQL affected-row counts.',
       sites: [
         "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n          new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n        ) #1",
@@ -714,6 +739,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Loads the shared cutover persistence suite; registration counts RETURNING rows and never executor changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-cutover-suite.js') #1",
+      ],
+    },
+
+    {
+      reason:
         'Discovery rule authority imports and SELECT-only guards introduce no executor changes reads or mutation targets; exact predicates are contract and mutation tested.',
       sites: [
         "db-sqlite/src/repositories/discovery-rule-authority.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
@@ -722,6 +755,19 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`0` #1',
       ],
     },
+    {
+      reason:
+        'Destructures validated audit ledger SELECT fields; the rest object contains no executor result metadata.',
+      sites: ['db-sqlite/src/repositories/audit-api-export.ts:object rest access: ...row #1'],
+    },
+    {
+      reason:
+        'Loads the shared API export persistence suite; success counts RETURNING rows without executor changes metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-api-export-suite.js') #1",
+      ],
+    },
+
     {
       reason:
         'Registry policy D1 contracts load Miniflare and the Workers executor at run time, the migration contract builds rows by column name and walks a constant digest table, and the rule update maps validated patch fields to their columns; none reads executor affected-row counts.',
@@ -739,6 +785,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Maps ledger kinds to fixed alert code strings; this lookup contains no executor result or change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-health.ts:unresolved computed access: LEDGER_ALERT_CODES[kind] #1',
+      ],
+    },
+
+    {
+      reason:
         'Publisher snapshot traversal pairs validated audit restriction values with their prior values; the contract traverses expected restrictions. None reads executor affected-row counts.',
       sites: [
         'db-sqlite/src/contract/trusted-publishers-contract.ts:opaque object access: Object.entries(values) #1',
@@ -748,11 +802,28 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Named constant batch indices select UPDATE RETURNING rows; success uses rows.length and never executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[chainUpdateIndex] #1',
+        'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[sinkUpdateIndex] #1',
+      ],
+    },
+
+    {
+      reason:
         'The SQL builder import constructs typed statements; it does not read executor changes counts.',
       sites: [
         "db-sqlite/src/repositories/npm-vcs-build.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
       ],
     },
+    {
+      reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(fields) #1',
+      ],
+    },
+
     {
       reason:
         'The publisher page cursor comes from the last returned row of a bounded SELECT with one-row lookahead; it does not inspect executor affected-row metadata.',
@@ -762,6 +833,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(chain) #1',
+      ],
+    },
+
+    {
+      reason:
         'Source revision and hosted approval guards read org-scoped rows and leave referenced keys unchanged.',
       sites: [
         'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId}\n        and id = ${input.id} and revision = ${input.expectedRevision ?? current.revision})` #1',
@@ -769,6 +848,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId} and id = ${input.id}\n            and type = 'hosted' and ecosystem = 'npm')` #1",
       ],
     },
+    {
+      reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(sink) #1',
+      ],
+    },
+
     {
       reason:
         'Build eligibility and retry-generation predicates read organization-scoped rows only; they neither write nor consume D1 changes counts.',
@@ -782,12 +869,28 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(sink) #2',
+      ],
+    },
+
+    {
+      reason:
         'Build-outcome upserts preserve all organization, version, commit and policy keys, changing only the outcome under the lease and retry fences; no changes count is read.',
       sites: [
         "db-sqlite/src/repositories/npm-vcs-build.ts:conflict action: db\n            .insertInto('npm_vcs_build_outcome')\n            .values({\n              org_id: ctx.orgId,\n              version_id: input.versionId,\n              source_ref: input.sourceRef!,\n              packing_policy: input.packingPolicy!,\n              retry_generation: input.retryGeneration!,\n              outcome: null,\n            })\n            .onConflict((oc) =>\n              oc.columns(['org_id', 'version_id', 'source_ref', 'packing_policy']).doNothing(),\n            ) #1",
         "db-sqlite/src/repositories/npm-vcs-build.ts:conflict action: db\n            .insertInto('npm_vcs_build_outcome')\n            .values({\n              org_id: ctx.orgId,\n              version_id: input.versionId,\n              source_ref: input.sourceRef!,\n              packing_policy: input.packingPolicy!,\n              retry_generation: input.retryGeneration!,\n              outcome,\n            })\n            .onConflict((oc) =>\n              oc\n                .columns(['org_id', 'version_id', 'source_ref', 'packing_policy'])\n                .doUpdateSet({ outcome }),\n            ) #1",
       ],
     },
+    {
+      reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        'db-sqlite/src/testing/audit-fork-suite.ts:opaque object access: Object.entries(expected) #1',
+      ],
+    },
+
     {
       reason:
         'Mutation-table indexes and entry metadata refer to contract cases and SQL decision registrations, never SQL result counts.',
@@ -800,11 +903,27 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        "db-sqlite/src/testing/audit-fork-suite.ts:unresolved computed key: expect(\n          await port.save(\n            org,\n            {\n              ...expected,\n              [key]:\n                typeof value === 'number'\n                  ? value + 1\n                  : typeof value === 'boolean'\n                    ? !value\n                    : 'moved',\n            },\n            [],\n            change,\n            2,\n          ),\n          key,\n        ).toBe(false); #1",
+      ],
+    },
+
+    {
+      reason:
         'These typed guards classify a refused publisher write; the result probe reads the selected failed flag, never executor changes.',
       sites: [
         'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(checks) #1',
       ],
     },
+    {
+      reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        'db-sqlite/src/testing/audit-fork-suite.ts:opaque object access: Object.entries(expected.sinks[0]!) #1',
+      ],
+    },
+
     {
       reason:
         'The default enqueue condition is a constant true predicate; it performs no write and cannot affect a changes count.',
@@ -819,12 +938,29 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
+      sites: [
+        "db-sqlite/src/testing/audit-fork-suite.ts:unresolved computed key: const moved = {\n          ...expected.sinks[0]!,\n          [key]:\n            typeof value === 'number' ? value + 1 : typeof value === 'boolean' ? !value : 'moved',\n        }; #1",
+      ],
+    },
+
+    {
+      reason:
         'The contract dispatches three named status writers and asserts their typed outcomes; the imported purge constant is a numeric retention interval. Neither site reads executor change counts.',
       sites: [
         "db-sqlite/src/contract/npm-publish-writer-contract.ts:computed builder call: store[method](ctx, h.fence, {\n              ...base,\n              ...(method === 'tombstoneVersion'\n                ? { tombstoneReason: 'retired', expectedRevision: current!.revision }\n                : {}),\n              audit: { ...h.input.event, id: ulid() },\n              expectedStatus,\n              reason: method === 'quarantineVersion' ? 'admin_quarantine' : 'admin_tombstone',\n            } as never) #1",
         "db-sqlite/src/repositories/blob-references.ts:opaque dependency: import { PUBLISH_PURGE_WINDOW_DAYS } from '@package-broker/core/db/publishes'; #1",
       ],
     },
+    {
+      reason:
+        'Loads the shared fork persistence suite for Node and D1 tests; no executor change counts are read.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-fork-suite.js') #1",
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-backpressure-suite.js') #1",
+      ],
+    },
+
     {
       reason:
         'Token lookup composes a typed read condition; blob publication uses returned rows and a transactional before-image for cleanup; tag lookup selects active patch targets. None reads executor change counts.',
@@ -839,6 +975,19 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Destructures chain fields from a single SELECT snapshot; the remaining sink fields are SELECT data, never executor change metadata.',
+      sites: ['db-sqlite/src/repositories/audit-export.ts:object rest access: ...sink #1'],
+    },
+    {
+      reason:
+        'Sets each named nullable export snapshot field to null to exercise CAS rejection; the computed key never accesses executor metadata.',
+      sites: [
+        'db-sqlite/src/testing/audit-export-suite.ts:unresolved computed key: expect(\n          await port().save(\n            org(),\n            fence(),\n            { ...current, sink: { ...current.sink, [key]: null } },\n            before.sink,\n            1,\n          ),\n          key,\n        ).toBe(false); #1',
+      ],
+    },
+
+    {
+      reason:
         'Publish authorization and batch assembly use prepared statement parameters and metadata records; these sites neither inspect executor changes nor infer success from change counts. Held-package filtering and tag patching preserve the existing returned-row decisions.',
       sites: [
         "db-sqlite/src/contract/npm-publish-writer-contract.ts:opaque object access: Object.assign(input.version, {\n              metadata: {\n                ...input.version.metadata,\n                json: JSON.stringify({ name: 'widget', description: 'x'.repeat(262144) }),\n              },\n            }) #1",
@@ -850,6 +999,57 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/package-admin-read.ts:object rest access: ...version #1',
       ],
     },
+    {
+      reason:
+        'Loads the shared none persistence suite for Node and D1 tests; it checks RETURNING rows and stored state without reading executor change metadata.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-none-suite.js') #1",
+      ],
+    },
+    {
+      reason:
+        'Loads the shared export persistence contract suite for Node and D1 tests; the module has no executor count reads.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-export-suite.js') #1",
+      ],
+    },
+    {
+      reason:
+        'Compares named chain snapshot fields from readHead SELECT results for contention; neither snapshot contains executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: a[key as keyof Head] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: b[key as keyof Head] #1',
+      ],
+    },
+    {
+      reason:
+        'Compares the recomputed chain state with the readHead SELECT result to skip a no-op recovery; both are SELECT-derived values, never executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: state[key] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: head[key] #1',
+      ],
+    },
+    {
+      reason:
+        'Compares pending audit row fields from SELECT results against the original snapshot for integrity; neither row contains executor change metadata.',
+      sites: [
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: row[key as keyof PendingRow] #1',
+        'db-sqlite/src/repositories/audit-seal.ts:unresolved computed access: original[key as keyof PendingRow] #1',
+      ],
+    },
+    {
+      reason:
+        'Ledger reader rows drop their computed conflict flag before validation; they are SELECT result rows, never executor change metadata.',
+      sites: ['db-sqlite/src/repositories/audit-ledger.ts:object rest access: ...row #1'],
+    },
+    {
+      reason:
+        'Lazy import loads the shared ledger test suite; its executor batches ignore change metadata and assertions read stored rows, so no trigger or FK-action counts are consumed.',
+      sites: [
+        "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-ledger-suite.js') #1",
+      ],
+    },
+
     {
       reason:
         'Hosted-claim preflight adds only scoped SELECT predicates and a constant guard; no changes() reads or mutation targets. The names import is a Unicode character filter and Kysely builds the reviewed predicate.',
@@ -1386,6 +1586,20 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Builds audit_ledger fixture INSERT parameters from scalar column values, never executor results or changes counts.',
+      sites: [
+        'db-sqlite/src/contract/migration-contract.ts:opaque object access: Object.values(values) #3',
+      ],
+    },
+    {
+      reason:
+        'Sets a literal audit_ledger constraint-test column in fixture input; neither the computed key nor ledgerRow reads executor counts.',
+      sites: [
+        "db-sqlite/src/contract/migration-contract.ts:unresolved computed key: const error = await rejection(ledgerRow({ id: 'rejected', [column]: value })); #1",
+      ],
+    },
+    {
+      reason:
         'Indexes fixture data in migration-contract; retained because the key cannot be proven to exclude changes.',
       sites: [
         'db-sqlite/src/contract/migration-contract.ts:unresolved computed access: ROLE_IDS[defaults.key] #1',
@@ -1688,7 +1902,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         'db-sqlite/src/repositories/audit-pending.ts:SQL text: `INSERT INTO audit_pending\n  (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip,\n   action, target_type, target_id, project_id, payload_json)` #1',
         "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'audit insert must bind at most 100 parameters' #1",
-        'db-sqlite/src/repositories/audit-pending.ts:SQL input: sql:\n      when === undefined\n        ? `${INSERT} VALUES (${values})`\n        : `${INSERT} SELECT ${values} WHERE ${when.sql}` #1',
+        "db-sqlite/src/repositories/audit-pending.ts:SQL input: sql: `${INSERT}\n    SELECT pending_id, pending_org_id, ${createdAt}, pending_actor_type, pending_actor_id, pending_token_selector, pending_source_ip,\n      pending_action, pending_target_type, pending_target_id, pending_project_id, pending_payload_json\n    FROM (\n      SELECT ? AS pending_id, ? AS pending_org_id, ? AS pending_created_at, ? AS pending_actor_type, ? AS pending_actor_id,\n        ? AS pending_token_selector, ? AS pending_source_ip, ? AS pending_action, ? AS pending_target_type,\n        ? AS pending_target_id, ? AS pending_project_id, ${payload} AS pending_payload_json\n    ) AS input${when === undefined ? '' : ` WHERE ${when.sql}`}` #1",
       ],
     },
     {
@@ -2337,9 +2551,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
-        'SQL in job-lease-guard; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
+        'Shared live job lease predicate optionally binds the sink resource key; all interpolations are checked lease inputs or bound SQL values, never executor metadata.',
       sites: [
-        "db-sqlite/src/repositories/job-lease-guard.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM job\n      WHERE job.id = ${id} AND job.org_id = ${ctx.orgId}\n        AND job.lease_owner = ${owner} AND job.fence = ${fence}\n        AND job.state = 'running'\n        AND job.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now'))` #1",
+        "db-sqlite/src/repositories/job-lease-guard.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM job\n      WHERE job.id = ${id} AND job.org_id = ${ctx.orgId}\n        AND job.lease_owner = ${owner} AND job.fence = ${fence}\n        AND job.state = 'running'\n        AND job.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now')\n        ${resourceKey === undefined ? sql`` : sql`AND job.resource_key = ${resourceKey}`})` #1",
       ],
     },
     {
@@ -2365,7 +2579,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`UPDATE job_schedule SET enabled = 0\n            WHERE org_id = ${ctx.orgId} AND enabled = 1\n              AND name NOT IN (SELECT value FROM json_each(${names}))` #1',
         "db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`strftime('${sql.raw(FORMAT)}',\n          unixepoch(s.next_run_at)\n            + ((unixepoch(${NOW}) - unixepoch(s.next_run_at)) / s.every_seconds) * s.every_seconds,\n          'unixepoch')` #1",
         'db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`INSERT INTO job_schedule\n                (org_id, name, every_seconds, next_run_at, enabled)\n              VALUES (${ctx.orgId}, ${name}, ${definition.everySeconds},\n                ${firstRun({ ...definition, nextRunAt: null })}, 1)\n              ON CONFLICT (org_id, name) DO NOTHING` #1',
-        "db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`INSERT INTO job (id, org_id, type, payload_json, idempotency_key, max_attempts)\n            SELECT ${jobId}, s.org_id, s.name, '{}', ${prefix} || ${slot}, ${maxAttempts}\n            FROM job_schedule s\n            WHERE s.org_id = ${ctx.orgId} AND s.name = ${name} AND s.enabled = 1\n              AND s.every_seconds IS NOT NULL AND s.next_run_at <= ${NOW}\n            ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1",
+        "db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`INSERT INTO job (id, org_id, type, payload_json, idempotency_key, max_attempts, resource_key)\n            SELECT ${jobId}, s.org_id, s.name, '{}', ${prefix} || ${slot}, ${maxAttempts},\n              ${definition?.resourceKey ?? null}\n            FROM job_schedule s\n            WHERE s.org_id = ${ctx.orgId} AND s.name = ${name} AND s.enabled = 1\n              AND s.every_seconds IS NOT NULL AND s.next_run_at <= ${NOW}\n            ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1",
         "db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`UPDATE job_schedule SET\n              last_slot = newest.slot,\n              next_run_at = strftime('${sql.raw(FORMAT)}', newest.slot,\n                printf('+%d seconds', job_schedule.every_seconds))\n            FROM (SELECT substr(max(idempotency_key), ${prefix.length + 1}) AS slot FROM job\n              WHERE org_id = ${ctx.orgId} AND type = ${name} AND idempotency_key >= ${prefix}\n                AND idempotency_key < ${`${KEY_PREFIX}${name};`}\n                AND length(idempotency_key) = ${prefix.length + SLOT_LENGTH}\n                AND substr(idempotency_key, ${prefix.length + 1}, ${SLOT_DATE_LENGTH}) GLOB ${SLOT_DATE_GLOB}\n                AND substr(idempotency_key, ${prefix.length + 1 + SLOT_DATE_LENGTH}) GLOB ${SLOT_TIME_GLOB}) AS newest\n            WHERE job_schedule.org_id = ${ctx.orgId} AND job_schedule.name = ${name}\n              AND job_schedule.enabled = 1 AND job_schedule.every_seconds IS NOT NULL\n              AND newest.slot >= job_schedule.next_run_at AND newest.slot <= ${NOW}` #1",
         'db-sqlite/src/repositories/job-schedule.ts:SQL template: sql`UPDATE job_schedule SET enabled = 0\n          WHERE org_id = ${ctx.orgId} AND name = ${scheduleName(name)}` #1',
       ],
@@ -3410,7 +3624,16 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         'runtime-cloudflare/src/index.ts:opaque object access: Object.getOwnPropertyDescriptor(env, name) #1',
         'runtime-cloudflare/src/index.ts:opaque object access: Object.entries(parsed) #1',
+        'runtime-cloudflare/src/index.ts:opaque object access: Object.entries(sink.destination) #1',
         "runtime-cloudflare/src/index.ts:opaque object access: Object.getOwnPropertyDescriptor(body, 'org') #1",
+      ],
+    },
+    {
+      reason:
+        'Destructures audit build configuration and job schedules, never executor results or change counts.',
+      sites: [
+        'runtime-cloudflare/src/entry.ts:object rest access: ...auditConfig #1',
+        'runtime-cloudflare/src/index.ts:object rest access: ...schedule #1',
       ],
     },
     {
@@ -4243,7 +4466,40 @@ function inboundForeignKeys(sql: readonly string[], parents: readonly string[]) 
 }
 
 describe('D1 changes read-site scan', () => {
+  it('inventories effective transitions as RETURNING-counted writes', () => {
+    const source = sourcesUnder(ROOT)['db-sqlite/src/repositories/audit-effective.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(source).toContain('RETURNING org_id');
+    expect(source).toContain('result.at(-1)?.rows.length === 1');
+  });
   const sources = sourcesUnder(ROOT);
+
+  it('inventories cutover registration as RETURNING-counted writes without changes metadata', () => {
+    const source = sources['db-sqlite/src/repositories/audit-cutover.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(source).toContain('RETURNING id');
+    expect(source).toContain('result.at(-1)?.rows.length === 1');
+  });
+
+  it('inventories status as read-only organization-scoped queries', () => {
+    const source = sources['db-sqlite/src/repositories/audit-status.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(mutationTargets(source)).toEqual([]);
+  });
+
+  it('inventories health persistence as RETURNING-counted writes without changes metadata', () => {
+    const source = sources['db-sqlite/src/repositories/audit-health.ts']!;
+    expect(reads(source)).toEqual([]);
+    expect(source).toContain('auditPendingStatement(ctx, event.event');
+    expect(source).toContain('RETURNING id');
+    expect(source).toContain('results.at(-1)!.rows.length');
+    expect(mutationTargets(source)).toEqual([
+      'INSERT INTO audit_health',
+      'INSERT INTO audit_health',
+      'UPDATE audit_health',
+      'UPDATE audit_health',
+    ]);
+  });
 
   it('lists every changes read across both source trees with no stale reviewed sites', () => {
     assertReviewed(sources);

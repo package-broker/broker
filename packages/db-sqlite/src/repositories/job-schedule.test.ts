@@ -113,6 +113,19 @@ describe('job schedule repository', () => {
     expect(await schedules(database.executor)).toHaveLength(0);
   });
 
+  it.each(['', 'a'.repeat(161), 'resource\nkey', 'resource\u007fkey', 'résource'])(
+    'sync rejects invalid resource key %j before storing a schedule',
+    async (resourceKey) => {
+      const repo = createJobScheduleRepository(database.executor);
+      await expect(
+        repo.sync(ctx, [{ name: NAME, everySeconds: EVERY, nextRunAt: iso(-60), resourceKey }]),
+      ).rejects.toThrow('invalid_schedule');
+      expect(await schedules(database.executor)).toEqual([]);
+      expect(await repo.tick(ctx)).toEqual([]);
+      expect(await jobs(database.executor)).toEqual([]);
+    },
+  );
+
   it('tick fires nothing before the row is due', async () => {
     const repo = createJobScheduleRepository(database.executor);
     await repo.upsert(ctx, { name: NAME, everySeconds: EVERY, nextRunAt: iso(3600) });
@@ -142,6 +155,36 @@ describe('job schedule repository', () => {
     expect(Date.parse(row!.next_run_at)).toBe(Date.parse(firedSlot) + EVERY * 1000);
     expect(await repo.tick(ctx)).toEqual([]);
     expect(await jobs(database.executor)).toHaveLength(1);
+  });
+
+  it('assigns scheduled verification the same resource lease as requested runs', async () => {
+    const repo = createJobScheduleRepository(database.executor);
+    await repo.sync(ctx, [
+      {
+        name: 'core:audit-verify:v1',
+        everySeconds: EVERY,
+        nextRunAt: iso(-60),
+        resourceKey: 'audit-verify',
+      },
+      { name: NAME, everySeconds: EVERY, nextRunAt: iso(-60) },
+      {
+        name: 'other:shared:v1',
+        everySeconds: EVERY,
+        nextRunAt: iso(-60),
+        resourceKey: 'another-resource',
+      },
+    ]);
+    await repo.tick(ctx);
+    expect(
+      await database.executor.all({
+        sql: 'SELECT type, resource_key FROM job WHERE org_id = ? ORDER BY type',
+        params: [ctx.orgId],
+      }),
+    ).toEqual([
+      { type: 'core:audit-verify:v1', resource_key: 'audit-verify' },
+      { type: NAME, resource_key: null },
+      { type: 'other:shared:v1', resource_key: 'another-resource' },
+    ]);
   });
 
   it('two concurrent ticks for the same due slot create exactly one job', async () => {

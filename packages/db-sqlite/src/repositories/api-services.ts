@@ -1,3 +1,17 @@
+import { AuditResolutionError } from '@package-broker/core/audit/effective';
+import {
+  createObservability,
+  noopObservability,
+  type Observability,
+} from '@package-broker/core/platform/observability';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
+import type { EffectiveAuditReader } from '@package-broker/core/audit/status';
+import type { ApiModuleDeps } from '@package-broker/core/api/module';
+import type { AuditTrailContext } from '@package-broker/core/audit/plugin-api';
+import { requestVerification } from '@package-broker/core/audit/verify';
+import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { Clock } from '@package-broker/core/ids';
+import { orgContext } from '@package-broker/core/db/port';
 import { createDiscoveryConnections } from './discovery-connections.js';
 import { createOrganizationRepository } from './organization.js';
 import { createCatalogueReader } from './catalogue.js';
@@ -31,12 +45,14 @@ import type { SourcePackageProbe } from '@package-broker/core/ingest/source-pack
 import { createProjectGrantReader } from './project-grant-read.js';
 import type { createVulnerabilityRuntime } from '@package-broker/core/runtime/vulnerability';
 import { createApiModule, ApiModuleDependencyError } from '@package-broker/core/api/module';
-import type { AuditReader } from '@package-broker/core/api/routes/audit';
-import { AUDIT_GENESIS_HASH } from '@package-broker/core/audit/chain';
+import type { Registration } from '@package-broker/core/kernel/registry';
+import type { AuditTrailDispatch } from '@package-broker/core/api/routes/audit';
 import type { VcsProvider } from '@package-broker/core/sources/config';
 import { createSourceService } from '@package-broker/core/sources/source-service';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
+import { createAuditApiExportStore } from './audit-api-export.js';
+import { createAuditJournalReader } from './audit-query.js';
 import type { PolicyServing } from '@package-broker/core/registry/policy/serving';
 import { createPolicyManageService } from '@package-broker/core/registry/policy/manage';
 import { createPolicyMemberService } from '@package-broker/core/registry/policy/manage-members';
@@ -48,7 +64,6 @@ import { createRegistryPolicyMembers } from './registry-policy-members.js';
 import { createRegistryPolicyReader } from './registry-policy-read.js';
 import { createPolicyReadAuditSink } from './registry-policy-read-audit.js';
 import { createRegistryPolicyUpdater } from './registry-policy-update.js';
-import { createAuditQueryRepository } from './audit-query.js';
 import { createPackageAdminReader } from './package-admin-read.js';
 import { createProjectSourceReader } from './project-source-read.js';
 import { createRegisteredNameRepository } from './registered-name.js';
@@ -76,34 +91,14 @@ import { createSourceRepository } from './source.js';
 import { createVisibilityStore } from './catalogue-writer.js';
 import type { AccessAssembly } from './access-services.js';
 
-function auditReader(executor: SqlExecutor): AuditReader {
-  const audit = createAuditQueryRepository(executor);
-  const organization = (ctx: Parameters<AuditReader['list']>[0]): OrgContext => {
-    if (ctx.org === null) throw new TypeError('route requires an organization context');
-    return ctx.org;
-  };
-  return {
-    list: (ctx, query) =>
-      audit.list(organization(ctx), {
-        limit: query.limit,
-        ...(query.projectId === null ? {} : { projectId: query.projectId }),
-        ...(query.actor === undefined ? {} : { actor: query.actor }),
-        ...(query.action === undefined ? {} : { action: query.action }),
-        ...(query.after === undefined ? {} : { afterId: query.after }),
-      }),
-    async head(ctx) {
-      const head = await audit.head(organization(ctx));
-      return {
-        seq: head?.seq ?? 0,
-        hash: head?.hash ?? AUDIT_GENESIS_HASH,
-        pendingCount: head?.pending ?? 0,
-        lastVerifiedAt: head?.lastVerifiedAt ?? null,
-      };
-    },
-  };
-}
-
 export interface ApiRoutesOptions {
+  readonly registration?: Pick<Registration, 'audit'>;
+  readonly auditTrail?: Omit<AuditTrailDispatch, 'trail' | 'log' | 'services'> &
+    Partial<Pick<AuditTrailDispatch, 'services'>>;
+  readonly auditJobs?: Jobs;
+  readonly effectiveAudit?: EffectiveAuditReader;
+  readonly auditStatus?: ApiModuleDeps['auditStatus'];
+  readonly auditHealth?: ApiModuleDeps['auditHealth'];
   readonly runtime: 'node' | 'cloudflare';
   readonly onDiscoveryRules?: (deps: DiscoveryRuleJobDeps) => void;
   readonly discoveryFetch?: PolicyFetch;
@@ -116,6 +111,8 @@ export interface ApiRoutesOptions {
   readonly policy: OutboundPolicy;
   readonly lifetime: TokenLifetimePolicy;
   readonly log: KernelLog;
+  readonly observability?: Observability;
+  readonly auditAlerts?: { raise(org: OrgContext, reason: 'withheld'): void };
   readonly blob: BlobStore | undefined;
   readonly sourcePackageProbe?: SourcePackageProbe;
   readonly trustedPublisherLookup?: (
@@ -177,8 +174,18 @@ function registryPolicyApi(
 }
 
 export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefinition[] {
-  const { access, packages, lifetime, log, blob } = input;
-  const executor = input.executor;
+  const { executor, access, packages, lifetime, log, blob } = input;
+  const observability =
+    input.observability ??
+    createObservability(
+      {
+        emit: (record) => {
+          if (record.kind === 'log') log({ ...record.record });
+        },
+      },
+      { deploymentId: 'unconfigured', runtime: input.runtime, requestId: null, plugin: 'core' },
+      { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+    );
   const { services } = access;
   const anchors = access.anchors;
   const common = { ids: { ulid }, clock: systemClock, clientIp: input.clientIp };
@@ -370,9 +377,11 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
       },
       organization: {
         ...common,
+        log: observability.log,
         organizations,
         users,
         administration: services.administration,
+        ...(input.effectiveAudit === undefined ? {} : { effectiveAudit: input.effectiveAudit }),
         lifetime,
       },
       projects: {
@@ -466,7 +475,52 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
         ...createPackageAdminReader(executor),
         readStatuses: input.vulnerability.readStatuses,
       },
-      audit: auditReader(executor),
+      ...(input.auditStatus === undefined ? {} : { auditStatus: input.auditStatus }),
+      ...(input.auditHealth === undefined ? {} : { auditHealth: input.auditHealth }),
+      ...(input.registration?.audit.trail == null
+        ? {}
+        : {
+            auditTrail: {
+              trail: input.registration.audit.trail,
+              effective:
+                input.auditTrail?.effective ??
+                (async () => {
+                  throw new Error('Audit configuration unavailable');
+                }),
+              services: input.auditTrail?.services ?? {
+                journal: {
+                  list: (org, query) =>
+                    createAuditJournalReader(executor, org, observability).list(query),
+                  head: (org) => createAuditJournalReader(executor, org, observability).head(),
+                },
+                requestVerification: async (org) => {
+                  if (input.auditJobs === undefined)
+                    throw new AuditResolutionError('audit_verification_unavailable');
+                  await createAuditTrailServices(
+                    executor,
+                    org,
+                    input.auditJobs,
+                    systemClock,
+                    observability,
+                  ).requestVerification();
+                },
+              },
+              log,
+            },
+          }),
+      auditExport: {
+        ...common,
+        store: createAuditApiExportStore(executor, anchors),
+        sessions: services.sessions,
+        alert: (org) => {
+          observability.log({
+            level: 'error',
+            event: 'audit.delivery_loss',
+            reason_code: 'audit.withheld',
+          });
+          input.auditAlerts?.raise(org, 'withheld');
+        },
+      },
       packageManage: {
         ...common,
         service: createPackageManageService({
@@ -519,6 +573,20 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     }
     throw error;
   }
+}
+
+export function createAuditTrailServices(
+  executor: SqlExecutor,
+  org: OrgContext,
+  jobs: Jobs,
+  clock: Clock,
+  observability: Pick<Observability, 'counter'> = noopObservability,
+): Pick<AuditTrailContext, 'journal' | 'requestVerification'> {
+  const boundOrg = orgContext(org.orgId);
+  return Object.freeze({
+    journal: createAuditJournalReader(executor, boundOrg, observability),
+    requestVerification: () => requestVerification(jobs, boundOrg, clock.now()),
+  });
 }
 
 export async function notificationRoutesAvailable(

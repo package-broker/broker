@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '@package-broker/core/db/port';
 import type { KernelOptions } from '@package-broker/core/kernel/kernel';
@@ -57,6 +58,7 @@ function keyringOnlyD1(): NonNullable<Env['DB']> {
       };
     }
     if (/from (?:local_login|credential|token)\b/i.test(sql)) return { results: [] };
+    if (/from "organization"/i.test(sql)) return { results: [] };
     throw new Error('unexpected SQL');
   };
   const make = (sql: string, values: unknown[]): Recorded => ({
@@ -113,7 +115,11 @@ const authEnv: Env = {
 };
 
 function harness() {
-  const worker = createWorker([], { authorization: engine, log: () => undefined });
+  const worker = createWorker([auditTrail()], {
+    audit: {},
+    authorization: engine,
+    log: () => undefined,
+  });
   const env = { ...authEnv, ASSETS: binding };
   const fetchAs = (path: string, init?: RequestInit) =>
     worker.fetch(new Request(`${ORIGIN}${path}`, init), env);
@@ -255,7 +261,11 @@ describe('Worker setup mount', () => {
   });
 
   it('mounts no setup routes without the ASSETS binding', async () => {
-    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      authorization: engine,
+      log: () => undefined,
+    });
     try {
       await worker.services(authEnv);
       expect(

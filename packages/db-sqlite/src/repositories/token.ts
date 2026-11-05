@@ -2,7 +2,7 @@ import { npmManagementIssuance } from '@package-broker/core/authz/npm-management
 import { createWorkloadTokenStore } from './workload-token.js';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditPendingStatement, auditReserveStatements } from './audit-pending.js';
 import { idempotencyInsertStatement } from './idempotency.js';
 import { sql, type Compilable, type Expression, type Kysely } from 'kysely';
 import {
@@ -929,8 +929,7 @@ export function createTokenRepository(
             ),
             ...assertCheck(sql<boolean>`exists (select 1 from token where org_id = ${ctx.orgId}
             and id = ${input.tokenId} and last_op_id = ${opId})`),
-            auditPendingStatement(ctx, input.audit),
-            auditPendingStatement(ctx, rotationAudit, performed),
+            ...auditReserveStatements(ctx, rotationAudit, input.audit, performed),
             compile(
               db
                 .updateTable('audit_pending')

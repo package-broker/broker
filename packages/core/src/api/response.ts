@@ -12,6 +12,7 @@ import { errorEnvelope } from '../envelope.js';
 import type { ValidationDetail } from './validate.js';
 
 export const API_ERROR_CODES = {
+  rate_limited: { status: 429, message: 'Too many requests' },
   unsupported_package: { status: 400, message: 'Unsupported package' },
   unsupported_source_kind: { status: 400, message: 'Unsupported source kind' },
   source_not_attached: {
@@ -25,6 +26,8 @@ export const API_ERROR_CODES = {
   local_auth_disabled: { status: 403, message: 'Local sign-in is disabled' },
   reauth_required: { status: 403, message: 'Reauthentication required' },
   not_found: { status: 404, message: 'Not found' },
+  audit_trail_invalid_response: { status: 500, message: 'Invalid audit trail response' },
+  audit_trail_unavailable: { status: 404, message: 'Audit trail unavailable' },
   conflict: { status: 409, message: 'Conflict' },
   discovery_rule_disabled: { status: 409, message: 'Discovery rule is disabled' },
   source_paused: { status: 409, message: 'Source is paused' },

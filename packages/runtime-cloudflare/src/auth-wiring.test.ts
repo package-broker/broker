@@ -1,7 +1,5 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
@@ -13,8 +11,8 @@ import type { IdentityProvider } from '@package-broker/core/identity/port';
 import { definePlugin } from '@package-broker/core/plugin';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
-import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
@@ -52,19 +50,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
 let sources: MigrationSource[] | undefined;
 
 async function coreMigrations(): Promise<MigrationSource[]> {
-  sources ??= await Promise.all(
-    ['0001_init.sql'].map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
+  sources ??= await discoveredMigrations();
   return sources;
 }
 
@@ -196,6 +185,7 @@ describe('auth wiring on Miniflare D1', () => {
         apiVersion: 3,
         register,
       }),
+      auditTrail(),
     ]);
     const environment = env(await sharedDatabase());
 
@@ -225,10 +215,10 @@ describe('auth wiring on Miniflare D1', () => {
     };
     const sink = collectLog();
 
-    const response = await createWorker([failing], { log: sink.log }).fetch(
-      get('/_pb/auth/providers'),
-      env(db),
-    );
+    const response = await createWorker([failing, auditTrail()], {
+      audit: {},
+      log: sink.log,
+    }).fetch(get('/_pb/auth/providers'), env(db));
 
     expect(response.status).toBe(503);
     const text = await response.text();
@@ -258,10 +248,10 @@ describe('auth wiring on Miniflare D1', () => {
     };
     const sink = collectLog();
 
-    const response = await createWorker([failing], { log: sink.log }).fetch(
-      get('/_pb/auth/providers'),
-      env(db, { PB_MASTER_KEY: undefined }),
-    );
+    const response = await createWorker([failing, auditTrail()], {
+      audit: {},
+      log: sink.log,
+    }).fetch(get('/_pb/auth/providers'), env(db, { PB_MASTER_KEY: undefined }));
 
     expect(response.status).toBe(503);
     expect(calls).toBe(0);
@@ -272,7 +262,7 @@ describe('auth wiring on Miniflare D1', () => {
 
   it('runs local setup and login through worker.fetch and serves the session', async () => {
     const { db, token } = await bootstrappedDatabase();
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
     const environment = env(db);
 
     const started = await worker.fetch(post('/_pb/auth/local/setup/start', { token }), environment);
@@ -320,14 +310,14 @@ describe('auth wiring on Miniflare D1', () => {
 
   it('lists the providers and local login without an organization', async () => {
     const db = await sharedDatabase();
-    const response = await createWorker([]).fetch(get('/_pb/auth/providers'), env(db));
+    const response = await createWorker([auditTrail()]).fetch(get('/_pb/auth/providers'), env(db));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ providers: [], local: true });
   });
 
   it('accepts a PB_PUBLIC_URL with a trailing slash and an uppercase host', async () => {
     const { db, token } = await bootstrappedDatabase();
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
     const response = await worker.fetch(
       post('/_pb/auth/local/setup/start', { token }),
       env(db, { PB_PUBLIC_URL: 'https://Broker.Test/' }),
@@ -336,7 +326,7 @@ describe('auth wiring on Miniflare D1', () => {
   });
 
   it('keeps auth routes out of the unbound path', async () => {
-    const worker = createWorker([]);
+    const worker = createWorker([auditTrail()]);
     const response = await worker.fetch(get('/_pb/auth/providers'), {
       PB_MASTER_KEY: KEY_V1,
       PB_PUBLIC_URL: PUBLIC_URL,
@@ -367,7 +357,7 @@ describe('auth wiring on Miniflare D1', () => {
         return [];
       },
     });
-    const response = await createWorker([plugin]).fetch(
+    const response = await createWorker([plugin, auditTrail()]).fetch(
       get('/_pb/auth/providers'),
       env(db, { PB_IDP_X: 'visible', PB_AUTH_LOCAL: 'enabled', PB_MASTER_KEY_PREVIOUS: undefined }),
     );
@@ -397,7 +387,10 @@ describe('auth wiring on Miniflare D1', () => {
       },
     });
     const logged: unknown[] = [];
-    const worker = createWorker([plugin], { log: (entry) => void logged.push(entry) });
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
+      log: (entry) => void logged.push(entry),
+    });
     expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
     expect((await worker.fetch(get('/_pb/auth/providers'), env(db))).status).toBe(200);
     expect(builds).toBe(1);
@@ -528,7 +521,10 @@ describe('misconfigured environment', () => {
   it.each(cases)('answers 503 misconfigured for $name until the env is fixed', async (item) => {
     const db = await sharedDatabase();
     const sink = collectLog();
-    const worker = createWorker(item.plugins(), { log: sink.log });
+    const worker = createWorker([...item.plugins(), auditTrail()], {
+      audit: {},
+      log: sink.log,
+    });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const response = await worker.fetch(get('/_pb/auth/providers'), env(db, item.bad));
@@ -546,7 +542,10 @@ describe('misconfigured environment', () => {
 
   it.each(cases)('answers HEAD for $name with 503 and no body', async (item) => {
     const db = await sharedDatabase();
-    const worker = createWorker(item.plugins(), { log: () => undefined });
+    const worker = createWorker([...item.plugins(), auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     const response = await worker.fetch(get('/_pb/auth/providers', {}, 'HEAD'), env(db, item.bad));
     expect(response.status).toBe(503);
     expect(response.headers.get('x-request-id')).not.toBeNull();
@@ -564,10 +563,10 @@ describe('misconfigured environment', () => {
         throw new Error('init failed');
       },
     });
-    const response = await createWorker([failing], { log: () => undefined }).fetch(
-      get('/health/live', {}, 'HEAD'),
-      env(db),
-    );
+    const response = await createWorker([failing, auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    }).fetch(get('/health/live', {}, 'HEAD'), env(db));
     expect(response.status).toBe(500);
     expect(await response.text()).toBe('');
   });
@@ -590,7 +589,7 @@ describe('password hashing self-test', () => {
   it('builds the kernel on a runtime that caps PBKDF2 at 100 000 iterations', async () => {
     const db = await sharedDatabase();
     capDeriveBits();
-    const response = await createWorker([]).fetch(get('/_pb/auth/providers'), env(db));
+    const response = await createWorker([auditTrail()]).fetch(get('/_pb/auth/providers'), env(db));
     expect(response.status).toBe(200);
   });
 
@@ -600,7 +599,10 @@ describe('password hashing self-test', () => {
     const spy = vi
       .spyOn(crypto.subtle, 'deriveBits')
       .mockRejectedValue(new Error('runtime rejected the derivation'));
-    const worker = createWorker([], { log: sink.log });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: sink.log,
+    });
 
     const response = await worker.fetch(get('/_pb/auth/providers'), env(db));
     expect(spy).toHaveBeenCalled();
@@ -676,10 +678,10 @@ describe('start-up order', () => {
   it('rejects a bad PB_PUBLIC_URL before the PBKDF2 self-test runs', async () => {
     const db = await sharedDatabase();
     const spy = vi.spyOn(crypto.subtle, 'deriveBits');
-    const response = await createWorker([], { log: () => undefined }).fetch(
-      get('/_pb/auth/providers'),
-      env(db, { PB_PUBLIC_URL: 'http://broker.test' }),
-    );
+    const response = await createWorker([auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    }).fetch(get('/_pb/auth/providers'), env(db, { PB_PUBLIC_URL: 'http://broker.test' }));
     expect(response.status).toBe(503);
     expect(spy).not.toHaveBeenCalled();
   });
@@ -776,17 +778,20 @@ describe('plugin hooks and identity fetch', () => {
 
   it('logs in through a direct provider when no hook objects', async () => {
     const { db } = await bootstrappedDatabase();
-    const response = await createWorker([identityPlugin()], { log: () => undefined }).fetch(
-      startLogin(),
-      env(db),
-    );
+    const response = await createWorker([identityPlugin(), auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    }).fetch(startLogin(), env(db));
     expect(response.status).toBe(303);
     expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
   });
 
   it('gives the assembled services the anchors of the providers the auth module uses', async () => {
     const { db } = await bootstrappedDatabase();
-    const worker = createWorker([identityPlugin()], { log: () => undefined });
+    const worker = createWorker([identityPlugin(), auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     const services = await worker.services(env(db));
     expect(await services.providerAnchors.anchors(orgContext(ulid()))).toEqual([
       {
@@ -802,7 +807,8 @@ describe('plugin hooks and identity fetch', () => {
 
   it('hands the registered hooks to the auth module: a deny hook refuses the login', async () => {
     const { db } = await bootstrappedDatabase();
-    const response = await createWorker([identityPlugin(), denyPlugin()], {
+    const response = await createWorker([identityPlugin(), denyPlugin(), auditTrail()], {
+      audit: {},
       log: () => undefined,
     }).fetch(startLogin(), env(db));
     expect(response.status).toBe(401);
@@ -835,7 +841,10 @@ describe('plugin hooks and identity fetch', () => {
         });
       },
     });
-    const worker = createWorker([shared], { log: () => undefined });
+    const worker = createWorker([shared, auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
 
     const before = await worker.fetch(get('/hook-runs'), env(db));
     expect(await before.json()).toEqual({ runs: 0 });
@@ -862,7 +871,10 @@ describe('plugin hooks and identity fetch', () => {
         return [];
       },
     });
-    const response = await createWorker([plugin]).fetch(get('/_pb/auth/providers'), env(db));
+    const response = await createWorker([plugin, auditTrail()]).fetch(
+      get('/_pb/auth/providers'),
+      env(db),
+    );
     expect(response.status).toBe(200);
     if (captured === undefined) throw new Error('factory did not run');
     return captured;
@@ -921,6 +933,7 @@ describe('runtime error path', () => {
       createKernel: () =>
         Promise.resolve({
           fetch: () => Promise.reject(new Error('kernel exploded')),
+          routeTemplates: new Set<string>(),
           registration: { routes: [], hooks: { 'access.check': [] }, bindings: new Map() },
         }),
     }));

@@ -67,10 +67,14 @@ export function describeDiscoveryRulesMigrationContract(
   describe(`discovery rules migration: ${name}`, () => {
     it('adds an expand migration after the frozen baseline', async () => {
       const sources = await discoveredMigrations();
-      expect(sources.at(-1)?.id).toBe(MIGRATION);
-      expect(sources.at(-1)?.phase).toBe('expand');
+      expect(sources.find((source) => source.sequence === 10)?.id).toBe(MIGRATION);
+      expect(sources.find((source) => source.sequence === 10)?.phase).toBe('expand');
       expect(
-        Object.fromEntries(sources.slice(0, -1).map((source) => [source.id, source.checksum])),
+        Object.fromEntries(
+          sources
+            .filter((source) => source.sequence < 10)
+            .map((source) => [source.id, source.checksum]),
+        ),
       ).toEqual(FROZEN);
     });
 
@@ -283,7 +287,7 @@ export function describeDiscoveryRulesMigrationContract(
         const sources = await discoveredMigrations();
         await migrate(
           opened.executor,
-          sources.filter((source) => source.id !== MIGRATION),
+          sources.filter((source) => source.sequence < 10),
           { holder: 'baseline' },
         );
         await opened.executor.all({
@@ -291,13 +295,27 @@ export function describeDiscoveryRulesMigrationContract(
           params: [],
         });
         const before = await opened.executor.all({ sql: 'SELECT * FROM organization', params: [] });
-        expect((await migrate(opened.executor, sources, { holder: 'upgrade' })).applied).toEqual([
-          MIGRATION,
-        ]);
+        expect(
+          (
+            await migrate(
+              opened.executor,
+              sources.filter((source) => source.sequence <= 10),
+              { holder: 'upgrade' },
+            )
+          ).applied,
+        ).toEqual([MIGRATION]);
         expect(
           await opened.executor.all({ sql: 'SELECT * FROM organization', params: [] }),
         ).toEqual(before);
-        expect((await migrate(opened.executor, sources, { holder: 'rerun' })).applied).toEqual([]);
+        expect(
+          (
+            await migrate(
+              opened.executor,
+              sources.filter((source) => source.sequence <= 10),
+              { holder: 'rerun' },
+            )
+          ).applied,
+        ).toEqual([]);
       } finally {
         await opened.close();
       }

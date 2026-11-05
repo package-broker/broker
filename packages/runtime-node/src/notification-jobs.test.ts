@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
@@ -64,8 +65,9 @@ function boot(
   overrides: Partial<NodeServerOptions> = {},
 ): NodeBroker {
   const broker = createNodeServerWithSeams(
-    [],
+    [auditTrail()],
     {
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       executor: database.executor,
       log: () => undefined,
       ...(notifications === undefined ? {} : { notifications }),

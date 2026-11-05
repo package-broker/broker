@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createSecretCipher, credentialAad } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
@@ -53,7 +54,14 @@ const ORIGIN = 'https://broker.test';
 const TTL = 900;
 const MODIFIED = 'Mon, 19 Oct 2026 10:00:00 GMT';
 const SYNC = 'core:package-sync:v1';
-const AUDIT = ['core:audit-seal:v1', 'core:audit-verify:v1'];
+const AUDIT = [
+  'core:audit-seal:v1',
+  'core:audit-verify:v1',
+  'core:audit-maintain:v1',
+  'core:audit-health-observe:v1',
+  'core:audit-frontier:v1',
+  'core:audit-head:v1',
+];
 const AUTH_JOBS = [
   'core:import-verify:v1',
   'core:import-apply:v1',
@@ -289,9 +297,10 @@ describe('Node package-sync wiring', () => {
   async function boot(transport: FetchLike, registry = true) {
     const bytes = await openFilesystemByteStore({ root: join(directory, 'blobs') });
     broker = createNodeServerWithSeams(
-      [],
+      [auditTrail()],
       {
         executor: db.executor,
+        audit: { capacity: { maxJournalBytes: 67108864 } },
         auth: {
           keyring: createKeyring([
             parseMasterKey('pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8', 'PB_MASTER_KEY'),
@@ -942,7 +951,7 @@ describe('Node package-sync wiring', () => {
         'core:vulnerability-sync:v1',
       ].sort(),
     );
-    const bare = createNodeServer([]);
+    const bare = createNodeServer([auditTrail()]);
     try {
       expect((await bare.ready()).registration.jobs).toEqual([]);
     } finally {

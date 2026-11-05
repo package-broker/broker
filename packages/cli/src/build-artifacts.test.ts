@@ -182,6 +182,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
         'export const notifications = config.notifications;',
@@ -208,6 +209,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
         'export const notifications = config.notifications;',
@@ -236,6 +238,7 @@ describe('renderBuildManifest', () => {
         'export const observability = config.observability;',
         'export const registry = config.registry;',
         'export const tokens = config.tokens;',
+        'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
         'export const notifications = config.notifications;',
@@ -358,7 +361,7 @@ describe('build with platformPorts', () => {
     const file = path.join(project, 'broker.config.ts');
     await writeFile(
       file,
-      `export default { platform: ${JSON.stringify(platform)}, plugins: ${plugins}, platformPorts: ${JSON.stringify(ports)} } as never;
+      `export default { platform: ${JSON.stringify(platform)}, plugins: ${plugins}, audit: { capacity: { maxJournalBytes: 67108864 } }, platformPorts: ${JSON.stringify(ports)} } as never;
 `,
     );
     return file;
@@ -492,8 +495,10 @@ describe('build with platformPorts', () => {
       for (const file of files) {
         const contents = await readFile(path.join(result.outDir, file), 'utf8');
         for (const absolutePath of forbidden) {
-          expect(contents, file).not.toContain(absolutePath);
-          expect(contents, file).not.toContain(JSON.stringify(absolutePath).slice(1, -1));
+          for (const spelling of [absolutePath, JSON.stringify(absolutePath).slice(1, -1)]) {
+            const escaped = spelling.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            expect(contents, file).not.toMatch(new RegExp(`(?<![.\\w/])${escaped}`));
+          }
         }
       }
     },
@@ -524,7 +529,7 @@ describe('build with platformPorts', () => {
         plugins: unknown;
       };
       expect(imported.platformPorts).toEqual(target === 'node' ? NODE_PORTS : CLOUDFLARE_PORTS);
-      expect(imported.plugins).toEqual([]);
+      expect(imported.plugins).toMatchObject([{ id: 'audit-trail' }]);
     },
     60_000,
   );
@@ -582,7 +587,10 @@ describe('build with platformPorts', () => {
 
   it('builds without a stanza and records no description', async () => {
     const file = path.join(project, 'broker.config.ts');
-    await writeFile(file, "export default { platform: 'node', plugins: [] };\n");
+    await writeFile(
+      file,
+      "export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [] };\n",
+    );
     const result = await build({ configPath: file, target: 'node', cwd: project, runtimeEntry });
     expect((await readManifest(result.outDir)).platformPorts).toBeNull();
   }, 60_000);
@@ -713,7 +721,7 @@ describe('build with platformPorts', () => {
     await writeFile(
       config,
       `const plugin = { id: 'jobby', package: '@test/jobby', apiVersion: 3, platforms: ['node'], register: (r) => r.job({ name: 'tick', version: 1, validate: (x) => x, handler: async () => {} }) };
-export default { platform: 'node', plugins: [plugin] };
+export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [plugin] };
 `,
     );
     await expect(
@@ -726,7 +734,7 @@ export default { platform: 'node', plugins: [plugin] };
     await writeFile(
       config,
       `const plugin = { id: 'bad', package: '@test/bad', apiVersion: 3, platforms: ['node'], binds: ['blob'] };
-export default { platform: 'node', plugins: [plugin] };
+export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [plugin] };
 `,
     );
     await expect(
@@ -758,6 +766,7 @@ describe('built plugin order round trip', () => {
       configPath,
       `export default {
         platform: 'node',
+        audit: { capacity: { maxJournalBytes: 67108864 } },
         plugins: [
           { id: 'b', package: '@package-broker/core', apiVersion: 3,
             platforms: ['node', 'cloudflare'], dependsOn: ['a'] },
@@ -797,7 +806,7 @@ describe('built plugin order round trip', () => {
         runtimeEntry: await stubRuntimeEntry(),
       });
       const loaded = await loadBundle(result.bundle);
-      expect(loaded.plugins.map(({ id }) => id)).toEqual(['a', 'b']);
+      expect(loaded.plugins.map(({ id }) => id)).toEqual(['a', 'b', 'audit-trail']);
     },
   );
 
@@ -808,7 +817,7 @@ describe('built plugin order round trip', () => {
       const tokens = { maxLifetimeDays: { personal: 30, service: 60 } };
       await writeFile(
         configPath,
-        `export default ${JSON.stringify({ platform: target, plugins: [], tokens })};`,
+        `export default ${JSON.stringify({ platform: target, plugins: [], audit: { capacity: { maxJournalBytes: 67108864 } }, tokens })};`,
       );
       await writeFile(runtimeEntry, "export { tokens } from '#pb-manifest';\n");
       const result = await build({
@@ -823,12 +832,33 @@ describe('built plugin order round trip', () => {
   );
 
   it.each(['node', 'cloudflare'] as const)(
+    'carries the configured audit budget into the %s bundle',
+    async (target) => {
+      const configPath = path.join(project, 'audit.config.ts');
+      const audit = { capacity: { maxJournalBytes: 64 * 1024 * 1024 } };
+      await writeFile(
+        configPath,
+        `export default ${JSON.stringify({ platform: target, plugins: [], audit })};`,
+      );
+      await writeFile(runtimeEntry, "export { audit } from '#pb-manifest';\n");
+      const result = await build({
+        configPath,
+        target,
+        outDir: path.join(project, target),
+        runtimeEntry,
+      });
+      const loaded = (await import(pathToFileURL(result.bundle).href)) as { audit: unknown };
+      expect(loaded.audit).toEqual({ ...audit, build_generation: expect.any(Number) });
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
     'carries the disabled vulnerability setting into the %s bundle',
     async (target) => {
       const configPath = path.join(project, 'vulnerability.config.ts');
       await writeFile(
         configPath,
-        `export default ${JSON.stringify({ platform: target, plugins: [], vulnerability: { enabled: false } })};`,
+        `export default ${JSON.stringify({ platform: target, plugins: [], audit: { capacity: { maxJournalBytes: 67108864 } }, vulnerability: { enabled: false } })};`,
       );
       await writeFile(runtimeEntry, "export { vulnerability } from '#pb-manifest';\n");
       const result = await build({
@@ -850,7 +880,7 @@ describe('built plugin order round trip', () => {
       const configPath = path.join(project, 'mcp.config.ts');
       await writeFile(
         configPath,
-        `export default ${JSON.stringify({ platform: target, plugins: [], mcp: { enabled: true } })};`,
+        `export default ${JSON.stringify({ platform: target, plugins: [], audit: { capacity: { maxJournalBytes: 67108864 } }, mcp: { enabled: true } })};`,
       );
       await writeFile(runtimeEntry, "export { mcp } from '#pb-manifest';\n");
       const result = await build({

@@ -18,12 +18,27 @@ const CODE = /^[a-z][a-z0-9_.]{0,63}$/;
 const ENGINE = 'core:authorization';
 
 describe('vocabularies', () => {
-  it('has exactly the 5 audit events', () => {
+  it('has exactly the 20 audit events', () => {
     expect([...AUDIT_EVENTS].sort()).toEqual([
+      'audit.alert',
+      'audit.capacity_unbounded',
       'audit.chain_broken',
+      'audit.chain_integrity',
+      'audit.delivery_loss',
+      'audit.delivery_partial_success',
+      'audit.effective_unavailable',
+      'audit.failure_event_failed',
+      'audit.failure_event_invalid',
+      'audit.failure_event_refused',
+      'audit.failure_events_cap',
+      'audit.loss',
       'audit.seal.contended',
+      'audit.seal_repaired',
       'audit.sealed',
+      'audit.sink_admin_refused',
+      'audit.trail_toggle_ignored',
       'audit.verified',
+      'audit.verify_continued',
       'audit.verify_partial',
     ]);
     expect(Object.isFrozen(AUDIT_EVENTS)).toBe(true);
@@ -31,7 +46,7 @@ describe('vocabularies', () => {
     expect(() => (AUDIT_EVENTS as Set<string>).add('x.y')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).delete('audit.sealed')).toThrow();
     expect(() => (AUDIT_EVENTS as Set<string>).clear()).toThrow();
-    expect(AUDIT_EVENTS.size).toBe(5);
+    expect(AUDIT_EVENTS.size).toBe(20);
   });
 
   it('has exactly the 7 kernel events', () => {
@@ -48,9 +63,12 @@ describe('vocabularies', () => {
     );
   });
 
-  it('has exactly the 24 reason codes', () => {
+  it('has exactly the registered reason codes', () => {
     expect([...KERNEL_REASON_CODES].sort()).toEqual(
       [
+        'audit.effective_unavailable',
+        'no_ip_key_saturated',
+        'org_cap_reached',
         'authz.unauthenticated',
         'authz.forbidden',
         'authz.not_found',
@@ -63,6 +81,7 @@ describe('vocabularies', () => {
         'error.not_bootstrapped',
         'error.misconfigured',
         'error.unavailable',
+        'error.audit_backlog_full',
         'error.internal',
         'error.upstream_refused',
         'db.unique',
@@ -70,14 +89,40 @@ describe('vocabularies', () => {
         'db.not_null',
         'db.check',
         'db.busy',
+        'db.backlog_full',
         'db.too_big',
         'db.unknown',
         'health.not_ready',
         'request.aborted',
         'http.handler_status',
+        'audit.restore_detected',
+        'audit.local_fork',
+        'audit.receiver_fork',
+        'audit.history_limit',
+        'audit.batch_limit',
+        'audit.partial_success',
+        'audit.skipped',
+        'audit.marker_rejected',
+        'audit.uncertain',
+        'audit.blocked',
+        'audit.withheld',
+        'audit.capacity',
+        'audit.hold_failed',
+        'audit.prune_anchor',
+        'audit.gap',
+        'audit.fork',
+        'audit.pending_old',
+        'audit.mode_change',
+        'audit.policy_change',
+        'audit.sink_inactive',
+        'audit.config_invalid',
+        'audit.mode_none',
+        'audit.trail_toggle_ignored',
+        'audit.capacity_unbounded',
+        'audit.chain_integrity',
       ].sort(),
     );
-    expect(KERNEL_REASON_CODES.size).toBe(24);
+    expect(KERNEL_REASON_CODES.size).toBe(54);
   });
 
   it('matches the port CODE pattern for every value', () => {
@@ -139,6 +184,7 @@ describe('mapping functions', () => {
     ['not_bootstrapped', 'error.not_bootstrapped'],
     ['misconfigured', 'error.misconfigured'],
     ['unavailable', 'error.unavailable'],
+    ['audit_backlog_full', 'error.audit_backlog_full'],
     ['internal', 'error.internal'],
     ['something_else', 'error.internal'],
   ])('maps envelope code %s to %s', (code, reason) => {
@@ -151,6 +197,7 @@ describe('mapping functions', () => {
     'not_null',
     'check',
     'busy',
+    'backlog_full',
     'too_big',
     'unknown',
   ])('maps DbError kind %s to db.%s', (kind) => {

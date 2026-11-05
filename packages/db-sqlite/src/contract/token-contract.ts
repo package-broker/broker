@@ -703,7 +703,7 @@ const ownPersonalTokenGuard: Case = (open, wrap) =>
       expect((await revoke('own-pat')).status).toBe('revoked');
       for (const statement of statements) {
         const sql = statement.sql.startsWith('INSERT INTO audit_pending')
-          ? statement.sql.replace(/\btoken_selector\b/g, '')
+          ? statement.sql.replace(/\b(?:pending_)?token_selector\b/g, '')
           : statement.sql;
         expect(sql).not.toMatch(SECRET_COLUMNS);
       }

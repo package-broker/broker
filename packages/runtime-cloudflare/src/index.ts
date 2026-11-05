@@ -1,3 +1,18 @@
+import { createAuditHealthRepository } from '@package-broker/db-sqlite/repositories/audit-health';
+import { createAuditHealthService } from '@package-broker/core/audit/health';
+import { jobLeaseExecutor } from '@package-broker/db-sqlite/repositories/job-lease-executor';
+import { auditTelemetryActive } from '@package-broker/core/audit/destinations';
+import { bindJobAdmission } from './job-admission.js';
+import { createWorkerAudit, auditExportSchedules } from './audit.js';
+import { AuditSinkConfigError } from '@package-broker/core/audit/plugin-api';
+import {
+  AuditEffectiveConfigError,
+  AuditResolutionError,
+  resolveAuditJournalBudget,
+} from '@package-broker/core/audit/effective';
+import { createFailureEvents } from '@package-broker/core/audit/failure-events';
+import { createAuditStatusReader } from '@package-broker/db-sqlite/repositories/audit-status';
+import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import {
   discoveryRuleJobs,
   type DiscoveryRuleJobDeps,
@@ -349,6 +364,14 @@ export type Env = {
   readonly PB_MASTER_KEY_PREVIOUS?: string;
   readonly PB_KEYRING_RESEED?: string;
   readonly PB_PUBLIC_URL?: string;
+  readonly PB_AUDIT_POLICY?: string;
+  readonly PB_AUDIT_TRAIL?: string;
+  readonly PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT?: string;
+  readonly PB_AUDIT_OTLP_ENDPOINT?: string;
+  readonly PB_AUDIT_OTLP_HEADERS?: string;
+  readonly PB_AUDIT_WEBHOOK_URL?: string;
+  readonly PB_AUDIT_WEBHOOK_HEADERS?: string;
+  readonly [binding: `OTEL_EXPORTER_OTLP_${string}`]: string | undefined;
   readonly PB_AUTH_LOCAL?: string;
   readonly [binding: `PB_IDP_${string}`]: string | undefined;
 };
@@ -404,6 +427,8 @@ export interface WorkerOptions {
   readonly platformPorts?: PlatformPortConfig | null;
   /** Registry settings; an invalid value fails startup. Dist URLs use the origin of PB_PUBLIC_URL only, so a path-prefixed public URL is unsupported. */
   readonly registry?: RegistryConfigInput;
+  readonly audit?: BrokerConfig['audit'];
+  readonly auditGeneration?: number;
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
@@ -492,6 +517,7 @@ async function buildAuth(
   dispatch: (run: () => Promise<void>) => void,
   collectRegistration: () => Registration,
   tokens: TokenWiring,
+  failureEvents: NonNullable<Parameters<typeof createAccessServices>[0]['failureEvents']>,
   keyring: Keyring,
 ): Promise<{
   assembly: AccessAssembly;
@@ -527,6 +553,7 @@ async function buildAuth(
     ids: { ulid },
     log,
     dispatch,
+    failureEvents,
     clientIp: clientIpOf,
     registration,
     tokens,
@@ -1232,6 +1259,9 @@ function scheduleDefinitions(jobs: Registration['jobs']) {
           {
             name: job.qualifiedName,
             everySeconds: job.definition.schedule.everySeconds,
+            ...(job.definition.schedule.resourceKey === undefined
+              ? {}
+              : { resourceKey: job.definition.schedule.resourceKey }),
             ...(job.definition.maxAttempts === undefined
               ? {}
               : { maxAttempts: job.definition.maxAttempts }),
@@ -1438,6 +1468,7 @@ export function createWorker(
       : options.cacheStorage;
   const applications = new Map<string, { pending: Promise<Application>; failedUntil?: number }>();
   const scopes = createRequestScopes();
+  const failureRecorder = createFailureEvents();
   const identities = new WeakMap<object, number>();
   let nextIdentity = 0;
 
@@ -1468,6 +1499,20 @@ export function createWorker(
   async function computeFingerprint(env: Env): Promise<string> {
     const names = new Set<string>(FINGERPRINT_BINDINGS);
     const variables = new Set<string>(Object.keys(env).filter((name) => name.startsWith('PB_')));
+    for (const plugin of plugins) {
+      if (plugin.auditTrail?.toggleEnv !== undefined) variables.add(plugin.auditTrail.toggleEnv);
+      for (const sink of plugin.auditSinks ?? []) {
+        for (const [key, value] of Object.entries(sink.destination)) {
+          if (key !== 'protocol') variables.add(value);
+        }
+        for (const name of sink.envNames ?? []) variables.add(name);
+      }
+    }
+    if (options.audit?.alerts?.webhookEnv !== undefined)
+      variables.add(options.audit.alerts.webhookEnv);
+    for (const name of Object.keys(env)) {
+      if (name.startsWith('OTEL_EXPORTER_OTLP_')) variables.add(name);
+    }
     if (stanza !== null) {
       for (const name of [
         stanza.blob.binding,
@@ -1748,6 +1793,12 @@ export function createWorker(
       ...(options.observability === undefined ? {} : { observability: options.observability }),
     });
     if (observabilityProblems.length > 0) throw new KernelConfigError(observabilityProblems);
+    const maxJournalBytes = resolveAuditJournalBudget(
+      options.audit,
+      'cloudflare',
+      env?.PB_AUDIT_POLICY,
+    );
+    const auditCapacity = maxJournalBytes === null ? {} : { maxJournalBytes };
     let notificationsOn: boolean;
     try {
       notificationsOn = notificationsSwitch(options.notifications);
@@ -1788,7 +1839,13 @@ export function createWorker(
       db === undefined ? unboundExecutor() : createD1Executor(db);
     const bootstrap = createOrganizationBootstrap(executor);
     const organizations = createOrganizationRepository(executor);
-    const resolveOrg = createOrgResolver(bootstrap);
+    const resolveOrganization = createOrgResolver(bootstrap);
+    let audit: Awaited<ReturnType<typeof createWorkerAudit>> | undefined;
+    const resolveOrg = async (request?: Request): Promise<OrgContext> => {
+      const org = await resolveOrganization();
+      if (audit !== undefined) await audit.resolveRequest(org, request);
+      return org;
+    };
 
     let untrackedLogged = false;
     const dispatch = (run: () => Promise<void>): void => {
@@ -1998,11 +2055,33 @@ export function createWorker(
                   }),
                 ),
                 registerObservedJob(
-                  auditSealJob(createAuditSealRepository(executor as SqlExecutor)),
+                  auditSealJob(
+                    createAuditSealRepository(executor as SqlExecutor, auditCapacity),
+                    (context) =>
+                      createAuditSealRepository(
+                        jobLeaseExecutor(executor as SqlExecutor, context),
+                        { ...auditCapacity, signal: context.signal },
+                      ),
+                  ),
                 ),
-                registerObservedJob(
-                  auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor)),
-                ),
+                registerObservedJob({
+                  ...auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor)),
+                  async handler(payload, context) {
+                    const scoped = jobLeaseExecutor(executor as SqlExecutor, context);
+                    const job = auditVerifyJob(createAuditVerifyReader(scoped), {
+                      raise: async (org, code) => {
+                        const health = createAuditHealthService({
+                          port: createAuditHealthRepository(scoped),
+                          clock: systemClock,
+                          observability: context.observability,
+                        });
+                        await health.raise(org, code);
+                        await audit?.notifyAlert(code);
+                      },
+                    });
+                    await job.handler(job.validate(payload), context);
+                  },
+                }),
                 ...(db === undefined ? [] : importJobRegistrations(importJobs)),
                 ...(db === undefined
                   ? []
@@ -2059,6 +2138,25 @@ export function createWorker(
                     ]),
               ],
       });
+    const failureRouteTemplates = new Set<string>();
+    const fallbackObservability = createObservability(
+      {
+        emit: (record) => {
+          if (record.kind === 'log') log({ ...record.record });
+        },
+      },
+      {
+        deploymentId: bound?.deploymentId ?? 'unconfigured',
+        runtime: 'cloudflare',
+        requestId: null,
+        plugin: 'core',
+      },
+      {
+        events: AUDIT_EVENTS,
+        reasonCodes: KERNEL_REASON_CODES,
+        routeTemplates: failureRouteTemplates,
+      },
+    );
     if (
       db === undefined &&
       parseLocalAuthPolicy(read(env ?? NO_ENV, 'PB_AUTH_LOCAL')) === 'disabled'
@@ -2076,9 +2174,62 @@ export function createWorker(
             dispatch,
             collectRegistration,
             tokenWiring(lifetime, patJobs, config !== null),
+            {
+              recorder: failureRecorder,
+              binding: {
+                deploymentId: bound?.deploymentId ?? 'unconfigured',
+                staging: createAuditFailureRepository(executor as SqlExecutor),
+                routeTemplates: failureRouteTemplates,
+                now: () => systemClock.now(),
+                observability: delegatingObservability(
+                  (): Observability => services?.observability ?? fallbackObservability,
+                ),
+              },
+            },
             keyring!,
           );
-    const registration = built?.registration ?? collectRegistration();
+    let registration = built?.registration ?? collectRegistration();
+    if (db !== undefined && config !== null) {
+      const schedules = [
+        { name: 'audit-maintain', everySeconds: 60, resourceKey: 'audit-maintain' },
+        { name: 'audit-health-observe', everySeconds: 60, resourceKey: 'audit-health-observe' },
+        { name: 'audit-frontier', everySeconds: 86400, resourceKey: 'audit-frontier' },
+        { name: 'audit-head', everySeconds: 86400, resourceKey: 'audit-head' },
+        ...(await auditExportSchedules(registration, options.audit, (name) => {
+          const value = read(env ?? {}, name);
+          return typeof value === 'string' ? value : undefined;
+        })),
+      ];
+      registration = {
+        ...registration,
+        jobs: [
+          ...registration.jobs,
+          ...schedules.map(({ name, ...schedule }) =>
+            registerObservedJob({
+              name,
+              version: 1,
+              maxAttempts: 3,
+              schedule,
+              validate: (payload) => {
+                if (
+                  payload === null ||
+                  typeof payload !== 'object' ||
+                  Array.isArray(payload) ||
+                  Reflect.ownKeys(payload).length !== 0
+                )
+                  throw new JobError('invalid_payload');
+                return {};
+              },
+              async handler(payload, context) {
+                const job = audit?.jobs.find((job) => job.name === name);
+                if (job === undefined) throw new PlatformUnavailableError();
+                await job.handler(job.validate(payload), context);
+              },
+            }),
+          ),
+        ],
+      };
+    }
     const auth = built?.auth;
     const services =
       config === null || bound === null
@@ -2088,7 +2239,7 @@ export function createWorker(
             bound,
             executor as SqlExecutor,
             registration,
-            resolveOrg,
+            resolveOrganization,
             registryConfig?.timers.waitBudgetMs ?? 8000,
           );
     coreJobBindings.services = services;
@@ -2188,6 +2339,7 @@ export function createWorker(
       built === undefined || packages === null
         ? []
         : createApiRoutes({
+            registration,
             onDiscoveryRules: (deps) => {
               discoveryRules = deps;
             },
@@ -2228,6 +2380,19 @@ export function createWorker(
               }),
             lifetime,
             log,
+            effectiveAudit: (org) => audit!.effective(org),
+            auditStatus: {
+              reader: createAuditStatusReader(executor as SqlExecutor),
+              effective: (org) => audit!.effective(org),
+              modeSource: (org) => audit!.status.modeSource(org),
+            },
+            auditHealth: { read: (org) => audit!.health.read(org) },
+            auditTrail: { effective: (org) => audit!.effective(org) },
+            auditAlerts: {
+              raise: (org) => {
+                dispatch(() => audit!.raise(org, 'audit.withheld'));
+              },
+            },
             blob: services?.platformServices.blob,
             vcsProviders: () =>
               registryModule === undefined
@@ -2335,6 +2500,50 @@ export function createWorker(
               },
             }),
       });
+      if (db !== undefined) {
+        audit = await createWorkerAudit({
+          config: {
+            platform: 'cloudflare',
+            plugins,
+            ...(options.audit === undefined ? {} : { audit: options.audit }),
+            ...(config === null ? {} : { platformPorts: { cloudflare: config } }),
+          },
+          env: (name) => {
+            const value = read(env ?? {}, name);
+            return typeof value === 'string' ? value : undefined;
+          },
+          executor: executor as SqlExecutor,
+          observability: services?.observability ?? fallbackObservability,
+          dispatch,
+          ...(bound === null ? {} : { deploymentId: bound.deploymentId }),
+          generation: options.auditGeneration ?? 0,
+          maxJournalBytes,
+          telemetryActive:
+            config?.observability.endpointEnv !== undefined &&
+            auditTelemetryActive(read(env ?? {}, config.observability.endpointEnv)),
+          registration: () => kernel.registration,
+        });
+      }
+      if (audit !== undefined) {
+        bindJobAdmission(kernel.registration.jobs, audit.admitJob);
+        const org = await bootstrap.findSingleton();
+        if (org !== null) {
+          try {
+            await audit.effective(await resolveOrganization());
+          } catch (error) {
+            if (!(error instanceof AuditResolutionError) || error.transient)
+              (services?.observability ?? fallbackObservability).log({
+                level: 'error',
+                event: 'audit.effective_unavailable',
+                reason_code: 'audit.effective_unavailable',
+              });
+          }
+        }
+      }
+      if (kernel.routeTemplates == null) {
+        throw new KernelConfigError(['kernel.routeTemplates is required']);
+      }
+      for (const template of kernel.routeTemplates) failureRouteTemplates.add(template);
       if (services === undefined)
         return {
           kernel,
@@ -2375,10 +2584,17 @@ export function createWorker(
     const pending = build(env).catch((error: unknown) => {
       const entry = applications.get(key);
       if (entry?.pending === pending) {
-        if (error instanceof KernelConfigError) entry.failedUntil = Date.now() + 30_000;
+        if (
+          error instanceof KernelConfigError ||
+          error instanceof AuditEffectiveConfigError ||
+          error instanceof AuditSinkConfigError
+        )
+          entry.failedUntil = Date.now() + 30_000;
         else applications.delete(key);
       }
       logBuildFailure(log, error);
+      if (error instanceof AuditEffectiveConfigError || error instanceof AuditSinkConfigError)
+        throw new KernelConfigError(['Invalid effective audit configuration']);
       throw error;
     });
     if (applications.size >= MAX_CACHED_APPLICATIONS) {

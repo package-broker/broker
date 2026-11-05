@@ -1,3 +1,4 @@
+import { auditTrail } from '../audit-trail.test.support.js';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,8 +79,9 @@ beforeAll(async () => {
   world = seeded;
   bootBroker = async (enabled) =>
     createNodeServerWithSeams(
-      [],
+      [auditTrail()],
       {
+        audit: { capacity: { maxJournalBytes: 67108864 } },
         executor: database.executor,
         notifications: { enabled },
         auth: { keyring, publicOrigin: ORIGIN, env: { PB_KEYRING_RESEED: '1' } },

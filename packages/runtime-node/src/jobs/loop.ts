@@ -1,3 +1,4 @@
+import { admitJob } from '../job-admission.js';
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import { systemClock, ulid, type Clock } from '@package-broker/core/ids';
 import { createOrgResolver } from '@package-broker/core/kernel/org';
@@ -116,6 +117,9 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
           {
             name: job.qualifiedName,
             everySeconds: job.definition.schedule.everySeconds,
+            ...(job.definition.schedule.resourceKey === undefined
+              ? {}
+              : { resourceKey: job.definition.schedule.resourceKey }),
             ...(job.definition.maxAttempts === undefined
               ? {}
               : { maxAttempts: job.definition.maxAttempts }),
@@ -266,6 +270,7 @@ export function createJobLoop(input: JobLoopInput): JobLoop {
       const job = byType.get(claim.type);
       if (stopping) return { outcome: 'released', delaySeconds: 0 };
       if (job === undefined) return { outcome: 'released', delaySeconds: JOB_LEASE_SECONDS };
+      if (!(await admitJob(job, org))) return { outcome: 'released', delaySeconds: 30 };
       let payload: unknown;
       try {
         payload = job.definition.validate(JSON.parse(claim.payloadJson) as unknown);

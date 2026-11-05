@@ -1,3 +1,4 @@
+import { sha256Hex } from '../auth/primitives.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiCall } from '../api/idempotency.js';
 import type { AuthenticatedSession } from '../auth/session.js';
@@ -419,8 +420,9 @@ it.each(['r'.repeat(201), 'r'.repeat(1000), 'é'.repeat(500)])(
     const { call, store } = setup({ ...managed, hostedNpm: true, revision: 3 });
     expect(await call({ ...input, action: 'tombstone', reason })).toMatchObject({ ok: true });
     expect(
-      JSON.parse(store.tombstoneVersion.mock.calls[0]![2].audit.payloadJson).changes.reason.new,
-    ).toBe(reason);
+      JSON.parse(store.tombstoneVersion.mock.calls[0]![2].audit.payloadJson).changes.reason_sha256
+        .new,
+    ).toBe(await sha256Hex(reason));
   },
 );
 it.each(['r'.repeat(1001), 'é'.repeat(501), '', '   '])(

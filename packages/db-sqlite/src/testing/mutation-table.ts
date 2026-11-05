@@ -1,3 +1,17 @@
+import { entries as auditCapacityStateEntries } from './mutation-table/audit-capacity-state.js';
+import { entries as auditEffectiveEntries } from './mutation-table/audit-effective.js';
+import { entries as auditCutoverEntries } from './mutation-table/audit-cutover.js';
+import { entries as auditStatusEntries } from './mutation-table/audit-status.js';
+import { entries as auditApiExportEntries } from './mutation-table/audit-api-export.js';
+import { entries as auditHealthEntries } from './mutation-table/audit-health.js';
+import { entries as auditForkEntries } from './mutation-table/audit-fork.js';
+import { entries as auditNoneEntries } from './mutation-table/audit-none.js';
+import { entries as auditPruneEntries } from './mutation-table/audit-prune.js';
+import { entries as auditJournalEntries } from './mutation-table/audit-journal.js';
+import { entries as auditTrailServicesEntries } from './mutation-table/audit-trail-services.js';
+import { entries as auditFailureEntries } from './mutation-table/audit-failure.js';
+import { entries as auditExportEntries } from './mutation-table/audit-export.js';
+import { entries as auditSinkEntries } from './mutation-table/audit-sink.js';
 import { entries as discoveryConnectionsEntries } from './mutation-table/discovery-connections.js';
 import { entries as discoveryRuleEntries } from './mutation-table/discovery-rules.js';
 import { entries as npmTokensEntries } from './mutation-table/npm-tokens.js';
@@ -119,10 +133,10 @@ import { entries as catalogueWriteVersionUpdateEntries } from './mutation-table/
 import { entries as catalogueEpochEntries } from './mutation-table/catalogue-epoch.js';
 import { entries as cacheEpochEntries } from './mutation-table/cache-epoch.js';
 import { entries as sourceEntries } from './mutation-table/source.js';
+import { entries as auditLedgerEntries } from './mutation-table/audit-ledger.js';
 import { entries as auditPendingEntries } from './mutation-table/audit-pending.js';
 import { entries as auditSealEntries } from './mutation-table/audit-seal.js';
 import { entries as auditVerifyEntries } from './mutation-table/audit-verify.js';
-import { entries as auditQueryEntries } from './mutation-table/audit-query.js';
 import { entries as packageIdEntries } from './mutation-table/package-id.js';
 import { entries as registryReadsEntries } from './mutation-table/registry-reads.js';
 import { entries as patOffboardingEntries } from './mutation-table/pat-offboarding.js';
@@ -151,7 +165,12 @@ import type { MutationEntry } from './mutation-table/harness.js';
 export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
-export const mutationTable: readonly MutationEntry[] = [
+const registeredEntries: readonly MutationEntry[] = [
+  ...auditCapacityStateEntries,
+  ...auditEffectiveEntries,
+  ...auditCutoverEntries,
+  ...auditNoneEntries,
+  ...auditPruneEntries,
   ...registryPolicyReadEntries,
   ...registryPolicyCreateEntries,
   ...registryPolicyUpdateEntries,
@@ -264,10 +283,19 @@ export const mutationTable: readonly MutationEntry[] = [
   ...attachedProxyEntries,
   ...projectSourceReadEntries,
   ...projectGrantReadEntries,
+  ...auditFailureEntries,
+  ...auditExportEntries,
+  ...auditApiExportEntries,
+  ...auditSinkEntries,
+  ...auditForkEntries,
+  ...auditLedgerEntries,
+  ...auditStatusEntries,
+  ...auditHealthEntries,
   ...auditPendingEntries,
   ...auditSealEntries,
   ...auditVerifyEntries,
-  ...auditQueryEntries,
+  ...auditJournalEntries,
+  ...auditTrailServicesEntries,
   ...catalogueReblobEntries,
   ...webhookDeliveryEntries,
   ...blobLeaseEntries,
@@ -295,6 +323,70 @@ export const mutationTable: readonly MutationEntry[] = [
   ...notificationRetentionEntries,
   ...notificationPrepareEntries,
 ];
+
+const stagingBuilders = new Set([
+  'createRegistryPolicyStore',
+  'createRegistryPolicyUpdater',
+  'createRegistryPolicyMembers',
+  'createRegistryPolicyExpiry',
+  'createPolicyReadAuditSink',
+  'createDiscoveryRuleRepository',
+  'createDistTagStore',
+  'createUnpublishStore',
+  'createAuditHealthRepository',
+  'disableTrustedPublisherStatements',
+  'createNotificationWriteRepository',
+  'notificationCaptureStatements',
+  'sourceOverflowStatements',
+  'createNotificationAttemptRepository',
+  'createNotificationSettlement',
+  'createNotificationRetentionRepository',
+  'createNotificationPrepareRepository',
+  'failureStreakStatements',
+  'createPackageDetailRepository',
+  'createDeprecationStore',
+  'createApiRoutes',
+  'createAuditApiExportStore',
+  'createAuditCutoverRepository',
+  'createAuditNoneRepository',
+  'createAuditFailureRepository',
+  'createAuditForkRepository',
+  'createAuditSinkRepository',
+  'createGrantRepository',
+  'createImportVerificationStore',
+  'createVisibilityStore',
+  'createImportRollbackStore',
+  'createIdentityBlockRepository',
+  'createImportJournalStore',
+  'createLocalLoginSetupWriter',
+  'createLoginWriter',
+  'createPatOffboardingRepository',
+  'createRegisteredNameRepository',
+  'createLocalLoginSuccessWriter',
+  'createRoleRepository',
+  'createSessionRepository',
+  'createVisibilitySubsetRepository',
+  'createVisibilityAttachRepository',
+  'createSourcePackageStore',
+  'visibilityAuditStatements',
+  'createSourceRepository',
+]);
+
+export const mutationTable: readonly MutationEntry[] = registeredEntries.map((entry) =>
+  !stagingBuilders.has(entry.builder)
+    ? entry
+    : {
+        ...entry,
+        waivers: [
+          ...(entry.waivers ?? []),
+          {
+            locate: /audit_chain\.org_id = input\.pending_org_id/,
+            reason:
+              'The shared staging capacity scope is mutation-tested by auditPendingStatement; callers do not supply this predicate.',
+          },
+        ],
+      },
+);
 
 export function checkCompleteness(
   sources: Readonly<Record<string, string>>,

@@ -354,7 +354,10 @@ function totp(secret: string, step: number): string {
   return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, '0');
 }
 
-export async function session(broker: LocalBroker, email = 'admin@example.test') {
+export async function session(
+  broker: Pick<LocalBroker, 'origin' | 'publicOrigin' | 'setupToken'>,
+  email = 'admin@example.test',
+) {
   let cookie = '';
   let csrf = '';
   const request = async (

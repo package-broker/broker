@@ -59,7 +59,7 @@ async function fixture(route: string) {
   const runtimeEntry = path.join(cwd, 'runtime.ts');
   await writeFile(
     configPath,
-    `export default { platform: 'node', plugins: [{ id: 'widgets', package: '@package-broker/core', apiVersion: 3, platforms: ['node'], register: (r) => r.route(${route}) }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
+    `export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [{ id: 'widgets', package: '@package-broker/core', apiVersion: 3, platforms: ['node'], register: (r) => r.route(${route}) }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
   );
   await writeFile(runtimeEntry, "export { platformPorts } from '#pb-manifest';");
   return { cwd, configPath, runtimeEntry };
@@ -125,7 +125,7 @@ describe('build vulnerability configuration', () => {
       const options = await fixture(routeSource(''));
       await writeFile(
         options.configPath,
-        `export default { platform: 'node', plugins: [], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} }, vulnerability: ${JSON.stringify(vulnerability)} };`,
+        `export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} }, vulnerability: ${JSON.stringify(vulnerability)} };`,
       );
       await writeFile(options.runtimeEntry, "export { vulnerability } from '#pb-manifest';");
       const result = await build(options);
@@ -140,7 +140,7 @@ describe('build vulnerability configuration', () => {
       const options = await fixture(routeSource(''));
       await writeFile(
         options.configPath,
-        `export default { platform: 'node', plugins: [], vulnerability: ${JSON.stringify(vulnerability)} };`,
+        `export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [], vulnerability: ${JSON.stringify(vulnerability)} };`,
       );
       await expect(build(options)).rejects.toBeInstanceOf(BuildDiagnosticsError);
     },

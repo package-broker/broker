@@ -20,7 +20,7 @@ import {
 import { createJobRepository } from './job.js';
 import { actorHolds } from './actor-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditOperationStatement } from './audit-pending.js';
 import { assertCaptureBudget } from '@package-broker/core/db/notifications';
 import { npmDisplayName, notificationCaptureStatements } from './notification-capture.js';
 import { compile as compiled, newOpId, type ProtectedHolderProvider } from '../kysely.js';
@@ -283,7 +283,14 @@ export function createPublishesRepository(
         : [];
     statements.push(...capture);
     statements.push(
-      auditPendingStatement(ctx, input.event, statement(succeeded)) as ScalarStatement,
+      auditOperationStatement(
+        ctx,
+        input.event,
+        statement(
+          sql`${Number(scan !== undefined && (scan.scanState === 'denied' || scan.scanState === 'failed'))} and (${succeeded}) and exists(select 1 from publish_approval where org_id=${ctx.orgId} and id=${input.id} and scan_state in ('denied','failed'))`,
+        ),
+        statement(succeeded),
+      ) as ScalarStatement,
       statement(
         sql`update cache_epoch set version=hex(randomblob(16)) where org_id=${ctx.orgId} and ${succeeded}`,
       ),

@@ -51,7 +51,14 @@ export interface AdminOptions {
 }
 
 type Command =
-  'admin bootstrap' | 'admin reset-local' | 'admin rebind-provider' | 'admin show-provider-binding';
+  | 'audit alert'
+  | 'audit sink'
+  | 'audit cutover'
+  | 'audit epoch bump'
+  | 'admin bootstrap'
+  | 'admin reset-local'
+  | 'admin rebind-provider'
+  | 'admin show-provider-binding';
 
 const SIGNALS = ['SIGINT', 'SIGTERM'] as const;
 const SETUP_TOKEN_TTL_MS = 24 * 3_600_000;
@@ -136,7 +143,7 @@ interface Opened {
   close(): Promise<void>;
 }
 
-function openTarget(command: Command, target: AdminTarget): Opened | null {
+export function openTarget(command: Command, target: AdminTarget): Opened | null {
   if (target.kind === 'cloudflare') {
     const executor = cloudflareExecutor(command, target);
     return executor === null ? null : { executor, close: async () => undefined };

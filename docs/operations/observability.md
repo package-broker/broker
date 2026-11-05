@@ -91,7 +91,8 @@ observability: {
 
 Rebuild and redeploy for the target runtime. `PB_OTLP_ENDPOINT` and
 `PB_OTLP_HEADERS` are the exact names selected by this example, not built-in
-variables. Setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone has no effect. Without
+variables. For broker telemetry, setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone has no effect.
+The prebuilt audit OTLP sink separately activates from this variable; see [audit export](audit-export.md). Without
 `endpointEnv`, OTLP is disabled. If `endpointEnv` is configured, its variable must
 be set. If `headersEnv` is configured, its variable must hold a JSON object whose
 values are strings; use `{}` for an unauthenticated receiver. To omit the headers

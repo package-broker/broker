@@ -37,6 +37,7 @@ export const METRIC_NAMES = [
   'pb.upstream.duration_ms',
   'pb.upstream.bytes',
   'pb.obs.export_failures',
+  'pb.audit.failure_events_suppressed',
 ] as const;
 
 export type MetricName = (typeof METRIC_NAMES)[number];

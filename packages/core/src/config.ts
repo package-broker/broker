@@ -1,3 +1,5 @@
+export { DEFAULT_AUDIT_REJECTION_RETRIES } from './audit/export-state.js';
+import type { BrokerAuditConfig } from './audit/config.js';
 import type { LogLevel } from './platform/observability.js';
 import { assetDeclarationProblems, type AssetDeclaration } from './asset-provider.js';
 import type { TokenLifetimeInput } from './authz/token-lifetime.js';
@@ -18,6 +20,9 @@ export type {
   AssetProviderV1,
 } from './asset-provider.js';
 
+export { brokerAuditProblems, brokerAuditWarnings } from './audit/config.js';
+export type { BrokerAuditConfig } from './audit/config.js';
+
 export interface BrokerConfig {
   readonly platform: Platform;
   readonly plugins: readonly PluginDefinition[];
@@ -26,6 +31,7 @@ export interface BrokerConfig {
   readonly registry?: RegistryConfigInput;
   readonly tokens?: TokenLifetimeInput;
   readonly observability?: BrokerObservabilityConfig;
+  readonly audit?: BrokerAuditConfig;
   readonly vulnerability?: { readonly enabled?: boolean };
   /** Read-only MCP endpoint for `read` tokens; requires the Rate Limiting binding on Workers. */
   readonly mcp?: { readonly enabled?: boolean };

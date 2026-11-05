@@ -313,14 +313,28 @@ export function describeDiscoveryRulesContract(
           sql: "update credential set kind='github_token' where org_id=?",
           params: [a.orgId],
         });
-        await repo.due(a, new Date().toISOString());
+        await executor.batch([
+          {
+            sql: "UPDATE job SET type='core:discovery-rules:v1' WHERE org_id=? AND id='DRJOB'",
+            params: [a.orgId],
+          },
+        ]);
+        await repo.failUnavailableCredentials(
+          a,
+          { id: 'DRJOB', owner: 'worker', fence: 3 },
+          new Date().toISOString(),
+        );
         expect((await repo.get(a, RULE_ID))?.completed).toEqual(completed);
         const before = await executor.all({
           sql: "select * from audit_pending where org_id=? and action='discovery_rule.run_finished'",
           params: [a.orgId],
         });
         expect(before).toHaveLength(1);
-        await repo.due(a, new Date().toISOString());
+        await repo.failUnavailableCredentials(
+          a,
+          { id: 'DRJOB', owner: 'worker', fence: 3 },
+          new Date().toISOString(),
+        );
         expect(
           await executor.all({
             sql: "select * from audit_pending where org_id=? and action='discovery_rule.run_finished'",
@@ -647,8 +661,8 @@ export function describeDiscoveryRulesContract(
         });
         expect((await repo.due(a, new Date().toISOString())).map((r) => r.id)).toEqual(['zzz']);
         expect(await repo.get(a, 'bad-0')).toMatchObject({
-          outcome: 'failed',
-          failureReason: 'credential_unavailable',
+          outcome: null,
+          failureReason: null,
           completed: null,
         });
       }));
@@ -673,7 +687,7 @@ export function describeDiscoveryRulesContract(
           params: [a.orgId],
         });
         expect(await repo.due(a, new Date().toISOString())).toEqual([]);
-        expect(await repo.get(a, RULE_ID)).toMatchObject({ outcome: 'failed' });
+        expect(await repo.get(a, RULE_ID)).toMatchObject({ outcome: null });
       }));
     it('rejects invalid credentials on update without discarding the checkpoint', () =>
       fixture(async ({ repo, a, admin, executor }) => {

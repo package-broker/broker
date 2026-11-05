@@ -1,8 +1,8 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes, type webcrypto } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { base64urlEncode } from '@package-broker/core/auth/primitives';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
@@ -11,10 +11,8 @@ import { orgContext } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
 import type { Kernel } from '@package-broker/core/kernel/kernel';
 import { SUPPORTED_PLUGIN_API, type PluginDefinition } from '@package-broker/core/plugin';
-import {
-  loadMigrationSource,
-  type MigrationSource,
-} from '@package-broker/db-sqlite/migrations/source';
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import {
   bootstrapAdmin,
   bootstrapSsoAdmin,
@@ -47,19 +45,8 @@ const PASSWORD = 'correct horse battery staple 42';
 const ADMIN_EMAIL = 'admin@example.test';
 const encoder = new TextEncoder();
 
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
-
 async function migrationSources(): Promise<MigrationSource[]> {
-  const names = (await readdir(migrationsDirectory)).filter((name) => name.endsWith('.sql')).sort();
-  return Promise.all(
-    names.map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
+  return discoveredMigrations();
 }
 
 interface KeyPair {
@@ -284,7 +271,8 @@ describe('runtime SSO providers on the node runtime', () => {
   ): Promise<{ broker: NodeBroker; kernel: Kernel }> {
     const plugins: PluginDefinition[] = [ssoOidc(compiled)];
     const broker = await startNode({
-      plugins,
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [...plugins, auditTrail()],
       migrations: await migrationSources(),
       env,
       log: (entry) => {

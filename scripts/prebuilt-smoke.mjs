@@ -15,6 +15,7 @@ import {
   startMockIssuer,
 } from '../packages/runtime-cloudflare/scripts/mock-oidc-issuer.mjs';
 import { listFiles, payloadFiles } from './stage-prebuilt.mjs';
+import { prebuiltAuditProblems } from './check-pack-audit.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const INSTALL_NOT_RUN = 'NOT RUN: npm install needs the registry for better-sqlite3';
@@ -316,6 +317,14 @@ export async function runPrebuiltSmoke({ root = ROOT, run = checked, materialize
     const nodeDir = join(nodePackage, 'node');
     await copyMetafile(root, 'node', nodeDir);
     await copyMetafile(root, 'cloudflare', materialized.outDir);
+    for (const [target, directory] of [
+      ['node', nodeDir],
+      ['cloudflare', materialized.outDir],
+    ]) {
+      const problems = prebuiltAuditProblems(directory, target);
+      if (problems.length)
+        throw new Error(`Packed ${target} audit composition is invalid: ${problems.join('; ')}`);
+    }
 
     const smokeEnv = {
       ...installEnv,

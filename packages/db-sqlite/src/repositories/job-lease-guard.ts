@@ -21,15 +21,18 @@ function fenceOf(value: unknown): number {
   return value;
 }
 
-export function jobLeaseGuard(ctx: OrgContext, guard: JobGuard): readonly Statement[] {
+export function jobLeasePredicate(ctx: OrgContext, guard: JobGuard, resourceKey?: string) {
   const id = text('id', guard.id);
   const owner = text('owner', guard.owner);
   const fence = fenceOf(guard.fence);
-  return assertCheck(
-    sql<boolean>`EXISTS (SELECT 1 FROM job
+  return sql<boolean>`EXISTS (SELECT 1 FROM job
       WHERE job.id = ${id} AND job.org_id = ${ctx.orgId}
         AND job.lease_owner = ${owner} AND job.fence = ${fence}
         AND job.state = 'running'
-        AND job.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
-  );
+        AND job.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        ${resourceKey === undefined ? sql`` : sql`AND job.resource_key = ${resourceKey}`})`;
+}
+
+export function jobLeaseGuard(ctx: OrgContext, guard: JobGuard): readonly Statement[] {
+  return assertCheck(jobLeasePredicate(ctx, guard));
 }

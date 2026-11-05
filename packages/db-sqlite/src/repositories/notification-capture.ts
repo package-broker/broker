@@ -11,7 +11,7 @@ import {
 } from '@package-broker/core/db/notifications';
 import { displayName } from '@package-broker/core/catalogue/names';
 import { compile, db, newOpId } from '../kysely.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditOperationStatement } from './audit-pending.js';
 import { createJobRepository } from './job.js';
 import { notificationFilterCondition } from './notification-filter.js';
 
@@ -139,6 +139,7 @@ export function notificationCaptureStatements(
   ctx: OrgContext,
   input: CaptureInput,
   when: Expression<SqlBool>,
+  reserve: Statement = { sql: '0', params: [] },
 ): readonly Statement[] {
   const plan = planOf(ctx, input);
   if (plan === null) return [];
@@ -192,9 +193,10 @@ export function notificationCaptureStatements(
     sql`exists (select 1 from notification_delivery as cap_delivery
       where cap_delivery.org_id = ${ctx.orgId} and cap_delivery.event_id in ${captured})`,
   );
-  const overflow = auditPendingStatement(
+  const overflow = auditOperationStatement(
     ctx,
     plan.overflow,
+    reserve,
     raw(sql`(${when}) and not exists (select 1 from notification_event as cap_kept
         where cap_kept.org_id = ${ctx.orgId} and cap_kept.operation_id = ${plan.operationId})
       and exists (select 1 from json_each(${json}) as capture where ${eligible(ctx)})`),
@@ -217,6 +219,7 @@ export function sourceOverflowStatements(
     readonly eventCount: number;
   },
   when: Expression<SqlBool>,
+  reserve: Statement = { sql: '0', params: [] },
 ): readonly Statement[] {
   let audit;
   try {
@@ -233,9 +236,10 @@ export function sourceOverflowStatements(
   }
   const types = JSON.stringify(input.eventTypes);
   return [
-    auditPendingStatement(
+    auditOperationStatement(
       ctx,
       audit,
+      reserve,
       raw(sql`(${when}) and exists (select 1 from notification_endpoint as over_ep
         join project as over_project on over_project.id = over_ep.project_id and over_project.org_id = ${ctx.orgId}
         join project_source as over_ps on over_ps.project_id = over_ep.project_id and over_ps.org_id = ${ctx.orgId}

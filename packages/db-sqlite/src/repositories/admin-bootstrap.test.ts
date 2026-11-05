@@ -544,7 +544,7 @@ describe('local admin grant cache invalidation', () => {
 });
 
 describe('bootstrapAdmin organization_admin top-up', () => {
-  const TOPPED = ['org:projects:archive', 'project:service-principals:write'];
+  const TOPPED = ['org:audit:export', 'project:service-principals:write'];
 
   async function adminRole(ctx: OrgContext) {
     const found = await rows<{ id: string; revision: number; updated_at: string }>(

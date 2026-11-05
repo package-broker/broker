@@ -190,10 +190,17 @@ export function renderBuildManifest(
   migrations?: readonly Pick<MigrationSource, 'id' | 'checksum'>[],
   platform: NodeJS.Platform = process.platform,
   platformPorts?: PlatformPortConfig | null,
+  audit?: { readonly buildGeneration: number; readonly defaultTrailImport?: string },
 ): string {
   const specifier = platform === 'win32' ? configPath.replaceAll('\\', '/') : configPath;
   const lines = [
-    `import config from ${JSON.stringify(specifier)};`,
+    ...(audit?.defaultTrailImport === undefined
+      ? [`import config from ${JSON.stringify(specifier)};`]
+      : [
+          `import loadedConfig from ${JSON.stringify(specifier)};`,
+          `import { auditTrail } from ${JSON.stringify(audit.defaultTrailImport)};`,
+          'const config = { ...loadedConfig, plugins: [...loadedConfig.plugins, auditTrail()] };',
+        ]),
     `const orderedPluginIds = ${JSON.stringify(orderedPluginIds)};`,
     'const pluginsById = new Map(config.plugins.map((plugin) => [plugin.id, plugin]));',
     'export const plugins = orderedPluginIds.map((id) => {',
@@ -212,6 +219,11 @@ export function renderBuildManifest(
   lines.push('export const observability = config.observability;');
   lines.push('export const registry = config.registry;');
   lines.push('export const tokens = config.tokens;');
+  lines.push(
+    audit === undefined
+      ? 'export const audit = config.audit;'
+      : `export const audit = { ...config.audit, build_generation: ${audit.buildGeneration} };`,
+  );
   lines.push('export const vulnerability = config.vulnerability;');
   lines.push('export const mcp = config.mcp;');
   lines.push('export const notifications = config.notifications;');

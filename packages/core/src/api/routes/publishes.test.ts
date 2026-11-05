@@ -1,3 +1,4 @@
+import { sha256Hex } from '../../auth/primitives.js';
 import { describe, expect, it } from 'vitest';
 import { publishRoutes } from './publishes.js';
 import { generateOpenApi } from '../openapi.js';
@@ -154,7 +155,9 @@ describe('publish approval handler guards', () => {
       { event: { payloadJson: string }; reason: string },
     ];
     expect(input[2].reason).toBe(reason);
-    expect(JSON.parse(input[2].event.payloadJson).changes.reason.new).toBe(reason);
+    expect(JSON.parse(input[2].event.payloadJson).changes.reason_sha256.new).toBe(
+      await sha256Hex(reason),
+    );
   });
 });
 

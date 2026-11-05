@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import { ulid } from '@package-broker/core/ids';
@@ -85,7 +86,8 @@ async function boot() {
   });
   const records: unknown[] = [];
   const list = vi.fn(async () => ({ objects: [], truncated: false }));
-  const worker = createWorker([], {
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     platformPorts: {
       blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
       cache: { adapter: 'cache-api', namespace: 'retention-test' },

@@ -349,6 +349,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
         });
         return { ok: true, value: page };
       } catch (error) {
+        if (error instanceof DbError && error.kind === 'backlog_full') throw error;
         const code = error instanceof DbError ? error.kind : discoveryErrorCode(error);
         if (code === undefined) throw error;
         return { ok: false, error: code, ...backoff(error, now()) };
@@ -388,6 +389,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
         if (credential === null) return { ok: false, error: 'credential_not_found' };
         await deps.discovery.prepare?.(ctx, credential, input.repositories.slice(0, 3));
       } catch (error) {
+        if (error instanceof DbError && error.kind === 'backlog_full') throw error;
         const code = error instanceof DbError ? error.kind : discoveryErrorCode(error);
         if (code === undefined) throw error;
         return { ok: false, error: code, ...backoff(error, now()) };
@@ -456,6 +458,7 @@ export function createBulkDiscovery(deps: BulkDiscoveryDeps): BulkDiscovery {
             }
           }
         } catch (error) {
+          if (error instanceof DbError && error.kind === 'backlog_full') throw error;
           const code = error instanceof DbError ? error.kind : discoveryErrorCode(error);
           if (code === undefined) throw error;
           for (const prior of input.completedResults ?? []) {

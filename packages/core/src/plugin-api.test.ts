@@ -81,7 +81,7 @@ describe('plugin contract', () => {
       Promise<PublishPolicyVerdict>
     >();
     expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
-    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity']);
+    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity', 'audit-trail']);
   });
 
   it('exports an optional asynchronous reauth capability resolver', () => {
@@ -102,7 +102,7 @@ describe('plugin contract', () => {
   });
 
   it('lists the ports a plugin may bind', () => {
-    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity']);
+    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity', 'audit-trail']);
   });
 
   it('accepts a plugin with binds, migrations, routes, an access hook and init', async () => {
@@ -227,8 +227,8 @@ describe('plugin contract', () => {
 
     // @ts-expect-error database is owned by the runtime
     expect(definePlugin(definition)).toBe(definition);
-    expectTypeOf<NonNullable<PluginDefinition['binds']>[number]>().toEqualTypeOf<
-      'source' | 'identity'
+    expectTypeOf<(typeof PLUGIN_BINDABLE_PORTS)[number]>().toEqualTypeOf<
+      'source' | 'identity' | 'audit-trail'
     >();
   });
 

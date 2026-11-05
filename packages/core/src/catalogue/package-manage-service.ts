@@ -1,3 +1,5 @@
+import { redactValue } from '../audit/redact.js';
+import { sha256Hex } from '../auth/primitives.js';
 import type { ApiCall } from '../api/idempotency.js';
 import { auditEvent } from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
@@ -115,6 +117,8 @@ export function createPackageManageService(deps: {
           new TextEncoder().encode(input.reason).length > 1000
         )
           return fail('invalid_input');
+        const safe = redactValue(input.reason, 1000, 'reason');
+        if (!safe.ok || safe.value !== input.reason) return fail('invalid_input');
       }
       const transition = {
         quarantine: { status: 'quarantined', reason: 'admin_quarantine' },
@@ -133,7 +137,7 @@ export function createPackageManageService(deps: {
         context: call.audit,
         changes: {
           ...(version.hostedNpm && input.action === 'tombstone'
-            ? { reason: { new: input.reason! } }
+            ? { reason_sha256: { new: await sha256Hex(input.reason!) } }
             : {}),
           from_status: { old: version.status },
           to_status: { new: to.status },

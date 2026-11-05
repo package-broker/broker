@@ -75,9 +75,11 @@ export async function hashRow(prevHash: string, row: AuditRow): Promise<string> 
 export async function verifyChain(
   rows: readonly AuditRow[],
   startPrevHash?: string,
+  startSeq?: number,
 ): Promise<ChainBreak | null> {
+  if (startSeq !== undefined) assertSeq(startSeq);
   let expectedPrev = startPrevHash ?? AUDIT_GENESIS_HASH;
-  let expectedSeq = startPrevHash === undefined ? 1 : null;
+  let expectedSeq = startSeq ?? (startPrevHash === undefined ? 1 : null);
   for (const row of rows) {
     assertSeq(row.seq);
     if (expectedSeq !== null && row.seq !== expectedSeq) {

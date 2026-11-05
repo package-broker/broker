@@ -33,6 +33,7 @@ const matrix = [
   ['org:import:write', 'organization', '0100000'],
   ['org:import:approve', 'organization', '1100000'],
   ['org:audit:read', 'organization', '0110000'],
+  ['org:audit:export', 'organization', '1100000'],
   ['project:read', 'project', '0111110'],
   ['project:settings:write', 'project', '1101000'],
   ['project:grants:read', 'project', '0111010'],
@@ -61,8 +62,8 @@ const roles = [
 describe('permission catalogue', () => {
   it('matches every catalogue and default-role matrix cell', () => {
     expect(PERMISSIONS.map(({ name }) => name)).toEqual(matrix.map(([name]) => name));
-    expect(PERMISSIONS).toHaveLength(36);
-    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(22);
+    expect(PERMISSIONS).toHaveLength(37);
+    expect(PERMISSIONS.filter(({ scope }) => scope === 'organization')).toHaveLength(23);
     expect(PERMISSIONS.filter(({ scope }) => scope === 'project')).toHaveLength(14);
     expect(DEFAULT_ROLES).toHaveLength(6);
     for (const [index, [key, name, scope]] of roles.entries()) {
@@ -84,8 +85,8 @@ describe('permission catalogue', () => {
       expect(name).toMatch(PERMISSION_PATTERN);
       expect(isPermission(name)).toBe(true);
     }
-    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(36);
-    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(36);
+    expect(new Set(PERMISSIONS.map(({ name }) => name)).size).toBe(37);
+    expect(DEFAULT_ROLES[0]!.permissions).toHaveLength(37);
   });
 
   it('validates unknown names, project scope violations and duplicates', () => {
@@ -224,8 +225,8 @@ describe('permission catalogue', () => {
     expect(problems).toHaveLength(2);
     const missing = missingCatalogue([]);
     expect(() => missing.push('extra')).not.toThrow();
-    expect(missing).toHaveLength(37);
-    expect(missingCatalogue([])).toHaveLength(36);
+    expect(missing).toHaveLength(38);
+    expect(missingCatalogue([])).toHaveLength(37);
     expect(rolePermissionProblems('project', ['bogus'])).toHaveLength(1);
   });
 

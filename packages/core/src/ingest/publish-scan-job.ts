@@ -1,3 +1,4 @@
+import { sha256Hex } from '../auth/primitives.js';
 import { auditEvent } from '../audit/actions.js';
 import { redactValue } from '../audit/redact.js';
 import { PUBLISH_SCAN_RECOVERY_BATCH_SIZE } from '../db/publishes.js';
@@ -56,7 +57,7 @@ export function createPublishScanJob(deps: {
             throw new JobError('aborted');
           const current = item;
           if (!current) return false;
-          const event = scanEvent(job, current, scanState, verdicts.at(-1));
+          const event = await scanEvent(job, current, scanState, verdicts.at(-1));
           const result = await deps.publishes.scan(job.org, job.fences!.verifier(), {
             id,
             expectedRevision: current.revision,
@@ -171,7 +172,7 @@ export function createPublishScanJob(deps: {
   });
 }
 
-function scanEvent(
+async function scanEvent(
   job: JobContext,
   item: PublishInspection,
   state: string,
@@ -194,7 +195,7 @@ function scanEvent(
       ...(verdict
         ? {
             plugin: { new: verdict.plugin },
-            ...(verdict.reason ? { reason: { new: verdict.reason } } : {}),
+            ...(verdict.reason ? { reason_sha256: { new: await sha256Hex(verdict.reason) } } : {}),
           }
         : {}),
     },
@@ -243,7 +244,7 @@ export function createPublishScanSweepJob(deps: { readonly publishes: PublishesR
             now: job.ports.clock.now().toISOString(),
             scanState: state,
             verdicts: [],
-            event: scanEvent(job, item, state),
+            event: await scanEvent(job, item, state),
           });
           if (!result.changed || state === 'failed') continue;
           const current = await deps.publishes.get(job.org, item.id);

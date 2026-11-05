@@ -373,6 +373,32 @@ async function importFixture(fixture: Fixture, manifest: ParsedManifest, interru
 
 export function describeWriterBatchContract(open: () => Promise<Fixture>): void {
   describe('writer batches stay within 200 statements', () => {
+    it('fills an import writer batch to exactly 200 statements', async () => {
+      const fixture = await open();
+      try {
+        const items = Array.from({ length: 33 }, (_, i) => ({
+          ...maximumRole(i),
+          permissions: (i < 30 ? PERMISSIONS : PERMISSIONS.slice(0, 33)).map((p) => p.name),
+        }));
+        const parsed = parseManifest({ version: 1, source_system: 'test', widening: [], items });
+        if (!parsed.ok) throw new Error('Invalid exact batch fixture');
+        const { run, runId, counter, store, sizes } = await importFixture(fixture, parsed.data);
+        expect(await run()).toEqual({ status: 'applied' });
+        expect(sizes).toEqual([33]);
+        expect(counter.batches[0]).toBe(200);
+        expect(await store.appliedRefs(fixture.ctx, runId)).toHaveLength(33);
+        expect(
+          await counter.executor.all(
+            stmt(
+              "SELECT count(*) AS n FROM audit_pending WHERE org_id = ? AND action = 'role.create'",
+              fixture.ctx.orgId,
+            ),
+          ),
+        ).toEqual([{ n: 33 }]);
+      } finally {
+        await fixture.close();
+      }
+    });
     it.each(['38 roles then attachment', ...Array.from({ length: 16 }, (_, i) => i + 1)])(
       'budgets each item in mixed import manifest %s',
       async (mix) => {

@@ -554,91 +554,101 @@ export function describeNpmPublishWriterContract(
           ),
         ).toEqual(Array.from({ length: 82 }, () => ({ message: 'use v3' })));
       }));
-    it('admin tombstone requires a live protected holder, fresh reauth, reason and revision', () =>
-      run(async (e, w) => {
-        const h = await deprecations(e, w);
-        const anchors = [
-          {
-            provider: 'oidc',
-            anchor: 'oidc:https://idp.example.test',
-            emailAuthoritative: true,
-            emailAuthoritativeDomains: ['example.test'],
-          },
-        ];
-        await e.batch([
-          st(
-            "INSERT INTO identity_provider_binding VALUES ('org','oidc','oidc:https://idp.example.test',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-          ),
-          st(
-            "INSERT INTO identity (id,org_id,user_id,provider,subject,email,email_verified,validated_at) VALUES ('admin-identity','org','user','oidc','admin','test@example.test',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-          ),
-          st(
-            "INSERT INTO session (id,org_id,user_id,identity_id,secret_hash,csrf_hash,expires_at,last_seen_at,reauth_at) VALUES ('admin-session','org','user','admin-identity',?,?,'2099-01-01T00:00:00.000Z',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-            'a'.repeat(64),
-            'b'.repeat(64),
-          ),
-          st(
-            "INSERT INTO role (id,org_id,key,name,scope,protects_last_holder) VALUES ('admin-role','org','admin','Admin','organization',1)",
-          ),
-          st("INSERT INTO role_permission VALUES ('org','admin-role','org:packages:manage')"),
-          st(
-            "INSERT INTO access_grant (id,org_id,role_id,scope,subject_type,subject_value) VALUES ('admin-grant','org','admin-role','organization','email','test@example.test')",
-          ),
-        ]);
-        const store = createVisibilityStore(e, { providerAnchors: anchors });
-        const fence = mutationFence(
-          { userId: 'user', sessionId: 'admin-session' } as AuthenticatedActor,
-          {},
-        );
-        const input = {
-          packageId: h.snapshot.packageId,
-          versionId: 'version-2.0.0',
-          expectedStatus: 'active' as const,
-          expectedRevision: 1,
-          manage: { kind: 'organization' as const },
-          reason: 'admin_tombstone' as const,
-          tombstoneReason: 'retired',
-          audit: { ...w.input().event, id: ulid(), action: 'version.state_change' as const },
-        };
-        for (const mutation of [
-          "UPDATE session SET reauth_at=NULL WHERE id='admin-session'",
-          "UPDATE role SET protects_last_holder=0 WHERE id='admin-role'",
-          "UPDATE version SET revision=2 WHERE version='2.0.0'",
-        ]) {
-          await e.all(st(mutation));
-          expect((await store.tombstoneVersion(ctx, fence, input)).ok).toBe(false);
-          expect(await e.all(st("SELECT status FROM version WHERE version='2.0.0'"))).toEqual([
-            { status: 'active' },
-          ]);
+    it.each([false, true])(
+      'admin tombstone requires live authority and commits under refusal=%s',
+      (refusing) =>
+        run(async (e, w) => {
+          const h = await deprecations(e, w);
+          const anchors = [
+            {
+              provider: 'oidc',
+              anchor: 'oidc:https://idp.example.test',
+              emailAuthoritative: true,
+              emailAuthoritativeDomains: ['example.test'],
+            },
+          ];
           await e.batch([
             st(
-              "UPDATE session SET reauth_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id='admin-session'",
+              "INSERT INTO identity_provider_binding VALUES ('org','oidc','oidc:https://idp.example.test',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
             ),
-            st("UPDATE role SET protects_last_holder=1 WHERE id='admin-role'"),
-            st("UPDATE version SET revision=1 WHERE version='2.0.0'"),
+            st(
+              "INSERT INTO identity (id,org_id,user_id,provider,subject,email,email_verified,validated_at) VALUES ('admin-identity','org','user','oidc','admin','test@example.test',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            ),
+            st(
+              "INSERT INTO session (id,org_id,user_id,identity_id,secret_hash,csrf_hash,expires_at,last_seen_at,reauth_at) VALUES ('admin-session','org','user','admin-identity',?,?,'2099-01-01T00:00:00.000Z',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+              'a'.repeat(64),
+              'b'.repeat(64),
+            ),
+            st(
+              "INSERT INTO role (id,org_id,key,name,scope,protects_last_holder) VALUES ('admin-role','org','admin','Admin','organization',1)",
+            ),
+            st("INSERT INTO role_permission VALUES ('org','admin-role','org:packages:manage')"),
+            st(
+              "INSERT INTO access_grant (id,org_id,role_id,scope,subject_type,subject_value) VALUES ('admin-grant','org','admin-role','organization','email','test@example.test')",
+            ),
           ]);
-        }
-        expect(
-          (await store.tombstoneVersion(ctx, fence, { ...input, tombstoneReason: '' })).ok,
-        ).toBe(false);
-        const [before] = await e.all<{ rev: number; modified_at: string }>(
-          st('SELECT rev,modified_at FROM package WHERE id=?', h.snapshot.packageId),
-        );
-        expect((await store.tombstoneVersion(ctx, fence, input)).ok).toBe(true);
-        const [after] = await e.all<{ rev: number; modified_at: string }>(
-          st('SELECT rev,modified_at FROM package WHERE id=?', h.snapshot.packageId),
-        );
-        expect(after?.rev).toBe(before!.rev + 1);
-        expect(after!.modified_at > before!.modified_at).toBe(true);
-        expect(
-          await e.all(
-            st("SELECT status,tombstone_reason,purge_after FROM version WHERE version='2.0.0'"),
-          ),
-        ).toEqual([
-          { status: 'tombstoned', tombstone_reason: 'retired', purge_after: expect.any(String) },
-        ]);
-        expect((await h.store.snapshot(ctx, 'source', 'widget'))?.tags.latest).toBe('1.0.0');
-      }));
+          const store = createVisibilityStore(e, { providerAnchors: anchors, notifications: true });
+          const fence = mutationFence(
+            { userId: 'user', sessionId: 'admin-session' } as AuthenticatedActor,
+            {},
+          );
+          const input = {
+            packageId: h.snapshot.packageId,
+            versionId: 'version-2.0.0',
+            expectedStatus: 'active' as const,
+            expectedRevision: 1,
+            manage: { kind: 'organization' as const },
+            reason: 'admin_tombstone' as const,
+            tombstoneReason: 'retired',
+            audit: { ...w.input().event, id: ulid(), action: 'version.state_change' as const },
+          };
+          for (const mutation of [
+            "UPDATE session SET reauth_at=NULL WHERE id='admin-session'",
+            "UPDATE role SET protects_last_holder=0 WHERE id='admin-role'",
+            "UPDATE version SET revision=2 WHERE version='2.0.0'",
+          ]) {
+            await e.all(st(mutation));
+            expect((await store.tombstoneVersion(ctx, fence, input)).ok).toBe(false);
+            expect(await e.all(st("SELECT status FROM version WHERE version='2.0.0'"))).toEqual([
+              { status: 'active' },
+            ]);
+            await e.batch([
+              st(
+                "UPDATE session SET reauth_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id='admin-session'",
+              ),
+              st("UPDATE role SET protects_last_holder=1 WHERE id='admin-role'"),
+              st("UPDATE version SET revision=1 WHERE version='2.0.0'"),
+            ]);
+          }
+          expect(
+            (await store.tombstoneVersion(ctx, fence, { ...input, tombstoneReason: '' })).ok,
+          ).toBe(false);
+          const [before] = await e.all<{ rev: number; modified_at: string }>(
+            st('SELECT rev,modified_at FROM package WHERE id=?', h.snapshot.packageId),
+          );
+          if (refusing) {
+            await e.all(
+              st(
+                "UPDATE audit_chain SET policy='required',capacity_state='refusing' WHERE org_id='org'",
+              ),
+            );
+          }
+          expect((await store.tombstoneVersion(ctx, fence, input)).ok).toBe(true);
+          const [after] = await e.all<{ rev: number; modified_at: string }>(
+            st('SELECT rev,modified_at FROM package WHERE id=?', h.snapshot.packageId),
+          );
+          expect(after?.rev).toBe(before!.rev + 1);
+          expect(after!.modified_at > before!.modified_at).toBe(true);
+          expect(
+            await e.all(
+              st("SELECT status,tombstone_reason,purge_after FROM version WHERE version='2.0.0'"),
+            ),
+          ).toEqual([
+            { status: 'tombstoned', tombstone_reason: 'retired', purge_after: expect.any(String) },
+          ]);
+          expect((await h.store.snapshot(ctx, 'source', 'widget'))?.tags.latest).toBe('1.0.0');
+        }),
+    );
     it('whole-package unpublish refuses one old version without changing any version', () =>
       run(async (e, w) => {
         const h = await deprecations(e, w);
@@ -1984,6 +1994,45 @@ export function describeNpmPublishWriterContract(
         ).changed,
       ).toBe(true);
     }
+    it.each(['denied', 'failed', 'allowed'] as const)(
+      'scan %s under required refusal',
+      (scanState) =>
+        run(async (e, w) => {
+          const h = await held(e, w);
+          await e.all(
+            st("UPDATE publish_approval SET hold_scan=1,scan_state='running' WHERE org_id='org'"),
+          );
+          await e.all(
+            st(
+              "UPDATE audit_chain SET policy='required',capacity_state='refusing' WHERE org_id='org'",
+            ),
+          );
+          const call = h.repo.scan(
+            ctx,
+            systemMutationFence('verifier', { id: 'job', owner: 'owner', fence: 1 }, {}),
+            {
+              ...h.input,
+              expectedScanState: 'running',
+              scanState,
+              verdicts:
+                scanState === 'failed'
+                  ? []
+                  : [{ plugin: 'scanner', verdict: scanState === 'denied' ? 'deny' : 'allow' }],
+              event: { ...h.input.event, id: ulid(), action: 'publish.scan' },
+            },
+          );
+          if (scanState === 'allowed') {
+            await expect(call).rejects.toMatchObject({ kind: 'backlog_full' });
+            expect((await h.repo.get(ctx, h.input.id))?.scanState).toBe('running');
+          } else {
+            expect(await call).toMatchObject({ changed: true, active: false });
+            expect((await h.repo.get(ctx, h.input.id))?.scanState).toBe(scanState);
+            expect(
+              await e.all(st("SELECT action FROM audit_pending WHERE action='publish.scan'")),
+            ).toEqual([{ action: 'publish.scan' }]);
+          }
+        }),
+    );
     it('scan denial leaves pending approval out of pending pages until expiry closes it', () =>
       run(async (e, w) => {
         const h = await held(e, w);

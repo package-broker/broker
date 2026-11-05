@@ -1,3 +1,4 @@
+import { DbError } from '../../db/errors.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { AuditEvent } from '../../audit/actions.js';
 import type { PolicyVersionFacts } from '../../db/package-admin.js';
@@ -299,3 +300,16 @@ describe('policy manager diagnostics', () => {
     });
   });
 });
+
+it.each(['policy', 'audit'] as const)(
+  'preserves audit backlog refusal at inspection %s boundary',
+  async (boundary) => {
+    const { deps, service } = setup();
+    const error = new DbError('backlog_full', 'Audit backlog is full');
+    if (boundary === 'policy') deps.policy.snapshot.mockRejectedValueOnce(error);
+    else deps.audit.record.mockRejectedValueOnce(error);
+    await expect(service.inspect(policyCallerOf(), { packageId: PACKAGE, limit: 10 })).rejects.toBe(
+      error,
+    );
+  },
+);

@@ -1,3 +1,4 @@
+import { isPrivateHost, isAuditDeniedHost } from '@package-broker/core/platform/private-host';
 import { lookup as systemLookup } from 'node:dns/promises';
 import type { LookupAddress, LookupOptions } from 'node:dns';
 import { isIP, type LookupFunction } from 'node:net';
@@ -180,6 +181,21 @@ function withDeadline<T>(
 }
 
 export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions = {}): DnsGuard {
+  return dnsGuard(policy, options);
+}
+
+export function createAuditDnsGuard(
+  policy: OutboundPolicy,
+  options: DnsGuardOptions & { readonly allowPrivate?: boolean } = {},
+): DnsGuard {
+  return dnsGuard(policy, options, options.allowPrivate ?? false);
+}
+
+function dnsGuard(
+  policy: OutboundPolicy,
+  options: DnsGuardOptions,
+  auditAllowPrivate?: boolean,
+): DnsGuard {
   const resolver = options.resolver ?? systemResolver;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
@@ -234,6 +250,14 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
     return { host: target, addresses };
   }
 
+  const resolve =
+    auditAllowPrivate === undefined
+      ? resolveTarget
+      : (host: string, _port: number, scheme: GuardedScheme) =>
+          resolveAuditTarget(host, scheme, auditAllowPrivate, (target) =>
+            withDeadline(startResolution(target), timeoutMs, options.signal),
+          );
+
   return {
     forTarget(host, port, scheme) {
       const bound = comparableHost(host);
@@ -247,7 +271,7 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
           fail(new DnsGuardError('blocked_host'));
           return;
         }
-        resolveTarget(host, port, scheme).then(
+        resolve(host, port, scheme).then(
           ({ addresses }) => {
             const matching = addresses.filter(
               (entry) => wanted === undefined || entry.family === wanted,
@@ -270,7 +294,33 @@ export function createDnsGuard(policy: OutboundPolicy, options: DnsGuardOptions 
             fail(error instanceof DnsGuardError ? error : new DnsGuardError('resolution_failed')),
         );
       };
-      return { resolve: () => resolveTarget(host, port, scheme), lookup };
+      return { resolve: () => resolve(host, port, scheme), lookup };
     },
   };
+}
+
+async function resolveAuditTarget(
+  host: string,
+  scheme: GuardedScheme,
+  allowPrivate: boolean,
+  resolve: (host: string) => Promise<readonly ResolvedAddress[]>,
+): Promise<GuardedResolution> {
+  if (scheme !== 'https' && scheme !== 'http') throw new DnsGuardError('scheme');
+  const target = canonicalIpv6(stripBrackets(host.toLowerCase())) ?? stripBrackets(host);
+  const resolved = await resolve(target);
+  if (resolved.length === 0) throw new DnsGuardError('no_address');
+  const addresses = resolved.map((entry) => {
+    const normalized = normalizeAddress(entry.address);
+    const addressHost = normalized.family === 6 ? `[${normalized.address}]` : normalized.address;
+    if (isNeverAllowed(normalized) || isAuditDeniedHost(addressHost))
+      throw new DnsGuardError('blocked_address');
+    const privateAllowed = allowPrivate && isPrivateHost(addressHost, true);
+    if (scheme !== 'https' && !privateAllowed) throw new DnsGuardError('scheme');
+    if (!privateAllowed) {
+      const auditVerdict = classifyAddress(normalized.address);
+      if (!auditVerdict.ok) throw new DnsGuardError(auditVerdict.reason);
+    }
+    return normalized;
+  });
+  return { host: target, addresses };
 }

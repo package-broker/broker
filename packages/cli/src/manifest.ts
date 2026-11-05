@@ -1,3 +1,5 @@
+import type { BrokerConfig } from '@package-broker/core';
+import { DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES } from '@package-broker/core/audit/config';
 import type { IdentityDescriptor, Platform, PluginDefinition } from '@package-broker/core/plugin';
 import { SUPPORTED_PLUGIN_API } from '@package-broker/core/plugin';
 import {
@@ -12,6 +14,52 @@ import {
 import { DEFAULT_ROLES } from '@package-broker/core/authz/permissions';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+
+let lastBuildGeneration = 0;
+
+function buildGeneration(): number {
+  const epoch = process.env.SOURCE_DATE_EPOCH;
+  const generation =
+    epoch === undefined ? Math.max(Date.now(), lastBuildGeneration + 1) : Number(epoch) * 1000;
+  if (
+    !Number.isSafeInteger(generation) ||
+    generation < 0 ||
+    (epoch !== undefined && !/^[0-9]+$/.test(epoch))
+  ) {
+    throw new Error('Invalid audit build generation');
+  }
+  lastBuildGeneration = generation;
+  return generation;
+}
+
+export function describeAudit(config: BrokerConfig, target: Platform) {
+  const trail = config.plugins.find((plugin) => plugin.auditTrail);
+  const description = {
+    policy: config.audit?.policy ?? 'availability',
+    trail: trail ? { plugin: trail.id, toggleEnv: trail.auditTrail?.toggleEnv ?? null } : null,
+    sinks: config.plugins.flatMap((plugin) =>
+      (plugin.auditSinks ?? []).map((sink) => ({
+        id: sink.id,
+        kind: sink.kind,
+        plugin: plugin.id,
+        activation: sink.activation,
+        custody: sink.custody,
+        envNames: sink.envNames ?? [],
+        destination: sink.destination,
+      })),
+    ),
+    acceptNoDurableAudit: config.audit?.acceptNoDurableAudit === true,
+    maxJournalBytes:
+      config.audit?.capacity?.maxJournalBytes ??
+      (target === 'cloudflare' ? DEFAULT_CLOUDFLARE_AUDIT_JOURNAL_BYTES : null),
+    alerts: config.audit?.alerts ?? null,
+    egress: config.audit?.egress ?? null,
+  };
+  return {
+    ...description,
+    build_generation: buildGeneration(),
+  };
+}
 
 export function validatePluginShape(
   plugins: readonly PluginDefinition[],
@@ -171,6 +219,7 @@ export interface ManifestMigration {
 }
 
 export interface Manifest {
+  audit?: ReturnType<typeof describeAudit>;
   localAuth?: LocalAuthCapability;
   identity?: IdentityDescriptor;
   platformPorts?: PlatformPortConfig | null;

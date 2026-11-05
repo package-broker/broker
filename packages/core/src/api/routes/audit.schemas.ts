@@ -14,7 +14,6 @@ const filters = {
 export const auditQuery = z.strictObject({ ...filters, project: filter.optional() });
 export const projectAuditQuery = z.strictObject(filters);
 export const projectAuditParams = z.strictObject({ project: z.string().min(1).max(64) });
-export const auditLimit = z.number().int().min(1).max(200);
 const auditValue = z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]);
 const payload = z.strictObject({
   op_id: z.string().optional(),
@@ -35,7 +34,21 @@ const item = z.strictObject({
   payload,
 });
 export const auditListResponse = z.strictObject({
-  items: z.array(item),
+  items: z.array(
+    z.union([
+      item,
+      z.strictObject({
+        kind: z.literal('withheld'),
+        id: z
+          .string()
+          .describe(
+            'Original event id when reason is content; marker id when reason is unreadable.',
+          ),
+        seq: z.number().int(),
+        reason: z.enum(['content', 'unreadable']),
+      }),
+    ]),
+  ),
   next: z.string().nullable(),
 });
 export const auditHeadResponse = z.strictObject({
@@ -43,4 +56,13 @@ export const auditHeadResponse = z.strictObject({
   hash: z.string(),
   pendingCount: z.number().int(),
   lastVerifiedAt: z.string().nullable(),
+  verification: z
+    .strictObject({
+      fromSeq: z.number().int().nonnegative(),
+      throughSeq: z.number().int().nonnegative(),
+      bodies: z.number().int().nonnegative(),
+      withheld: z.number().int().nonnegative(),
+      verifiedAt: z.string(),
+    })
+    .nullable(),
 });

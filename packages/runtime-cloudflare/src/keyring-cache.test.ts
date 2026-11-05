@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as verifier from '@package-broker/core/secrets/keyring-verifier';
 import { createWorker, type Env } from './index.js';
@@ -21,7 +22,10 @@ describe('Worker failed build cache', () => {
     const verify = vi
       .spyOn(verifier, 'verifyKeyring')
       .mockRejectedValue(new verifier.KeyringMismatchError(1));
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     const request = () => new Request(`${PUBLIC_URL}/_pb/auth/providers`);
     expect((await worker.fetch(request(), env(db))).status).toBe(503);
     now += 29_999;
@@ -38,7 +42,10 @@ describe('Worker failed build cache', () => {
     const verify = vi
       .spyOn(verifier, 'verifyKeyring')
       .mockRejectedValue(new TypeError('Unavailable'));
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       expect(
         (await worker.fetch(new Request(`${PUBLIC_URL}/_pb/auth/providers`), env(db))).status,

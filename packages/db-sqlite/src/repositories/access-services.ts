@@ -1,3 +1,7 @@
+import type {
+  createFailureEvents,
+  FailureEventsOptions,
+} from '@package-broker/core/audit/failure-events';
 import { type NpmLoginDeps } from '@package-broker/core/api/routes/npm-login';
 import { createNpmLoginRepository } from './npm-login.js';
 import {
@@ -93,6 +97,11 @@ function anchorReader(list: readonly ConfiguredProviderAnchor[]): ProviderAnchor
 }
 
 export interface AccessServicesOptions {
+  readonly failureEvents?: {
+    readonly recorder: ReturnType<typeof createFailureEvents>;
+    readonly binding: FailureEventsOptions;
+    readonly dispatch?: (run: () => Promise<void>) => void;
+  };
   readonly tokens: {
     readonly lifetime: TokenLifetimePolicy;
     readonly offboarding: Pick<
@@ -145,6 +154,15 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
   const providerAnchors = anchorReader(anchorList);
 
   const module = createAuthModule({
+    ...(options.failureEvents === undefined
+      ? {}
+      : {
+          recordFailure: (ctx, attempt) => {
+            const { recorder, binding } = options.failureEvents!;
+            void recorder.record(ctx, attempt, binding);
+            (options.failureEvents?.dispatch ?? dispatch)(() => recorder.drain(ctx));
+          },
+        }),
     clientIp: options.clientIp,
     repositories: createAuthRepositories(executor, { ...tokens.offboarding, log }),
     keyring,

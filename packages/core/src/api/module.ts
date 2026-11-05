@@ -11,7 +11,9 @@ import { packageAccessRequestRoutes } from './routes/package-access-requests.js'
 import { routesConflict } from '../kernel/routes.js';
 import type { RouteDefinition } from '../kernel/routes.js';
 import { accessRoutes } from './routes/access.js';
+import { auditExportRoutes } from './routes/audit-export.js';
 import { auditRoutes } from './routes/audit.js';
+import { auditHealthRoutes, auditStatusRoutes } from './routes/audit-status.js';
 import { importRoutes } from './routes/import.js';
 import { organizationRoutes } from './routes/organization.js';
 import { packageManageRoutes } from './routes/package-manage.js';
@@ -51,7 +53,10 @@ export interface ApiModuleDeps {
   readonly sourceNames: Parameters<typeof sourceNameRoutes>[0];
   readonly sourceAttachments: Parameters<typeof sourceAttachmentRoutes>[0];
   readonly packages: Parameters<typeof packageRoutes>[0];
-  readonly audit: Parameters<typeof auditRoutes>[0];
+  readonly auditExport?: Parameters<typeof auditExportRoutes>[0];
+  readonly auditTrail?: Parameters<typeof auditRoutes>[0];
+  readonly auditStatus?: Omit<NonNullable<Parameters<typeof auditStatusRoutes>[0]>, 'health'>;
+  readonly auditHealth?: Parameters<typeof auditHealthRoutes>[0];
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
   readonly imports?: Parameters<typeof importRoutes>[0];
@@ -75,6 +80,9 @@ type RouteDependencies = Omit<
   ApiModuleDeps,
   | 'extensions'
   | 'imports'
+  | 'auditHealth'
+  | 'auditStatus'
+  | 'auditTrail'
   | 'notifications'
   | 'packageAccessRequests'
   | 'packageDetail'
@@ -213,7 +221,6 @@ const REQUIRED_DEPENDENCIES = {
     probe: true,
   },
   packages: { listProject: true, listOrganization: true, listVersions: true },
-  audit: { list: true, head: true },
   packageManage: {
     ...CONTEXT_METHODS,
     service: { manage: true },
@@ -309,6 +316,10 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     );
   }
 
+  if (deps.auditStatus !== undefined) {
+    requireDependencies(deps, { auditHealth: { read: true } }, 'dependencies');
+  }
+
   if (deps.trustedPublishers !== undefined)
     requireDependencies(
       deps.trustedPublishers,
@@ -382,7 +393,14 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     ...(deps.packageAccessRequests === undefined
       ? []
       : packageAccessRequestRoutes(deps.packageAccessRequests)),
-    ...auditRoutes(deps.audit),
+    ...auditRoutes(deps.auditTrail),
+    ...auditExportRoutes(deps.auditExport),
+    ...auditHealthRoutes(deps.auditHealth),
+    ...auditStatusRoutes(
+      deps.auditStatus === undefined || deps.auditHealth === undefined
+        ? undefined
+        : { ...deps.auditStatus, health: deps.auditHealth },
+    ),
     ...packageManageRoutes(deps.packageManage),
     ...(deps.imports == null ? [] : importRoutes(deps.imports)),
     myPermissionsRoute(),

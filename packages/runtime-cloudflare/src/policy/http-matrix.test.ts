@@ -1,3 +1,4 @@
+import { auditTrail } from '../audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -295,7 +296,8 @@ function worker(h: Harness, enabled: boolean) {
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
   };
-  const app = createWorker([], {
+  const app = createWorker([auditTrail()], {
+    audit: {},
     platformPorts,
     cacheStorage,
     log: (record) => void h.events.push(record),

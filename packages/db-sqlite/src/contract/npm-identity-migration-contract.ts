@@ -173,6 +173,7 @@ export function describeNpmIdentityMigrationContract(
           'core:0008_registry_policy',
           'core:0009_npm_notifications',
           'core:0010_source_discovery_rules',
+          'core:0011_audit',
         ]);
         await opened.executor.all({
           sql: "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('new', 'revision-org', 'New', 'npm', 'hosted')",
@@ -216,6 +217,7 @@ export function describeNpmIdentityMigrationContract(
             'core:0008_registry_policy',
             'core:0009_npm_notifications',
             'core:0010_source_discovery_rules',
+            'core:0011_audit',
           ]);
           await migrate(opened.executor, sources.slice(0, baseline), { holder: 'baseline' });
           await seed(opened.executor);

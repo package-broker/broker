@@ -130,7 +130,7 @@ async function buildFixture(platformPorts: unknown, jobs = false) {
     : '[]';
   await writeFile(
     configPath,
-    `export default { platform: 'node', plugins: ${plugins}, platformPorts: ${JSON.stringify(platformPorts)} };`,
+    `export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: ${plugins}, platformPorts: ${JSON.stringify(platformPorts)} };`,
   );
   await writeFile(runtimeEntry, "export { platformPorts } from '#pb-manifest';");
   return { cwd, configPath, runtimeEntry };
@@ -187,7 +187,7 @@ async function routeFixture(permission: string | null) {
   const options = await buildFixture({ node: NODE_PORTS });
   await writeFile(
     options.configPath,
-    `export default { platform: 'node', plugins: [{ id: 'widgets', package: '@test/widgets', apiVersion: 3, platforms: ['node'], register: (r) => r.route({ method: 'GET', path: '/widgets', permission: ${JSON.stringify(permission)}, boundary: 'organization', handler: () => new Response(null) }) }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
+    `export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [{ id: 'widgets', package: '@test/widgets', apiVersion: 3, platforms: ['node'], register: (r) => r.route({ method: 'GET', path: '/widgets', permission: ${JSON.stringify(permission)}, boundary: 'organization', handler: () => new Response(null) }) }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
   );
   return options;
 }
@@ -243,7 +243,7 @@ describe('build failure disclosure', () => {
     const options = await buildFixture({ node: NODE_PORTS });
     await writeFile(
       options.configPath,
-      `export default { platform: 'node', plugins: [{ id: 'widgets', package: '@test/widgets', apiVersion: ${JSON.stringify(SENTINEL)}, platforms: ['node'] }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
+      `export default { platform: 'node', audit: { capacity: { maxJournalBytes: 67108864 } }, plugins: [{ id: 'widgets', package: '@test/widgets', apiVersion: ${JSON.stringify(SENTINEL)}, platforms: ['node'] }], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} } };`,
     );
     return options;
   }

@@ -5,12 +5,16 @@ import { dirname, join, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { sha256 } from './stage-prebuilt.mjs';
+import { prebuiltAuditProblems } from './check-pack-audit.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_PACKAGES = [
   'core',
   'cli',
   'db-sqlite',
+  'plugin-audit-trail',
+  'plugin-audit-otlp',
+  'plugin-audit-webhook',
   'runtime-cloudflare',
   'runtime-node',
   'ui',
@@ -24,7 +28,14 @@ const DEPENDENCY_FIELDS = [
 ];
 const UNRESOLVED_RANGE = /^(?:workspace|catalog|link|file):/;
 const CORE_PACKAGE = '@package-broker/core';
-const CORE_PEER_PACKAGES = new Set(['plugin-github', 'plugin-sso-oidc', 'ui-assets']);
+const CORE_PEER_PACKAGES = new Set([
+  'plugin-github',
+  'plugin-sso-oidc',
+  'plugin-audit-trail',
+  'plugin-audit-otlp',
+  'plugin-audit-webhook',
+  'ui-assets',
+]);
 const TEST_FILE = /\.(?:test|spec|test-d)\.|(?:^|\/)__tests__\//;
 const ENTRY_FIELDS = ['main', 'types', 'typings', 'module'];
 const STATIC_REQUIRED_FILES = {
@@ -34,7 +45,7 @@ const STATIC_REQUIRED_FILES = {
     'dist/api/openapi-route.js',
     'dist/api/openapi-route.d.ts',
   ],
-  'db-sqlite': ['migrations/0001_init.sql'],
+  'db-sqlite': ['migrations/0001_init.sql', 'migrations/0011_audit.sql'],
 };
 const MIGRATION_PACKAGES = ['db-sqlite'];
 const FORBIDDEN_EXPORTS = { 'db-sqlite': ['./sql/inline'] };
@@ -173,6 +184,12 @@ function checkExports(pkg, pkgJson, files) {
 
   const forbidden = FORBIDDEN_EXPORTS[pkg] ?? [];
   if (pkg === 'core') {
+    const testing = exportsField['./plugin/testing'];
+    if (
+      testing?.types !== './dist/audit/plugin-testing.d.ts' ||
+      testing?.default !== './dist/audit/plugin-testing.js'
+    )
+      problems.push('export "./plugin/testing" must resolve the public audit conformance kit');
     const runtime = exportsField['./runtime/*'];
     if (runtime?.types !== './dist/runtime/*.d.ts' || runtime?.default !== './dist/runtime/*.js')
       problems.push(
@@ -322,6 +339,32 @@ function checkCorePackageContext(dir, pkgJson, files) {
   }
   if (readers === 0)
     problems.add('core must export ./kernel/package-context with resolvedPackageOf');
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { auditCanonicalVectors, auditSinkConformanceFixtures, runAuditSinkConformance }
+           from '@package-broker/core/plugin/testing';
+         import { canonicalRow, hashRow } from '@package-broker/core/audit/chain';
+         if (typeof runAuditSinkConformance !== 'function' || auditSinkConformanceFixtures.length < 11)
+           throw new Error('Missing conformance runner or fixtures');
+         for (const vector of auditCanonicalVectors) {
+           if (vector.format !== 'audit-chain/1' || canonicalRow(vector.row) !== vector.canonical ||
+               await hashRow(vector.row.prev_hash, vector.row) !== vector.row.hash)
+             throw new Error('Invalid canonical vector');
+         }
+         if (auditCanonicalVectors.length < 3) throw new Error('Missing canonical vectors');`,
+      ],
+      { cwd: dir, stdio: 'pipe' },
+    );
+  } catch (error) {
+    const status = Number.isInteger(error.status) ? error.status : 'unavailable';
+    problems.add(
+      `core ./plugin/testing cannot run its canonical vectors from the packed package (exit code: ${status})`,
+    );
+  }
   return [...problems];
 }
 
@@ -579,7 +622,10 @@ function checkPackedPackage(pkg, pkgJson, files, dir) {
     !pkgJson.repository.directory.trim()
   )
     problems.push('repository.url and repository.directory are required');
-  if (PREBUILT[pkg]) problems.push(...prebuiltProblems(dir, files, PREBUILT[pkg]));
+  if (PREBUILT[pkg]) {
+    problems.push(...prebuiltProblems(dir, files, PREBUILT[pkg]));
+    problems.push(...prebuiltAuditProblems(join(dir, PREBUILT[pkg]), PREBUILT[pkg]));
+  }
   if (
     pkg === 'cli' &&
     process.env.CHECK_PACK_RELEASE === '1' &&

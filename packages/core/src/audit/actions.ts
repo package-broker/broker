@@ -1,7 +1,9 @@
+import { PERMISSIONS } from '../authz/permissions.js';
 import { MAX_KEY_LENGTH, displayName, packageKey } from '../catalogue/names.js';
 import { isValidProviderId } from '../identity/port.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 import { isUlid } from '../ids.js';
+import { AUDIT_ALERT_CODES } from '../platform/observability.js';
 import { isWorkflowFilename } from '../registry/npm/oidc/claim-values.js';
 import {
   POLICY_CLIENT_FAMILIES,
@@ -16,6 +18,7 @@ import {
   isPolicyPackageKey,
   isPolicyTimestamp,
 } from '../db/registry-policy.js';
+import { validDistTag } from '../registry/npm/dist-tags.js';
 import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
@@ -35,6 +38,8 @@ export const AUDIT_ACTIONS = [
   'package.access_request',
   'package.access_decide',
   'session.login',
+  'session.login_failed',
+  'access.denied',
   'session.logout',
   'session.reauth',
   'setup.complete',
@@ -99,6 +104,9 @@ export const AUDIT_ACTIONS = [
   'import_run.credential_set',
   'purge.batch',
   'sync_session.finalize',
+  'audit.export',
+  'audit.mode_change',
+  'audit.sink_admin',
   'registry_policy.create',
   'registry_policy.update',
   'registry_policy.disable',
@@ -181,7 +189,7 @@ const IDENTITY_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
-  'package.deprecate': ['version', 'deprecated', 'deprecated_encoding'],
+  'package.deprecate': ['version', 'deprecated', 'deprecated_sha256'],
   'package.dist_tag': ['tag', 'version'],
   'package.unpublish': ['versions', 'removed_version_count'],
   'package.publish': [
@@ -195,9 +203,9 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'source',
   ],
   'publish.approve': ['package', 'version', 'token_id'],
-  'publish.reject': ['package', 'version', 'reason', 'token_id'],
+  'publish.reject': ['package', 'version', 'reason_sha256', 'token_id'],
   'publish.expire': ['package', 'version'],
-  'publish.scan': ['plugin', 'verdict', 'reason'],
+  'publish.scan': ['plugin', 'verdict', 'reason_sha256'],
   'trusted_publisher.create': TRUSTED_PUBLISHER_FIELDS,
   'trusted_publisher.update': TRUSTED_PUBLISHER_FIELDS,
   'trusted_publisher.disable': TRUSTED_PUBLISHER_FIELDS,
@@ -214,9 +222,11 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
     'expires_at',
   ],
   'package.access_update': ['visible_to_new_projects', 'new_project_access_mode'],
-  'package.access_request': ['package', 'project_id', 'reason'],
-  'package.access_decide': ['package', 'project_id', 'state', 'reason'],
+  'package.access_request': ['package', 'project_id', 'reason_sha256'],
+  'package.access_decide': ['package', 'project_id', 'state', 'reason_sha256'],
   'session.login': [],
+  'session.login_failed': ['method', 'reason', 'count', 'window_start'],
+  'access.denied': ['permission', 'boundary', 'count', 'window_start'],
   'session.logout': [],
   'session.reauth': [],
   'setup.complete': [],
@@ -276,7 +286,7 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'registered_name.add': REGISTERED_NAME_FIELDS,
   'registered_name.update': REGISTERED_NAME_FIELDS,
   'registered_name.remove': REGISTERED_NAME_FIELDS,
-  'version.state_change': ['reason', 'from_status', 'to_status', 'package_name', 'version'],
+  'version.state_change': ['reason_sha256', 'from_status', 'to_status', 'package_name', 'version'],
   'version.rebuilt': ['package_name', 'version', 'sha256_old', 'sha256_new'],
   'version.published_at_set': ['package_name', 'version', 'published_at', 'published_at_basis'],
   'import_run.create': IMPORT_RUN_FIELDS,
@@ -290,6 +300,28 @@ export const AUDIT_FIELDS: Record<AuditAction, readonly string[]> = {
   'import_run.credential_set': ['external_ref'],
   'purge.batch': ['count', 'kind'],
   'sync_session.finalize': ['source_id', 'added', 'updated', 'removed'],
+  'audit.export': ['from_seq', 'to_seq', 'count', 'withheld', 'format'],
+  'audit.mode_change': [
+    'from_mode',
+    'to_mode',
+    'policy',
+    'source',
+    'mode_generation',
+    'cutover_seq',
+  ],
+  // A rebind always includes from_seq; to_seq is omitted when custody is empty.
+  'audit.sink_admin': [
+    'operation',
+    'policy',
+    'sink_id',
+    'from_seq',
+    'to_seq',
+    'epoch',
+    'generation',
+    'reason_code',
+    'alert_code',
+    'revision',
+  ],
   'registry_policy.create': POLICY_RULE_FIELDS,
   'registry_policy.update': POLICY_OVERRIDE_FIELDS,
   'registry_policy.disable': POLICY_OVERRIDE_FIELDS,
@@ -463,7 +495,10 @@ export interface AuditEventInput {
   now: string;
   action: AuditAction;
   actor: { type: AuditActorType; id: string | null };
-  context: AuditContext;
+  context: Omit<AuditContext, 'opId' | 'requestId'> & {
+    opId: string | null;
+    requestId: string | null;
+  };
   target: { type: string; id: string | null };
   projectId?: string | null;
   changes?: Record<string, { old?: AuditValue; new?: AuditValue }>;
@@ -502,7 +537,15 @@ function cleanWorkloadClaim(value: unknown, field: string, limit: number): Clean
             : field === 'repository_visibility'
               ? ['public', 'private', 'internal'].includes(value)
               : /^[1-9][0-9]*$/.test(value);
-  return valid ? { ok: true, value } : { ok: false, reason: 'bad_value' };
+  if (!valid) return { ok: false, reason: 'bad_value' };
+  // UUIDs are verified workflow/ref identifiers; other credential forms and e-mails remain private.
+  const scanned = value.replace(
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+    'identifier',
+  );
+  const clean = redactValue(scanned, limit, 'text');
+  if (!clean.ok) return clean;
+  return clean.value === scanned ? { ok: true, value } : { ok: false, reason: 'bad_value' };
 }
 const MAX_ARRAY = 50;
 const MAX_ARRAY_STRING = 100;
@@ -561,6 +604,110 @@ function cleanProviderId(value: unknown): Cleaned {
     : { ok: false, reason: 'bad_value' };
 }
 
+const AUDIT_CONTROL_ACTIONS: ReadonlySet<string> = new Set([
+  'audit.export',
+  'audit.mode_change',
+  'audit.sink_admin',
+]);
+const AUDIT_CONTROL_ENUMS: Record<string, readonly string[]> = {
+  format: ['api', 'jsonl'],
+  from_mode: ['trail', 'export', 'none'],
+  to_mode: ['trail', 'export', 'none'],
+  source: ['build', 'env', 'cli'],
+  policy: ['availability', 'required'],
+  alert_code: AUDIT_ALERT_CODES,
+  operation: [
+    'alert_ack',
+    'resolve',
+    'rebind',
+    'retire',
+    'unblock',
+    'skip',
+    'replay',
+    'confirm_restore',
+    'policy_set',
+    'epoch_bump',
+    'chain_reset',
+  ],
+};
+const AUDIT_CONTROL_INTEGERS: ReadonlySet<string> = new Set([
+  'from_seq',
+  'to_seq',
+  'count',
+  'withheld',
+  'mode_generation',
+  'cutover_seq',
+  'epoch',
+  'generation',
+  'revision',
+]);
+
+function cleanAuditControlValue(value: unknown, field: string): Cleaned {
+  const values = AUDIT_CONTROL_ENUMS[field];
+  if (values !== undefined) {
+    return typeof value === 'string' && values.includes(value)
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (field === 'sink_id') {
+    return value === null ||
+      (typeof value === 'string' && /^[a-z0-9-]{1,32}$/.exec(value)?.[0] === value)
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (field === 'reason_code') {
+    return typeof value === 'string' && /^[a-z][a-z_]{0,31}$/.exec(value)?.[0] === value
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (AUDIT_CONTROL_INTEGERS.has(field)) {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  return cleanValue(value, field);
+}
+
+export const LOGIN_FAILURE_METHODS = ['local', 'oidc', 'cloudflare_access', 'reauth'] as const;
+export const LOGIN_FAILURE_REASONS = [
+  'bad_credentials',
+  'unknown_account',
+  'blocked',
+  'suspended',
+  'provider_error',
+  'state_mismatch',
+  'expired',
+] as const;
+
+function cleanFailureValue(value: unknown, field: string): Cleaned {
+  if (field === 'permission' && value === null) return { ok: true, value: null };
+  const enums: Record<string, readonly string[]> = {
+    method: LOGIN_FAILURE_METHODS,
+    reason: LOGIN_FAILURE_REASONS,
+    boundary: ['organization', 'project', 'authenticated'],
+    permission: PERMISSIONS.map(({ name }) => name),
+  };
+  if (field === 'count') {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  if (field === 'window_start') {
+    return typeof value === 'string' &&
+      isUtcTimestamp(value) &&
+      new Date(value).toISOString() === value
+      ? { ok: true, value }
+      : { ok: false, reason: 'bad_value' };
+  }
+  return typeof value === 'string' && (enums[field]?.includes(value) ?? false)
+    ? { ok: true, value }
+    : { ok: false, reason: 'bad_value' };
+}
+
+function isFailureAction(action: AuditAction): boolean {
+  return action === 'session.login_failed' || action === 'access.denied';
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -617,8 +764,8 @@ function checkEnvelope(input: AuditEventInput): AuditRefusal | null {
   const context: unknown = input.context;
   if (!isPlainObject(context)) return 'bad_value';
   const checks: Array<[unknown, string, boolean]> = [
-    [context.opId, 'id', false],
-    [context.requestId, 'id', false],
+    [context.opId, 'id', actorType === 'system'],
+    [context.requestId, 'id', actorType === 'system'],
     [input.id, 'id', false],
     [input.now, 'now', false],
     [input.actor.id, 'id', true],
@@ -630,7 +777,11 @@ function checkEnvelope(input: AuditEventInput): AuditRefusal | null {
     const refusal = envelopeString(value, field, nullable);
     if (refusal !== null) return refusal;
   }
-  if (!isBrokerId(context.opId) || !isBrokerId(context.requestId)) return 'bad_value';
+  if (
+    (context.opId !== null && !isBrokerId(context.opId)) ||
+    (context.requestId !== null && !isBrokerId(context.requestId))
+  )
+    return 'bad_value';
   if (!isUtcTimestamp(input.now)) return 'bad_value';
   if (context.tokenSelector !== null && !TOKEN_SELECTOR.test(String(context.tokenSelector))) {
     return 'bad_value';
@@ -768,6 +919,152 @@ function missingOverrideReason(
   return (kind === 'block' || kind === 'quarantine') && typeof removed === 'number' && removed > 0;
 }
 
+const NPM_AUDIT_ACTIONS = new Set<string>([
+  'package.publish',
+  'package.deprecate',
+  'package.dist_tag',
+  'package.unpublish',
+  'package.access_update',
+  'package.access_request',
+  'package.access_decide',
+  'publish.approve',
+  'publish.reject',
+  'publish.expire',
+  'publish.scan',
+  'token.workload_issue',
+  'trusted_publisher.create',
+  'trusted_publisher.update',
+  'trusted_publisher.disable',
+]);
+
+function cleanNpmValue(value: unknown, field: string, action: AuditAction): Cleaned {
+  if (typeof value === 'string') {
+    if (/\p{Cc}/u.test(value)) return { ok: false, reason: 'bad_value' };
+    const clean = cleanString(value, field === 'package' ? MAX_KEY_LENGTH : 256, field);
+    if (!clean.ok) return clean;
+    if (clean.value !== value) return { ok: false, reason: 'bad_value' };
+  }
+  let valid: boolean;
+  switch (field) {
+    case 'package':
+      try {
+        valid =
+          typeof value === 'string' &&
+          (isUlid(value) ||
+            ((action === 'package.access_request' || action === 'package.access_decide') &&
+              isPolicyPackageKey('composer', value)) ||
+            displayName(packageKey(value, { ecosystem: 'npm', legacyCase: true })) === value);
+      } catch {
+        valid = false;
+      }
+      break;
+    case 'version':
+      if (value === null) return { ok: true, value: null };
+      valid = typeof value === 'string' && /^[0-9A-Za-z][0-9A-Za-z.+_~-]{0,255}$/.test(value);
+      break;
+    case 'versions':
+      valid =
+        Array.isArray(value) &&
+        value.length <= 64 &&
+        value.every(
+          (item) => typeof item === 'string' && /^[0-9A-Za-z][0-9A-Za-z.+_~-]{0,255}$/.test(item),
+        );
+      break;
+    case 'tag':
+      valid = typeof value === 'string' && validDistTag(value);
+      break;
+    case 'authority':
+      valid = oneOf(['project', 'organization'])(value);
+      break;
+    case 'hold_approval':
+    case 'hold_scan':
+    case 'visible_to_new_projects':
+      valid = typeof value === 'boolean';
+      break;
+    case 'new_project_access_mode':
+      valid = oneOf(['none', 'request'])(value);
+      break;
+    case 'state':
+      valid = oneOf(['pending', 'approved', 'rejected', 'expired'])(value);
+      break;
+    case 'verdict':
+      valid = oneOf([
+        'allow',
+        'deny',
+        'not_required',
+        'queued',
+        'running',
+        'allowed',
+        'denied',
+        'failed',
+      ])(value);
+      break;
+    case 'size_bytes':
+    case 'removed_version_count':
+      valid = count(0, Number.MAX_SAFE_INTEGER)(value);
+      break;
+    case 'source':
+    case 'token_id':
+    case 'trusted_publisher_id':
+    case 'project_id':
+      valid = typeof value === 'string' && POLICY_PROJECT_ID.test(value);
+      break;
+    case 'expires_at':
+      valid = isPolicyTimestamp(value);
+      break;
+    case 'plugin':
+      valid = typeof value === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(value);
+      break;
+    default:
+      return { ok: false, reason: 'bad_value' };
+  }
+  if (!valid) return { ok: false, reason: 'bad_value' };
+  // Names and versions still pass the credential and e-mail detector.
+  return typeof value === 'string'
+    ? cleanString(value, field === 'package' ? MAX_KEY_LENGTH : 256, field)
+    : { ok: true, value: value as AuditValue };
+}
+
+function specializedPrivacyRefusal(
+  action: AuditAction,
+  field: string,
+  value: unknown,
+): AuditRefusal | null {
+  if (
+    (action.startsWith('notification.') ||
+      action.startsWith('policy.') ||
+      action.startsWith('registry_policy.') ||
+      NPM_AUDIT_ACTIONS.has(action)) &&
+    WORKLOAD_CLAIM_LIMITS[field] === undefined &&
+    !(action === 'package.publish' && field === 'integrity') &&
+    field !== 'reason_sha256' &&
+    field !== 'deprecated_sha256'
+  ) {
+    const strings = Array.isArray(value) ? value : [value];
+    for (const item of strings) {
+      if (typeof item !== 'string') continue;
+      const scanField =
+        field.endsWith('_id') || field === 'source'
+          ? 'id'
+          : field === 'versions'
+            ? 'version'
+            : field;
+      const scanned = cleanString(item, MAX_PAYLOAD_BYTES, scanField);
+      if (!scanned.ok) return scanned.reason;
+      if (scanned.value !== item) return 'bad_value';
+      if (field === 'package_key') {
+        try {
+          const decoded = cleanString(displayName(item), MAX_KEY_LENGTH, 'package');
+          if (!decoded.ok) return decoded.reason;
+        } catch {
+          return 'bad_value';
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function cleanChanges(
   action: AuditAction,
   changes: unknown,
@@ -785,15 +1082,16 @@ function cleanChanges(
     if (!isPlainObject(entry)) return { ok: false, reason: 'bad_value' };
     const cleanedEntry: Record<string, AuditValue> = {};
     for (const key of Object.keys(entry)) {
-      if (!CHANGE_KEYS.has(key)) return { ok: false, reason: 'bad_value' };
+      if (!CHANGE_KEYS.has(key) || (isFailureAction(action) && key === 'old'))
+        return { ok: false, reason: 'bad_value' };
       if (entry[key] === undefined) continue;
       const integrity = action === 'package.publish' && field === 'integrity';
-      const accessReason =
-        (action === 'package.access_request' ||
-          action === 'package.access_decide' ||
-          action === 'version.state_change') &&
-        field === 'reason';
       const value = entry[key];
+      if (
+        action === 'registered_name.update' &&
+        (typeof value !== 'string' || !isValidPattern(value))
+      )
+        return { ok: false, reason: 'bad_value' };
       const validIntegrity =
         typeof value === 'string' &&
         /^(?:sha512-[A-Za-z0-9+/]{85}[AQgw]==|sha1-[A-Za-z0-9+/]{26}[AEIMQUYcgkosw048]=)$/.test(
@@ -802,6 +1100,8 @@ function cleanChanges(
       if (action.startsWith('registry_policy.') || action.startsWith('policy.')) {
         const cleanedPolicy = cleanPolicyValue(field, value);
         if (!cleanedPolicy.ok) return cleanedPolicy;
+        const privacy = specializedPrivacyRefusal(action, field, value);
+        if (privacy !== null) return { ok: false, reason: privacy };
         cleanedEntry[key] = cleanedPolicy.value;
         continue;
       }
@@ -809,48 +1109,116 @@ function cleanChanges(
         action === 'token.workload_issue' || action.startsWith('trusted_publisher.')
           ? WORKLOAD_CLAIM_LIMITS[field]
           : undefined;
-      const publicDeprecation =
-        action === 'package.deprecate' &&
-        field === 'deprecated' &&
-        (value === null || typeof value === 'string');
-      const cleaned = action.startsWith('notification.')
-        ? cleanNotificationValue(value, field, action)
-        : publicDeprecation
-          ? { ok: true as const, value: value as string | null }
-          : workloadLimit !== undefined &&
-              !(value === null && action.startsWith('trusted_publisher.'))
-            ? cleanWorkloadClaim(value, field, workloadLimit)
-            : accessReason && typeof value === 'string'
-              ? new TextEncoder().encode(value).length <= 1000
-                ? cleanString(value, 1000, field)
-                : { ok: false as const, reason: 'bad_value' as const }
-              : integrity
-                ? validIntegrity
-                  ? { ok: true as const, value: value as string }
-                  : { ok: false as const, reason: 'bad_value' as const }
-                : field === 'provider' && IDENTITY_ACTIONS.has(action)
-                  ? cleanProviderId(entry[key])
-                  : action === 'publish.reject' && field === 'reason' && typeof value === 'string'
-                    ? cleanString(value, 1000, field)
-                    : cleanValue(entry[key], field);
+      const cleaned =
+        action.startsWith('trusted_publisher.') && value === null
+          ? { ok: true as const, value: null }
+          : isFailureAction(action)
+            ? cleanFailureValue(value, field)
+            : AUDIT_CONTROL_ACTIONS.has(action)
+              ? cleanAuditControlValue(value, field)
+              : action.startsWith('notification.')
+                ? cleanNotificationValue(value, field, action)
+                : field === 'reason_sha256' || field === 'deprecated_sha256'
+                  ? value === null ||
+                    (typeof value === 'string' &&
+                      value.length === 64 &&
+                      /^[0-9a-f]{64}$/.test(value))
+                    ? { ok: true as const, value: value as string | null }
+                    : { ok: false as const, reason: 'bad_value' as const }
+                  : action === 'package.deprecate' && field === 'deprecated'
+                    ? typeof value === 'boolean'
+                      ? { ok: true as const, value }
+                      : { ok: false as const, reason: 'bad_value' as const }
+                    : workloadLimit !== undefined &&
+                        !(value === null && action.startsWith('trusted_publisher.'))
+                      ? cleanWorkloadClaim(value, field, workloadLimit)
+                      : integrity
+                        ? validIntegrity
+                          ? { ok: true as const, value: value as string }
+                          : { ok: false as const, reason: 'bad_value' as const }
+                        : field === 'provider' && IDENTITY_ACTIONS.has(action)
+                          ? cleanProviderId(entry[key])
+                          : NPM_AUDIT_ACTIONS.has(action)
+                            ? cleanNpmValue(value, field, action)
+                            : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
-      if (accessReason && cleaned.value !== value) return { ok: false, reason: 'bad_value' };
+      const privacy = specializedPrivacyRefusal(action, field, value);
+      if (privacy !== null) return { ok: false, reason: privacy };
       cleanedEntry[key] = cleaned.value;
     }
     if (Object.keys(cleanedEntry).length === 0) return { ok: false, reason: 'bad_value' };
     out[field] = cleanedEntry;
   }
+  if (
+    action === 'audit.sink_admin' &&
+    (out.operation?.old === 'alert_ack' || out.operation?.new === 'alert_ack')
+  ) {
+    if (
+      out.operation?.new !== 'alert_ack' ||
+      out.sink_id !== undefined ||
+      out.alert_code?.new === undefined ||
+      out.revision?.new === undefined
+    )
+      return { ok: false, reason: 'bad_value' };
+  }
   if (missingOverrideReason(action, out)) return { ok: false, reason: 'bad_value' };
   return { ok: true, value: out };
 }
 
-export function auditEvent(input: AuditEventInput): AuditEventResult {
+export function auditEnvelopeRefusal(input: AuditEventInput): AuditRefusal | null {
   const action: unknown = input.action;
   if (typeof action !== 'string' || !(AUDIT_ACTIONS as readonly string[]).includes(action)) {
-    return { ok: false, reason: 'unknown_action' };
+    return 'unknown_action';
   }
   const envelope = checkEnvelope(input);
+  if (envelope !== null) return envelope;
+  if (isFailureAction(input.action)) {
+    if (
+      !isUlid(input.id) ||
+      input.context.tokenSelector !== null ||
+      (input.actor.id !== null && !isUlid(input.actor.id)) ||
+      (input.projectId != null && !isUlid(input.projectId))
+    ) {
+      return 'bad_value';
+    }
+    if (input.action === 'session.login_failed') {
+      if (
+        input.target.type !== 'session' ||
+        input.target.id !== null ||
+        !(
+          (input.actor.type === 'system' && input.actor.id === null) ||
+          (input.actor.type === 'user' && input.actor.id !== null)
+        )
+      ) {
+        return 'bad_value';
+      }
+    } else if (
+      input.actor.type === 'system' ||
+      input.actor.id === null ||
+      input.target.type !== 'route' ||
+      typeof input.target.id !== 'string' ||
+      (input.target.id !== '/' &&
+        !/^\/(?:[A-Za-z0-9._~-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[A-Za-z0-9._~-]+|:[A-Za-z][A-Za-z0-9]*))*$/.test(
+          input.target.id,
+        ))
+    ) {
+      return 'bad_value';
+    }
+  }
+  return null;
+}
+
+export function auditEvent(input: AuditEventInput): AuditEventResult {
+  const envelope = auditEnvelopeRefusal(input);
   if (envelope !== null) return { ok: false, reason: envelope };
+  if (isFailureAction(input.action)) {
+    if (
+      input.changes === undefined ||
+      !AUDIT_FIELDS[input.action].every((field) => input.changes?.[field]?.new !== undefined)
+    ) {
+      return { ok: false, reason: 'bad_value' };
+    }
+  }
   const payload: Record<string, unknown> = {
     op_id: input.context.opId,
     request_id: input.context.requestId,

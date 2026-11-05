@@ -112,7 +112,7 @@ export function checkConsistency(node, cloudflare) {
 
 export function checkReproducible(
   root,
-  builder = () => execFileSync('pnpm', ['bundle'], { cwd: root, stdio: 'inherit' }),
+  builder = (env) => execFileSync('pnpm', ['bundle'], { cwd: root, stdio: 'inherit', env }),
 ) {
   const snapshot = () =>
     Object.fromEntries(
@@ -123,10 +123,20 @@ export function checkReproducible(
         ]),
       ),
     );
+  const env = { ...process.env };
+  if (env.SOURCE_DATE_EPOCH === undefined)
+    env.SOURCE_DATE_EPOCH = execFileSync('git', ['log', '-1', '--format=%ct'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    }).trim();
+  const rebuild = () => {
+    for (const target of Object.keys(TARGETS))
+      rmSync(join(root, '.pb', target), { recursive: true, force: true });
+    builder(env);
+  };
+  rebuild();
   const before = snapshot();
-  for (const target of Object.keys(TARGETS))
-    rmSync(join(root, '.pb', target), { recursive: true, force: true });
-  builder();
+  rebuild();
   const after = snapshot();
   const differences = differingPaths(before, after);
   if (differences.length)

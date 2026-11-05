@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
 import type { KernelOptions } from '@package-broker/core/kernel/kernel';
@@ -352,11 +353,25 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     jobs: [],
     ownerPacket: 'T531',
   },
+
   {
-    dependency: 'audit',
-    constructed: 'audit query repository adapter',
-    routes: ['GET /_pb/audit', 'GET /_pb/audit/head', 'GET /_pb/projects/:project/audit'],
+    dependency: 'auditTrail',
+    constructed: 'composed audit trail dispatch over journal services',
+    routes: [
+      'GET /_pb/audit',
+      'GET /_pb/audit/head',
+      'GET /_pb/audit/health',
+      'GET /_pb/audit/status',
+      'GET /_pb/projects/:project/audit',
+    ],
     jobs: ['audit-seal', 'audit-verify'],
+    ownerPacket: 'T531',
+  },
+  {
+    dependency: 'auditExport',
+    constructed: 'audit export store over the audit journal, anchors and sessions',
+    routes: ['GET /_pb/audit/export'],
+    jobs: [],
     ownerPacket: 'T531',
   },
   {
@@ -476,8 +491,9 @@ describe('Node management API mount', () => {
       log?: KernelLog;
     } = {},
   ): NodeBroker =>
-    (broker = createNodeServer([], {
+    (broker = createNodeServer([auditTrail()], {
       executor: db.executor,
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',
@@ -723,8 +739,9 @@ describe('Node management API mount', () => {
       'node',
       'https://broker.test',
     );
-    broker = createNodeServer([], {
+    broker = createNodeServer([auditTrail()], {
       executor: db.executor,
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'https://broker.test',

@@ -1,3 +1,4 @@
+import { sha256Hex } from '../../auth/primitives.js';
 import { describe, expect, it, vi } from 'vitest';
 import { validateAuditEvent } from '../../audit/actions.js';
 import { setAccessContext } from '../../authz/access-context.js';
@@ -322,17 +323,14 @@ it.each(['\n', '\u0000', '\t', '"', '\\', 'é'])(
       expect(response.status).toBe(200);
       const input = h.deps.deprecations.update.mock.calls.at(-1)![2];
       const payload = JSON.parse(input.edits[0]!.event.payloadJson);
-      const decoded =
-        payload.changes.deprecated_encoding?.new === 'base64-utf8'
-          ? Buffer.from(payload.changes.deprecated.new, 'base64').toString('utf8')
-          : payload.changes.deprecated.new;
-      expect(decoded).toBe(next);
-      const decodedOld =
-        payload.changes.deprecated_encoding?.new === 'base64-utf8' &&
-        payload.changes.deprecated.old !== null
-          ? Buffer.from(payload.changes.deprecated.old, 'base64').toString('utf8')
-          : payload.changes.deprecated.old;
-      expect(decodedOld).toBe(old);
+      expect(input.edits[0]!.message).toBe(next);
+      expect(input.edits[0]!.old).toBe(old);
+      expect(payload.changes.deprecated).toEqual({ old: Boolean(old), new: next !== '' });
+      expect(payload.changes.deprecated_sha256).toEqual({
+        old: old === null ? null : await sha256Hex(old),
+        new: await sha256Hex(next),
+      });
+      expect(payload.changes).not.toHaveProperty('deprecated_encoding');
       expect(validateAuditEvent(input.edits[0]!.event)).toEqual(input.edits[0]!.event);
       expect(
         new TextEncoder().encode(input.edits[0]!.event.payloadJson).byteLength,
@@ -447,3 +445,58 @@ it('keeps ambiguous hosted claims as a conflict for manifest updates', async () 
   expect(await json(response)).toMatchObject({ code: 'name_not_claimed' });
   expect(h.deps.deprecations.update).not.toHaveBeenCalled();
 });
+
+it.each(['publish', 'dist-tag', 'unpublish'] as const)(
+  'preserves backlog_full through npm %s',
+  async (operation) => {
+    const h = harness(MANAGE);
+    const error = new DbError('backlog_full', 'Audit backlog is full');
+    const call =
+      operation === 'dist-tag'
+        ? (h.deps.distTags.update.mockRejectedValueOnce(error),
+          createDistTagService(h.deps as never)(
+            h.context('PUT', '-/package/widget/dist-tags/_next', JSON.stringify('1.0.0')),
+            'widget',
+            '_next',
+          ))
+        : operation === 'unpublish'
+          ? (h.deps.unpublish.remove.mockRejectedValueOnce(error),
+            createUnpublishService(h.deps as never)(
+              h.context('DELETE', 'widget/-rev/3'),
+              'widget',
+              '3',
+            ))
+          : (h.deps.deprecations.update.mockRejectedValueOnce(error),
+            createPublishService(h.deps as never)(
+              h.context('PUT', 'widget', JSON.stringify(h.packument('retired'))),
+              'widget',
+            ));
+    await expect(call).rejects.toBe(error);
+  },
+);
+it.each(['_next', 'next!'])(
+  'sets and removes valid tag %s through audit construction',
+  async (tag) => {
+    const h = harness(MANAGE);
+    expect(
+      (
+        await createDistTagService(h.deps as never)(
+          h.context('PUT', '-/package/widget/dist-tags/' + tag, JSON.stringify('1.0.0')),
+          'widget',
+          tag,
+        )
+      ).status,
+    ).toBe(200);
+    h.snapshot.tags[tag] = '1.0.0';
+    expect(
+      (
+        await createDistTagService(h.deps as never)(
+          h.context('DELETE', '-/package/widget/dist-tags/' + tag),
+          'widget',
+          tag,
+        )
+      ).status,
+    ).toBe(200);
+    expect(h.deps.distTags.update).toHaveBeenCalledTimes(2);
+  },
+);

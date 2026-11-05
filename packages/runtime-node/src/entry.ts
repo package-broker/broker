@@ -16,6 +16,7 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8000;
 export interface EntryManifest {
   readonly observability?: BrokerConfig['observability'];
   readonly registry?: BrokerConfig['registry'];
+  readonly audit?: BrokerConfig['audit'] & { readonly build_generation?: number };
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
@@ -113,6 +114,7 @@ export async function runEntry(
       platformPorts,
       observability,
       registry,
+      audit,
       tokens,
       vulnerability,
       mcp,
@@ -126,6 +128,7 @@ export async function runEntry(
       runtime.exit(1);
       return;
     }
+    const { build_generation: manifestGeneration, ...auditConfig } = audit ?? {};
     broker = await runtime.start({
       plugins,
       migrations,
@@ -134,6 +137,10 @@ export async function runEntry(
       ...(platformPorts == null ? {} : { platformPorts }),
       ...(observability === undefined ? {} : { observability }),
       ...(registry === undefined ? {} : { registry }),
+      auditGeneration: manifestGeneration ?? 0,
+      ...(audit === undefined
+        ? {}
+        : { audit: manifestGeneration === undefined ? audit : auditConfig }),
       ...(tokens === undefined ? {} : { tokens }),
       ...(vulnerability === undefined ? {} : { vulnerability }),
       ...(mcp === undefined ? {} : { mcp }),

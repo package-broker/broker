@@ -1,3 +1,8 @@
+import {
+  clearAuthorizationFailure,
+  setAuthorizationFailure,
+  type DenialRecorder,
+} from '../internal/authorization-failure.js';
 import { clearPackageActor, setPackageActor } from '../internal/package-actor.js';
 import type { ActorAccessSnapshot } from './actor.js';
 import { npmManagementPermits, npmManagementRoute } from './npm-management.js';
@@ -114,6 +119,7 @@ export interface PatValidationGate {
 export const patValidationGate: PatValidationGate = Object.freeze({ decide: decidePatValidation });
 
 export interface AuthorizationEngineDeps {
+  readonly recordDenied?: DenialRecorder;
   readonly access: EngineAccessPort;
   readonly tokenUse: Omit<TokenUseDeps, 'touch'>;
   readonly patValidation: PatValidationGate;
@@ -270,6 +276,12 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       secretHash: await sha256Hex(secret),
     });
     if (found === null) return UNAUTHORIZED;
+    setAuthorizationFailure(
+      request,
+      { kind: 'user', id: found.user.id },
+      found.project?.id ?? null,
+      deps.recordDenied,
+    );
     if (
       (request.route.boundary === 'authenticated' || request.route.boundary === 'self') &&
       found.identity !== null &&
@@ -282,6 +294,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
         assertSameOrigin(request.request, publicOrigin);
         await assertCsrfToken(request.request, found.session.csrfHash);
       } catch {
+        clearAuthorizationFailure(request);
         return FORBIDDEN;
       }
     }
@@ -370,6 +383,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     }
     const principal = principalOf(found);
     if (principal === undefined) return UNAUTHORIZED;
+    setAuthorizationFailure(request, principal, found.project?.id ?? null, deps.recordDenied);
     if (
       input.boundary === 'organization' &&
       found.token.projectMode === 'selected' &&
@@ -485,13 +499,16 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
     if (!result.ok) return UNAUTHORIZED;
     const { token: held } = result.access;
     if (!held.bindingOk || held.scope === null || held.projectMode === null) return UNAUTHORIZED;
-    if (principalOf(result.access) === undefined) return UNAUTHORIZED;
+    const principal = principalOf(result.access);
+    if (principal === undefined) return UNAUTHORIZED;
+    setAuthorizationFailure(request, principal, null, deps.recordDenied);
     return FORBIDDEN;
   }
 
   return Object.freeze({
     async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
       grants.delete(request);
+      clearAuthorizationFailure(request);
       clearPackageActor(request);
       const { boundary: routeBoundary } = request.route;
       if (

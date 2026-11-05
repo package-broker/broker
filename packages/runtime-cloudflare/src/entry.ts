@@ -1,4 +1,5 @@
 import {
+  audit,
   mcp,
   migrations,
   notifications,
@@ -16,11 +17,15 @@ declare module '#pb-manifest' {
   export const observability: BrokerConfig['observability'];
 }
 
+const { build_generation: auditGeneration, ...auditConfig } = audit ?? {};
+
 export default createWorker(plugins, {
+  auditGeneration: auditGeneration ?? 0,
   platformPorts,
   migrations,
   observability,
   ...(registry === undefined ? {} : { registry }),
+  ...(audit === undefined ? {} : { audit: auditConfig }),
   ...(tokens === undefined ? {} : { tokens }),
   ...(vulnerability === undefined ? {} : { vulnerability }),
   ...(mcp === undefined ? {} : { mcp }),

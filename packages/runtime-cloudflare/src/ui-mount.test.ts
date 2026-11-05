@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { auditTrail } from './audit-trail.test.support.js';
+import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated-database';
+import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
+import type { SqlValue, Statement } from '@package-broker/core/db/port';
+import type { D1PreparedStatementLike } from './db/d1-executor.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { orgContext } from '@package-broker/core/db/port';
 import type { KernelOptions } from '@package-broker/core/kernel/kernel';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
@@ -39,50 +44,48 @@ const engine: AuthorizationEngine = {
 
 import { createWorker, type Env } from './index.js';
 
-function keyringOnlyD1(): NonNullable<Env['DB']> {
-  const verifier = new Map<number, string>();
-  type Recorded = {
-    sql: string;
-    values: unknown[];
-    bind: (...next: unknown[]) => Recorded;
-    all: () => Promise<unknown>;
-  };
-  const run = (sql: string, values: unknown[]) => {
-    const insert = /^\s*insert into keyring_verifier .*X'([0-9a-f]{64})'/is.exec(sql);
-    if (insert !== null) {
-      const version = values[0] as number;
-      if (verifier.has(version)) return { results: [], meta: { changes: 0 } };
-      verifier.set(version, (insert[1] as string).toUpperCase());
-      return { results: [], meta: { changes: 1 } };
-    }
-    if (/from "keyring_verifier"/i.test(sql)) {
-      return {
-        results: [...verifier]
-          .sort(([left], [right]) => right - left)
-          .map(([key_version, mac_hex]) => ({ key_version, mac_hex })),
-      };
-    }
-    if (/from (?:local_login|credential|token)\b/i.test(sql)) return { results: [] };
-    throw new Error('unexpected SQL');
-  };
-  const make = (sql: string, values: unknown[]): Recorded => ({
-    sql,
-    values,
-    bind: (...next) => make(sql, next),
-    all: () => Promise.resolve(run(sql, values)),
+let database: Awaited<ReturnType<typeof openMigratedDatabase>>;
+beforeEach(async () => {
+  database = await openMigratedDatabase({ d1PatternLimit: true });
+  await createOrganizationBootstrap(database.executor).bootstrap({
+    id: 'org-ui',
+    slug: 'ui',
+    name: 'UI',
+    now: new Date().toISOString(),
   });
+});
+afterEach(async () => {
+  await database.close();
+});
+
+function migratedD1(): NonNullable<Env['DB']> {
+  const statements = new WeakMap<D1PreparedStatementLike, Statement>();
+  const prepare = (statement: Statement): D1PreparedStatementLike => {
+    const bound: D1PreparedStatementLike = {
+      bind: (...params) => prepare({ sql: statement.sql, params: params as SqlValue[] }),
+      all: async () => ({ results: await database.executor.all(statement) }),
+    };
+    statements.set(bound, statement);
+    return bound;
+  };
   return {
-    prepare: (sql: string) => make(sql, []),
-    batch: (statements: Recorded[]) =>
-      Promise.resolve(statements.map((statement) => run(statement.sql, statement.values))),
-  } as unknown as NonNullable<Env['DB']>;
+    prepare: (sql) => prepare({ sql, params: [] }),
+    batch: async (batch) =>
+      (await database.executor.batch(batch.map((statement) => statements.get(statement)!))).map(
+        (result) => ({ results: result.rows, meta: { changes: result.changes } }),
+      ),
+  };
 }
 
 describe('Worker UI mount', () => {
   it('adds only public UI routes without an organization or session requirement', async () => {
-    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      authorization: engine,
+      log: () => undefined,
+    });
     const authEnv: Env = {
-      DB: keyringOnlyD1(),
+      DB: migratedD1(),
       PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
       PB_PUBLIC_URL: 'https://broker.test',
     };
@@ -126,15 +129,12 @@ describe('Worker UI mount', () => {
       expect(redirect.status).toBe(303);
       expect(redirect.headers.get('location')).toBe('/_pb/ui/?view=packages');
       expect(redirect.headers.get('cache-control')).toBe('no-store');
-      expect(
-        (
-          await fetchUi(
-            new Request('https://broker.test/_pb/projects', {
-              headers: { cookie: 'test-session=valid' },
-            }),
-          )
-        ).status,
-      ).toBe(200);
+      const projects = await fetchUi(
+        new Request('https://broker.test/_pb/projects', {
+          headers: { cookie: 'test-session=valid' },
+        }),
+      );
+      expect(projects.status).toBe(200);
       const routes = captured.options.at(-1)?.coreRoutes ?? [];
 
       expect(
@@ -214,13 +214,17 @@ describe('Worker UI mount from the ASSETS binding', () => {
     },
   });
   const authEnv: Env = {
-    DB: keyringOnlyD1(),
+    DB: migratedD1(),
     PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
     PB_PUBLIC_URL: 'https://broker.test',
   };
 
   it('serves every script and stylesheet the document references at the document-relative URL', async () => {
-    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      authorization: engine,
+      log: () => undefined,
+    });
     const env = { ...authEnv, ASSETS: bindingFor(JSON.stringify(stagedManifest)) };
     const fetchUi = (request: Request) => worker.fetch(request, env);
     try {
@@ -287,7 +291,11 @@ describe('Worker UI mount from the ASSETS binding', () => {
   });
 
   it('answers 404, not 500, when the binding holds an invalid manifest', async () => {
-    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      authorization: engine,
+      log: () => undefined,
+    });
     const env = { ...authEnv, ASSETS: bindingFor('{"version":1,"entry":"../x","files":{}}') };
     try {
       for (const path of ['/_pb/ui/', '/_pb/ui', '/_pb/ui/manifest.json', '/_pb/ui/index.html']) {
@@ -302,7 +310,8 @@ describe('Worker UI mount from the ASSETS binding', () => {
 
   it('logs a fixed warning for an invalid manifest and retries on the next request', async () => {
     const entries: Record<string, unknown>[] = [];
-    const worker = createWorker([], {
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       authorization: engine,
       log: (entry) => entries.push({ ...entry }),
     });
@@ -326,7 +335,11 @@ describe('Worker UI mount from the ASSETS binding', () => {
   });
 
   it('mounts no UI routes without the binding', async () => {
-    const worker = createWorker([], { authorization: engine, log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      authorization: engine,
+      log: () => undefined,
+    });
     try {
       await worker.services(authEnv);
       expect(

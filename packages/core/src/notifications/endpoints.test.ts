@@ -12,6 +12,7 @@ import {
   type NotificationReadRepository,
   type NotificationWriteRepository,
 } from '../db/notifications.js';
+import { DbError } from '../db/errors.js';
 import { orgContext } from '../db/port.js';
 import { ulid } from '../ids.js';
 import { NotificationError, createNotificationEndpointService } from './endpoints.js';
@@ -314,3 +315,26 @@ describe('notification endpoint service', () => {
     await refused(h.service.delete(ORG, fence, PROJECT, 'E1', 3, CALL), 'unavailable');
   });
 });
+
+it.each(['create', 'update', 'enable', 'disable', 'delete'] as const)(
+  'preserves backlog_full through notification %s',
+  async (operation) => {
+    const h = harness();
+    const error = new DbError('backlog_full', 'Audit backlog is full');
+    h.writes[operation].mockRejectedValueOnce(error);
+    const call =
+      operation === 'create'
+        ? h.service.create(ORG, fence, PROJECT, { ...OPTIONS, secret: SECRET }, CALL)
+        : operation === 'update'
+          ? h.service.update(
+              ORG,
+              fence,
+              PROJECT,
+              'E1',
+              { expectedRevision: 3, options: OPTIONS },
+              CALL,
+            )
+          : h.service[operation](ORG, fence, PROJECT, 'E1', 3, CALL);
+    await expect(call).rejects.toBe(error);
+  },
+);

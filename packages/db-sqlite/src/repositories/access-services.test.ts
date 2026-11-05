@@ -1,3 +1,5 @@
+import { createFailureEvents } from '@package-broker/core/audit/failure-events';
+import { createAuditFailureRepository } from './audit-failure.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveTokenLifetimePolicy } from '@package-broker/core/authz/token-lifetime';
 import { systemClock, ulid } from '@package-broker/core/ids';
@@ -178,6 +180,122 @@ describe.each(['node', 'cloudflare'])('%s access services contract', () => {
       }),
     ).toEqual({ items: [], next: null });
   });
+
+  it.each(['slow', 'failing'] as const)(
+    'keeps the login response unchanged with a %s staging store',
+    async (mode) => {
+      let release!: () => void;
+      let started!: () => void;
+      const stagingStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const work: Promise<void>[] = [];
+      const log = vi.fn();
+      const counter = vi.fn();
+      const executor: AccessServicesOptions['executor'] = {
+        ...options.executor,
+        async batch(statements) {
+          if (statements.some((statement) => statement.sql.includes('audit_pending'))) {
+            started();
+            await hold;
+            if (mode === 'failing') throw new Error('private staging failure');
+          }
+          return options.executor.batch(statements);
+        },
+      };
+      const baseline = createAccessServices(options);
+      const built = createAccessServices({
+        ...options,
+        executor,
+        failureEvents: {
+          recorder: createFailureEvents(),
+          binding: {
+            deploymentId: 'test',
+            observability: { log, counter, histogram: vi.fn() },
+            staging: createAuditFailureRepository(executor),
+            routeTemplates: new Set(),
+            now: () => options.clock.now(),
+          },
+        },
+        dispatch: (run) => {
+          work.push(Promise.resolve().then(run));
+        },
+      });
+      const attempt = (assembly: typeof built, org = database.orgs!.a) => {
+        const route = assembly.module.coreRoutes.find(
+          (route) => route.path === '/_pb/auth/local/login',
+        )!;
+        return route.handler({
+          request: new Request(`${options.publicOrigin}/_pb/auth/local/login`, {
+            method: 'POST',
+            headers: { origin: options.publicOrigin, 'content-type': 'application/json' },
+            body: JSON.stringify({
+              email: 'unknown@example.test',
+              password: 'private password',
+              code: '123456',
+            }),
+          }),
+          requestId: 'request',
+          org,
+          principal: null,
+          projectId: null,
+          params: {},
+          ports: {
+            organizations: assembly.repositories.organizations,
+            clock: options.clock,
+            ids: options.ids,
+          },
+        });
+      };
+      const expected = await attempt(baseline);
+      const response = await attempt(built);
+      // The response is available while the staging batch is still blocked.
+      await stagingStarted;
+      expect(response.status).toBe(401);
+      expect(response.status).toBe(expected.status);
+      expect([...response.headers]).toEqual([...expected.headers]);
+      expect(await response.text()).toBe(await expected.text());
+      release();
+      await Promise.all(work);
+      if (mode === 'failing') {
+        expect(log).toHaveBeenCalledWith({ level: 'error', event: 'audit.failure_event_failed' });
+        expect(counter).toHaveBeenCalledWith('pb.audit.failure_events_suppressed');
+        expect(JSON.stringify(log.mock.calls)).not.toContain('private staging failure');
+      } else {
+        await attempt(built);
+        await attempt(built, database.orgs!.b);
+        await Promise.all(work);
+        const rows = await database.executor.all<{
+          actor_type: string;
+          actor_id: string | null;
+          payload_json: string;
+        }>({
+          sql: "SELECT actor_type, actor_id, payload_json FROM audit_pending WHERE org_id = ? AND action = 'session.login_failed'",
+          params: [database.orgs!.a.orgId],
+        });
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ actor_type: 'system', actor_id: null });
+        expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+          changes: {
+            method: { new: 'local' },
+            reason: { new: 'unknown_account' },
+            count: { new: 1 },
+          },
+        });
+        for (const secret of ['unknown@example.test', 'private password', '123456'])
+          expect(JSON.stringify(rows)).not.toContain(secret);
+        expect(
+          await database.executor.all({
+            sql: "SELECT id FROM audit_pending WHERE org_id = ? AND action = 'session.login_failed'",
+            params: [database.orgs!.b.orgId],
+          }),
+        ).toHaveLength(1);
+      }
+    },
+  );
 
   it.each(['access', 'project', 'user', 'grant', 'token reader'] as const)(
     'fails closed with the same wired() error for %s',

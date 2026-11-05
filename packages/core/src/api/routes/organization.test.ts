@@ -72,6 +72,7 @@ interface Options {
   projectPermissions?: readonly string[];
   permissions?: readonly string[];
   users?: readonly User[];
+  effectiveAudit?: Parameters<typeof organizationRoutes>[0]['effectiveAudit'];
   me?: User | null;
   organization?: Organization | null;
 }
@@ -105,6 +106,7 @@ async function fixture(options: Options = {}) {
     platform: 'node',
     plugins: [],
     coreRoutes: organizationRoutes({
+      ...(options.effectiveAudit === undefined ? {} : { effectiveAudit: options.effectiveAudit }),
       organizations: { get: getOrganization },
       users: { list, get },
       administration: options.administration ?? { suspendUser, reactivateUser },
@@ -112,6 +114,7 @@ async function fixture(options: Options = {}) {
       clock,
       ids,
       clientIp,
+      log,
     }),
     ports: { organizations: { get: async () => null }, clock, ids },
     resolveOrg: async () => orgContext('org-1'),
@@ -619,6 +622,7 @@ describe('GET /_pb/me', () => {
       principal: { kind: 'user', id: USER_ID },
       user: { id: USER_ID, email: 'person9@example.test', displayName: 'Person 9' },
       organization: { slug: 'acme', name: 'Acme' },
+      features: { auditTrail: false },
     });
     for (const sentinel of [SESSION_ID, CSRF, SESSION_SECRET, SELECTOR]) {
       expect(text).not.toContain(sentinel);
@@ -649,6 +653,7 @@ describe('GET /_pb/me', () => {
       principal: { kind: 'service', id: '01JA0000000000000000000007' },
       user: null,
       organization: { slug: 'acme', name: 'Acme' },
+      features: { auditTrail: false },
     });
     expect(text).not.toContain(SELECTOR);
     expect(f.get).not.toHaveBeenCalled();
@@ -669,6 +674,66 @@ describe('GET /_pb/me', () => {
     const f = await fixture({ permissions: [] });
     expect((await f.request('GET', '/_pb/me')).status).toBe(200);
   });
+  it.each([true, false])('reports effective trail activity %s on me', async (trailActive) => {
+    const effectiveAudit = vi.fn(async () => ({
+      policy: 'required' as const,
+      policySource: 'stored' as const,
+      persistRaise: false,
+      mode: 'trail' as const,
+      trailActive,
+      activeSinkIds: [],
+      blockedSinkIds: [],
+      durableSinkIds: [],
+      durablePath: true,
+      maxJournalBytes: 1000,
+      warnings: [],
+    }));
+    const f = await fixture({ effectiveAudit, permissions: [] });
+    const response = await f.request('GET', '/_pb/me');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ features: { auditTrail: trailActive } });
+    expect(effectiveAudit).toHaveBeenCalledWith(orgContext('org-1'));
+  });
+
+  it('keeps me available when the effective audit warning logger throws', async () => {
+    const f = await fixture({
+      effectiveAudit: async () => {
+        throw new Error('Audit configuration unavailable');
+      },
+      permissions: [],
+    });
+    f.log.mockImplementation(() => {
+      throw new Error('Logger unavailable');
+    });
+    const response = await f.request('GET', '/_pb/me');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ features: { auditTrail: false } });
+    expect(f.log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'audit.effective_unavailable',
+      reason_code: 'audit.effective_unavailable',
+    });
+  });
+
+  it.each(['throw', 'refusal'] as const)(
+    'keeps me available after effective audit %s',
+    async (failure) => {
+      const effectiveAudit = vi.fn(async () => {
+        if (failure === 'throw') throw new Error('private@example.test secret');
+        return { ok: false as const, code: 'durable_path_required' as const, persistRaise: false };
+      });
+      const f = await fixture({ effectiveAudit, permissions: [] });
+      const response = await f.request('GET', '/_pb/me');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ features: { auditTrail: false } });
+      expect(f.log).toHaveBeenCalledWith({
+        level: 'warn',
+        event: 'audit.effective_unavailable',
+        reason_code: 'audit.effective_unavailable',
+      });
+      expect(JSON.stringify(f.log.mock.calls)).not.toContain('private@example.test');
+    },
+  );
 });
 
 describe('route registration', () => {

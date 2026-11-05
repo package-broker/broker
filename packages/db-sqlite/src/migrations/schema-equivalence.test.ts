@@ -78,3 +78,22 @@ it('npm_login_handoff fits D1 migration statement and parameter limits', async (
     ),
   ).toBe(true);
 });
+
+it('the audit migration back-fill fits D1 statement, parameter and atomic batch limits', async () => {
+  const audit = (await discoveredMigrations()).find((source) => source.id === 'core:0011_audit')!;
+  expect(audit.id).toBe('core:0011_audit');
+  expect(audit.phase).toBe('expand');
+  const statements = splitStatements(audit.sql);
+  expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(4);
+  expect(statements.filter((sql) => sql.startsWith('INSERT INTO audit_chain '))).toHaveLength(1);
+  expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
+  expect(
+    statements.every((sql) =>
+      scanSql(sql)
+        .filter((segment) => segment.kind === 'code')
+        .every((segment) => !/[?:@$]/.test(segment.text)),
+    ),
+  ).toBe(true);
+  // Lease assertion, migration record and lease renewal share the atomic batch.
+  expect(statements.length + 3).toBeLessThanOrEqual(1_000);
+});

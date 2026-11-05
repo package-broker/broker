@@ -2020,7 +2020,7 @@ describe('POST /_pb/auth/logout', () => {
   });
 
   it.each(['refuses', 'throws'] as const)(
-    'revokes, clears cookies and logs once when audit construction %s',
+    'revokes, stages a fallback and clears cookies when audit construction %s',
     async (failure) => {
       const app = await build();
       const { cookie, csrf, id } = await app.seed();
@@ -2044,11 +2044,20 @@ describe('POST /_pb/auth/logout', () => {
 
         expect(response.status).toBe(204);
         expect(row.revoked).toBe(true);
-        expect(app.audits).toEqual([]);
+        expect(app.audits).toEqual([
+          expect.objectContaining({
+            action: 'session.logout',
+            actor: { type: 'user', id: row.session.userId },
+            target: { type: 'session', id },
+            occurredAt: new Date(NOW).toISOString(),
+            sourceIp: null,
+            tokenSelector: null,
+          }),
+        ]);
         expect(cookieValue(response, SESSION_COOKIE)).toBe('');
         expect(cookieValue(response, CSRF_COOKIE)).toBe('');
         expect(cookieValue(response, LOGIN_COOKIE)).toBe('');
-        expect(log).toHaveBeenCalledExactlyOnceWith('Session logout audit event unavailable');
+        expect(log).toHaveBeenCalledExactlyOnceWith('session.logout.audit_fallback');
         expect(JSON.stringify(app.logs)).not.toContain('private request data');
       } finally {
         audit.mockRestore();

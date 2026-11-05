@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -207,7 +208,8 @@ async function boot(options: { jobs?: boolean; mode?: 'real' | 'missing' | 'thro
   const log = (record: unknown) => {
     logged.push(record);
   };
-  const worker = createWorker([plugin], {
+  const worker = createWorker([plugin, auditTrail()], {
+    audit: {},
     ...(options.jobs === false
       ? {}
       : {

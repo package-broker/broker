@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,8 @@ describe('Node retention startup assembly', () => {
       try {
         const path = join(directory, 'broker.sqlite');
         broker = await startNode({
-          plugins: [],
+          audit: { capacity: { maxJournalBytes: 67108864 } },
+          plugins: [auditTrail()],
           migrations: await discoveredMigrations(),
           env: {
             PB_SQLITE_PATH: path,

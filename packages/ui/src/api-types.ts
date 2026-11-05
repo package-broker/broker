@@ -21,6 +21,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/audit/export': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Export retained audit records */
+    get: operations['exportAudit'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/audit/head': {
     parameters: {
       query?: never;
@@ -30,6 +47,40 @@ export interface paths {
     };
     /** Read audit chain head */
     get: operations['auditHead'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/audit/health': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read audit health */
+    get: operations['getAuditHealth'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/audit/status': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read audit status */
+    get: operations['getAuditStatus'];
     put?: never;
     post?: never;
     delete?: never;
@@ -2435,30 +2486,185 @@ export interface operations {
         };
         content: {
           'application/json': {
-            items: {
-              action: string;
-              actor: {
-                id: string | null;
-                type: string;
-              };
-              createdAt: string;
-              id: string;
-              payload: {
-                changes?: {
-                  [key: string]: {
-                    new?: string | number | boolean | null | string[];
-                    old?: string | number | boolean | null | string[];
+            items: (
+              | {
+                  action: string;
+                  actor: {
+                    id: string | null;
+                    type: string;
                   };
-                };
-                op_id?: string;
-                request_id?: string;
-              };
-              projectId: string | null;
-              seq: number;
-              targetId: string | null;
-              targetType: string;
-            }[];
+                  createdAt: string;
+                  id: string;
+                  payload: {
+                    changes?: {
+                      [key: string]: {
+                        new?: string | number | boolean | null | string[];
+                        old?: string | number | boolean | null | string[];
+                      };
+                    };
+                    op_id?: string;
+                    request_id?: string;
+                  };
+                  projectId: string | null;
+                  seq: number;
+                  targetId: string | null;
+                  targetType: string;
+                }
+              | {
+                  /** @description Original event id when reason is content; marker id when reason is unreadable. */
+                  id: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  /** @enum {string} */
+                  reason: 'content' | 'unreadable';
+                  seq: number;
+                }
+            )[];
             next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  exportAudit: {
+    parameters: {
+      query?: {
+        from_seq?: string;
+        to_seq?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            dispositions: {
+              actorId: string | null;
+              actorType: string;
+              capacity?: {
+                affectedSinkIds: string[];
+                /** @constant */
+                affectedSinkIdsOverflow?: true;
+                hash: string;
+                prevHash: string;
+              };
+              chainId: string;
+              count: number;
+              createdAt: string;
+              epoch: number;
+              fromSeq: number;
+              id: string;
+              kind: string;
+              modeGeneration: number;
+              policy: string;
+              reasonCode: string;
+              resolvesId?: string | null;
+              sinkId: string | null;
+              toSeq: number;
+            }[];
+            fromSeq: number;
+            items: (
+              | {
+                  action: string;
+                  actor_id: string | null;
+                  actor_type: string;
+                  chain_id: string;
+                  created_at: string;
+                  epoch: number;
+                  hash: string;
+                  id: string;
+                  /** @constant */
+                  kind: 'event';
+                  org_id: string;
+                  payload_json: string;
+                  prev_hash: string;
+                  project_id: string | null;
+                  seq: number;
+                  source_ip?: string | null;
+                  target_id: string | null;
+                  target_type: string;
+                  token_selector: string | null;
+                }
+              | {
+                  action: string;
+                  actor_id: string | null;
+                  actor_type: string;
+                  chain_id: string;
+                  created_at: string;
+                  epoch: number;
+                  hash: string;
+                  id: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  marker_id: string;
+                  org_id: string;
+                  prev_hash: string;
+                  project_id: string | null;
+                  reason_code: string;
+                  seq: number;
+                  target_id: string | null;
+                  target_type: string;
+                }
+              | {
+                  chain_id: string;
+                  epoch: number;
+                  hash: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  marker_id: string;
+                  org_id: string;
+                  prev_hash: string;
+                  /** @constant */
+                  reason_code: 'unreadable';
+                  seq: number;
+                }
+            )[];
+            next_from_seq: number | null;
+            /** @constant */
+            schema: 'audit-chain/1';
+            snapshot: {
+              boundaryPrevHash: string;
+              boundarySeq: number;
+              chainId: string;
+              epoch: number;
+              headHash: string;
+              headSeq: number;
+            };
+            toSeq: number;
           };
         };
       };
@@ -2511,6 +2717,199 @@ export interface operations {
             lastVerifiedAt: string | null;
             pendingCount: number;
             seq: number;
+            verification: {
+              bodies: number;
+              fromSeq: number;
+              throughSeq: number;
+              verifiedAt: string;
+              withheld: number;
+            } | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getAuditHealth: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            codes: (
+              | 'audit.skipped'
+              | 'audit.uncertain'
+              | 'audit.gap'
+              | 'audit.withheld'
+              | 'audit.marker_rejected'
+              | 'audit.blocked'
+              | 'audit.fork'
+              | 'audit.pending_old'
+              | 'audit.capacity'
+              | 'audit.mode_change'
+              | 'audit.policy_change'
+              | 'audit.sink_inactive'
+              | 'audit.config_invalid'
+              | 'audit.mode_none'
+              | 'audit.chain_integrity'
+              | 'audit.hold_failed'
+              | 'audit.prune_anchor'
+            )[];
+            /** @enum {string} */
+            status: 'ok' | 'degraded' | 'failing';
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getAuditStatus: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            boundaryPrevHash: string;
+            boundarySeq: number;
+            capacity: {
+              journalBytes: number;
+              journalRows: number;
+              maxJournalBytes: number | null;
+              /** @enum {string} */
+              state: 'ok' | 'warning' | 'refusing';
+            };
+            chainId: string;
+            epoch: number;
+            headHash: string;
+            headSeq: number;
+            health: {
+              codes: (
+                | 'audit.skipped'
+                | 'audit.uncertain'
+                | 'audit.gap'
+                | 'audit.withheld'
+                | 'audit.marker_rejected'
+                | 'audit.blocked'
+                | 'audit.fork'
+                | 'audit.pending_old'
+                | 'audit.capacity'
+                | 'audit.mode_change'
+                | 'audit.policy_change'
+                | 'audit.sink_inactive'
+                | 'audit.config_invalid'
+                | 'audit.mode_none'
+                | 'audit.chain_integrity'
+                | 'audit.hold_failed'
+                | 'audit.prune_anchor'
+              )[];
+              /** @enum {string} */
+              status: 'ok' | 'degraded' | 'failing';
+            };
+            ledger: {
+              count: number;
+              kind: string;
+            }[];
+            /** @enum {string} */
+            mode: 'trail' | 'export' | 'none';
+            /** @enum {string} */
+            modeSource: 'build' | 'env' | 'stored';
+            pendingCount: number;
+            /** @enum {string} */
+            pendingMode?: 'trail' | 'export' | 'none';
+            /** @enum {string} */
+            policy: 'availability' | 'required';
+            /** @enum {string} */
+            policySource: 'build' | 'env' | 'stored';
+            restorePending: boolean;
+            sinks: {
+              activationSource: string;
+              custodySeq: number;
+              durableAck: boolean;
+              id: string;
+              progressSeq: number;
+              /** @enum {string} */
+              state: 'active' | 'inactive' | 'blocked' | 'disabled' | 'retired';
+            }[];
+            trailActive: boolean;
+            verification: {
+              bodies: number;
+              fromSeq: number;
+              throughSeq: number;
+              verifiedAt: string;
+              withheld: number;
+            } | null;
           };
         };
       };
@@ -4135,6 +4534,9 @@ export interface operations {
         };
         content: {
           'application/json': {
+            features: {
+              auditTrail: boolean;
+            };
             organization: {
               name: string;
               slug: string;
@@ -6651,29 +7053,40 @@ export interface operations {
         };
         content: {
           'application/json': {
-            items: {
-              action: string;
-              actor: {
-                id: string | null;
-                type: string;
-              };
-              createdAt: string;
-              id: string;
-              payload: {
-                changes?: {
-                  [key: string]: {
-                    new?: string | number | boolean | null | string[];
-                    old?: string | number | boolean | null | string[];
+            items: (
+              | {
+                  action: string;
+                  actor: {
+                    id: string | null;
+                    type: string;
                   };
-                };
-                op_id?: string;
-                request_id?: string;
-              };
-              projectId: string | null;
-              seq: number;
-              targetId: string | null;
-              targetType: string;
-            }[];
+                  createdAt: string;
+                  id: string;
+                  payload: {
+                    changes?: {
+                      [key: string]: {
+                        new?: string | number | boolean | null | string[];
+                        old?: string | number | boolean | null | string[];
+                      };
+                    };
+                    op_id?: string;
+                    request_id?: string;
+                  };
+                  projectId: string | null;
+                  seq: number;
+                  targetId: string | null;
+                  targetType: string;
+                }
+              | {
+                  /** @description Original event id when reason is content; marker id when reason is unreadable. */
+                  id: string;
+                  /** @constant */
+                  kind: 'withheld';
+                  /** @enum {string} */
+                  reason: 'content' | 'unreadable';
+                  seq: number;
+                }
+            )[];
             next: string | null;
           };
         };
@@ -9894,6 +10307,7 @@ export interface operations {
             | 'org:import:write'
             | 'org:import:approve'
             | 'org:audit:read'
+            | 'org:audit:export'
             | 'project:read'
             | 'project:settings:write'
             | 'project:grants:read'
@@ -13045,7 +13459,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Package not found; Not found */
+      /** @description Package not found; Not found; Audit trail unavailable */
       404: {
         headers: {
           [name: string]: unknown;
@@ -13099,6 +13513,7 @@ export interface operations {
             | 'org:import:write'
             | 'org:import:approve'
             | 'org:audit:read'
+            | 'org:audit:export'
             | 'project:read'
             | 'project:settings:write'
             | 'project:grants:read'
@@ -13164,7 +13579,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Package not found; Not found */
+      /** @description Package not found; Not found; Audit trail unavailable */
       404: {
         headers: {
           [name: string]: unknown;
@@ -13324,6 +13739,7 @@ export interface operations {
             | 'org:import:write'
             | 'org:import:approve'
             | 'org:audit:read'
+            | 'org:audit:export'
             | 'project:read'
             | 'project:settings:write'
             | 'project:grants:read'

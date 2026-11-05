@@ -337,6 +337,25 @@ export function describeNotificationCaptureContract(
       });
     });
 
+    it('standalone overflow stays ordinary and rolls back under required refusal', () =>
+      world(async (executor, ctx) => {
+        await seedEndpoint(executor, ctx, { id: 'E1' });
+        await fill(executor, ctx, 10000, 'pending');
+        await run(
+          executor,
+          "UPDATE audit_chain SET policy='required',capacity_state='refusing' WHERE org_id=?",
+          ctx.orgId,
+        );
+        await expect(
+          capture(executor, ctx, capturePlan(ctx, [publishedEvent()])),
+        ).rejects.toMatchObject({ kind: 'backlog_full' });
+        expect(await counts(executor, ctx)).toMatchObject({
+          events: 10000,
+          deliveries: 10000,
+          overflow: 0,
+          mutated: 0,
+        });
+      }));
     it('commits the mutation and one overflow audit when the organization is full', async () => {
       await world(async (executor, ctx) => {
         await seedEndpoint(executor, ctx, { id: 'E1' });

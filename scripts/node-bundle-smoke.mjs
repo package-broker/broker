@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { checkNodeAuditModes } from './node-audit-smoke.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -237,6 +238,10 @@ async function checkAuditJobs(database) {
     assert.deepEqual(
       schedules().map((row) => [row.name, row.every_seconds]),
       [
+        ['core:audit-frontier:v1', 86400],
+        ['core:audit-head:v1', 86400],
+        ['core:audit-health-observe:v1', 60],
+        ['core:audit-maintain:v1', 60],
         ['core:audit-seal:v1', 60],
         ['core:audit-verify:v1', 86400],
         ['core:blob-purge:v1', 3600],
@@ -367,7 +372,7 @@ async function stopChild() {
   await waitExit(child, 2_000).catch(() => {});
 }
 
-async function startBundle(source) {
+async function startBundle(source, extraEnv = {}) {
   if (copy !== undefined) await rm(copy, { recursive: true, force: true });
   childStdout = '';
   childStderr = '';
@@ -428,6 +433,15 @@ async function startBundle(source) {
     PB_PUBLIC_URL: `http://127.0.0.1:${port}`,
     PB_BLOB_ROOT: join(copy, 'data', 'blobs'),
     DEPLOYMENT_ID: 'smoke',
+    PB_AUDIT_OTLP_ENDPOINT: '',
+    PB_AUDIT_OTLP_HEADERS: '',
+    PB_AUDIT_WEBHOOK_URL: '',
+    PB_AUDIT_WEBHOOK_HEADERS: '',
+    OTEL_EXPORTER_OTLP_ENDPOINT: '',
+    OTEL_EXPORTER_OTLP_HEADERS: '',
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: '',
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS: '',
+    ...extraEnv,
   };
   delete env['NODE_PATH'];
   delete env['PB_MASTER_KEY_FILE'];
@@ -732,6 +746,28 @@ async function run() {
   await expectStatus(signedIn, 200, 'GET /_pb/session with the minted session');
   console.log('smoke:node GET /_pb/session with a session minted through pb admin bootstrap 200');
 
+  if (PREBUILT) {
+    const head = await fetch(`${base}/_pb/audit/head`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(head, 200, 'default prebuilt audit trail');
+    console.log('smoke:node prebuilt default audit head 200');
+    const health = await fetch(`${base}/_pb/audit/health`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    await expectStatus(health, 200, 'default prebuilt audit health');
+    assert.equal((await health.json()).codes.includes('audit.sink_inactive'), false);
+    assert.equal(
+      auditLogs().some(
+        (record) => record.event === 'audit.alert' && record.reason_code === 'audit.sink_inactive',
+      ),
+      false,
+      'never-configured prebuilt sinks must not alert',
+    );
+  }
+
   step = 'checking the public UI mount';
   const assetsDir = join(PREBUILT ? SOURCE : copy, 'assets');
   await checkUiBundle({
@@ -816,6 +852,66 @@ async function run() {
   child.kill('SIGTERM');
   const code = await waitExit(child, EXIT_TIMEOUT_MS);
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
+  step = 'checking audit schedules with destinations';
+  const active = await startBundle(SOURCE, {
+    PB_AUDIT_OTLP_ENDPOINT: 'https://audit.example.test/v1/logs',
+    PB_AUDIT_OTLP_HEADERS: 'Authorization=smoke',
+    PB_AUDIT_WEBHOOK_URL: 'https://audit.example.test/archive',
+    PB_AUDIT_WEBHOOK_HEADERS: 'Authorization=smoke',
+  });
+  try {
+    await mintSession(active.base, active.env.PB_SQLITE_PATH);
+    const db = new DatabaseSync(active.env.PB_SQLITE_PATH);
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      const orgId = db.prepare('SELECT id FROM organization WHERE slug = ?').get('smoke').id;
+      const schedules = () =>
+        db
+          .prepare(
+            "SELECT name, every_seconds FROM job_schedule WHERE org_id = ? AND enabled = 1 AND name LIKE 'core:audit-export-%' ORDER BY name",
+          )
+          .all(orgId);
+      await waitForAudit(() => schedules().length === 2, 'export schedules with destinations');
+      assert.deepEqual(
+        schedules().map((row) => [row.name, row.every_seconds]),
+        [
+          ['core:audit-export-otlp:v1', 60],
+          ['core:audit-export-webhook:v1', 60],
+        ],
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    await stopChild();
+  }
+  step = 'checking audit modes';
+  if (PREBUILT) {
+    const disabled = await startBundle(SOURCE, {
+      PB_AUDIT_TRAIL: 'off',
+      PB_AUDIT_ACCEPT_NO_DURABLE_AUDIT: 'true',
+    });
+    try {
+      const disabledCookie = await mintSession(disabled.base, disabled.env.PB_SQLITE_PATH);
+      const head = await fetch(`${disabled.base}/_pb/audit/head`, {
+        headers: { cookie: disabledCookie },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      await expectStatus(head, 404, 'disabled prebuilt audit trail');
+      assert.equal((await head.json()).error.code, 'audit_trail_unavailable');
+      const me = await fetch(`${disabled.base}/_pb/me`, {
+        headers: { cookie: disabledCookie },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      await expectStatus(me, 200, 'disabled prebuilt features');
+      assert.equal((await me.json()).features.auditTrail, false);
+      console.log('smoke:node prebuilt PB_AUDIT_TRAIL=off: head 404, auditTrail false');
+    } finally {
+      await stopChild();
+    }
+  } else {
+    await checkNodeAuditModes({ root: REPO_ROOT, startBundle, stopChild, mintSession });
+  }
   console.log('smoke:node SIGTERM exit code 0');
 
   if (PREBUILT) {

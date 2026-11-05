@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -508,7 +509,8 @@ async function boot(remote: ReturnType<typeof upstream>) {
     PB_PUBLIC_URL: ORIGIN,
     DEPLOYMENT_ID: 'step7-gate',
   };
-  const worker = createWorker([remote.plugin], {
+  const worker = createWorker([remote.plugin, auditTrail()], {
+    audit: {},
     platformPorts: {
       blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1048576 },
       cache: { adapter: 'cache-api', namespace: 'step7-gate' },

@@ -1,10 +1,12 @@
 import { D1_STATEMENTS_PER_BATCH } from './port.js';
 
 export type DbErrorKind =
-  'unique' | 'foreign_key' | 'not_null' | 'check' | 'busy' | 'too_big' | 'unknown';
+  'unique' | 'foreign_key' | 'not_null' | 'check' | 'busy' | 'backlog_full' | 'too_big' | 'unknown';
 
 /** UNIQUE constraint raised by every access_mutation_guard insert: fence guards, assertCheck postconditions and the cache epoch bump check. */
 export const ACCESS_MUTATION_GUARD_CONSTRAINT = 'access_mutation_guard.key';
+
+export const AUDIT_BACKLOG_CONSTRAINT = 'audit_pending.created_at';
 
 export interface DbErrorOptions {
   readonly cause?: unknown;
@@ -82,6 +84,10 @@ export function classifySqliteError(error: unknown): DbError {
     marker?.namesConstraint === true && constraintText !== undefined
       ? constraintOf(constraintText, marker)
       : undefined;
+
+  if (kind === 'not_null' && constraint === AUDIT_BACKLOG_CONSTRAINT) {
+    return new DbError('backlog_full', 'Audit backlog is full', { constraint });
+  }
 
   return new DbError(kind, `${kind}: ${originalMessage(error)}`, { cause: error, constraint });
 }

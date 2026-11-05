@@ -838,6 +838,14 @@ test('functional broker startup matches the lifecycle environment, volume and us
   const passing = lifecycle.calls.find(({ check }) => check === 'container-create').args;
   const functional = h.calls.find(({ check }) => check === 'functional-create-broker').args;
   for (const args of [passing, functional]) {
+    for (const [index, argument] of args.entries()) {
+      if (argument === '--env') {
+        assert.match(args[index + 1], /^[A-Za-z_][A-Za-z0-9_]*=/);
+        assert.ok(!args[index + 1].startsWith('--'));
+      }
+    }
+  }
+  for (const args of [passing, functional]) {
     assert.ok(args.some((arg) => /^type=volume,source=pb-smoke-.+,target=\/data$/.test(arg)));
     assert.ok(!args.includes('--user'));
     assert.equal(args.at(-1), 'pb:test');

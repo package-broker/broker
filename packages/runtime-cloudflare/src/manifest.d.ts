@@ -1,4 +1,9 @@
 declare module '#pb-manifest' {
+  export const audit:
+    | (NonNullable<import('@package-broker/core/config').BrokerConfig['audit']> & {
+        readonly build_generation?: number;
+      })
+    | undefined;
   import type { PluginDefinition } from '@package-broker/core/plugin';
   import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
   export const migrations: readonly Pick<

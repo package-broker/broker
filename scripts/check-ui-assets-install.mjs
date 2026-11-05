@@ -15,6 +15,7 @@ const PACKAGES = [
   'cli',
   'core',
   'db-sqlite',
+  'plugin-audit-trail',
   'runtime-cloudflare',
   'runtime-node',
   'ui-assets',

@@ -1,5 +1,5 @@
 import type { AuditEvent } from '@package-broker/core/audit/actions';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditReserveStatements } from './audit-pending.js';
 import { sql, type Compilable, type Kysely, type SqlBool } from 'kysely';
 import type { MutationFence } from '@package-broker/core/authz/fence';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
@@ -275,9 +275,11 @@ export async function unlinkIdentity(
     guard,
     [
       ...checks,
-      auditPendingStatement(ctx, audit.unlink),
       block,
-      auditPendingStatement(ctx, audit.block, { sql: 'changes() = 1', params: [] }),
+      ...auditReserveStatements(ctx, audit.block, audit.unlink, {
+        sql: 'changes() = 1',
+        params: [],
+      }),
       ...assertCheck(blocked),
       revokeTokens,
       deleteSessions,

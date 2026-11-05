@@ -1,3 +1,4 @@
+import { auditTrail } from '../audit-trail.test.support.js';
 import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
@@ -163,7 +164,8 @@ beforeAll(async () => {
     PB_KEYRING_RESEED: '1',
   } as Env;
   bootWorker = (enabled) =>
-    createWorker([], {
+    createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       notifications: { enabled },
       log: (entry) => void logged.push(entry),

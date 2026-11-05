@@ -1,3 +1,6 @@
+import type { EffectiveAuditConfig, OrgAuditResult } from '../../audit/effective.js';
+import type { OrgContext } from '../../db/port.js';
+import type { LogRecord } from '../../platform/observability.js';
 import { accessContextOf } from '../../authz/access-context.js';
 import type { Administration } from '../../authz/administration.js';
 import type { TokenLifetimePolicy } from '../../authz/token-lifetime.js';
@@ -16,6 +19,8 @@ import {
 const DEFAULT_LIMIT = 50;
 
 export interface OrganizationRouteDeps extends ApiRouteDeps {
+  readonly effectiveAudit?: (ctx: OrgContext) => Promise<EffectiveAuditConfig | OrgAuditResult>;
+  readonly log?: (record: LogRecord) => void;
   readonly organizations: Pick<OrganizationRepository, 'get'>;
   readonly users: Pick<UserRepository, 'list' | 'get'>;
   readonly administration: Pick<Administration, 'suspendUser' | 'reactivateUser'>;
@@ -95,9 +100,33 @@ export function organizationRoutes(deps: OrganizationRouteDeps): readonly RouteD
       const ownSession = accessContextOf(ctx)?.sessionId != null;
       const account =
         principal.kind === 'user' ? await deps.users.get(ctx.org, principal.id) : null;
+      let auditTrail = false;
+      try {
+        const result = await deps.effectiveAudit?.(ctx.org);
+        if (result !== undefined) {
+          if ('ok' in result) {
+            if (!result.ok) throw new Error('Audit configuration refused');
+            auditTrail = result.effective.trailActive;
+          } else {
+            auditTrail = result.trailActive;
+          }
+        }
+      } catch {
+        try {
+          const log = deps.log ?? ctx.ports.platform?.observability.log;
+          log?.({
+            level: 'warn',
+            event: 'audit.effective_unavailable',
+            reason_code: 'audit.effective_unavailable',
+          });
+        } catch {
+          // Warning delivery must not prevent the safe feature fallback.
+        }
+      }
       return {
         status: 200,
         body: {
+          features: { auditTrail },
           principal: { kind: principal.kind, id: principal.id },
           user:
             account === null

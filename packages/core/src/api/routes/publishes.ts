@@ -1,3 +1,4 @@
+import { sha256Hex } from '../../auth/primitives.js';
 import { redactValue } from '../../audit/redact.js';
 import { auditEvent } from '../../audit/actions.js';
 import { authenticatedActorOf } from '../../authz/access-context.js';
@@ -83,7 +84,7 @@ export function publishRoutes(deps: PublishRouteDeps): readonly RouteDefinition[
             package: { new: item.packageName },
             version: { new: item.version },
             token_id: { new: item.tokenId },
-            ...(reject ? { reason: { new: body.reason! } } : {}),
+            ...(reject ? { reason_sha256: { new: await sha256Hex(body.reason!) } } : {}),
           },
         });
         if (!prepared.ok) return { error: 'invalid_request' };

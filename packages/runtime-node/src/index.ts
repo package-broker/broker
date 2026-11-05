@@ -1,3 +1,15 @@
+import { createAuditHealthRepository } from '@package-broker/db-sqlite/repositories/audit-health';
+import { createAuditHealthService } from '@package-broker/core/audit/health';
+import { jobLeaseExecutor } from '@package-broker/db-sqlite/repositories/job-lease-executor';
+import { bindJobAdmission } from './job-admission.js';
+import { createNodeAudit, auditExportSchedules } from './audit.js';
+import { createAuditStatusReader } from '@package-broker/db-sqlite/repositories/audit-status';
+import {
+  AuditResolutionError,
+  resolveAuditJournalBudget,
+} from '@package-broker/core/audit/effective';
+import { createFailureEvents } from '@package-broker/core/audit/failure-events';
+import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
 import {
   discoveryRuleJobs,
   type DiscoveryRuleJobDeps,
@@ -88,7 +100,7 @@ import { jobLeaseOf } from '@package-broker/core/platform/job-fences';
 import { JobError } from '@package-broker/core/platform/jobs';
 import { createBlobReferenceReader } from '@package-broker/db-sqlite/repositories/blob-references';
 import { jobLeaseGuard } from '@package-broker/db-sqlite/repositories/job-lease-guard';
-import { AUDIT_EVENTS } from '@package-broker/core/kernel/obs-codes';
+import { AUDIT_EVENTS, KERNEL_REASON_CODES } from '@package-broker/core/kernel/obs-codes';
 import { createObservability, filterLogLevel } from '@package-broker/core/platform/observability';
 import type { JobDefinition } from '@package-broker/core/platform/jobs';
 import { createImportJobHolder, importJobRegistrations } from './import-jobs.js';
@@ -384,6 +396,10 @@ export interface NodeServerOptions {
   readonly observability?: KernelObservability;
   readonly platformServices?: PlatformServices;
   readonly authorization?: AuthorizationEngine;
+  readonly audit?: BrokerConfig['audit'];
+  readonly auditEnv?: Readonly<Record<string, string | undefined>>;
+  readonly auditPlatformPorts?: BrokerConfig['platformPorts'];
+  readonly auditGeneration?: number;
   /** Token lifetime maxima; an invalid value fails server creation. */
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
@@ -476,6 +492,7 @@ async function assembleAccess(
   log: KernelLog,
   tokens: TokenWiring,
   clientIp: (request: Request) => string | null,
+  failureEvents: NonNullable<Parameters<typeof createAccessServices>[0]['failureEvents']>,
   admissionIp: (request: Request) => string | null,
 ): Promise<AccessAssembly> {
   const localAuth = parseLocalAuthPolicy(auth.env['PB_AUTH_LOCAL']);
@@ -495,6 +512,7 @@ async function assembleAccess(
     ids: { ulid },
     log,
     dispatch: deferredDispatch,
+    failureEvents,
     clientIp,
     registration,
     tokens,
@@ -1093,6 +1111,13 @@ export function createNodeServer(
   const shutdownMs = seams.shutdownDeadlineMs ?? SHUTDOWN_IDLE_MS;
   const log = options.log ?? defaultLog;
   const executor = options.executor ?? rejectingExecutor();
+  const auditEnv = options.auditEnv ?? { ...process.env, ...options.auth?.env };
+  const maxJournalBytes = resolveAuditJournalBudget(
+    options.audit,
+    'node',
+    auditEnv.PB_AUDIT_POLICY,
+  );
+  const auditCapacity = maxJournalBytes === null ? {} : { maxJournalBytes };
   const lifetime = resolveTokenLifetime(options.tokens);
   let notificationsOn: boolean;
   try {
@@ -1121,6 +1146,7 @@ export function createNodeServer(
 
   const repository = createOrganizationRepository(executor);
   const bootstrap = createOrganizationBootstrap(executor);
+  const resolveOrganization = createOrgResolver({ findSingleton: bootstrap.findSingleton });
 
   const ports: PluginPorts = Object.freeze({
     organizations: Object.freeze({ get: repository.get }),
@@ -1134,7 +1160,17 @@ export function createNodeServer(
       : { ...options.auth, env: Object.freeze({ ...options.auth.env }) };
   const importJobs = createImportJobHolder();
   const patJobs = createPatJobHolder();
+  const failureWork = new Set<Promise<void>>();
+  const dispatchFailures = (run: () => Promise<void>): void => {
+    const work = Promise.resolve()
+      .then(run)
+      .catch(() => undefined);
+    failureWork.add(work);
+    void work.finally(() => failureWork.delete(work));
+  };
   let drainRegistry: (() => Promise<void>) | undefined;
+  const failureRecorder = createFailureEvents();
+  const failureRouteTemplates = new Set<string>();
   const ingestScope = new AsyncLocalStorage<Observability>();
   let keyringVerification: Promise<void> | undefined;
   const verify = async (): Promise<void> => {
@@ -1174,6 +1210,7 @@ export function createNodeServer(
         },
         options.observability?.level,
       );
+    let audit: Awaited<ReturnType<typeof createNodeAudit>> | undefined;
     function registerAuditJob<P>(definition: JobDefinition<P>): RegisteredCoreJob {
       return registerCoreJob({
         ...definition,
@@ -1192,7 +1229,7 @@ export function createNodeServer(
               },
               {
                 events: AUDIT_EVENTS,
-                reasonCodes: new Set(),
+                reasonCodes: KERNEL_REASON_CODES,
                 routeTemplates: new Set(),
               },
             ),
@@ -1339,7 +1376,7 @@ export function createNodeServer(
           });
     if (notifications.enabled !== notificationsOn)
       throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
-    const registration = collectRegistrations(plugins, {
+    let registration = collectRegistrations(plugins, {
       ...(registry === undefined ? {} : { sourceProviderContext: registry.sourceProviderContext }),
       ...(packageResolver === undefined ? {} : { packageResolver }),
       coreJobs:
@@ -1399,8 +1436,32 @@ export function createNodeServer(
                       routeTemplates: new Set<string>(),
                     }),
                   )),
-              registerAuditJob(auditSealJob(createAuditSealRepository(executor))),
-              registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+              registerAuditJob(
+                auditSealJob(createAuditSealRepository(executor, auditCapacity), (context) =>
+                  createAuditSealRepository(jobLeaseExecutor(executor, context), {
+                    ...auditCapacity,
+                    signal: context.signal,
+                  }),
+                ),
+              ),
+              registerAuditJob({
+                ...auditVerifyJob(createAuditVerifyReader(executor)),
+                async handler(payload, context) {
+                  const scoped = jobLeaseExecutor(executor, context);
+                  const job = auditVerifyJob(createAuditVerifyReader(scoped), {
+                    raise: async (org, code) => {
+                      const health = createAuditHealthService({
+                        port: createAuditHealthRepository(scoped),
+                        clock: systemClock,
+                        observability: context.observability,
+                      });
+                      await health.raise(org, code);
+                      await audit?.notifyAlert(code);
+                    },
+                  });
+                  await job.handler(job.validate(payload), context);
+                },
+              }),
               ...(registry?.module.coreJobs ?? []).map((job) => registerIngestJob(job.definition)),
               ...(registry?.module.packageSyncJob === undefined
                 ? []
@@ -1410,6 +1471,50 @@ export function createNodeServer(
               ...notifications.jobs,
             ],
     });
+    const auditEnabled =
+      options.executor !== undefined ||
+      registration.audit.trail !== null ||
+      registration.audit.sinks.length > 0 ||
+      options.audit !== undefined ||
+      auditEnv.PB_AUDIT_POLICY !== undefined;
+    if (auditEnabled && options.platformServices !== undefined) {
+      const schedules = [
+        { name: 'audit-maintain', everySeconds: 60, resourceKey: 'audit-maintain' },
+        { name: 'audit-health-observe', everySeconds: 60, resourceKey: 'audit-health-observe' },
+        { name: 'audit-frontier', everySeconds: 86400, resourceKey: 'audit-frontier' },
+        { name: 'audit-head', everySeconds: 86400, resourceKey: 'audit-head' },
+        ...(await auditExportSchedules(registration, options.audit, (name) => auditEnv[name])),
+      ];
+      registration = {
+        ...registration,
+        jobs: [
+          ...registration.jobs,
+          ...schedules.map(({ name, ...schedule }) =>
+            registerAuditJob({
+              name,
+              version: 1,
+              maxAttempts: 3,
+              schedule,
+              validate: (payload) => {
+                if (
+                  payload === null ||
+                  typeof payload !== 'object' ||
+                  Array.isArray(payload) ||
+                  Reflect.ownKeys(payload).length !== 0
+                )
+                  throw new JobError('invalid_payload');
+                return {};
+              },
+              async handler(payload, context) {
+                const job = audit?.jobs.find((job) => job.name === name);
+                if (job === undefined) throw new PlatformUnavailableError();
+                await job.handler(job.validate(payload), context);
+              },
+            }),
+          ),
+        ],
+      };
+    }
     policyHooks = registration.hooks['registry.read'];
     if (registry !== undefined && options.platformServices !== undefined) {
       await registry.bindSourceProviders(registration.sourceProviders.values());
@@ -1451,6 +1556,25 @@ export function createNodeServer(
             log,
             tokenWiring(lifetime, patJobs, options.platformServices !== undefined),
             clientIp,
+            {
+              recorder: failureRecorder,
+              dispatch: dispatchFailures,
+              binding: {
+                deploymentId,
+                staging: createAuditFailureRepository(executor),
+                now: () => systemClock.now(),
+                routeTemplates: failureRouteTemplates,
+                observability: createObservability(
+                  obsSink,
+                  { deploymentId, runtime: 'node', requestId: null, plugin: 'core' },
+                  {
+                    events: AUDIT_EVENTS,
+                    reasonCodes: KERNEL_REASON_CODES,
+                    routeTemplates: failureRouteTemplates,
+                  },
+                ),
+              },
+            },
             admissionIp,
           );
     if (access !== undefined && options.platformServices !== undefined) {
@@ -1472,6 +1596,36 @@ export function createNodeServer(
       auth === undefined || access === undefined || packages === null
         ? []
         : createApiRoutes({
+            registration,
+            ...(options.platformServices === undefined
+              ? {}
+              : {
+                  auditJobs: createRepositoryJobs({
+                    store: options.platformServices.jobStore,
+                    jobs: registration.jobs,
+                    clock: systemClock,
+                    ids: { ulid },
+                  })('core', { projectId: null, tokenId: null }),
+                }),
+            ...(!auditEnabled
+              ? {}
+              : {
+                  effectiveAudit: (org: OrgContext) => audit!.effective(org),
+                  auditStatus: {
+                    reader: createAuditStatusReader(executor),
+                    effective: (org: OrgContext) => audit!.effective(org),
+                    modeSource: (org: OrgContext) => audit!.status.modeSource(org),
+                  },
+                  auditHealth: {
+                    read: (org: OrgContext) => audit!.health.read(org),
+                  },
+                  auditTrail: { effective: (org: OrgContext) => audit!.effective(org) },
+                  auditAlerts: {
+                    raise: (org: OrgContext) => {
+                      void audit!.raise(org, 'audit.withheld');
+                    },
+                  },
+                }),
             onDiscoveryRules: (deps) => {
               discoveryRules = deps;
             },
@@ -1581,7 +1735,11 @@ export function createNodeServer(
       publicOrigin: auth?.publicOrigin,
       registration,
       ports,
-      resolveOrg: createOrgResolver({ findSingleton: bootstrap.findSingleton }),
+      resolveOrg: async (request?: Request) => {
+        const org = await resolveOrganization();
+        if (audit !== undefined) await audit.resolveRequest(org, request);
+        return org;
+      },
       health: async () => (await bootstrap.findSingleton()) !== null,
       ...(migrations === undefined
         ? {}
@@ -1594,6 +1752,58 @@ export function createNodeServer(
       coreRoutes,
       ...(authorization === undefined ? {} : { authorization }),
     });
+    if (auditEnabled) {
+      audit = await createNodeAudit({
+        config: {
+          platform: 'node',
+          plugins,
+          ...(options.audit === undefined ? {} : { audit: options.audit }),
+          ...(options.auditPlatformPorts === undefined
+            ? {}
+            : { platformPorts: options.auditPlatformPorts }),
+        },
+        env: (name) => auditEnv[name],
+        executor,
+        dispatch: dispatchFailures,
+        observability: createObservability(
+          obsSink,
+          { deploymentId, runtime: 'node', requestId: null, plugin: 'core' },
+          { events: AUDIT_EVENTS, reasonCodes: KERNEL_REASON_CODES, routeTemplates: new Set() },
+        ),
+        ...(options.observability?.deploymentId === undefined
+          ? {}
+          : { deploymentId: options.observability.deploymentId }),
+        generation: options.auditGeneration ?? 0,
+        maxJournalBytes,
+        telemetryActive:
+          options.observability !== undefined &&
+          options.auditPlatformPorts?.node?.observability.endpointEnv !== undefined &&
+          Boolean(auditEnv[options.auditPlatformPorts.node.observability.endpointEnv]),
+        registration: () => kernel.registration,
+      });
+    }
+    if (audit !== undefined) bindJobAdmission(kernel.registration.jobs, audit.admitJob);
+    if (
+      audit !== undefined &&
+      options.executor !== undefined &&
+      (options.servingGate === undefined || (await options.servingGate()))
+    ) {
+      const organization = await bootstrap.findSingleton();
+      if (organization !== null) {
+        const org = await resolveOrganization();
+        try {
+          await audit.probe(org, AbortSignal.timeout(1500));
+        } catch (error) {
+          if (!(error instanceof AuditResolutionError) || error.transient)
+            log({
+              level: 'error',
+              event: 'audit.effective_unavailable',
+              reason_code: 'audit.effective_unavailable',
+            });
+        }
+      }
+    }
+    for (const template of kernel.routeTemplates) failureRouteTemplates.add(template);
     const services: NodeServices = Object.freeze({
       providerAnchors: access?.providerAnchors ?? NO_ANCHORS,
       dispatch: deferredDispatch,
@@ -1659,6 +1869,12 @@ export function createNodeServer(
           (ready) => ready.idle(shutdownMs),
           () => undefined,
         );
+        const failuresDrained = await settlesWithin(
+          Promise.all([...failureWork]),
+          Math.max(0, deadline - Date.now()),
+        );
+        if (!failuresDrained)
+          log({ level: 'warn', event: 'shutdown.failure_events_drain_timeout' });
         if (drainRegistry !== undefined) {
           const drained = await settlesWithin(drainRegistry(), Math.max(0, deadline - Date.now()));
           if (!drained) log({ level: 'warn', event: 'shutdown.registry_drain_timeout' });

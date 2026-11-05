@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ulid } from '@package-broker/core/ids';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -42,7 +43,12 @@ async function fixture() {
     PB_MASTER_KEY: KEY,
     MCP_RATE_LIMIT: { limit },
   };
-  const worker = () => createWorker([], { mcp: { enabled: true }, log: () => undefined });
+  const worker = () =>
+    createWorker([auditTrail()], {
+      audit: {},
+      mcp: { enabled: true },
+      log: () => undefined,
+    });
   const token = formatToken('svc', SELECTOR, new Uint8Array(32).fill(7));
   const seedToken = async () => {
     const hash = await hashToken(createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]), 1, token);

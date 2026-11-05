@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_NPM_NAME_LENGTH } from '../catalogue/names.js';
 import { formatToken } from '../secrets/token-format.js';
+import { AUDIT_ALERT_CODES } from '../platform/observability.js';
 import { redactValue } from './redact.js';
 import { FAKE, githubWithSentinel } from '../test-support/credential-fixtures.js';
 import {
@@ -46,9 +47,11 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 99 unique actions', () => {
-    expect(AUDIT_ACTIONS.length).toBe(99);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(99);
+  it('has 104 unique actions, with alert_ack registered as a sink administration operation', () => {
+    expect(AUDIT_ACTIONS.length).toBe(104);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(104);
+    expect(AUDIT_ACTIONS).toContain('audit.sink_admin');
+    expect(AUDIT_ACTIONS).not.toContain('audit.alert_ack');
   });
 
   it.each([...AUDIT_ACTIONS])('%s matches the naming pattern', (action) => {
@@ -65,6 +68,247 @@ describe('AUDIT_ACTIONS', () => {
 
   it('allows no change fields for session.login', () => {
     expect(AUDIT_FIELDS['session.login']).toEqual([]);
+  });
+});
+
+describe('audit control action registration', () => {
+  const cases = [
+    {
+      action: 'audit.export',
+      fields: ['from_seq', 'to_seq', 'count', 'withheld', 'format'],
+      changes: {
+        from_seq: { new: 1 },
+        to_seq: { new: 10 },
+        count: { new: 10 },
+        withheld: { new: 2 },
+        format: { new: 'jsonl' },
+      },
+    },
+    {
+      action: 'audit.mode_change',
+      fields: ['from_mode', 'to_mode', 'policy', 'source', 'mode_generation', 'cutover_seq'],
+      changes: {
+        from_mode: { new: 'trail' },
+        to_mode: { new: 'export' },
+        source: { new: 'cli' },
+        policy: { old: 'availability', new: 'required' },
+        mode_generation: { old: 1, new: 2 },
+        cutover_seq: { new: 10 },
+      },
+    },
+    {
+      action: 'audit.sink_admin',
+      fields: [
+        'operation',
+        'policy',
+        'sink_id',
+        'from_seq',
+        'to_seq',
+        'epoch',
+        'generation',
+        'reason_code',
+        'alert_code',
+        'revision',
+      ],
+      changes: {
+        sink_id: { new: 'archive' },
+        operation: { new: 'retire' },
+        policy: { new: 'required' },
+        from_seq: { new: 1 },
+        to_seq: { new: 10 },
+        reason_code: { new: 'operator_confirmed' },
+        epoch: { new: 0 },
+        generation: { new: 1 },
+      },
+    },
+  ] satisfies Array<{
+    action: AuditAction;
+    fields: string[];
+    changes: Record<string, { old?: unknown; new?: unknown }>;
+  }>;
+
+  it.each(cases)(
+    'registers $action with exactly its allowed fields',
+    ({ action, fields, changes }) => {
+      expect(AUDIT_ACTIONS).toContain(action);
+      expect(AUDIT_FIELDS[action]).toEqual(fields);
+      const result = build(action, changes);
+      expect(result.ok).toBe(true);
+      expect(JSON.parse(payloadOf(result)).changes).toEqual(changes);
+    },
+  );
+
+  for (const { action, fields } of cases) {
+    it.each(['url', 'headers', 'email', 'token', 'unknown'])(
+      `${action} refuses unlisted field %s`,
+      (field) => {
+        expect(build(action, { [field]: { new: 'hidden' } })).toEqual({
+          ok: false,
+          reason: 'unknown_field',
+        });
+      },
+    );
+
+    it.each(fields)(`${action} refuses sensitive old and new values in %s`, (field) => {
+      for (const value of ['person@example.test', FAKE.GITHUB_PAT_CLASSIC_4]) {
+        for (const side of ['old', 'new']) {
+          expect(build(action, { [field]: { [side]: value } })).toEqual({
+            ok: false,
+            reason: 'bad_value',
+          });
+        }
+      }
+    });
+  }
+
+  const stringFields = [
+    ['audit.export', 'format', ['api', 'jsonl']],
+    ['audit.mode_change', 'from_mode', ['trail', 'export', 'none']],
+    ['audit.mode_change', 'to_mode', ['trail', 'export', 'none']],
+    ['audit.mode_change', 'source', ['build', 'env', 'cli']],
+    ['audit.mode_change', 'policy', ['availability', 'required']],
+    ['audit.sink_admin', 'policy', ['availability', 'required']],
+    ['audit.sink_admin', 'alert_code', AUDIT_ALERT_CODES],
+    [
+      'audit.sink_admin',
+      'operation',
+      [
+        'resolve',
+        'rebind',
+        'retire',
+        'unblock',
+        'skip',
+        'replay',
+        'confirm_restore',
+        'policy_set',
+        'epoch_bump',
+        'chain_reset',
+      ],
+    ],
+    ['audit.sink_admin', 'sink_id', ['a', '0', '-', 'archive-1', 'a'.repeat(32), null]],
+    ['audit.sink_admin', 'reason_code', ['a', 'operator_confirmed', 'a_', 'a'.repeat(32)]],
+  ] as const;
+
+  for (const [action, field, values] of stringFields) {
+    it.each(values)(`${action} preserves ${field} %s on both sides`, (value) => {
+      const changes = { [field]: { old: value, new: value } };
+      expect(JSON.parse(payloadOf(build(action, changes))).changes).toEqual(changes);
+    });
+
+    it.each(
+      [
+        'https://example.test/path',
+        'https://user:password@example.test/path?query=value#fragment',
+        'person@example.test',
+        '',
+        'invalid/value',
+        'TRAIL',
+        ' archive',
+        'archive\n',
+        'a'.repeat(33),
+        0,
+        true,
+        null,
+        ['trail'],
+        {},
+      ].filter((value) => field !== 'sink_id' || value !== null),
+    )(`${action} refuses invalid ${field} %j on both sides`, (value) => {
+      for (const side of ['old', 'new']) {
+        expect(build(action, { [field]: { [side]: value } })).toEqual({
+          ok: false,
+          reason: 'bad_value',
+        });
+      }
+    });
+  }
+
+  it.each([
+    ['audit.mode_change', 'from_mode', 'export-only'],
+    ['audit.mode_change', 'to_mode', 'export-only'],
+    ['audit.sink_admin', 'operation', 'unknown'],
+    ['audit.sink_admin', 'operation', 'list'],
+    ['audit.sink_admin', 'operation', 'confirm-restore'],
+    ['audit.sink_admin', 'operation', 'policy set'],
+    ['audit.sink_admin', 'sink_id', 'archive_id'],
+    ...[
+      '_reason',
+      'reason1',
+      'reason-code',
+      'reason code',
+      'a'.repeat(33),
+      'reason\n',
+      'reason\r\n',
+    ].map((value) => ['audit.sink_admin', 'reason_code', value]),
+  ])('%s refuses invalid %s %j on both sides', (action, field, value) => {
+    for (const side of ['old', 'new']) {
+      expect(build(action, { [field]: { [side]: value } })).toEqual({
+        ok: false,
+        reason: 'bad_value',
+      });
+    }
+  });
+
+  const integerFields = cases.flatMap(({ action, fields }) =>
+    fields
+      .filter((field) =>
+        [
+          'from_seq',
+          'to_seq',
+          'count',
+          'withheld',
+          'mode_generation',
+          'cutover_seq',
+          'epoch',
+          'generation',
+          'revision',
+        ].includes(field),
+      )
+      .map((field) => ({ action, field })),
+  );
+
+  for (const { action, field } of integerFields) {
+    it.each([0, 1, Number.MAX_SAFE_INTEGER])(
+      `${action} preserves ${field} %j on both sides`,
+      (value) => {
+        const changes = { [field]: { old: value, new: value } };
+        expect(JSON.parse(payloadOf(build(action, changes))).changes).toEqual(changes);
+      },
+    );
+
+    it.each([
+      -1,
+      0.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      NaN,
+      Infinity,
+      -Infinity,
+      '1',
+      'https://example.test/path',
+      'person@example.test',
+      true,
+      null,
+      [],
+      {},
+    ])(`${action} refuses invalid ${field} %j on both sides`, (value) => {
+      for (const side of ['old', 'new']) {
+        expect(build(action, { [field]: { [side]: value } })).toEqual({
+          ok: false,
+          reason: 'bad_value',
+        });
+      }
+    });
+  }
+
+  it.each([
+    ['audit.export', 'sink_id'],
+    ['audit.mode_change', 'count'],
+    ['audit.mode_change', 'mode'],
+    ['audit.sink_admin', 'mode'],
+  ])('%s refuses another action’s field %s', (action, field) => {
+    expect(build(action, { [field]: { new: 1 } })).toEqual({
+      ok: false,
+      reason: 'unknown_field',
+    });
   });
 });
 
@@ -1349,6 +1593,20 @@ describe('source package request audit', () => {
   );
 });
 
+it('records system actions without invented correlation ids and refuses null ids for users', () => {
+  const context = { opId: null, requestId: null, sourceIp: null, tokenSelector: null };
+  const system = build(
+    'audit.mode_change',
+    { source: { new: 'cli' } },
+    { actor: { type: 'system', id: null }, context },
+  );
+  expect(JSON.parse(payloadOf(system))).toMatchObject({ op_id: null, request_id: null });
+  expect(build('audit.mode_change', { source: { new: 'cli' } }, { context })).toEqual({
+    ok: false,
+    reason: 'bad_value',
+  });
+});
+
 describe('npm audit values', () => {
   it.each(['sha512', 'sha1'] as const)(
     'accepts a real %s SRI digest only for publish integrity',
@@ -1380,7 +1638,9 @@ describe('npm audit values', () => {
   ])('bounds npm package names in %s', (action) => {
     expect(build(action, { package: { new: 'a'.repeat(MAX_NPM_NAME_LENGTH) } }).ok).toBe(true);
     expect(build(action, { package: { new: 'a'.repeat(215) } }).ok).toBe(false);
-    expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(false);
+    expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(
+      action === 'package.access_request' || action === 'package.access_decide',
+    );
   });
 });
 
@@ -1464,6 +1724,48 @@ it('preserves complete publisher restriction snapshots including absent and long
   });
 });
 
+describe('alert acknowledgement control action', () => {
+  const changes = {
+    operation: { new: 'alert_ack' },
+    alert_code: { new: 'audit.capacity' },
+    revision: { new: 0 },
+  };
+  it.each([
+    { operation: { old: 'alert_ack' } },
+    { operation: { old: 'alert_ack' }, sink_id: { new: 'archive' } },
+    { ...changes, operation: { old: 'alert_ack' } },
+    { operation: { old: 'alert_ack', new: 'retire' } },
+    { ...changes, operation: { old: 'alert_ack', new: 'retire' } },
+    { ...changes, operation: { old: 'alert_ack', new: 'alert_ack' }, sink_id: { new: null } },
+  ])('refuses unsupported acknowledgement operation shape %j', (input) => {
+    expect(build('audit.sink_admin', input)).toEqual({ ok: false, reason: 'bad_value' });
+  });
+  it.each(AUDIT_ALERT_CODES)('records registered alert %s without a sink', (code) => {
+    const expected = { ...changes, alert_code: { new: code } };
+    expect(JSON.parse(payloadOf(build('audit.sink_admin', expected))).changes).toEqual(expected);
+  });
+  it.each(['alert_code', 'revision'])('requires %s', (field) => {
+    const input: Record<string, { new: unknown }> = { ...changes };
+    delete input[field];
+    expect(build('audit.sink_admin', input)).toEqual({ ok: false, reason: 'bad_value' });
+  });
+  it.each([null, 'archive'])('refuses sink_id %j', (value) => {
+    expect(build('audit.sink_admin', { ...changes, sink_id: { new: value } })).toEqual({
+      ok: false,
+      reason: 'bad_value',
+    });
+  });
+  it.each(['audit.unknown', 'audit.capacity\n', 'AUDIT.CAPACITY'])(
+    'refuses alert code %j',
+    (value) => {
+      expect(build('audit.sink_admin', { ...changes, alert_code: { new: value } })).toEqual({
+        ok: false,
+        reason: 'bad_value',
+      });
+    },
+  );
+});
+
 describe('final audit validation', () => {
   it('validates package names after enrichment and preserves a valid event', () => {
     const result = build('package.access_request', { package: { new: 'widget' } });
@@ -1515,4 +1817,96 @@ describe('final audit validation', () => {
       'invalid audit event',
     );
   });
+});
+
+describe('merged audit privacy contract', () => {
+  it.each([
+    'publish.reject',
+    'publish.scan',
+    'package.access_request',
+    'package.access_decide',
+    'version.state_change',
+  ] as const)('refuses request free text for %s and accepts only its evidence hash', (action) => {
+    expect(build(action, { reason: { new: 'private request text' } }).ok).toBe(false);
+    expect(build(action, { reason_sha256: { new: 'a'.repeat(64) } }).ok).toBe(true);
+    expect(build(action, { reason_sha256: { new: 'person@example.test' } }).ok).toBe(false);
+  });
+  it('keeps public deprecation content out of the journal', () => {
+    expect(
+      build('package.deprecate', { deprecated: { new: 'Contact person@example.test' } }).ok,
+    ).toBe(false);
+    expect(
+      build('package.deprecate', {
+        deprecated: { old: false, new: true },
+        deprecated_sha256: { old: null, new: 'b'.repeat(64) },
+      }).ok,
+    ).toBe(true);
+  });
+  it.each(['environment', 'ref'])('refuses private content in verified %s claims', (field) => {
+    for (const value of [
+      'person@example.test',
+      'https://user:password@example.test/private',
+      'ghp_' + 'a'.repeat(36),
+    ])
+      expect(build('token.workload_issue', { [field]: { new: value } }).ok).toBe(false);
+  });
+});
+
+it('types replacement registered-name audit patterns', () => {
+  expect(
+    build('registered_name.update', { pattern: { old: 'vendor/*', new: 'vendor/package' } }).ok,
+  ).toBe(true);
+  for (const value of [
+    true,
+    7,
+    ['vendor/*'],
+    'person@example.test',
+    'https://user:password@example.test',
+  ])
+    expect(build('registered_name.update', { pattern: { new: value } }).ok).toBe(false);
+});
+
+describe('merged action grammar and privacy', () => {
+  it.each([
+    ['notification.create', 'pattern', 'person@example.test'],
+    ['notification.update', 'pattern', `ghp_${'a'.repeat(36)}`],
+    ['registry_policy.create', 'package_key', `ghp_${'a'.repeat(36)}`],
+    ['registry_policy.create', 'package_key', `ghp_${'!a'.repeat(36)}`],
+    ['package.unpublish', 'versions', [`ghp_${'a'.repeat(36)}`]],
+    ['policy.read_denied', 'reasons', [`plugin:ghp_${'a'.repeat(36)}:blocked`]],
+    ['trusted_publisher.update', 'environment', 'person@example.test'],
+  ])('refuses private %s %s values on construction and export', (action, field, value) => {
+    expect(build(action as string, { [field as string]: { new: value } }).ok).toBe(false);
+    const safe = build(action as string);
+    if (!safe.ok) throw new Error('safe envelope refused');
+    expect(() =>
+      validateAuditEvent({
+        ...safe.event,
+        payloadJson: JSON.stringify({
+          op_id: context.opId,
+          request_id: context.requestId,
+          changes: { [field as string]: { new: value } },
+        }),
+      }),
+    ).toThrow('invalid audit event');
+  });
+  it.each(['_next', 'next!', "release'candidate", '~preview'])(
+    'accepts domain-valid dist-tag %s',
+    (tag) => {
+      expect(build('package.dist_tag', { tag: { new: tag } }).ok).toBe(true);
+    },
+  );
+  it.each(['vendor/package', '@scope/Legacy', 'Legacy'])(
+    'accepts access audit package name %s',
+    (name) => {
+      for (const action of ['package.access_request', 'package.access_decide'])
+        expect(build(action, { package: { new: name } }).ok).toBe(true);
+    },
+  );
+});
+
+it('accepts the Composer package name bound for access request audit', () => {
+  expect(
+    build('package.access_request', { package: { new: 'vendor/' + 'package'.repeat(50) } }).ok,
+  ).toBe(true);
 });

@@ -15,6 +15,7 @@ beforeAll(async () => {
         createRoot(document.getElementById('root')).render(
           <Shell route={globalThis.fixtureRoute ?? 'projects'} project="acme" projects={[]}
             unknown={null} onScope={() => {}} onSignOut={() => {}}
+            auditTrail={globalThis.fixtureAuditTrail}
             visibleRoutes={['projects', 'access', 'sources', 'packages', 'tokens',
               ...(globalThis.fixtureAdministration ?? ['audit', 'import'])]} />
         );`,
@@ -37,7 +38,7 @@ describe('shell navigation', () => {
     if (!fixture) context.skip('Chromium cannot start in this environment');
     const { page, browserExpect } = fixture!;
     await page.setViewportSize({ width: 1440, height: 800 });
-    await fixture!.mount(script, { fixtureRoute: 'audit' });
+    await fixture!.mount(script, { fixtureRoute: 'audit', fixtureAuditTrail: true });
     const nav = page.getByRole('navigation', { name: 'Main', exact: true });
     await browserExpect(nav.getByRole('link')).toHaveCount(7);
     await browserExpect(nav.getByRole('link', { name: 'Notifications', exact: true })).toHaveCount(
@@ -78,6 +79,16 @@ describe('shell navigation', () => {
     await browserExpect(page.getByRole('button', { name: 'Account', exact: true })).toBeFocused();
   });
 
+  it('hides Audit without audit capabilities even when its route is visible', async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await fixture!.mount(script);
+    const nav = page.getByRole('navigation', { name: 'Main', exact: true });
+    await browserExpect(nav.getByRole('link', { name: 'Import', exact: true })).toBeVisible();
+    await browserExpect(nav.getByRole('link', { name: 'Audit', exact: true })).toHaveCount(0);
+  });
+
   for (const administration of [[], ['audit'], ['import'], ['audit', 'import']]) {
     it(`shows the mobile divider only with visible administration items: ${administration.join(', ')}`, async (context) => {
       if (!fixture) context.skip('Chromium cannot start in this environment');
@@ -86,6 +97,7 @@ describe('shell navigation', () => {
       await fixture!.mount(script, {
         fixtureAdministration: administration,
         fixtureRoute: 'tokens',
+        fixtureAuditTrail: administration.includes('audit'),
       });
       const nav = page.getByRole('navigation', { name: 'Main', exact: true });
       await browserExpect(nav).toBeHidden();

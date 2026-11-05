@@ -25,6 +25,8 @@ import * as sourceNames from './routes/source-names.js';
 import * as sourceAttachment from './routes/source-attachment.js';
 import * as packages from './routes/packages.js';
 import * as audit from './routes/audit.js';
+import * as auditExport from './routes/audit-export.js';
+import * as auditStatus from './routes/audit-status.js';
 import * as permissions from './routes/permissions.js';
 import * as packageManage from './routes/package-manage.js';
 import * as importRuns from './routes/import.js';
@@ -112,6 +114,9 @@ const EXPECTED_ROUTES = [
   'GET /_pb/projects/:project/packages/:package/versions',
   'GET /_pb/audit',
   'GET /_pb/audit/head',
+  'GET /_pb/audit/export',
+  'GET /_pb/audit/health',
+  'GET /_pb/audit/status',
   'GET /_pb/projects/:project/audit',
   'GET /_pb/me/permissions',
   'GET /_pb/projects/:project/permissions',
@@ -265,7 +270,6 @@ function dependencies(): ApiModuleDeps {
       projects: unused('get'),
     },
     packages: unused('listProject', 'listOrganization', 'listVersions'),
-    audit: unused('list', 'head'),
     publishes: {
       ids: { ulid },
       clock: { now: () => new Date() },
@@ -439,11 +443,42 @@ describe('createApiModule', () => {
       vi.spyOn(sourceAttachment, 'sourceAttachmentRoutes'),
       vi.spyOn(packages, 'packageRoutes'),
       vi.spyOn(audit, 'auditRoutes'),
+      vi.spyOn(auditExport, 'auditExportRoutes'),
       vi.spyOn(permissions, 'myPermissionsRoute'),
       vi.spyOn(permissions, 'myProjectPermissionsRoute'),
     ];
-    createApiModule(dependencies());
+    const deps = dependencies();
+    createApiModule(deps);
     for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
+    expect(audit.auditRoutes).toHaveBeenCalledWith(deps.auditTrail);
+  });
+
+  it('passes registered trail dispatch services to the trail routes', () => {
+    const spy = vi.spyOn(audit, 'auditRoutes');
+    const deps = dependencies();
+    const auditTrail: NonNullable<ApiModuleDeps['auditTrail']> = {
+      log: vi.fn(),
+      trail: null,
+      effective: async () => ({ policy: 'availability', trailActive: false }),
+      services: { journal: { list: vi.fn(), head: vi.fn() }, requestVerification: vi.fn() },
+    };
+    createApiModule({ ...deps, auditTrail });
+    expect(spy).toHaveBeenCalledWith(auditTrail);
+  });
+
+  it('does not require the legacy reader for a composed trail', () => {
+    const deps = dependencies();
+    const auditTrail: NonNullable<ApiModuleDeps['auditTrail']> = {
+      log: vi.fn(),
+      trail: {
+        definition: {
+          create: () => ({ handle: async () => ({ error: 'audit_trail_unavailable' }) }),
+        },
+      },
+      effective: async () => ({ policy: 'availability', trailActive: true }),
+      services: { journal: { list: vi.fn(), head: vi.fn() }, requestVerification: vi.fn() },
+    };
+    expect(() => createApiModule({ ...deps, auditTrail })).not.toThrow();
   });
 
   it('omits the import routes when no import dependencies are provided', () => {
@@ -631,6 +666,24 @@ describe('createApiModule', () => {
     expect(error).toBeInstanceOf(ApiModuleDependencyError);
     expect((error as ApiModuleDependencyError).dependency).toBe('dependencies.organization.ids');
     expect((error as Error).message).not.toContain(sentinel);
+  });
+  it('shares the health service between status and health routes', () => {
+    const health = { read: vi.fn() };
+    const status = { reader: { read: vi.fn() }, effective: vi.fn(), modeSource: vi.fn() };
+    const mountStatus = vi.spyOn(auditStatus, 'auditStatusRoutes');
+    const mountHealth = vi.spyOn(auditStatus, 'auditHealthRoutes');
+    createApiModule({ ...dependencies(), auditHealth: health, auditStatus: status });
+    expect(mountHealth).toHaveBeenCalledWith(health);
+    expect(mountStatus).toHaveBeenCalledWith({ ...status, health });
+  });
+
+  it('requires audit health when status is supplied', () => {
+    expect(() =>
+      createApiModule({
+        ...dependencies(),
+        auditStatus: { reader: { read: vi.fn() }, effective: vi.fn(), modeSource: vi.fn() },
+      }),
+    ).toThrow(new ApiModuleDependencyError('dependencies.auditHealth'));
   });
 });
 

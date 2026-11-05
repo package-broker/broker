@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 const call = {
   audit: {
     opId: '01K00000000000000000000001',
@@ -321,7 +322,10 @@ describe('cloudflare access smoke on Miniflare D1', () => {
       PB_MASTER_KEY: KEY,
       PB_PUBLIC_URL: PUBLIC_URL,
     } as unknown as Env;
-    const worker = createWorker([plugin], { log: () => undefined });
+    const worker = createWorker([plugin, auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     services = (await worker.services(environment)).access;
     return { fetch: (request) => worker.fetch(request, environment), raw, orgId, token };
   }

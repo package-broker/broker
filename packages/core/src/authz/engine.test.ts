@@ -2128,6 +2128,69 @@ describe('projectActorOf parity with the engine', () => {
   });
 });
 
+describe('authorization denial actors', () => {
+  it.each(['session', 'pat', 'svc'] as const)(
+    'retains the authenticated %s actor on a permission denial',
+    async (kind) => {
+      const state = freshState();
+      if (kind === 'svc') {
+        state.token.kind = 'svc';
+        state.token.hashOf = SVC;
+      }
+      const recordDenied = vi.fn();
+      const engine = createAuthorizationEngine(deps(state, { recordDenied }));
+      const input = req({
+        headers: kind === 'session' ? cookie : bearer(kind === 'svc' ? SVC : PAT),
+        permission: 'project:settings:write',
+      });
+      expect(await authorizeRoute(input, engine, [])).toEqual({ allow: false, status: 403 });
+      expect(recordDenied).toHaveBeenCalledExactlyOnceWith(
+        input,
+        { kind: kind === 'svc' ? 'service' : 'user', id: kind === 'svc' ? 'svc-1' : 'user-1' },
+        'proj-1',
+      );
+      expect(state.lookups).toBe(1);
+      expect(state.touches).toEqual([]);
+    },
+  );
+
+  it.each([
+    { origin: 'https://foreign.test', 'x-csrf-token': CSRF },
+    { origin: ORIGIN },
+    { origin: ORIGIN, 'x-csrf-token': 'invalid' },
+  ])('excludes same-origin and CSRF refusals (%j)', async (headers) => {
+    const state = freshState();
+    const recordDenied = vi.fn();
+    const engine = createAuthorizationEngine(deps(state, { recordDenied }));
+    const input = req({ headers: { ...cookie, ...headers }, method: 'POST' });
+    expect(await authorizeRoute(input, engine, [])).toEqual({ allow: false, status: 403 });
+    expect(recordDenied).not.toHaveBeenCalled();
+    expect(state.lookups).toBe(1);
+    expect(state.touches).toEqual([]);
+  });
+
+  it('does not reuse a resolved actor when the next authorization is unauthenticated', async () => {
+    const state = freshState();
+    const recordDenied = vi.fn();
+    const engine = createAuthorizationEngine(deps(state, { recordDenied }));
+    const input = req({ headers: cookie });
+    expect((await authorizeRoute(input, engine, [])).allow).toBe(true);
+    state.sessionRevoked = true;
+    expect(await authorizeRoute(input, engine, [])).toEqual({ allow: false, status: 401 });
+    expect(recordDenied).not.toHaveBeenCalled();
+  });
+
+  it('contains a throwing recorder without changing the decision', async () => {
+    const recordDenied = vi.fn(() => {
+      throw new Error('private recorder error');
+    });
+    const engine = createAuthorizationEngine(deps(freshState(), { recordDenied }));
+    const input = req({ headers: cookie, permission: 'project:settings:write' });
+    expect(await authorizeRoute(input, engine, [])).toEqual({ allow: false, status: 403 });
+    expect(recordDenied).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('explicit organization publish alternative', () => {
   async function exercise(change: (state: State) => void = () => undefined, denyHook = false) {
     const state = freshState();

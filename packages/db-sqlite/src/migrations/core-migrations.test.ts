@@ -161,7 +161,7 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 71 tables, four expand migrations, the login handoff migration, the npm build outcome migration, the registry policy migration and the notifications migration', async () => {
+  it('1: a fresh database gets every core migration: 75 tables, four expand migrations, the login handoff migration, the npm build outcome migration, the registry policy migration and the notifications migration', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
@@ -178,6 +178,7 @@ describe('core migrations', () => {
       'core:0008_registry_policy',
       'core:0009_npm_notifications',
       'core:0010_source_discovery_rules',
+      'core:0011_audit',
     ]);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))
@@ -185,7 +186,7 @@ describe('core migrations', () => {
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    expect(await countTables()).toBe(71);
+    expect(await countTables()).toBe(75);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -338,6 +339,10 @@ describe('core migrations', () => {
         await rows(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name NOT LIKE 'source_sync_%'
           AND name NOT IN ('package_ecosystem_matches_source_insert',
             'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages',
+            'audit_ledger_append_only_update', 'audit_ledger_append_only_delete', 'audit_ledger_insert_visible', 'audit_ledger_capacity_insert',
+            'audit_sink_body_version_monotonic', 'audit_sink_body_version_bump',
+            'organization_audit_chain',
+
         'token_trusted_publisher_insert', 'token_trusted_publisher_update',
         'trusted_publisher_token_org_update')`),
       ).toEqual([]);
@@ -385,6 +390,7 @@ describe('core migrations', () => {
       ]);
       await run('INSERT INTO cache_epoch (org_id, version) SELECT id, ? FROM organization', ['v']);
 
+      await run('DELETE FROM audit_chain WHERE org_id = ?', [OTHER_ORG]);
       await run('DELETE FROM organization WHERE id = ?', [OTHER_ORG]);
 
       expect(await rows('SELECT org_id FROM cache_epoch')).toEqual([{ org_id: ORG }]);

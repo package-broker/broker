@@ -1,3 +1,4 @@
+import { auditTrail } from '../audit-trail.test.support.js';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -224,8 +225,9 @@ function transport(h: Harness): FetchLike {
 async function boot(h: Harness, enabled: boolean): Promise<NodeBroker> {
   const byteStore = await openFilesystemByteStore({ root: join(h.directory, 'blobs') });
   const broker = createNodeServerWithSeams(
-    [],
+    [auditTrail()],
     {
+      audit: { capacity: { maxJournalBytes: 67108864 } },
       executor: h.db.executor,
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),

@@ -5,7 +5,13 @@ import { isIP } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { FetchLike } from '@package-broker/core/platform/tracing';
 import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
-import { createDnsGuard, DnsGuardError, type DnsGuardOptions } from './dns-guard.js';
+import {
+  createDnsGuard,
+  createAuditDnsGuard,
+  DnsGuardError,
+  type DnsGuardOptions,
+  type DnsGuard,
+} from './dns-guard.js';
 
 export interface GuardedFetchOptions extends DnsGuardOptions {
   /** Bounds DNS, TCP and TLS establishment, independently of the caller total deadline. */
@@ -142,104 +148,131 @@ export function createGuardedFetch(
 ): FetchLike {
   const { tls, connectTimeoutMs, ...guardOptions } = options;
   const guard = createDnsGuard(policy, guardOptions);
-
   return async (input, init) => {
-    const { url, method, headers, body } = await normalizeRequest(input, init);
+    const normalized = await normalizeRequest(input, init);
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-    if (url.protocol !== 'https:') throw fetchFailed(new DnsGuardError('scheme'));
-    if (signal?.aborted) throw signal.reason;
-
-    const secure = url.protocol === 'https:';
-    const hostname = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
-    const port = url.port === '' ? (secure ? 443 : 80) : Number(url.port);
-    const target = guard.forTarget(url.hostname, port, secure ? 'https' : 'http');
-    const literal = isIP(hostname) !== 0;
-
-    let connectHost = hostname;
-    if (literal) {
-      let onLiteralAbort: (() => void) | undefined;
-      const aborted = new Promise<never>((_, reject) => {
-        onLiteralAbort = () => reject(signal?.reason);
-        signal?.addEventListener('abort', onLiteralAbort, { once: true });
-      });
-      aborted.catch(() => undefined);
-      try {
-        const resolved = await (signal
-          ? Promise.race([target.resolve(), aborted])
-          : target.resolve());
-        connectHost = resolved.addresses[0]?.address ?? hostname;
-      } catch (error) {
-        if (signal?.aborted) throw signal.reason;
-        throw toTransportError(error);
-      } finally {
-        if (onLiteralAbort) signal?.removeEventListener('abort', onLiteralAbort);
-      }
-    }
-
-    if (!headers.has('accept-encoding')) headers.set('accept-encoding', 'gzip, deflate, br');
-    const outgoing: OutgoingHttpHeaders = Object.fromEntries(headers);
-    outgoing['host'] = url.host;
-    if (body !== undefined) outgoing['content-length'] = String(body.byteLength);
-    const servername = hostname.replace(/\.$/, '');
-
-    return new Promise<Response>((resolve, reject) => {
-      const send = secure ? httpsRequest : httpRequest;
-      const req = send({
-        host: connectHost,
-        port,
-        path: `${url.pathname}${url.search}`,
-        method,
-        headers: outgoing,
-        agent: false,
-        lookup: target.lookup,
-        ...(secure ? { servername: literal ? '' : servername } : {}),
-        ...(secure && tls?.ca !== undefined ? { ca: tls.ca } : {}),
-      });
-      const connectTimer =
-        connectTimeoutMs === undefined
-          ? undefined
-          : setTimeout(() => {
-              req.destroy(new TransportError('CONNECT_TIMEOUT'));
-            }, connectTimeoutMs);
-      const clearConnectTimer = () => clearTimeout(connectTimer);
-      req.once('socket', (socket) =>
-        socket.once(secure ? 'secureConnect' : 'connect', clearConnectTimer),
-      );
-      req.once('close', clearConnectTimer);
-      let incoming: IncomingMessage | undefined;
-
-      const abortReason = (): Error =>
-        signal?.reason instanceof Error ? signal.reason : new Error('aborted');
-      const onAbort = (): void => {
-        incoming?.destroy(abortReason());
-        req.destroy(abortReason());
-        reject(signal?.reason);
-      };
-      const cleanup = (): void => signal?.removeEventListener('abort', onAbort);
-      signal?.addEventListener('abort', onAbort, { once: true });
-      req.once('close', cleanup);
-
-      const fail = (error: unknown): void => {
-        incoming?.destroy();
-        req.destroy();
-        cleanup();
-        reject(signal?.aborted ? signal.reason : toTransportError(error));
-      };
-
-      req.once('upgrade', (_response, socket) => {
-        socket.destroy();
-        fail(new TransportError('UPGRADE'));
-      });
-      req.once('response', (message) => {
-        incoming = message;
-        try {
-          resolve(toResponse(message, method));
-        } catch (error) {
-          fail(error);
-        }
-      });
-      req.once('error', fail);
-      req.end(body === undefined ? undefined : Buffer.from(body));
-    });
+    if (normalized.url.protocol !== 'https:') throw fetchFailed(new DnsGuardError('scheme'));
+    return sendGuardedRequest(normalized, signal, guard, tls, connectTimeoutMs);
   };
+}
+
+export function createAuditGuardedFetch(
+  policy: OutboundPolicy,
+  options: GuardedFetchOptions & { readonly allowPrivate?: boolean } = {},
+): FetchLike {
+  const { tls, connectTimeoutMs, ...guardOptions } = options;
+  const guard = createAuditDnsGuard(policy, guardOptions);
+  return async (input, init) => {
+    const normalized = await normalizeRequest(input, init);
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    validateAuditScheme(normalized.url, options.allowPrivate ?? false);
+    return sendGuardedRequest(normalized, signal, guard, tls, connectTimeoutMs);
+  };
+}
+
+function validateAuditScheme(url: URL, allowPrivate: boolean): void {
+  if (url.protocol !== 'https:' && !(allowPrivate && url.protocol === 'http:'))
+    throw fetchFailed(new DnsGuardError('scheme'));
+}
+
+async function sendGuardedRequest(
+  { url, method, headers, body }: Normalized,
+  signal: AbortSignal | null | undefined,
+  guard: DnsGuard,
+  tls: GuardedFetchOptions['tls'],
+  connectTimeoutMs: number | undefined,
+): Promise<Response> {
+  if (signal?.aborted) throw signal.reason;
+  const secure = url.protocol === 'https:';
+  const hostname = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
+  const port = url.port === '' ? (secure ? 443 : 80) : Number(url.port);
+  const target = guard.forTarget(url.hostname, port, secure ? 'https' : 'http');
+  const literal = isIP(hostname) !== 0;
+
+  let connectHost = hostname;
+  if (literal) {
+    let onLiteralAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onLiteralAbort = () => reject(signal?.reason);
+      signal?.addEventListener('abort', onLiteralAbort, { once: true });
+    });
+    aborted.catch(() => undefined);
+    try {
+      const resolved = await (signal
+        ? Promise.race([target.resolve(), aborted])
+        : target.resolve());
+      connectHost = resolved.addresses[0]?.address ?? hostname;
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      throw toTransportError(error);
+    } finally {
+      if (onLiteralAbort) signal?.removeEventListener('abort', onLiteralAbort);
+    }
+  }
+
+  if (!headers.has('accept-encoding')) headers.set('accept-encoding', 'gzip, deflate, br');
+  const outgoing: OutgoingHttpHeaders = Object.fromEntries(headers);
+  outgoing['host'] = url.host;
+  if (body !== undefined) outgoing['content-length'] = String(body.byteLength);
+  const servername = hostname.replace(/\.$/, '');
+
+  return new Promise<Response>((resolve, reject) => {
+    const send = secure ? httpsRequest : httpRequest;
+    const req = send({
+      host: connectHost,
+      port,
+      path: `${url.pathname}${url.search}`,
+      method,
+      headers: outgoing,
+      agent: false,
+      lookup: target.lookup,
+      ...(secure ? { servername: literal ? '' : servername } : {}),
+      ...(secure && tls?.ca !== undefined ? { ca: tls.ca } : {}),
+    });
+    const connectTimer =
+      connectTimeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            req.destroy(new TransportError('CONNECT_TIMEOUT'));
+          }, connectTimeoutMs);
+    const clearConnectTimer = () => clearTimeout(connectTimer);
+    req.once('socket', (socket) =>
+      socket.once(secure ? 'secureConnect' : 'connect', clearConnectTimer),
+    );
+    req.once('close', clearConnectTimer);
+    let incoming: IncomingMessage | undefined;
+
+    const abortReason = (): Error =>
+      signal?.reason instanceof Error ? signal.reason : new Error('aborted');
+    const onAbort = (): void => {
+      incoming?.destroy(abortReason());
+      req.destroy(abortReason());
+      reject(signal?.reason);
+    };
+    const cleanup = (): void => signal?.removeEventListener('abort', onAbort);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    req.once('close', cleanup);
+
+    const fail = (error: unknown): void => {
+      incoming?.destroy();
+      req.destroy();
+      cleanup();
+      reject(signal?.aborted ? signal.reason : toTransportError(error));
+    };
+
+    req.once('upgrade', (_response, socket) => {
+      socket.destroy();
+      fail(new TransportError('UPGRADE'));
+    });
+    req.once('response', (message) => {
+      incoming = message;
+      try {
+        resolve(toResponse(message, method));
+      } catch (error) {
+        fail(error);
+      }
+    });
+    req.once('error', fail);
+    req.end(body === undefined ? undefined : Buffer.from(body));
+  });
 }

@@ -44,6 +44,9 @@ test('full release follows dependency order regardless of input order', () => {
     'packages/db-sqlite',
     'packages/plugin-github',
     'packages/plugin-sso-oidc',
+    'packages/plugin-audit-trail',
+    'packages/plugin-audit-otlp',
+    'packages/plugin-audit-webhook',
     'packages/ui',
     'packages/ui-assets',
     'packages/runtime-cloudflare',
@@ -55,15 +58,30 @@ test('full release follows dependency order regardless of input order', () => {
 });
 
 test('plugin-only subset keeps independent release order', () => {
-  assert.deepEqual(orderedPaths(['packages/plugin-sso-oidc', 'packages/plugin-github']), [
-    'packages/plugin-github',
-    'packages/plugin-sso-oidc',
-  ]);
+  assert.deepEqual(
+    orderedPaths([
+      'packages/plugin-audit-webhook',
+      'packages/plugin-audit-otlp',
+      'packages/plugin-audit-trail',
+      'packages/plugin-sso-oidc',
+      'packages/plugin-github',
+    ]),
+    [
+      'packages/plugin-github',
+      'packages/plugin-sso-oidc',
+      'packages/plugin-audit-trail',
+      'packages/plugin-audit-otlp',
+      'packages/plugin-audit-webhook',
+    ],
+  );
 });
 
 for (const component of [
   'plugin-github',
   'plugin-sso-oidc',
+  'plugin-audit-trail',
+  'plugin-audit-otlp',
+  'plugin-audit-webhook',
   'ui-assets',
   'dist',
   'dist-cloudflare',

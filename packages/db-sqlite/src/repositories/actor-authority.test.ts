@@ -665,7 +665,7 @@ describe('shared actor session identity binding', () => {
     'role update': [34, 1, 1, 4, 3, 5, 12],
     'role permissions': [34, 1, 1, 4, 3, 6, 6, 4, 12],
     'role delete': [34, 1, 1, 4, 3, 3, 12],
-    unlink: [10, 1, 1, 6, 6, 4, 14, 12, 5, 12, 5, 3, 2, 3, 5, 1],
+    unlink: [10, 1, 1, 6, 6, 4, 14, 5, 12, 12, 5, 3, 2, 3, 5, 1],
     unblock: [13, 1, 1, 6, 31, 4, 1],
   } as const;
   type Operation = keyof typeof baseline;

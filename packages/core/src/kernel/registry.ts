@@ -26,6 +26,12 @@ import {
   qualifyJobName,
   type JobDefinition,
 } from '../platform/jobs.js';
+import {
+  AUDIT_SINKS_AVAILABLE,
+  collectAuditDefinitions,
+  snapshotPluginGate,
+  pluginLabel,
+} from './registry-audit.js';
 import { reportableErrorName } from './error-name.js';
 import type { PackageVisibilityPort } from '../db/catalogue.js';
 import {
@@ -114,6 +120,7 @@ export interface RegisteredJob {
 }
 
 export interface Registration {
+  readonly audit: ReturnType<typeof collectAuditDefinitions>;
   readonly routes: readonly RegisteredRoute[];
   readonly hooks: {
     readonly [K in keyof HookMap]: ReadonlyArray<{
@@ -155,6 +162,8 @@ const DEFINITION_KEYS: ReadonlySet<string> = new Set([
   'identityProviders',
   'identityDescriptor',
   'sourceProviders',
+  'auditTrail',
+  'auditSinks',
   'publishPolicy',
   'migrations',
   'register',
@@ -183,6 +192,10 @@ const REGISTRY_READ_API_VERSION = 4;
 const HOOK_NAMES: ReadonlySet<string> = new Set(Object.keys(HOOK_NAME_KEYS));
 
 const MAX_NAME_LENGTH = 80;
+
+function isBindablePort(port: string): port is PortName {
+  return BINDABLE.includes(port);
+}
 
 function isHookName(name: unknown): name is keyof HookMap {
   return typeof name === 'string' && HOOK_NAMES.has(name);
@@ -229,6 +242,23 @@ export function collectRegistrations(
       problems.push('publishPolicy must have a valid unique id and an inspect function');
     } else scannerIds.add(policy.id);
   }
+  const gates = plugins.map((plugin) => snapshotPluginGate(plugin, problems));
+  const audit = collectAuditDefinitions(plugins, gates, problems);
+  if (!AUDIT_SINKS_AVAILABLE && audit.sinks.length > 0) {
+    problems.push('audit plugins are not available in this build');
+  }
+  for (const plugin of plugins) {
+    try {
+      for (const key of Reflect.ownKeys(plugin)) {
+        if (typeof key === 'symbol' || !DEFINITION_KEYS.has(key)) {
+          problems.push(`${pluginLabel(plugin)} has unknown key "${String(key)}"`);
+        }
+      }
+    } catch {
+      problems.push('plugin definition is malformed');
+    }
+  }
+  if (problems.length > 0) throw new KernelConfigError(problems);
   const routes: RegisteredRoute[] = [];
   const hooks: { [K in keyof HookMap]: Array<{ plugin: string; handler: HookMap[K] }> } = {
     'access.check': [],
@@ -257,14 +287,14 @@ export function collectRegistrations(
     jobNames.add(core.qualifiedName);
   }
 
-  for (const plugin of plugins) {
-    const id = plugin.id;
+  for (const [index, plugin] of plugins.entries()) {
+    const { id, apiVersion, binds } = gates[index]!;
 
-    if (!Number.isInteger(plugin.apiVersion)) {
+    if (!Number.isInteger(apiVersion)) {
       problems.push(`plugin "${id}" apiVersion must be an integer`);
-    } else if (!(plugin.apiVersion >= minApi && plugin.apiVersion <= maxApi)) {
+    } else if (!(apiVersion >= minApi && apiVersion <= maxApi)) {
       problems.push(
-        `plugin "${id}" has apiVersion ${plugin.apiVersion}, core supports ${minApi} to ${maxApi}`,
+        `plugin "${id}" has apiVersion ${apiVersion}, core supports ${minApi} to ${maxApi}`,
       );
     }
     let validId: boolean | undefined;
@@ -272,15 +302,9 @@ export function collectRegistrations(
       validId = false;
       problems.push(`plugin id "${id}" is reserved`);
     }
-    for (const key of Reflect.ownKeys(plugin)) {
-      if (typeof key === 'symbol' || !DEFINITION_KEYS.has(key)) {
-        problems.push(`plugin "${id}" has unknown key "${String(key)}"`);
-      }
-    }
 
-    const binds = plugin.binds ?? [];
     for (const port of binds) {
-      if (!BINDABLE.includes(port)) {
+      if (!isBindablePort(port)) {
         problems.push(`plugin "${id}" cannot bind port "${port}": provided by the runtime`);
         continue;
       }
@@ -316,7 +340,7 @@ export function collectRegistrations(
     problems.push(
       ...providerFactoryProblems(id, 'source', 'sourceProviders', sourceFactory, binds),
     );
-    if (sourceFactory !== undefined && plugin.apiVersion < SOURCE_PROVIDERS_API_VERSION) {
+    if (sourceFactory !== undefined && apiVersion < SOURCE_PROVIDERS_API_VERSION) {
       problems.push(
         `plugin "${id}" declares sourceProviders and requires apiVersion ${SOURCE_PROVIDERS_API_VERSION}`,
       );
@@ -431,7 +455,7 @@ export function collectRegistrations(
       const boundaryProblems = routeBoundaryProblems(
         route,
         `plugin "${id}" route ${route.method} ${route.path}`,
-        { ...options, apiVersion: plugin.apiVersion },
+        { ...options, apiVersion },
       );
       const apiProblems = routeApiProblems(
         route,
@@ -469,6 +493,7 @@ export function collectRegistrations(
     Object.freeze(list);
   }
   return {
+    audit,
     routes,
     hooks: Object.freeze(hooks),
     jobs: Object.freeze(jobs),

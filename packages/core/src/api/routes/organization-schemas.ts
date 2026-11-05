@@ -46,6 +46,7 @@ const userParams = z.strictObject({ user: ulid });
 const userBody = z.strictObject({ status: z.enum(['active', 'suspended']) });
 
 const meResponse = z.strictObject({
+  features: z.strictObject({ auditTrail: z.boolean() }),
   principal: z.strictObject({ kind: z.enum(['user', 'service', 'customer']), id: z.string() }),
   user: z
     .strictObject({

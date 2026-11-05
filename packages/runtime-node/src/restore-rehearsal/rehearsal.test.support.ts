@@ -1,3 +1,4 @@
+import { auditTrail } from '../audit-trail.test.support.js';
 /* eslint-disable no-restricted-syntax -- Isolated fixture seeding and full database snapshots require SQL; this module is rehearsal-only. */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -318,7 +319,8 @@ export async function startDeployment(
   const keyPath = join(paths.secrets, 'master-key');
   void _context;
   return startNode({
-    plugins: [],
+    audit: { capacity: { maxJournalBytes: 67108864 } },
+    plugins: [auditTrail()],
     migrations: await discoveredMigrations(),
     env: {
       PB_SQLITE_PATH: paths.database,

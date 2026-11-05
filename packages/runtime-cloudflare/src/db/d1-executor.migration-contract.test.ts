@@ -1,6 +1,7 @@
 import { afterAll } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import {
+  describeAuditBackfillBench,
   describeMigrationContract,
   describeNpmPublishMigrationContract,
   describeNpmIdentityMigrationContract,
@@ -46,6 +47,7 @@ async function firstCoreMigration() {
 }
 
 describeMigrationContract('d1', openPair, firstCoreMigration);
+describeAuditBackfillBench('d1', openPair);
 describeMigrationLockContract('d1', openPair, firstCoreMigration);
 
 describeVulnerabilityMigrationContract('d1', openPair);

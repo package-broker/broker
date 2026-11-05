@@ -46,6 +46,12 @@ The module set must be decided when the artifact is built, on Cloudflare and on 
 <!-- source: packages/plugin-sso-oidc/src/planner.ts:28 -->
 <!-- source: packages/cli/src/commands/cloudflare/deploy.ts:102 -->
 
+### Amendment, 2026-11-05: audit contracts on API 4
+
+API 4 adds the plugin-bindable `audit-trail` port and static `auditSinks` declarations. This extends the earlier identity/source-only port list. A trail binding requires `auditTrail`; sink declarations do not bind a port. API 3 remains supported for plugins without API 4 features. Duplicate trail bindings or sink ids fail validation. All three first-party audit plugins are composed at build time; environment settings select data/destinations/activation, never load code. <!-- source: packages/core/src/plugin.ts:93 --> <!-- source: packages/core/src/plugin.ts:165 --> <!-- source: packages/core/src/kernel/plugin-ports.ts:1 -->
+
+Core gives a trail an organization-bound sanitized journal and verification request capability. It gives sinks frozen records/markers, a clock, a destination-bound transport and only declared non-destination environment data. Plugins do not own sequencing, SQL, custody advancement or retention. Hook decisions remain deny-only. The supported plugin test entry is `@package-broker/core/plugin/testing`, in addition to the root and `/plugin` API entries; it exports the audit vectors and sink conformance runner. The trail contract includes the explicit `verification` range and body/withheld counts. See [plugin authoring](../reference/plugin-authoring.md#audit-trail-and-sinks-api-4). <!-- source: packages/core/src/audit/plugin-api.ts:115 --> <!-- source: packages/core/src/audit/plugin-api.ts:139 --> <!-- source: packages/core/src/audit/plugin-api.ts:251 --> <!-- source: packages/core/package.json:17 -->
+
 ## ADR-025: Plugins run in-process; an execution boundary for untrusted plugins is Nice to have
 
 Status: Accepted, 2026-10-15

@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   fenceKind,
@@ -276,7 +277,8 @@ describe('import jobs in the Worker assembly', () => {
       const executor = createD1Executor(db);
       await migrate(executor, await discoveredMigrations(), { holder: 'import-jobs-test' });
       const { a } = await seedTwoOrganizations(executor);
-      const worker = createWorker([], {
+      const worker = createWorker([auditTrail()], {
+        audit: {},
         platformPorts,
         console: { log: () => undefined, error: () => undefined },
         cacheStorage: {

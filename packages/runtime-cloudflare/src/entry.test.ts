@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   manifest: {} as {
     plugins: [];
+    audit?: { capacity?: { maxJournalBytes: number }; build_generation?: number };
     migrations?: MigrationSource[];
     vulnerability?: { enabled: boolean };
     mcp?: { enabled: boolean };
@@ -16,6 +17,9 @@ const state = vi.hoisted(() => ({
   createWorker: vi.fn(() => ({ fetch: vi.fn() })),
 }));
 vi.mock('#pb-manifest', () => ({
+  get audit() {
+    return state.manifest.audit;
+  },
   get migrations() {
     return state.manifest.migrations;
   },
@@ -63,6 +67,7 @@ describe('Worker entry observability', () => {
       };
       await import('./entry.js');
       expect(state.createWorker).toHaveBeenCalledExactlyOnceWith([], {
+        auditGeneration: 0,
         platformPorts: null,
         migrations: undefined,
         observability,
@@ -168,4 +173,20 @@ it('forwards the bundled migration set to createWorker', async () => {
   await import('./entry.js');
   const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
   expect(options).toHaveProperty('migrations', migrations);
+});
+
+it('forwards the audit budget from the manifest', async () => {
+  const audit = { capacity: { maxJournalBytes: 64 * 1024 * 1024 } };
+  state.manifest = { plugins: [], platformPorts: null, audit };
+  await import('./entry.js');
+  expect(state.createWorker).toHaveBeenCalledWith([], expect.objectContaining({ audit }));
+});
+
+it('uses the manifest audit build generation without passing it as configuration', async () => {
+  state.manifest = { plugins: [], platformPorts: null, audit: { build_generation: 17 } };
+  await import('./entry.js');
+  expect(state.createWorker).toHaveBeenCalledWith(
+    [],
+    expect.objectContaining({ auditGeneration: 17, audit: {} }),
+  );
 });

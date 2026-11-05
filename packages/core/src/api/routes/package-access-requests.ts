@@ -1,3 +1,5 @@
+import { redactValue } from '../../audit/redact.js';
+import { sha256Hex } from '../../auth/primitives.js';
 import { auditEvent } from '../../audit/actions.js';
 import {
   PackageAccessRequestError,
@@ -28,6 +30,10 @@ export function packageAccessRequestRoutes(
   const routes = [
     apiRoute(create, async ({ ctx, body }) =>
       result(async () => {
+        if (body.reason !== undefined) {
+          const safe = redactValue(body.reason, 1000, 'reason');
+          if (!safe.ok || safe.value !== body.reason) return { error: 'invalid_request' };
+        }
         const c = projectSessionCallContext(ctx, deps);
         const now = deps.clock.now().toISOString();
         const event = auditEvent({
@@ -41,7 +47,9 @@ export function packageAccessRequestRoutes(
           changes: {
             package: { new: body.packageId },
             project_id: { new: c.projectId },
-            ...(body.reason === undefined ? {} : { reason: { new: body.reason } }),
+            ...(body.reason === undefined
+              ? {}
+              : { reason_sha256: { new: await sha256Hex(body.reason) } }),
           },
         });
         if (!event.ok) return { error: 'invalid_request' };
@@ -74,6 +82,10 @@ export function packageAccessRequestRoutes(
     ...[approve, reject].map((spec, index) =>
       apiRoute(spec, async ({ ctx, params, body, expectedRevision }) =>
         result(async () => {
+          if (body.reason !== undefined) {
+            const safe = redactValue(body.reason, 1000, 'reason');
+            if (!safe.ok || safe.value !== body.reason) return { error: 'invalid_request' };
+          }
           const c = callContext(ctx, deps);
           const item = await deps.repository.get(c.org, params.id);
           if (item === null) return { error: 'not_found' };
@@ -91,7 +103,9 @@ export function packageAccessRequestRoutes(
               package: { new: item.packageName },
               project_id: { new: item.projectId },
               state: { old: 'pending', new: state },
-              ...(body.reason === undefined ? {} : { reason: { new: body.reason } }),
+              ...(body.reason === undefined
+                ? {}
+                : { reason_sha256: { new: await sha256Hex(body.reason) } }),
             },
           });
           if (!event.ok) return { error: 'invalid_request' };

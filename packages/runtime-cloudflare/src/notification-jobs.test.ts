@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import type { PlatformPortConfig } from '@package-broker/core/platform/port-config';
@@ -98,7 +99,8 @@ async function boot(notifications: WorkerOptions['notifications']) {
     PB_PUBLIC_URL: 'https://broker.test',
     PB_KEYRING_RESEED: '1',
   } as Env;
-  const worker = createWorker([], {
+  const worker = createWorker([auditTrail()], {
+    audit: {},
     platformPorts,
     log: () => undefined,
     console: { log: () => undefined, error: () => undefined },

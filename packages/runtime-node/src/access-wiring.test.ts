@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 const call = {
   audit: {
     opId: '01K00000000000000000000001',
@@ -503,7 +504,8 @@ describe('node access wiring', () => {
   ): Promise<{ broker: NodeBroker; base: string }> {
     const base = `http://127.0.0.1:${port}`;
     const broker = await startNode({
-      plugins: [plugin],
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [plugin, auditTrail()],
       migrations: await migrationSources(),
       ...(tokens === undefined ? {} : { tokens }),
       env: {
@@ -749,7 +751,11 @@ describe('node access wiring', () => {
     const errors: string[] = [];
     let started: NodeBroker | undefined;
     await runEntry(
-      Promise.resolve({ plugins: [plugin], migrations: await migrationSources() }),
+      Promise.resolve({
+        plugins: [plugin],
+        migrations: await migrationSources(),
+        audit: { capacity: { maxJournalBytes: 67108864 } },
+      }),
       {
         PORT: String(port),
         PB_SQLITE_PATH: path,
@@ -932,7 +938,7 @@ describe('node access wiring', () => {
 
     it('refuses to create a server with a personal maximum above the ceiling', () => {
       expect(() =>
-        createNodeServer([], { tokens: { maxLifetimeDays: { personal: 400 } } }),
+        createNodeServer([auditTrail()], { tokens: { maxLifetimeDays: { personal: 400 } } }),
       ).toThrow(KernelConfigError);
     });
 
@@ -1007,7 +1013,7 @@ describe('node access wiring', () => {
   describe('start-up refusals', () => {
     async function broken(keyring: Keyring): Promise<unknown> {
       const opened = openBetterSqliteExecutor(path);
-      const broker = createNodeServer([], {
+      const broker = createNodeServer([auditTrail()], {
         executor: opened.executor,
         closeDatabase: opened.close,
         log: () => undefined,

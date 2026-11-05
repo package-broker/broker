@@ -1,3 +1,4 @@
+import { admitJob } from '../job-admission.js';
 import { orgContext, type OrgContext } from '@package-broker/core/db/port';
 import { isUlid, ulid } from '@package-broker/core/ids';
 import { reportableErrorName } from '@package-broker/core/kernel/error-name';
@@ -251,6 +252,11 @@ async function execute(
   job: RegisteredJob,
   runner: Observability,
 ): Promise<Execution> {
+  if (!(await admitJob(job, ctx)))
+    return {
+      settle: { outcome: 'released', delaySeconds: QUEUE_RETRY_DELAY_SECONDS },
+      outcome: 'released',
+    };
   const { definition } = job;
   let payload: unknown;
   try {

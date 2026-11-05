@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { basename, relative, resolve } from 'node:path';
 
 const PLUGIN_PATH = /(^|\/)packages\/plugin-|node_modules\/@package-broker\/plugin-/;
+const RELEASE_AUDIT_PLUGINS = ['audit-trail', 'audit-otlp', 'audit-webhook'];
 const WORKERS_INPUT_DENY =
   /node_modules\/(\.pnpm\/)?(better-sqlite3|miniflare|@hono\/node-server)|db-sqlite\/(src|dist)\/(contract|testing)\//;
 const NODE_INPUT_DENY = /miniflare|db-sqlite\/(src|dist)\/(contract|testing)\//;
@@ -12,6 +13,7 @@ const UI_INPUT_DENY =
 const UI_RUNTIME_DENY =
   /(?:packages|@package-broker)\/(?:ui-assets|ui)\/(?:src|dist)\/|createUiAssetsProvider|MANIFEST_SPECIFIER|createRequire|import\.meta\.resolve|require\.resolve|node:module|react-dom|tailwindcss|openapi-typescript/;
 const OPENAPI_INPUT = /core\/(src|dist)\/api\/openapi\.(?:js|ts)$/;
+const AUDIT_TESTING_INPUT = /core\/(src|dist)\/audit\/plugin-testing\.(?:js|ts)$/;
 const DYNAMIC_IMPORT = /(?:^|[^\w$.])import\s*\(/g;
 const REQUIRE_CALL = /(?:^|[^\w$.])(?:__)?require\s*\(/g;
 const FROM_SPECIFIER = /\bfrom\s*/g;
@@ -121,6 +123,7 @@ async function bundle(config, target, out) {
       buildPathFiles.push(relative(dir, file));
   }
   return {
+    dir,
     inputs,
     externalImports,
     bundleFiles,
@@ -150,11 +153,33 @@ let failed = false;
 
 for (const target of ['cloudflare', 'node']) {
   const minimal = await bundle('fixtures/minimal.config.ts', target, `.pb/minimal-${target}`);
+  const manifest = JSON.parse(await readText(resolve(minimal.dir, 'generated/manifest.json')));
+  if (
+    manifest.audit?.trail !== null ||
+    !Array.isArray(manifest.audit?.sinks) ||
+    manifest.audit.sinks.length !== 0
+  ) {
+    failed = true;
+    console.error(`minimal/${target}: expected no audit trail and no sinks`);
+  }
+  const automatic = await bundle(
+    'fixtures/default-trail.config.ts',
+    target,
+    `.pb/automatic-${target}`,
+  );
+  if (
+    !automatic.inputs.some((input) =>
+      /(?:packages|@package-broker)\/plugin-audit-trail\/(?:src|dist)\//.test(input),
+    )
+  ) {
+    failed = true;
+    console.error(`automatic/${target}: missing default-added audit trail plugin`);
+  }
   const leaked = minimal.inputs.filter((input) => PLUGIN_PATH.test(input));
   if (leaked.length > 0) {
     failed = true;
     console.error(
-      `minimal/${target}: plugin modules in bundle (metafile: every bundled input path):\n${leaked.join('\n')}`,
+      `minimal/${target}: plugin modules in explicit mode none bundle (metafile: every bundled input path):\n${leaked.join('\n')}`,
     );
   }
 
@@ -163,11 +188,19 @@ for (const target of ['cloudflare', 'node']) {
     failed = true;
     console.error(`default/${target}: no plugin modules found, the check cannot prove anything`);
   }
+  for (const name of RELEASE_AUDIT_PLUGINS) {
+    const plugin = new RegExp(`(?:packages|@package-broker)/plugin-${name}/(?:src|dist)/`);
+    if (!full.inputs.some((input) => plugin.test(input))) {
+      failed = true;
+      console.error(`default/${target}: missing compiled audit plugin: ${name}`);
+    }
+  }
 
   const inputDeny = target === 'cloudflare' ? WORKERS_INPUT_DENY : NODE_INPUT_DENY;
   for (const [label, { inputs }] of [
     ['minimal', minimal],
     ['default', full],
+    ['automatic', automatic],
   ]) {
     const openapi = inputs.filter((input) => OPENAPI_INPUT.test(input));
     if (openapi.length > 0) {
@@ -176,7 +209,10 @@ for (const target of ['cloudflare', 'node']) {
         `${label}/${target}: OpenAPI generator in bundle without the OpenAPI route:\n${openapi.join('\n')}`,
       );
     }
-    const forbidden = inputs.filter((input) => inputDeny.test(input) || UI_INPUT_DENY.test(input));
+    const forbidden = inputs.filter(
+      (input) =>
+        inputDeny.test(input) || UI_INPUT_DENY.test(input) || AUDIT_TESTING_INPUT.test(input),
+    );
     if (forbidden.length > 0) {
       failed = true;
       console.error(
@@ -188,6 +224,7 @@ for (const target of ['cloudflare', 'node']) {
   for (const [label, { bundleFiles, externalImports, buildPathFiles }] of [
     ['minimal', minimal],
     ['default', full],
+    ['automatic', automatic],
   ]) {
     if (buildPathFiles.length > 0) {
       failed = true;
@@ -203,6 +240,10 @@ for (const target of ['cloudflare', 'node']) {
     }
     for (const file of bundleFiles) {
       const code = await readText(file);
+      if (/__pbAuditFixture|pbAuditFixture|FixtureAckCrash/.test(code)) {
+        failed = true;
+        console.error(`${label}/${target}: audit fixture hook in production bundle ${file}`);
+      }
       if (UI_RUNTIME_DENY.test(code) || code.includes(process.cwd())) {
         failed = true;
         console.error(`${label}/${target}: provider, resolver or build-machine path in ${file}`);
@@ -214,6 +255,7 @@ for (const target of ['cloudflare', 'node']) {
     for (const [label, { externalImports }] of [
       ['minimal', minimal],
       ['default', full],
+      ['automatic', automatic],
     ]) {
       const foreign = externalImports.filter(
         (path) => !path.startsWith('cloudflare:') && !CLOUDFLARE_ALLOWED_NODE.has(path),
@@ -229,6 +271,7 @@ for (const target of ['cloudflare', 'node']) {
     for (const [label, { bundleFiles }] of [
       ['minimal', minimal],
       ['default', full],
+      ['automatic', automatic],
     ]) {
       for (const file of bundleFiles) {
         const findings = scanBundle(file, await readText(file));

@@ -43,11 +43,22 @@ export interface SafeLogRecord {
   readonly attempt?: number;
   readonly error_name?: ErrorName;
   readonly reason_code?: string;
+  readonly sink_id?: string;
+  readonly from_seq?: number;
+  readonly bodies?: number;
+  readonly withheld?: number;
   readonly head_seq?: number;
   readonly seq?: number;
   readonly rows?: number;
   readonly head_hash?: string;
-  readonly reason?: 'seq_gap' | 'prev_hash' | 'hash' | 'org_mismatch';
+  readonly reason?:
+    | 'seq_gap'
+    | 'head_mismatch'
+    | 'boundary_mismatch'
+    | 'prev_hash'
+    | 'hash'
+    | 'org_mismatch'
+    | 'checkpoint_pruned';
   readonly package_key?: string;
   readonly source_id?: string;
   readonly upstream_trace_id?: string;
@@ -91,6 +102,10 @@ export const LOG_FIELDS = [
   'attempt',
   'error_name',
   'reason_code',
+  'sink_id',
+  'from_seq',
+  'bodies',
+  'withheld',
   'head_seq',
   'seq',
   'rows',
@@ -314,7 +329,28 @@ export const FINISH_FAILURE_DETAIL_LABELS = Object.freeze({
   invalid_scope: true,
   token_endpoint_error: true,
 } as const);
+export const AUDIT_ALERT_CODES = [
+  'audit.skipped',
+  'audit.uncertain',
+  'audit.gap',
+  'audit.withheld',
+  'audit.marker_rejected',
+  'audit.blocked',
+  'audit.fork',
+  'audit.pending_old',
+  'audit.capacity',
+  'audit.mode_change',
+  'audit.policy_change',
+  'audit.sink_inactive',
+  'audit.config_invalid',
+  'audit.mode_none',
+  'audit.chain_integrity',
+  'audit.hold_failed',
+  'audit.prune_anchor',
+] as const;
+const AUDIT_CODES = new Set<string>(AUDIT_ALERT_CODES);
 const LABEL_KEYS = new Set([
+  'code',
   'method',
   'route',
   'status_class',
@@ -381,11 +417,22 @@ const FIELD_CHECKS: Readonly<
   job_id: matches(ENTITY_ID),
   attempt: (v) => isInt(v, 0, 1000),
   reason_code: matches(CODE),
+  sink_id: matches(/^[a-z0-9-]{1,32}$/),
+  from_seq: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
+  bodies: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
+  withheld: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   head_seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   seq: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   rows: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   head_hash: matches(/^[0-9a-f]{64}$/),
-  reason: (v) => v === 'seq_gap' || v === 'prev_hash' || v === 'hash' || v === 'org_mismatch',
+  reason: (v) =>
+    v === 'seq_gap' ||
+    v === 'head_mismatch' ||
+    v === 'boundary_mismatch' ||
+    v === 'prev_hash' ||
+    v === 'hash' ||
+    v === 'org_mismatch' ||
+    v === 'checkpoint_pruned',
   package_key: packageKey,
   source_id: matches(ENTITY_ID),
   upstream_trace_id: matches(TRACE_ID),
@@ -503,6 +550,8 @@ export function metricLabelValueAllowed(
   routeTemplates: ReadonlySet<string>,
 ): boolean {
   switch (key) {
+    case 'code':
+      return AUDIT_CODES.has(value);
     case 'stage':
       return value === 'list' || value === 'discard';
     case 'detail':

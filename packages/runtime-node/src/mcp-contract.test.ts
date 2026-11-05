@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -96,7 +97,8 @@ runMcpContract(
         .spyOn(mcpLimit, 'createInProcessMcpLimiter')
         .mockImplementationOnce((options) => createLimiter({ ...options, nowMs: () => 0 }));
       const broker = await startNode({
-        plugins: [],
+        audit: { capacity: { maxJournalBytes: 67108864 } },
+        plugins: [auditTrail()],
         mcp: { enabled: true },
         migrations: await migrationSources(),
         env: {

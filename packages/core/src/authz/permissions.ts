@@ -55,6 +55,7 @@ export const PERMISSIONS: readonly PermissionInfo[] = Object.freeze([
   permission('org:import:write', 'Import runs: create and read', false),
   permission('org:import:approve', 'Approve and apply import runs'),
   permission('org:audit:read', 'Read organization audit records', false),
+  permission('org:audit:export', 'Export organization audit records'),
   permission('project:read', 'Read project details', false),
   permission('project:settings:write', 'Change project settings'),
   permission('project:grants:read', 'Read project grants', false),

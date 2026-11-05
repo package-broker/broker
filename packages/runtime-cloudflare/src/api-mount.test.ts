@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { sha256Hex } from '@package-broker/core/auth/primitives';
 import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
 import { readdir, readFile } from 'node:fs/promises';
@@ -385,11 +386,25 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     jobs: [],
     ownerPacket: 'T531',
   },
+
   {
-    dependency: 'audit',
-    constructed: 'audit query repository adapter',
-    routes: ['GET /_pb/audit', 'GET /_pb/audit/head', 'GET /_pb/projects/:project/audit'],
+    dependency: 'auditTrail',
+    constructed: 'composed audit trail dispatch over journal services',
+    routes: [
+      'GET /_pb/audit',
+      'GET /_pb/audit/head',
+      'GET /_pb/audit/health',
+      'GET /_pb/audit/status',
+      'GET /_pb/projects/:project/audit',
+    ],
     jobs: ['audit-seal', 'audit-verify'],
+    ownerPacket: 'T531',
+  },
+  {
+    dependency: 'auditExport',
+    constructed: 'audit export store over the audit journal, anchors and sessions',
+    routes: ['GET /_pb/audit/export'],
+    jobs: [],
     ownerPacket: 'T531',
   },
   {
@@ -504,7 +519,10 @@ describe('Workers management API mount', () => {
 
   it('refuses anonymous requests to every route in the API module table', async () => {
     const env = await environment();
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     await worker.services(env);
     expect(built.modules).toHaveLength(1);
     const routes = built.modules[0]!;
@@ -525,7 +543,10 @@ describe('Workers management API mount', () => {
 
   it('mounts every management route exactly once', async () => {
     const env = await environment();
-    const worker = createWorker([], { log: () => undefined });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: () => undefined,
+    });
     await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
     expect(built.modules).toHaveLength(1);
     const expected = built.modules[0]!.map((route) => `${route.method} ${route.path}`);
@@ -560,7 +581,10 @@ describe('Workers management API mount', () => {
 
   it('mounts the package manage routes without a rebuild route', async () => {
     const mounted = await mountedAfter(
-      createWorker([], { log: () => undefined }),
+      createWorker([auditTrail()], {
+        audit: {},
+        log: () => undefined,
+      }),
       await environment(),
     );
     for (const action of ['quarantine', 'tombstone', 'release']) {
@@ -574,7 +598,10 @@ describe('Workers management API mount', () => {
 
   it('omits the import routes and logs the reason without a blob store', async () => {
     const records: unknown[] = [];
-    const worker = createWorker([], { log: (record) => records.push({ ...record }) });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: (record) => records.push({ ...record }),
+    });
     const mounted = await mountedAfter(worker, await environment());
     expect(mounted.filter((key) => key.includes('/_pb/import-runs'))).toEqual([]);
     expect(records).toContainEqual({
@@ -601,7 +628,8 @@ describe('Workers management API mount', () => {
       DEPLOYMENT_ID: 'api-mount',
     } as unknown as Env;
     const records: unknown[] = [];
-    const worker = createWorker([], {
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       cacheStorage: {
         open: async () => ({
@@ -629,7 +657,10 @@ describe('Workers management API mount', () => {
     const env = await environment();
     built.drop = 'tokenList';
     const logged: Array<Record<string, unknown>> = [];
-    const worker = createWorker([], { log: (entry) => logged.push({ ...entry }) });
+    const worker = createWorker([auditTrail()], {
+      audit: {},
+      log: (entry) => logged.push({ ...entry }),
+    });
     const failure = await worker.services(env).then(
       () => null,
       (caught: unknown) => caught as Error,

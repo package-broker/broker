@@ -210,6 +210,7 @@ describe('runEntry', () => {
         'core:0008_registry_policy',
         'core:0009_npm_notifications',
         'core:0010_source_discovery_rules',
+        'core:0011_audit',
       ]);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
@@ -269,6 +270,7 @@ describe('runEntry', () => {
           id: 'core:0010_source_discovery_rules',
           holder,
         },
+        { level: 'info', message: 'applied core:0011_audit', id: 'core:0011_audit', holder },
       ]);
       expect(
         records.filter((record) => record['message'] === 'migration lock acquired'),
@@ -364,6 +366,7 @@ describe('runEntry', () => {
       plugins: [],
       migrations: [],
       env: {},
+      auditGeneration: 0,
       log: expect.any(Function),
       ...(observability === undefined ? {} : { observability }),
     });
@@ -385,6 +388,35 @@ describe('runEntry', () => {
     expect(options?.registry).toBe(registry);
     expect(test.exit).not.toHaveBeenCalled();
   });
+
+  it('forwards the configured audit budget to startup', async () => {
+    const { broker } = fakeBroker();
+    const test = harness(() => Promise.resolve(broker));
+    const audit = { capacity: { maxJournalBytes: 64 * 1024 * 1024 } };
+    await runEntry(Promise.resolve({ plugins: [], migrations: [], audit }), {}, test.runtime);
+    expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0].audit).toBe(audit);
+    expect(test.exit).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 17])(
+    'reads audit manifest build_generation %s with a zero fallback',
+    async (generation) => {
+      const { broker } = fakeBroker();
+      const test = harness(() => Promise.resolve(broker));
+      await runEntry(
+        Promise.resolve({
+          plugins: [],
+          migrations: [],
+          ...(generation === undefined ? {} : { audit: { build_generation: generation } }),
+        }),
+        {},
+        test.runtime,
+      );
+      expect(vi.mocked(test.runtime.start).mock.calls[0]?.[0].auditGeneration).toBe(
+        generation ?? 0,
+      );
+    },
+  );
 
   it('forwards tokens', async () => {
     const { broker } = fakeBroker();
@@ -550,6 +582,7 @@ describe('entry platform ports and failure handling', () => {
       plugins: [],
       migrations: [],
       env: {},
+      auditGeneration: 0,
       log: expect.any(Function),
       platformPorts,
     });
@@ -569,6 +602,7 @@ describe('entry platform ports and failure handling', () => {
       plugins: [],
       migrations: [],
       env: {},
+      auditGeneration: 0,
       log: expect.any(Function),
     });
   });

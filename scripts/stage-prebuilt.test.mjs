@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,7 @@ import {
   currentCommit,
   deriveWrangler,
   payloadFiles,
+  payloadDigests,
   checkReproducible,
   listFiles,
   sha256,
@@ -106,7 +108,8 @@ test('rejects differing lockfile digests', (t) => {
 
 test('reproducibility rebuilds clean directories and compares every path', (t) => {
   const f = fixture(t);
-  const result = checkReproducible(f.root, () => {
+  const result = checkReproducible(f.root, (env) => {
+    assert.match(env.SOURCE_DATE_EPOCH, /^\d+$/);
     assert.throws(() => readFileSync(join(f.node, 'server.js')), /ENOENT/);
     assert.throws(() => readFileSync(join(f.cloudflare, 'worker.js')), /ENOENT/);
     f.build();
@@ -117,10 +120,12 @@ test('reproducibility rebuilds clean directories and compares every path', (t) =
 for (const change of ['changed', 'added', 'removed'])
   test(`reproducibility detects ${change} payload files`, (t) => {
     const f = fixture(t);
+    let calls = 0;
     assert.throws(
       () =>
         checkReproducible(f.root, () => {
           f.build();
+          if (++calls === 1) return;
           if (change === 'removed') rmSync(join(f.cloudflare, 'worker.js'));
           else
             write(
@@ -238,13 +243,13 @@ test('staging reproducibility option invokes the builder and refuses differences
       builder: () => {
         calls++;
         f.build();
-        write(f.root, '.pb/cloudflare/worker.js', 'changed');
+        if (calls === 2) write(f.root, '.pb/cloudflare/worker.js', 'changed');
       },
       validateArtifact: () => assert.fail('must refuse before deployment hashing'),
     }),
     /Reproducibility digests differ:\ncloudflare\/worker.js/,
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 for (const change of [
@@ -438,3 +443,55 @@ test('validation sees only temporary payloads and a thrown error leaves both pac
   for (const pkg of ['prebuilt', 'prebuilt-cloudflare'])
     assert.deepEqual(listFiles(join(f.root, 'packages', pkg)), ['package.json']);
 });
+
+test('payload digests ignore changes to build intermediates', (t) => {
+  const f = fixture(t);
+  const before = payloadDigests(f.node);
+  for (const name of ['package.json', 'metafile.json', 'generated/manifest.ts', 'server.js.map'])
+    write(f.node, name, 'build-only bytes');
+  assert.deepEqual(payloadDigests(f.node), before);
+  write(f.node, 'generated/manifest.json', { schemaVersion: 2 });
+  assert.notDeepEqual(payloadDigests(f.node), before);
+});
+
+for (const explicit of [undefined, '1234567890', ''])
+  test(`reproducibility pins build generation and preserves explicit epoch ${JSON.stringify(explicit)}`, (t) => {
+    const f = fixture(t);
+    const previous = process.env.SOURCE_DATE_EPOCH;
+    t.after(() => {
+      if (previous === undefined) delete process.env.SOURCE_DATE_EPOCH;
+      else process.env.SOURCE_DATE_EPOCH = previous;
+    });
+    if (explicit === undefined) delete process.env.SOURCE_DATE_EPOCH;
+    else process.env.SOURCE_DATE_EPOCH = explicit;
+    const epochs = [];
+    const result = checkReproducible(f.root, (env) => {
+      epochs.push(env.SOURCE_DATE_EPOCH);
+      f.build();
+      for (const target of ['node', 'cloudflare']) {
+        write(f.root, `.pb/${target}/generated/manifest.json`, {
+          audit: { build_generation: env.SOURCE_DATE_EPOCH },
+        });
+        write(
+          f.root,
+          `.pb/${target}/${target === 'node' ? 'server' : 'worker'}.js`,
+          `export const generation = ${JSON.stringify(env.SOURCE_DATE_EPOCH)};`,
+        );
+      }
+    });
+    assert.equal(epochs.length, 2);
+    assert.equal(epochs[0], epochs[1]);
+    assert.equal(
+      epochs[0],
+      explicit ?? execFileSync('git', ['log', '-1', '--format=%ct'], { encoding: 'utf8' }).trim(),
+    );
+    assert.deepEqual(result.before, result.after);
+    for (const path of [
+      'node/server.js',
+      'cloudflare/worker.js',
+      'node/generated/manifest.json',
+      'cloudflare/generated/manifest.json',
+    ])
+      assert.ok(result.before[path]);
+    assert.equal(process.env.SOURCE_DATE_EPOCH, explicit);
+  });

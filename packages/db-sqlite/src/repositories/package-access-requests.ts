@@ -1,5 +1,6 @@
-import { validateAuditEvent, withPackageAuditName } from '@package-broker/core/audit/actions';
+import { withPackageAuditName } from '@package-broker/core/audit/actions';
 import { sql, type Selectable, type SqlBool } from 'kysely';
+import { displayName, packageKey } from '@package-broker/core/catalogue/names';
 import { redactValue } from '@package-broker/core/audit/redact';
 import {
   fenceKind,
@@ -26,11 +27,12 @@ import {
 import type { PackageAccessRequestTable } from '../schema.js';
 import { monotonicNow } from '../internal/catalogue-write-guard.js';
 import { actorHolds } from './actor-authority.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditPendingStatement, auditOperationStatement } from './audit-pending.js';
 import { explicitPackageStatement } from './visibility-subset.js';
 
 type Row = Selectable<PackageAccessRequestTable> & {
   package_name: string;
+  ecosystem: 'npm' | 'composer';
   project_slug: string;
   project_name: string;
   requester_name: string | null;
@@ -84,12 +86,20 @@ function read(ctx: OrgContext) {
     .selectAll('ar')
     .select([
       'ap.name as package_name',
+      'ap.ecosystem',
       'aj.slug as project_slug',
       'aj.name as project_name',
       'au.display_name as requester_name',
       'ad.display_name as decider_name',
     ])
     .where('ar.org_id', '=', ctx.orgId);
+}
+
+function auditPackageName(key: string, ecosystem: 'npm' | 'composer'): string {
+  const name = displayName(key);
+  if (packageKey(name, { ecosystem, legacyCase: ecosystem === 'npm' }) !== key)
+    throw new PackageAccessRequestError('invalid_request');
+  return name;
 }
 
 function page(input: AccessRequestPage) {
@@ -222,18 +232,19 @@ export function createPackageAccessRequestRepository(
         input.projectId,
         input.requestedByUserId,
       );
-      const [pkg] = await executor.all<{ name: string }>(
+      const [pkg] = await executor.all<{ name: string; ecosystem: 'npm' | 'composer' }>(
         compile(
           db
             .selectFrom('package')
-            .select('name')
+            .select(['name', 'ecosystem'])
             .where('org_id', '=', ctx.orgId)
             .where('id', '=', input.packageId),
         ),
       );
+      if (pkg === undefined) throw new PackageAccessRequestError('forbidden');
       let event;
       try {
-        event = withPackageAuditName(input.event, pkg?.name ?? '');
+        event = withPackageAuditName(input.event, auditPackageName(pkg.name, pkg.ecosystem));
       } catch {
         throw new PackageAccessRequestError('invalid_request');
       }
@@ -329,7 +340,8 @@ export function createPackageAccessRequestRepository(
       }
       const [authorization] = await executor.all<{ failed: number }>(probe(held));
       if (authorization?.failed !== 0) throw new PackageAccessRequestError('forbidden');
-      const row = await get(ctx, input.id);
+      const [stored] = await executor.all<Row>(compile(read(ctx).where('ar.id', '=', input.id)));
+      const row = stored === undefined ? null : mapped(stored);
       if (row === null) throw new PackageAccessRequestError('not_found');
       const ready = sql<SqlBool>`exists (select 1 from package_access_request as deciding where deciding.org_id = ${ctx.orgId}
         and deciding.id = ${input.id} and deciding.state = 'pending' and deciding.revision = ${input.expectedRevision}
@@ -361,13 +373,24 @@ export function createPackageAccessRequestRepository(
       );
       let event;
       try {
-        event = validateAuditEvent(input.event);
+        event = withPackageAuditName(
+          input.event,
+          auditPackageName(stored!.package_name, stored!.ecosystem),
+        );
       } catch {
         throw new PackageAccessRequestError('invalid_request');
       }
       const mutations = [
         update,
-        auditPendingStatement(ctx, event, { sql: 'changes() = 1', params: [] }),
+        auditOperationStatement(
+          ctx,
+          event,
+          {
+            sql: "EXISTS (SELECT 1 FROM package_access_request WHERE org_id=? AND id=? AND revision=? AND state IN ('rejected','expired'))",
+            params: [ctx.orgId, input.id, input.expectedRevision + 1],
+          },
+          { sql: 'changes() = 1', params: [] },
+        ),
       ];
       if (input.state === 'approved')
         mutations.push(

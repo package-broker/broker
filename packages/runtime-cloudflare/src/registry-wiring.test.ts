@@ -1,3 +1,4 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { jobNotification } from './jobs/consumer.js';
 import type { SourceProvider } from '@package-broker/core/sources/provider';
 import type { PluginDefinition } from '@package-broker/core/plugin';
@@ -462,7 +463,8 @@ async function boot(
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
   };
-  const worker = createWorker(options.vcs ? [vcsPlugin] : [], {
+  const worker = createWorker([auditTrail(), ...(options.vcs ? [vcsPlugin] : [])], {
+    audit: {},
     platformPorts,
     cacheStorage,
     log: (record) => void events.push(record),
@@ -815,7 +817,8 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     const prepare = vi.fn(() => {
       throw new Error('unexpected database query');
     });
-    const worker = createWorker([], {
+    const worker = createWorker([auditTrail()], {
+      audit: {},
       platformPorts,
       cacheStorage,
       log: () => undefined,
@@ -843,8 +846,18 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
 
   it('fails startup when registry config is set without platformPorts or a database', async () => {
     const registry = { timers: { metadataTtlSeconds: 120 } };
-    const bare = createWorker([], { registry, log: () => undefined });
-    const noDb = createWorker([], { platformPorts, cacheStorage, registry, log: () => undefined });
+    const bare = createWorker([auditTrail()], {
+      audit: {},
+      registry,
+      log: () => undefined,
+    });
+    const noDb = createWorker([auditTrail()], {
+      audit: {},
+      platformPorts,
+      cacheStorage,
+      registry,
+      log: () => undefined,
+    });
     for (const worker of [bare, noDb]) {
       const response = await worker.fetch(request('/health/live'), { PB_MASTER_KEY: KEY });
       expect(response.status).toBe(503);

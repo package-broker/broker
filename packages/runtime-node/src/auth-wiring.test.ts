@@ -1,11 +1,11 @@
+import { auditTrail } from './audit-trail.test.support.js';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { Server } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
@@ -20,10 +20,8 @@ import {
   generateMasterKey,
   parseMasterKey,
 } from '@package-broker/core/secrets/master-key';
-import {
-  loadMigrationSource,
-  type MigrationSource,
-} from '@package-broker/db-sqlite/migrations/source';
+import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
+import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import { openBetterSqliteExecutor } from './db/better-sqlite3-executor.js';
@@ -80,19 +78,8 @@ const SENTINEL = 'SENTINEL_PROVIDER_FAILURE_7f3a';
 const PASSWORD = 'correct horse battery staple 42';
 const EMAIL = 'admin@example.test';
 
-const require = createRequire(import.meta.url);
-const migrationsDirectory = join(
-  dirname(require.resolve('@package-broker/db-sqlite/package.json')),
-  'migrations',
-);
-
 async function migrationSources(): Promise<MigrationSource[]> {
-  const names = ['0001_init.sql'];
-  return Promise.all(
-    names.map(async (name) =>
-      loadMigrationSource('core', name, await readFile(join(migrationsDirectory, name), 'utf8')),
-    ),
-  );
+  return discoveredMigrations();
 }
 
 function plugin(overrides: Partial<PluginDefinition> = {}): PluginDefinition {
@@ -176,7 +163,7 @@ describe('node auth wiring', () => {
         handler: () => new Response('ok'),
       });
     });
-    const broker = createNodeServer([plugin({ register })], {
+    const broker = createNodeServer([plugin({ register }), auditTrail()], {
       auth: {
         keyring: createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]),
         publicOrigin: 'http://127.0.0.1',
@@ -245,7 +232,8 @@ describe('node auth wiring', () => {
     capture?: unknown[],
   ): Promise<NodeBroker> {
     const broker = await startNode({
-      plugins,
+      audit: { capacity: { maxJournalBytes: 67108864 } },
+      plugins: [...plugins, auditTrail()],
       ...(capture === undefined
         ? {}
         : {
@@ -564,7 +552,8 @@ describe('node auth wiring', () => {
     async (setting, warns) => {
       const records: Array<Readonly<Record<string, unknown>>> = [];
       const broker = await startNode({
-        plugins: [],
+        audit: { capacity: { maxJournalBytes: 67108864 } },
+        plugins: [auditTrail()],
         migrations: await migrationSources(),
         env: env({ PB_TRUSTED_PROXY: setting }),
         log: (entry) => records.push(entry),
@@ -985,7 +974,7 @@ describe('node auth wiring', () => {
 
   describe('createNodeServer', () => {
     function bare(options: Parameters<typeof createNodeServer>[1] = {}): NodeBroker {
-      const broker = createNodeServer([], { log: () => undefined, ...options });
+      const broker = createNodeServer([auditTrail()], { log: () => undefined, ...options });
       running.push(broker);
       return broker;
     }
@@ -1098,7 +1087,7 @@ describe('node auth wiring', () => {
 
     it('10: a kernel build failure answers 503 misconfigured on GET and without a body on HEAD', async () => {
       const broken = plugin({ apiVersion: 999 as PluginDefinition['apiVersion'] });
-      const unusable = createNodeServer([broken], { log: () => undefined });
+      const unusable = createNodeServer([broken, auditTrail()], { log: () => undefined });
       running.push(unusable);
       await rejection(unusable.ready());
       const handle = handlers.captured.at(-1);
@@ -1119,7 +1108,7 @@ describe('node auth wiring', () => {
 
     it('11: the same 503 reaches a real client on GET and HEAD', async () => {
       const unusable = createNodeServer(
-        [plugin({ apiVersion: 999 as PluginDefinition['apiVersion'] })],
+        [plugin({ apiVersion: 999 as PluginDefinition['apiVersion'] }), auditTrail()],
         {
           log: () => undefined,
         },

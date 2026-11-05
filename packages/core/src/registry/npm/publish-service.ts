@@ -1,9 +1,5 @@
-import {
-  deprecationChanges,
-  deprecationAuditText,
-  ManifestUpdate,
-  type DeprecationStore,
-} from './deprecate.js';
+import { sha256Hex } from '../../auth/primitives.js';
+import { deprecationChanges, ManifestUpdate, type DeprecationStore } from './deprecate.js';
 import { manifest } from './render.js';
 import { removedVersions, type UnpublishStore } from './unpublish.js';
 import { validDistTag } from './dist-tags.js';
@@ -284,49 +280,39 @@ export function createPublishService(deps: PublishServiceDeps) {
             },
           };
           const opId = ulid();
-          const changes = deprecationChanges(before, error.metadata).map((change) => {
-            const version = snapshot.versions.find((v) => v.version === change.version)!;
-            const eventInput: AuditEventInput = {
-              id: ulid(),
-              now,
-              action: 'package.deprecate',
-              actor: {
-                type: ctx.principal!.kind === 'service' ? 'service_principal' : 'user',
-                id: ctx.principal!.id,
-              },
-              context: {
-                opId,
-                requestId: ctx.requestId,
-                sourceIp: null,
-                tokenSelector: selector,
-              },
-              target: { type: 'version', id: version.id },
-              projectId: ctx.projectId,
-              changes: {
-                version: { new: change.version },
-                deprecated: {
-                  old: change.old,
-                  new: change.message,
+          const changes = await Promise.all(
+            deprecationChanges(before, error.metadata).map(async (change) => {
+              const version = snapshot.versions.find((v) => v.version === change.version)!;
+              const eventInput: AuditEventInput = {
+                id: ulid(),
+                now,
+                action: 'package.deprecate',
+                actor: {
+                  type: ctx.principal!.kind === 'service' ? 'service_principal' : 'user',
+                  id: ctx.principal!.id,
                 },
-              },
-            };
-            let event = auditEvent(eventInput);
-            if (!event.ok && event.reason === 'too_large') {
-              event = auditEvent({
-                ...eventInput,
+                context: {
+                  opId,
+                  requestId: ctx.requestId,
+                  sourceIp: null,
+                  tokenSelector: selector,
+                },
+                target: { type: 'version', id: version.id },
+                projectId: ctx.projectId,
                 changes: {
                   version: { new: change.version },
-                  deprecated: {
-                    old: deprecationAuditText(change.old),
-                    new: deprecationAuditText(change.message),
+                  deprecated_sha256: {
+                    old: change.old === null ? null : await sha256Hex(change.old),
+                    new: await sha256Hex(change.message),
                   },
-                  deprecated_encoding: { new: 'base64-utf8' },
+                  deprecated: { old: Boolean(change.old), new: change.message !== '' },
                 },
-              });
-            }
-            if (!event.ok) throw new PublishValidationError('invalid_deprecation');
-            return { ...change, event: event.event };
-          });
+              };
+              const event = auditEvent(eventInput);
+              if (!event.ok) throw new PublishValidationError('invalid_deprecation');
+              return { ...change, event: event.event };
+            }),
+          );
           try {
             await deps.deprecations.update(
               org,
@@ -485,6 +471,7 @@ export function createPublishService(deps: PublishServiceDeps) {
       response.headers.set('x-request-id', ctx.requestId);
       return response;
     } catch (error) {
+      if (error instanceof DbError && error.kind === 'backlog_full') throw error;
       if (stagingFailure instanceof BlobTooLargeError || error instanceof BlobTooLargeError)
         return publishError(ctx, 413, 'tarball_too_large');
       if (
@@ -622,6 +609,7 @@ export function createDistTagService(deps: PublishServiceDeps) {
         event: event.event,
       });
     } catch (error) {
+      if (error instanceof DbError && error.kind === 'backlog_full') throw error;
       if (
         error instanceof DbError &&
         error.kind === 'unique' &&
@@ -799,6 +787,7 @@ export function createUnpublishService(deps: PublishServiceDeps) {
         event: event.event,
       });
     } catch (error) {
+      if (error instanceof DbError && error.kind === 'backlog_full') throw error;
       if (
         error instanceof DbError &&
         error.kind === 'unique' &&

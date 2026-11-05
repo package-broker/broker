@@ -1,3 +1,4 @@
+import type {} from '../fixture.js';
 import { auditDestinationNames, AUDIT_OTEL_ENDPOINTS } from '../destinations.js';
 import { isPrivateHost, isAuditDeniedHost } from '../../platform/private-host.js';
 import { classifyAddress } from '../../sources/url-policy.js';
@@ -5,7 +6,7 @@ import { AuditSinkConfigError } from '../plugin-api.js';
 import type { AuditBoundFetch, AuditDestinationSpec, AuditSinkErrorCode } from '../plugin-api.js';
 
 const DEFAULT_TIMEOUT_MS = 1500;
-const MAX_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS = import.meta.pbAuditFixture ? 90_000 : 10_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const DENIED_HEADERS = new Set([
@@ -329,6 +330,10 @@ export async function resolveAuditDestination(
   readonly receiverFingerprint: string;
   readonly activationSource: string;
 } | null> {
+  // eslint-disable-next-line no-unused-labels -- The production build drops this labeled block.
+  PB_AUDIT_FIXTURE: {
+    if (import.meta.pbAuditFixture) options = globalThis.__pbAuditFixture.transport(options);
+  }
   const { destination, env } = options;
   let resolved: AuditOtelEnvironment | null;
   if (destination.protocol === 'otlp-http-json') {
@@ -354,7 +359,11 @@ export async function resolveAuditDestination(
     if (options.activation === 'build') throw new AuditSinkConfigError('invalid_endpoint');
     return null;
   }
-  const boundFetch = createAuditBoundFetch({ ...options, ...resolved });
+  const boundFetch = createAuditBoundFetch({
+    ...options,
+    ...resolved,
+    ...(import.meta.pbAuditFixture ? { timeoutMs: 90_000 } : {}),
+  });
   // Credentials are deliberately excluded: rotating them does not change the receiver.
   const canonical = endpoint(
     resolved.endpoint,

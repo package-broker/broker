@@ -196,6 +196,46 @@ export const releaseScenarios: readonly Scenario[] = [
       return onBothRuntimes(auditScenario);
     },
   },
+  {
+    id: 'audit-delivery',
+    layer: 'L',
+    async run() {
+      const { auditDeliveryScenario } = (await import(
+        compiled('audit-delivery.spec.js')
+      )) as typeof import('./audit-delivery.spec.js');
+      return onBothRuntimes(auditDeliveryScenario);
+    },
+  },
+  {
+    id: 'audit-retention',
+    layer: 'L',
+    async run() {
+      const { auditRetentionScenario } = (await import(
+        compiled('audit-retention.spec.js')
+      )) as typeof import('./audit-retention.spec.js');
+      return onBothRuntimes(auditRetentionScenario);
+    },
+  },
+  ...(['tooling', 'frontier'] as const).map((detection) => ({
+    id: `audit-restore-${detection}`,
+    layer: 'L' as const,
+    async run() {
+      const { auditRestoreScenario } = (await import(
+        compiled('audit-restore.spec.js')
+      )) as typeof import('./audit-restore.spec.js');
+      return onBothRuntimes((runtime) => auditRestoreScenario(runtime, detection));
+    },
+  })),
+  {
+    id: 'audit-required',
+    layer: 'L',
+    async run() {
+      const { auditRequiredScenario } = (await import(
+        compiled('audit-required.spec.js')
+      )) as typeof import('./audit-required.spec.js');
+      return onBothRuntimes(auditRequiredScenario);
+    },
+  },
 ];
 export const releaseRequirements: Requirements = Object.fromEntries(
   layers.map((layer) => [layer, requiredScenarioIds(layer)]),

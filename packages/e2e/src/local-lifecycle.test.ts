@@ -104,6 +104,13 @@ describe('Cloudflare launcher lifecycle', () => {
         .bind('acme')
         .all();
       expect(results).toHaveLength(1);
+      expect(broker.databaseControl.path).toBe(instance.database);
+      expect(broker.databaseControl.orgId).toBe(results[0]!['id']);
+      expect(
+        await broker.databaseControl.sql.all('SELECT id FROM organization WHERE id = ?', [
+          broker.databaseControl.orgId,
+        ]),
+      ).toEqual(results);
       expect(
         await broker.read('SELECT COUNT(*) AS count FROM user_account WHERE org_id = ?', [
           String(results[0]!['id']),

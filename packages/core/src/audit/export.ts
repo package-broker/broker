@@ -1,3 +1,4 @@
+import type {} from './fixture.js';
 import { raiseAuditAlert, type AuditHealthPort } from './health.js';
 import type { SystemMutationFence } from '../authz/fence.js';
 import type { OrgContext } from '../db/port.js';
@@ -686,10 +687,26 @@ export async function exportAuditBatch(
         markersOnly ? rest : { ...rest, purpose: tail ? 'events' : 'idle' },
       ),
     };
-    const saved = await reconciling.save(org, fence, snapshot, next, options.generation, {
-      durableAck,
-      capacity,
-    });
+    let refused = false;
+    // eslint-disable-next-line no-unused-labels -- The production build drops this labeled block.
+    PB_AUDIT_FIXTURE: {
+      if (import.meta.pbAuditFixture && durableAck) {
+        const fault = await globalThis.__pbAuditFixture.beforeSave(sending.id);
+        if (fault === 'crash') throw new Error('FixtureAckCrash');
+        refused = fault === 'cas';
+      }
+    }
+    const saved = refused
+      ? false
+      : await reconciling.save(org, fence, snapshot, next, options.generation, {
+          durableAck,
+          capacity,
+        });
+    // eslint-disable-next-line no-unused-labels -- The production build drops this labeled block.
+    PB_AUDIT_FIXTURE: {
+      if (import.meta.pbAuditFixture)
+        await globalThis.__pbAuditFixture.afterSave(fence.job.id, sending.id, saved);
+    }
     if (saved && result.outcome === 'accepted_with_warning') options.warning?.(result.code);
     return saved ? 'accepted' : 'contended';
   }

@@ -387,6 +387,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     target: 'es2022',
     platform: target === 'cloudflare' ? 'neutral' : 'node',
     conditions: target === 'cloudflare' ? ['workerd', 'worker', 'browser'] : [],
+    dropLabels: process.env['PB_E2E_AUDIT_FIXTURE'] === '1' ? [] : ['PB_AUDIT_FIXTURE'],
+    define: {
+      'import.meta.pbAuditFixture': process.env['PB_E2E_AUDIT_FIXTURE'] === '1' ? 'true' : 'false',
+    },
     external:
       target === 'cloudflare'
         ? ['cloudflare:*', 'node:async_hooks', 'node:buffer', 'node:zlib']

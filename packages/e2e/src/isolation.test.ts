@@ -1,4 +1,8 @@
+import { auditRestoreScenario } from './audit-restore.spec.js';
+import { auditRequiredScenario, requiredAuditCases } from './audit-required.spec.js';
+import { auditRetentionScenario } from './audit-retention.spec.js';
 import { describe, expect, it, vi } from 'vitest';
+import { auditDeliveryScenario } from './audit-delivery.spec.js';
 import { anchoredBreak, auditHash, auditLogs, auditScenario } from './audit.spec.js';
 import type { AuditRecord, HeadAnchor } from './audit.spec.js';
 import {
@@ -309,6 +313,14 @@ describe('security scenario availability', () => {
   it.each([
     ['authz-project-isolation', isolationScenario],
     ['audit-integrity', auditScenario],
+    ['audit-delivery', auditDeliveryScenario],
+    ['audit-retention', auditRetentionScenario],
+    ['audit-restore-tooling', (runtime: local.Runtime) => auditRestoreScenario(runtime, 'tooling')],
+    [
+      'audit-restore-frontier',
+      (runtime: local.Runtime) => auditRestoreScenario(runtime, 'frontier'),
+    ],
+    ['audit-required', auditRequiredScenario],
   ] as const)('%s reports unavailable listeners as NOT RUN', async (_id, run) => {
     const probe = vi
       .spyOn(local, 'reserveLoopbackPort')
@@ -333,6 +345,26 @@ describe('security oracles on production bundles', () => {
           '(needs an SSO identity; local accounts hold only the organization admin role).',
       });
     }, 300_000);
+    it(`${runtime}: audit delivery, recovery and sink lifecycle`, async () => {
+      const result = await auditDeliveryScenario(runtime);
+      expect(result.status, result.reason).toBe('PASS');
+    }, 600_000);
+    it(`${runtime}: audit retention, cutover and capacity loss`, async () => {
+      const result = await auditRetentionScenario(runtime);
+      expect(result.status, result.reason).toBe('PASS');
+    }, 300_000);
+    for (const detection of ['tooling', 'frontier'] as const)
+      it(`${runtime}: audit restore detected by ${detection} blocks sinks until confirmation`, async () => {
+        const result = await auditRestoreScenario(runtime, detection);
+        expect(result.status, result.reason).toBe('PASS');
+      }, 300_000);
+    it.each(requiredAuditCases)(
+      `${runtime}: %s`,
+      async (_label, run) => {
+        await run(runtime);
+      },
+      300_000,
+    );
     it(`${runtime}: audit tamper positions and external head anchor`, async () => {
       const result = await auditScenario(runtime);
       expect(result.status, result.reason).toBe('PASS');

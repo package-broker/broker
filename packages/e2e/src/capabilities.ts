@@ -26,7 +26,7 @@ function capability(definition: CapabilityDefinition): Capability {
   return { ...definition, layers: [...new Set(Object.values(definition.gate).flat())] };
 }
 
-// One entry per row of e2e-release-testing.md section 4, in table order.
+// Entries follow e2e-release-testing.md section 4, with the G40a–d audit gates.
 export const capabilities: readonly Capability[] = [
   capability({
     id: 'artifact-portability',
@@ -446,11 +446,45 @@ export const capabilities: readonly Capability[] = [
     gate: { M: ['U', 'L'], R: ['C', 'H'] },
   }),
   capability({
+    id: 'audit-delivery',
+    group: 'Audit',
+    scenario:
+      'audit sink ACK persistence, lease fencing, partial success, skips, late originals and lifecycle on both runtimes',
+    gate: { M: ['L'] },
+  }),
+  capability({
     id: 'audit-integrity',
     group: 'Audit',
     scenario:
       'business effect and pending audit atomic; sealing ordered and idempotent; mutation, deletion, reorder and anchored truncation detected with the first invalid position',
     gate: { M: ['U', 'L'], R: ['C', 'H'] },
+  }),
+  capability({
+    id: 'audit-retention',
+    group: 'Audit',
+    scenario:
+      'stale sealers cannot reuse pruned sequences; trail toggles fence cutover on durable custody; capacity eviction records and delivers gaps; none retains history without a verified export',
+    gate: { M: ['L'] },
+  }),
+  capability({
+    id: 'audit-restore-tooling',
+    group: 'Audit',
+    scenario: 'tooling restore blocks both sinks until explicit confirmation and replay',
+    gate: { M: ['L'] },
+  }),
+  capability({
+    id: 'audit-restore-frontier',
+    group: 'Audit',
+    scenario:
+      'receiver frontier detects rollback and blocks both sinks until explicit confirmation',
+    gate: { M: ['L'] },
+  }),
+  capability({
+    id: 'audit-required',
+    group: 'Audit',
+    scenario:
+      'required policy reserves authentication and audit controls while refusing unsafe writes',
+    gate: { M: ['L'] },
   }),
   capability({
     id: 'd1-bindings',

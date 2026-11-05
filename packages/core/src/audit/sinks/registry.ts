@@ -1,3 +1,4 @@
+import type {} from '../fixture.js';
 import type { OrgContext } from '../../db/port.js';
 import { assertPluginId } from '../../platform/jobs.js';
 import { auditWireMarker } from '../wire.js';
@@ -132,6 +133,11 @@ export async function reconcileAuditSinks(
   configured: readonly AuditSinkRegistration[],
   now: Date,
 ): Promise<'applied' | 'stale' | 'contended'> {
+  // eslint-disable-next-line no-unused-labels -- The production build drops this labeled block.
+  PB_AUDIT_FIXTURE: {
+    if (import.meta.pbAuditFixture)
+      configured = await globalThis.__pbAuditFixture.registry(configured);
+  }
   validate(generation, configured);
   const timestamp = now.toISOString();
   const snapshot = await port.read(ctx);

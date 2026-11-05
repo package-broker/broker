@@ -42,7 +42,8 @@ export interface RetentionBroker extends Omit<
   LocalBroker,
   'databaseSnapshot' | 'confirmAuditRestore'
 > {
-  staleSeal(): Promise<{ release(): void; settled: Promise<StaleSealOutcome> }>;
+  prepareAuditRace(): Promise<void>;
+  staleSeal(): Promise<StaleSealOutcome>;
   fillCapacity(bytes: number): Promise<void>;
   configure(values: Record<string, string>): Promise<void>;
   fixture(sql: string, params: (string | number | null)[]): Promise<void>;
@@ -136,10 +137,7 @@ export async function startRetentionLocal(
     const copy = join(directory, 'bundle');
     await cp(output, copy, { recursive: true });
     const script = join(copy, entry);
-    await writeFile(
-      script,
-      retentionBundle(injectSourcePollClock(await readFile(script, 'utf8')), runtime),
-    );
+    await writeFile(script, retentionBundle(injectSourcePollClock(await readFile(script, 'utf8'))));
     if (options.patchBundle)
       await writeFile(script, options.patchBundle(await readFile(script, 'utf8')));
     if (options.removeWebhook) {
@@ -476,47 +474,40 @@ syncBuiltinESMExports();
       ...(options.reader
         ? { readerSetupToken: (await readFile(readerTokenFile, 'utf8')).trim() }
         : {}),
+      databaseControl: { path: database, orgId: pinnedOrgId, sql: sqlPort },
       logs: () => logs,
       secrets: () => [masterKey, 'admin@example.test'],
       read,
+      async prepareAuditRace() {
+        const tick = async () => {
+          if (worker)
+            await (
+              await worker.getWorker()
+            ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
+        };
+        await tick();
+        await sqlPort.run(
+          "UPDATE job_schedule SET next_run_at = '2099-01-01T00:00:00.000Z' WHERE org_id = ?",
+          [pinnedOrgId],
+        );
+        await until(async () => {
+          await tick();
+          const [row] = await read<{ count: number }>(
+            "SELECT count(*) AS count FROM job WHERE org_id = ? AND type LIKE 'core:audit-%' AND state IN ('queued', 'running')",
+            [pinnedOrgId],
+          );
+          return row?.count === 0;
+        }, 'retention-race-jobs-drained');
+      },
       async staleSeal() {
-        const control = (operation: 'capture' | 'release') =>
-          fetch(origin + '/__fixture/stale-seal', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ orgId: pinnedOrgId, operation }),
-            signal: AbortSignal.timeout(30_000),
-          });
-        let captured = false;
-        for (let attempt = 0; attempt < 3 && !captured; attempt++) {
-          const db = new DatabaseSync(database, { timeout: 5000 });
-          try {
-            const result = db
-              .prepare(
-                `INSERT INTO audit_pending (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip, action, target_type, target_id, project_id, payload_json)
-              SELECT ?, org_id, created_at, 'system', NULL, NULL, NULL, action, target_type, target_id, project_id, payload_json
-              FROM audit_event WHERE org_id = ? AND action = 'project.create' LIMIT 1`,
-              )
-              .run('01' + randomBytes(12).toString('hex').toUpperCase(), pinnedOrgId);
-            assert(Number(result.changes) === 1, 'StaleSealTemplateMissing');
-          } finally {
-            db.close();
-          }
-          const response = await control('capture');
-          assert(response.status === 200 || response.status === 409, 'StaleSealCaptureFailed');
-          captured = response.ok;
-        }
-        assert(captured, 'StaleSealDidNotPause');
-        let release!: () => void;
-        const gate = new Promise<void>((resolve) => {
-          release = resolve;
+        const response = await fetch(origin + '/__fixture/stale-seal', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ orgId: pinnedOrgId }),
+          signal: AbortSignal.timeout(30_000),
         });
-        const settled = gate.then(async () => {
-          const response = await control('release');
-          assert(response.ok, 'StaleSealReleaseFailed');
-          return (await response.json()) as StaleSealOutcome;
-        });
-        return { release, settled };
+        assert(response.ok, 'StaleSealRaceFailed');
+        return (await response.json()) as StaleSealOutcome;
       },
       async fillCapacity(bytes) {
         const db = new DatabaseSync(database, { timeout: 5000 });

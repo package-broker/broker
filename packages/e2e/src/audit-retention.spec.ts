@@ -125,7 +125,6 @@ export async function auditRetentionScenario(runtime: Runtime): Promise<Scenario
   let broker: RetentionBroker | undefined;
   let sink: Awaited<ReturnType<typeof receiver>> | undefined;
   let stage = 'startup';
-  let stale: Awaited<ReturnType<RetentionBroker['staleSeal']>> | undefined;
   const deadline = Date.now() + 270_000;
   const headerCanary = randomBytes(24).toString('hex');
   try {
@@ -285,34 +284,29 @@ https.request = (options) => {
     await job('seal');
 
     stage = 'stale-sealer-after-prune';
+    await local.prepareAuditRace();
     await project('retention-stale');
-    stale = await local.staleSeal();
-    await job('seal');
-    const sealed = await chain();
     sink.accept(true);
-    await retryNow();
-    await job('export-webhook');
-    const [ack] = await local.read<{ progress_seq: number; custody_seq: number }>(
-      'SELECT progress_seq, custody_seq FROM audit_sink WHERE org_id = ? AND sink_id = ?',
-      [orgId, 'webhook'],
-    );
+    const race = await local.staleSeal();
+    const sealed = race.sealed;
+    assert.equal(race.winner, 'sealed', 'CompetingSealerDidNotWrite');
+    assert.equal(race.delivered, 'accepted', 'CompetingSealerNotDelivered');
     assert(
-      ack && ack.progress_seq >= sealed.head_seq && ack.custody_seq >= sealed.head_seq,
+      race.ack.progress_seq >= sealed.head_seq && race.ack.custody_seq >= sealed.head_seq,
       'DurableCustodyMissing',
     );
-    await job('maintain');
-    const pruned = await chain();
+    const pruned = race.pruned;
     assert(
-      pruned.boundary_seq > initial.boundary_seq &&
-        pruned.mode === 'export' &&
-        pruned.pending_mode === null,
+      race.prune === 'pruned' &&
+        pruned.boundary_seq > initial.boundary_seq &&
+        pruned['mode'] === 'export' &&
+        pruned['pending_mode'] === null,
       'CutoverNotCompleted',
     );
-    stale.release();
-    const outcome = await stale.settled;
-    stale = undefined;
-    assert(outcome.outcome === 'contended', 'StaleSealerWasNotRefused');
-    assert((await chain()).head_seq === pruned.head_seq, 'StaleSealerMovedHead');
+    assert.equal(race.attempted, 1, 'StaleSealerDidNotAttemptBatch');
+    assert.equal(race.outcome, 'contended', 'StaleSealerWasNotRefused');
+    assert.deepEqual(race.afterStale, pruned, 'StaleSealerMovedChain');
+    assert.equal((await chain()).head_seq, pruned.head_seq, 'StaleSealerMovedHead');
     await project('retention-after-prune');
     await job('seal');
     const after = await chain();
@@ -418,10 +412,6 @@ https.request = (options) => {
       reason: `${runtime}: audit-retention:${stage} (${failureName(error)})`,
     };
   } finally {
-    if (stale) {
-      stale.release();
-      await stale.settled.catch(() => undefined);
-    }
     await broker?.close();
     await sink?.close();
     if (directory) await rm(directory, { recursive: true, force: true });

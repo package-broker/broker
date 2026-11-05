@@ -498,6 +498,7 @@ export interface LocalBroker {
   publicOrigin: string;
   setupToken: string;
   readerSetupToken?: string;
+  databaseControl: { path: string; orgId: string; sql: SqlPort };
   logs: () => string;
   secrets: () => readonly string[];
   read<T extends Record<string, unknown>>(sql: string, params?: (string | number)[]): Promise<T[]>;
@@ -932,6 +933,7 @@ syncBuiltinESMExports();
       ...(options.reader && !options.databaseSnapshot
         ? { readerSetupToken: (await readFile(readerTokenFile, 'utf8')).trim() }
         : {}),
+      databaseControl: { path: database, orgId: pinnedOrgId, sql: sqlPort },
       logs: () => logs,
       secrets: () => [masterKey, 'admin@example.test'],
       read,

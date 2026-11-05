@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { RestoreReceiver } from './audit-restore.spec.js';
+import { assertRestoreReplay, RestoreReceiver } from './audit-restore.spec.js';
 import { infrastructureOperations, snapshotLocalDatabase } from './local.js';
 
 const chainId = 'a'.repeat(32);
@@ -129,6 +129,94 @@ describe('restore receiver evidence', () => {
     expect(() => receiver.receive('/unexpected', envelope([]))).toThrow('UnexpectedReceiverPath');
     expect(receiver.deliveries).toHaveLength(1);
   });
+});
+
+describe('restore replay suffix oracle', () => {
+  const retained = {
+    id: 'retained',
+    seq: 5,
+    hash: 'a'.repeat(64),
+    prev_hash: hash,
+    action: 'project.create',
+    target_id: 'old-project',
+  };
+  const confirmation = {
+    id: 'confirmation',
+    seq: 6,
+    hash: 'b'.repeat(64),
+    prev_hash: retained.hash,
+    action: 'audit.sink_admin',
+  };
+  const created = {
+    id: 'new-event',
+    seq: 7,
+    hash: 'c'.repeat(64),
+    prev_hash: confirmation.hash,
+    action: 'project.create',
+    target_id: 'restore-resumed-id',
+  };
+  const expected = [retained, confirmation, created];
+  it.each(['webhook', 'otlp'])(
+    '%s requires the exact new event and the entire ordered replay suffix',
+    (sink) => {
+      const received = (records: Record<string, unknown>[]) => {
+        const receiver = new RestoreReceiver();
+        receiver.pin('restore-org');
+        const value = envelope(
+          records.map((record) => ({ kind: 'event', ...record })),
+          1,
+        );
+        if (sink === 'webhook') receiver.receive('/audit', value);
+        else {
+          const attributes = (fields: Record<string, unknown>) =>
+            Object.entries(fields).map(([key, value]) => ({
+              key: `pb.audit.${key}`,
+              value: { stringValue: String(value) },
+            }));
+          receiver.receive('/otlp', {
+            resourceLogs: [
+              {
+                resource: {
+                  attributes: attributes({
+                    chain_id: chainId,
+                    org_id: 'restore-org',
+                    epoch: 1,
+                    through_seq: created.seq,
+                    through_hash: created.hash,
+                  }),
+                },
+                scopeLogs: [
+                  {
+                    logRecords: value.records.map((record) => ({ attributes: attributes(record) })),
+                  },
+                ],
+              },
+            ],
+          });
+        }
+        return (sink === 'webhook' ? receiver.deliveries : receiver.otlp).flatMap(
+          (batch) => batch.records,
+        );
+      };
+      const check = (records: Record<string, unknown>[]) =>
+        assertRestoreReplay(received(records), expected, created);
+      expect(() => check(expected)).not.toThrow();
+      expect(() => check([retained, confirmation])).toThrow('MissingNewRestoreEvent');
+      for (const mutation of [
+        { id: retained.id },
+        { seq: 8 },
+        { hash },
+        { target_id: retained.target_id },
+      ]) {
+        expect(() => check([retained, confirmation, { ...created, ...mutation }])).toThrow(
+          'MissingNewRestoreEvent',
+        );
+      }
+      expect(() => check([confirmation, created])).toThrow('RestoreReplaySuffixMismatch');
+      expect(() => check([confirmation, retained, created])).toThrow('RestoreReplaySuffixMismatch');
+      expect(() => check([...expected, created])).toThrow('RestoreReplaySuffixMismatch');
+    },
+  );
 });
 
 describe('audit export dispatch', () => {

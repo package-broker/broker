@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
@@ -89,7 +89,9 @@ describe('audit bundle fixtures', () => {
         input: patched,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      expect(original).not.toMatch(/__pbAuditFixture|pbAuditFixture|FixtureAckCrash/);
+      expect(original).not.toMatch(
+        /__pbAuditFixture|pbAuditFixture|FixtureAckCrash|fixtureAuditExecutor|__fixture\//,
+      );
       const context = {
         fetch: vi.fn(),
         AbortSignal,
@@ -121,14 +123,34 @@ describe('audit bundle fixtures', () => {
   );
 
   it.each(['node', 'cloudflare'] as const)(
+    '%s parallel delivery builds have independent output directories',
+    async (runtime) => {
+      const directories = await Promise.all([deliveryBuild(runtime), deliveryBuild(runtime)]);
+      try {
+        expect(directories[0]).not.toBe(directories[1]);
+        const bundles = await Promise.all(
+          directories.map((directory) =>
+            readFile(`${directory}/${runtime === 'node' ? 'server' : 'worker'}.js`, 'utf8'),
+          ),
+        );
+        expect(bundles.every((bundle) => bundle.includes('__pbAuditFixture'))).toBe(true);
+      } finally {
+        await Promise.all(
+          directories.map((directory) => rm(directory, { recursive: true, force: true })),
+        );
+      }
+    },
+  );
+
+  it.each(['node', 'cloudflare'] as const)(
     '%s retention pauses the bundled sealer',
     async (runtime) => {
-      const patched = retentionBundle(await source(runtime), runtime);
+      const patched = retentionBundle(await source(runtime));
       execFileSync(process.execPath, ['--check', '--input-type=module'], {
         input: patched,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      expect(() => retentionBundle(patched, runtime)).toThrow('RetentionSealerAlreadyPatched');
+      expect(() => retentionBundle(patched)).toThrow('RetentionSealerAlreadyPatched');
     },
   );
 
@@ -197,80 +219,6 @@ describe('required audit control evidence', () => {
       db.close();
     }
   });
-});
-
-describe('retention stale writer control', () => {
-  it.each(['contended', 'sealed'])(
-    'holds the captured batch until release and returns repository outcome %s',
-    async (outcome) => {
-      let control!: (context: {
-        req: { json(): Promise<unknown> };
-        json(value: unknown, status?: number): unknown;
-        executionCtx: { waitUntil(work: Promise<unknown>): void };
-      }) => Promise<unknown>;
-      const batch = vi.fn().mockResolvedValue([]);
-      const executor = {
-        driver: 'fixture',
-        all: vi.fn().mockResolvedValue([{ id: 'org-a' }]),
-        batch,
-      };
-      const bundle = retentionBundle(
-        `function createAuditSealRepository(executor, options = {}) {
-      return { async seal(ctx) {
-        await executor.all({ sql: 'SELECT head_seq FROM audit_chain WHERE org_id = ?', params: [ctx.orgId] });
-        await executor.batch([{ sql: 'stale batch', params: [ctx.orgId] }]);
-        return { outcome };
-      } };
-    }
-  app.get("/health/ready", async (c) => {});`,
-        'cloudflare',
-      );
-      runInNewContext(bundle + '\ncreateAuditSealRepository(executor);', {
-        executor,
-        outcome,
-        orgContext: (orgId: string) => ({ orgId }),
-        app: {
-          post: (_path: string, handler: typeof control) => {
-            control = handler;
-          },
-          get() {},
-        },
-      });
-      const lifetime: Promise<unknown>[] = [];
-      const request = (orgId: string, operation: string) =>
-        control({
-          req: { json: async () => ({ orgId, operation }) },
-          json: (body, status = 200) => ({ body, status }),
-          executionCtx: {
-            waitUntil: (work) => {
-              lifetime.push(work);
-            },
-          },
-        });
-      expect(await request('org-a', 'capture')).toEqual({ body: { captured: true }, status: 200 });
-      expect(await request('org-a', 'capture')).toEqual({
-        body: { error: 'FixtureSealerAlreadyCaptured' },
-        status: 409,
-      });
-      expect(lifetime).toHaveLength(1);
-      expect(batch).not.toHaveBeenCalled();
-      expect(await request('org-b', 'release')).toEqual({
-        body: { error: 'FixtureSealerNotCaptured' },
-        status: 409,
-      });
-      expect(batch).not.toHaveBeenCalled();
-      expect(await request('org-a', 'release')).toEqual({
-        body: { outcome },
-        status: 200,
-      });
-      await expect(lifetime[0]).resolves.toEqual({ outcome });
-      expect(batch).toHaveBeenCalledExactlyOnceWith([{ sql: 'stale batch', params: ['org-a'] }]);
-      expect(await request('org-a', 'release')).toEqual({
-        body: { error: 'FixtureSealerNotCaptured' },
-        status: 409,
-      });
-    },
-  );
 });
 
 describe('audit receiver organization boundary', () => {

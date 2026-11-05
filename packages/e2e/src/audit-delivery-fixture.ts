@@ -1,11 +1,11 @@
+import { auditRaceBundle, overlapRace } from './audit-race-fixture.js';
 import assert from 'node:assert/strict';
 import { assertWireIdentity, decodeOtlp } from './audit-wire-fixture.js';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import { repository, until, type LocalBroker, type Runtime } from './local.js';
 
@@ -216,7 +216,7 @@ export function deliveryEntry(bundle: string, runtime: Runtime, receiver: string
   return `
 const fixtureRequest = (path, body) => fetch(${JSON.stringify(origin)} + path, {
   method: 'POST', headers: { 'content-type': 'application/json' },
-  body: JSON.stringify(body), signal: AbortSignal.timeout(90000)
+  body: JSON.stringify(body), signal: AbortSignal.timeout(10000)
 });
 globalThis.__pbAuditFixture = {
   transport(options) {
@@ -237,11 +237,14 @@ globalThis.__pbAuditFixture = {
   async beforeSave(sink) { return (await fixtureRequest('/cas', { sink }).then(r => r.json())).action; },
   async afterSave(job, sink, saved) { await fixtureRequest('/saved', { job, sink, saved }); }
 };
-${bundle}`;
+${bundle ? auditRaceBundle(bundle, '/__fixture/overlapping-leases', overlapRace) : ''}`;
 }
 
 export async function deliveryBuild(runtime: Runtime, hooks = true): Promise<string> {
-  const output = join(repository, '.pb', `audit-${hooks ? 'delivery' : 'restore'}-${runtime}`);
+  await mkdir(join(repository, '.pb'), { recursive: true });
+  const output = await mkdtemp(
+    join(repository, '.pb', `audit-${hooks ? 'delivery' : 'restore'}-${runtime}-`),
+  );
   await promisify(execFile)(
     process.execPath,
     [
@@ -264,46 +267,18 @@ export async function deliveryBuild(runtime: Runtime, hooks = true): Promise<str
   return output;
 }
 
-async function sqliteFiles(directory: string): Promise<string[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
-  return (
-    await Promise.all(
-      entries.map((entry) => {
-        const path = join(directory, entry.name);
-        return entry.isDirectory()
-          ? sqliteFiles(path)
-          : Promise.resolve(
-              entry.name.endsWith('.sqlite') && entry.name !== 'metadata.sqlite' ? [path] : [],
-            );
-      }),
-    )
-  ).flat();
-}
-
 /* eslint-disable no-restricted-syntax -- Test infrastructure pins all queue and fault writes to the bootstrapped organization. */
-export async function deliveryInfrastructure(broker: LocalBroker, orgId: string) {
-  const root = join(repository, '.pb');
-  const matches = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith('e2e-')) continue;
-    const directory = join(root, entry.name);
-    const token = await readFile(join(directory, 'setup-token'), 'utf8').catch(() => '');
-    if (token.trim() === broker.setupToken) matches.push(directory);
-  }
-  assert.equal(matches.length, 1, 'DeliveryDatabaseDirectoryMissing');
-  const databases = await sqliteFiles(matches[0]!);
-  assert.equal(databases.length, 1, 'DeliveryDatabaseMissing');
-  const database = databases[0]!;
-  const run = (sql: string, params: (string | number)[]) => {
-    const db = new DatabaseSync(database, { timeout: 5000 });
-    try {
-      db.prepare(sql).run(...params);
-    } finally {
-      db.close();
-    }
-  };
+export async function deliveryInfrastructure(
+  broker: Pick<LocalBroker, 'databaseControl' | 'tick' | 'read'>,
+  orgId: string,
+) {
+  const { path: database, orgId: pinnedOrgId, sql } = broker.databaseControl;
+  assert(orgId === pinnedOrgId, 'ForeignDeliveryOrganization');
+  const run = (statement: string, params: (string | number)[]) => sql.run(statement, params);
   await broker.tick();
-  run("UPDATE job_schedule SET next_run_at = '2099-01-01T00:00:00.000Z' WHERE org_id = ?", [orgId]);
+  await run("UPDATE job_schedule SET next_run_at = '2099-01-01T00:00:00.000Z' WHERE org_id = ?", [
+    orgId,
+  ]);
   await until(
     async () => {
       await broker.tick();
@@ -317,10 +292,10 @@ export async function deliveryInfrastructure(broker: LocalBroker, orgId: string)
     60_000,
   );
   return {
-    isolateRestorePruneGuard() {
+    async isolateRestorePruneGuard() {
       // Detection already proved the normal sink block. Remove that independent gate
       // without changing the real receiver-backed progress or custody evidence.
-      run(
+      await run(
         "UPDATE audit_sink SET state = 'active' WHERE org_id = ? AND state = 'blocked' AND blocked_reason = 'fork'",
         [orgId],
       );
@@ -330,7 +305,7 @@ export async function deliveryInfrastructure(broker: LocalBroker, orgId: string)
       const resource = kind.startsWith('export-')
         ? `audit-export:${kind.slice(7)}`
         : `audit-${kind}`;
-      run('INSERT INTO job (id, org_id, type, resource_key) VALUES (?, ?, ?, ?)', [
+      await run('INSERT INTO job (id, org_id, type, resource_key) VALUES (?, ?, ?, ?)', [
         id,
         orgId,
         `core:audit-${kind}:v1`,
@@ -353,18 +328,12 @@ export async function deliveryInfrastructure(broker: LocalBroker, orgId: string)
         90_000,
       );
     },
-    due(sink: string) {
+    async due(sink: string) {
       assert(['webhook', 'otlp'].includes(sink), 'InvalidFixtureSink');
-      run('UPDATE audit_sink SET next_attempt_at = NULL WHERE org_id = ? AND sink_id = ?', [
+      await run('UPDATE audit_sink SET next_attempt_at = NULL WHERE org_id = ? AND sink_id = ?', [
         orgId,
         sink,
       ]);
-    },
-    expire(id: string) {
-      run(
-        "UPDATE job SET lease_until = '2000-01-01T00:00:00.000Z' WHERE org_id = ? AND id = ? AND state = 'running'",
-        [orgId, id],
-      );
     },
     async admin(operation: 'replay' | 'retire' | 'rebind', argument: string) {
       const [actor] = await broker.read<{ id: string }>(

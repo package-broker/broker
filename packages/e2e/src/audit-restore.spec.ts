@@ -1,6 +1,7 @@
 /* eslint-disable no-restricted-syntax -- Organization-scoped observations of real runtime jobs and audit state. */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { rm } from 'node:fs/promises';
 import { assertWireIdentity, decodeOtlp } from './audit-wire-fixture.js';
 import { deliveryBuild, deliveryInfrastructure } from './audit-delivery-fixture.js';
 import { failureName, requireStatus, session } from './evidence.js';
@@ -21,6 +22,32 @@ interface Envelope {
   epoch: number;
   org_id: string;
   records: Record<string, unknown>[];
+}
+
+export function assertRestoreReplay(
+  events: Record<string, unknown>[],
+  expected: Record<string, unknown>[],
+  newEvent: Record<string, unknown>,
+) {
+  const identity = (row: Record<string, unknown>) => [
+    row['id'],
+    row['seq'],
+    row['hash'],
+    row['prev_hash'],
+  ];
+  assert(
+    events.some(
+      (row) =>
+        JSON.stringify(identity(row)) === JSON.stringify(identity(newEvent)) &&
+        row['action'] === 'project.create' &&
+        row['target_id'] === newEvent['target_id'],
+    ),
+    'MissingNewRestoreEvent',
+  );
+  assert(
+    JSON.stringify(events.map(identity)) === JSON.stringify(expected.map(identity)),
+    'RestoreReplaySuffixMismatch',
+  );
 }
 
 // Retains receiver state independently of every broker process and database snapshot.
@@ -158,6 +185,7 @@ export async function auditRestoreScenario(
   detection: 'tooling' | 'frontier',
 ): Promise<ScenarioResult> {
   let broker: LocalBroker | undefined;
+  let buildDirectory: string | undefined;
   let fixture: Awaited<ReturnType<typeof startReceiver>> | undefined;
   const logs: string[] = [];
   const sensitive = [receiverCredential, 'admin@example.test'];
@@ -166,8 +194,9 @@ export async function auditRestoreScenario(
     await reserveLoopbackPort();
     fixture = await startReceiver();
     const receiver = fixture.receiver;
+    buildDirectory = await deliveryBuild(runtime, false);
     const options = {
-      bundleDirectory: await deliveryBuild(runtime, false),
+      bundleDirectory: buildDirectory,
       onOrganization: (orgId: string) => receiver.pin(orgId),
       auditEnv: {
         PB_AUDIT_TRAIL: 'off',
@@ -408,11 +437,23 @@ export async function auditRestoreScenario(
         confirmation[0]!.actor_id === actor.id,
       'MissingConfirmationLedger',
     );
-    requireStatus(
+    const created = (await requireStatus(
       await admin.request('/_pb/projects', { slug: 'restore-resumed', name: 'Restore resumed' }),
       201,
+    ).json()) as { id: string };
+    const [pendingNew] = await broker.read<{ id: string }>(
+      "SELECT id FROM audit_pending WHERE org_id = ? AND action = 'project.create' AND target_id = ? UNION ALL SELECT id FROM audit_event WHERE org_id = ? AND action = 'project.create' AND target_id = ?",
+      [orgId, created.id, orgId, created.id],
     );
+    assert(pendingNew, 'NewRestoreEventNotCaptured');
     const resumed = await sealAndDeliver();
+    const expectedReplay = (await broker.audit.snapshot()).filter(
+      (row) => row.seq > common.head_seq && row.seq <= resumed.head_seq,
+    );
+    const newEvent = expectedReplay.find(
+      (row) => row['id'] === pendingNew.id && row['target_id'] === created.id,
+    );
+    assert(newEvent && newEvent.seq > baseline.head_seq, 'NewRestoreEventNotSealed');
     for (const deliveries of [
       receiver.deliveries.slice(deliveryOffset),
       receiver.otlp.slice(otlpOffset),
@@ -441,7 +482,12 @@ export async function auditRestoreScenario(
           (record) =>
             record['seq'] === common.head_seq + 1 && record['hash'] === baseline.head_hash,
         ) &&
-          events.some((record) => record['action'] === 'project.create') &&
+          events.some(
+            (record) =>
+              record['id'] === newEvent['id'] &&
+              record['seq'] === newEvent.seq &&
+              record['hash'] === newEvent.hash,
+          ) &&
           events.some(
             (record) =>
               record['action'] === 'audit.sink_admin' &&
@@ -449,16 +495,7 @@ export async function auditRestoreScenario(
           ),
         'MissingResumedEvents',
       );
-      const retained = (await broker.audit.snapshot()).filter(
-        (row) => row.seq > common.head_seq && row.seq <= baseline.head_seq,
-      );
-      assert(
-        retained.length > 0 &&
-          retained.every((row) =>
-            events.some((record) => record['seq'] === row.seq && record['hash'] === row['hash']),
-          ),
-        'MissingRetainedReplay',
-      );
+      assertRestoreReplay(events, expectedReplay, newEvent);
       assert(
         events.every(
           (record) =>
@@ -509,7 +546,7 @@ export async function auditRestoreScenario(
     ).json()) as { trailActive: boolean };
     assert(pruneStatus.trailActive === false, 'RestorePruneTrailStillActive');
     const pruning = await deliveryInfrastructure(broker, orgId);
-    pruning.isolateRestorePruneGuard();
+    await pruning.isolateRestorePruneGuard();
     const pruneBefore = await chain();
     const custody = await sinks();
     assert(
@@ -555,7 +592,11 @@ export async function auditRestoreScenario(
       reason: `${runtime}: audit restore ${detection}: ${failureName(error)}`,
     };
   } finally {
-    await broker?.close();
-    await fixture?.close();
+    try {
+      await broker?.close();
+    } finally {
+      await fixture?.close();
+      if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
+    }
   }
 }

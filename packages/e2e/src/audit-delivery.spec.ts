@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import {
   deliveryEntry,
   deliveryBuild,
@@ -30,14 +31,16 @@ interface Sink extends Record<string, unknown> {
 /* eslint-disable no-restricted-syntax -- Read-only evidence is scoped to the organization created by the launcher. */
 export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioResult> {
   let broker: LocalBroker | undefined;
+  let buildDirectory: string | undefined;
   let receiver: Awaited<ReturnType<typeof deliveryReceiver>> | undefined;
   let stage = 'startup';
   try {
     await reserveLoopbackPort();
     receiver = await deliveryReceiver();
     const remote = receiver;
+    buildDirectory = await deliveryBuild(runtime);
     broker = await startLocal(runtime, remote.origin, {
-      bundleDirectory: await deliveryBuild(runtime),
+      bundleDirectory: buildDirectory,
       onOrganization: (orgId) => remote.pin(orgId),
       patchBundle: (bundle) => deliveryEntry(bundle, runtime, remote.origin),
       outboundDestination(url) {
@@ -87,7 +90,7 @@ export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioR
     const drain = async (id: 'webhook' | 'otlp', through: number) => {
       await until(
         async () => {
-          infrastructure.due(id);
+          await infrastructure.due(id);
           await job(`export-${id}`);
           return Number((await sink(id)).progress_seq) >= through;
         },
@@ -161,53 +164,62 @@ export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioR
     }
 
     stage = 'overlapping-leases';
-    remote.hold(true);
     const overlapStart = Number((await sink()).progress_seq);
-    await seal();
-    await infrastructure.enqueue('export-webhook');
-    await until(
-      async () => {
-        await local.tick();
-        return remote.held() >= 1;
-      },
-      'old-lease-delivery',
-      30_000,
-    );
-    const [heldJob] = await local.read<{ id: string }>(
-      "SELECT id FROM job WHERE org_id = ? AND resource_key = 'audit-export:webhook' AND state = 'running'",
-      [orgId],
-    );
-    assert(heldJob, 'MissingHeldDeliveryLease');
-    const oldJob = heldJob.id;
     const independentHead = await seal();
-    await drain('otlp', independentHead);
-    assert.equal(Number((await sink()).progress_seq), overlapStart, 'BlockedSinkAdvancedProgress');
-    infrastructure.expire(oldJob);
-    await infrastructure.enqueue('export-webhook');
-    await until(
-      async () => {
-        await local.tick();
-        return remote.held() >= 2;
-      },
-      'replacement-lease-delivery',
-      30_000,
+    const overlapOffset = remote.receipts.length;
+    const overlap = (await requireStatus(
+      await fetch(local.origin + '/__fixture/overlapping-leases', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ orgId }),
+        signal: AbortSignal.timeout(30_000),
+      }),
+      200,
+    ).json()) as {
+      independentOutcome: string;
+      independentThrough: number;
+      heartbeatRefused: boolean;
+      cancelled: string;
+      cancellationSaves: number;
+      staleOutcome: string;
+      replacementOutcome: string;
+      attempts: { fence: number; saved: boolean }[];
+      oldFence: number;
+      replacementFence: number;
+      before: number;
+      afterStale: number;
+      after: number;
+      sameSnapshot: boolean;
+      frozen: boolean;
+    };
+    assert.equal(overlap.independentOutcome, 'accepted', 'IndependentSinkBlocked');
+    assert.equal(overlap.independentThrough, independentHead, 'IndependentSinkMissingProgress');
+    assert(overlap.heartbeatRefused, 'StaleHeartbeatNotRefused');
+    assert.equal(overlap.cancelled, 'idle', 'CancelledExportNotStopped');
+    assert.equal(overlap.cancellationSaves, 0, 'CancelledExportAttemptedAckSave');
+    assert.equal(overlap.staleOutcome, 'contended', 'StaleLeaseNotContended');
+    assert.equal(overlap.replacementOutcome, 'accepted', 'ReplacementLeaseNotAccepted');
+    assert.deepEqual(
+      overlap.attempts,
+      [
+        { fence: overlap.oldFence, saved: false },
+        { fence: overlap.replacementFence, saved: true },
+      ],
+      'StaleLeaseRepositorySaveNotFenced',
     );
-    const overlap = webhookEvents().slice(-2);
-    assert.equal(overlap[0]!.raw, overlap[1]!.raw, 'ReplacementLeaseChangedFrozenBytes');
-    remote.release();
-    await until(
-      async () => remote.saves.some((save) => save.job === oldJob),
-      'stale-lease-save-attempt',
-      30000,
-    );
+    assert.equal(overlap.replacementFence, overlap.oldFence + 1, 'LeaseFenceNotAdvanced');
+    assert.equal(overlap.before, overlapStart, 'OverlapStartedWithWrongCursor');
+    assert.equal(overlap.afterStale, overlapStart, 'StaleLeaseAdvancedProgress');
+    assert.equal(overlap.after, independentHead, 'ReplacementLeaseMissingProgress');
+    const deliveries = remote.receipts.slice(overlapOffset).filter((row) => row.sink === 'webhook');
+    assert.equal(deliveries.length, 3, 'OverlapExecutionsNotDelivered');
     assert(
-      remote.saves.filter((save) => save.job === oldJob).every((save) => !save.saved),
-      'StaleLeaseSaveAccepted',
+      deliveries.every((row) => row.raw === deliveries[0]!.raw),
+      'ReplacementLeaseChangedFrozenBytes',
     );
-    assert.equal(Number((await sink()).progress_seq), overlapStart, 'StaleLeaseAdvancedProgress');
-    remote.hold(false);
-    remote.release();
-    await drain('webhook', independentHead);
+    assert(overlap.sameSnapshot, 'StaleLeaseSinkCasChanged');
+    assert(overlap.frozen, 'OverlapFrozenBatchMissing');
+    await drain('otlp', independentHead);
     assert.equal(
       Number((await sink()).custody_seq),
       independentHead,
@@ -601,6 +613,7 @@ export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioR
       await broker?.close();
     } finally {
       await receiver?.close();
+      if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
     }
   }
 }

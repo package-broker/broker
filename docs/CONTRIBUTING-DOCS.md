@@ -29,6 +29,9 @@ This folder is the source of the 2.0 documentation site at package.broker.
 - Operations
   - [Backup and upgrades](operations/backup-and-upgrades.md)
   - [Observability](operations/observability.md)
+  - [Audit operations](operations/audit.md)
+  - [Audit compliance profile](operations/audit-compliance.md)
+  - [Audit exports and cutover](operations/audit-export.md)
   - [Registry policy](operations/registry-policy.md)
   - [Outbound notifications](operations/notifications.md)
   - [Restore rehearsal](operations/restore-rehearsal.md)

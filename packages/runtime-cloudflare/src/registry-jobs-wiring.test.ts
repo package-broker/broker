@@ -525,7 +525,7 @@ it('mounts access request routes and consumes expiry with a local D1 binding', a
     DEPLOYMENT_ID: 'access-request-wiring',
   };
   const kernelSpy = vi.spyOn(kernelModule, 'createKernel');
-  const worker = createWorker([], {
+  const worker = createWorker([auditTrail()], {
     platformPorts: {
       blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
       cache: { adapter: 'cache-api', namespace: 'access-request-wiring' },

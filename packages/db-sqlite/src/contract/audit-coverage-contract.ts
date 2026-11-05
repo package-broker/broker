@@ -298,7 +298,7 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     repository: 'visibility-audit',
     batchGuard: 'visibility repository fenced batch; immediately follows domain mutation',
     cardinality: '0 or 1 per changed operation using changes() > 0',
-    stagingCalls: 1,
+    stagingCalls: 2,
   },
   {
     actions: ['source.attach', 'source.detach', 'source.reorder'],
@@ -529,7 +529,7 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     callers: ['core/src/api/routes/discovery-rules.ts', 'core/src/runtime/discovery-rule-jobs.ts'],
     repository: 'discovery-rules',
     batchGuard:
-      'runFenced/runOrgFenced; live organization authority or discovery-rule lease, revision and performed guards',
+      'runOrgFenced for management and checkpoints; credential failures assert the live discovery-rules scheduler lease in the same batch; due is read-only',
     cardinality:
       '1 per accepted rule write/run request/start/finish; stale, replay and per-repository checkpoints stage zero',
     stagingCalls: 3,

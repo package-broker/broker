@@ -955,6 +955,11 @@ export const entries: readonly MutationEntry[] = [
     })),
     waivers: [
       {
+        locate: /(?<=from version where )org_id=\?(?= and id=\? and last_op_id)/,
+        reason:
+          'Capacity reserve evidence repeats the target version identity and mutation opId from the same fenced batch; restrictive tombstone and overflow regressions cover admission.',
+      },
+      {
         locate: /(?:np|ns|nv)\.org_id\s*=\s*\?|"npm_admin"\."org_id" = \?/,
         reason:
           'Hosted npm tombstone guards repeat the existing target package/version organization checks. Live protected-holder evidence delegates to the independently mutation-tested protectedHolder guard; admin tombstone contracts test freshness, role protection, and revision loss.',

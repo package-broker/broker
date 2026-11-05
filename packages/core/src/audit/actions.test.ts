@@ -1638,7 +1638,9 @@ describe('npm audit values', () => {
   ])('bounds npm package names in %s', (action) => {
     expect(build(action, { package: { new: 'a'.repeat(MAX_NPM_NAME_LENGTH) } }).ok).toBe(true);
     expect(build(action, { package: { new: 'a'.repeat(215) } }).ok).toBe(false);
-    expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(false);
+    expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(
+      action === 'package.access_request' || action === 'package.access_decide',
+    );
   });
 });
 
@@ -1862,4 +1864,49 @@ it('types replacement registered-name audit patterns', () => {
     'https://user:password@example.test',
   ])
     expect(build('registered_name.update', { pattern: { new: value } }).ok).toBe(false);
+});
+
+describe('merged action grammar and privacy', () => {
+  it.each([
+    ['notification.create', 'pattern', 'person@example.test'],
+    ['notification.update', 'pattern', `ghp_${'a'.repeat(36)}`],
+    ['registry_policy.create', 'package_key', `ghp_${'a'.repeat(36)}`],
+    ['registry_policy.create', 'package_key', `ghp_${'!a'.repeat(36)}`],
+    ['package.unpublish', 'versions', [`ghp_${'a'.repeat(36)}`]],
+    ['policy.read_denied', 'reasons', [`plugin:ghp_${'a'.repeat(36)}:blocked`]],
+    ['trusted_publisher.update', 'environment', 'person@example.test'],
+  ])('refuses private %s %s values on construction and export', (action, field, value) => {
+    expect(build(action as string, { [field as string]: { new: value } }).ok).toBe(false);
+    const safe = build(action as string);
+    if (!safe.ok) throw new Error('safe envelope refused');
+    expect(() =>
+      validateAuditEvent({
+        ...safe.event,
+        payloadJson: JSON.stringify({
+          op_id: context.opId,
+          request_id: context.requestId,
+          changes: { [field as string]: { new: value } },
+        }),
+      }),
+    ).toThrow('invalid audit event');
+  });
+  it.each(['_next', 'next!', "release'candidate", '~preview'])(
+    'accepts domain-valid dist-tag %s',
+    (tag) => {
+      expect(build('package.dist_tag', { tag: { new: tag } }).ok).toBe(true);
+    },
+  );
+  it.each(['vendor/package', '@scope/Legacy', 'Legacy'])(
+    'accepts access audit package name %s',
+    (name) => {
+      for (const action of ['package.access_request', 'package.access_decide'])
+        expect(build(action, { package: { new: name } }).ok).toBe(true);
+    },
+  );
+});
+
+it('accepts the Composer package name bound for access request audit', () => {
+  expect(
+    build('package.access_request', { package: { new: 'vendor/' + 'package'.repeat(50) } }).ok,
+  ).toBe(true);
 });

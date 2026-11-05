@@ -22,8 +22,9 @@ import {
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
+import { jobLeaseGuard } from './job-lease-guard.js';
 import { actorHolds } from './actor-authority.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditPendingStatement, auditOperationStatement } from './audit-pending.js';
 import { idempotencyInsertStatement } from './idempotency.js';
 import { discoveryRuleAuthority } from './discovery-rule-authority.js';
 
@@ -125,6 +126,7 @@ export function createDiscoveryRuleRepository(
     audit: AuditEvent,
     call: ApiCall,
     duplicate?: Guard,
+    reserve: Guard = sql<SqlBool>`0`,
   ): Promise<DiscoveryRuleWriteResult> {
     const result = await runOrgFenced(
       executor,
@@ -133,8 +135,8 @@ export function createDiscoveryRuleRepository(
       assertGuard(allowed, ctx),
       [
         ...assertCheck(condition),
+        auditOperationStatement(ctx, audit, statement(sql`${reserve}`)),
         ...mutations,
-        auditPendingStatement(ctx, audit),
         ...(call.idempotency === undefined
           ? []
           : [idempotencyInsertStatement(ctx, call.idempotency)]),
@@ -180,7 +182,7 @@ export function createDiscoveryRuleRepository(
         )[0] ?? null
       );
     },
-    async due(ctx, now) {
+    async failUnavailableCredentials(ctx, lease, now) {
       const invalid = await executor.all<{ id: string }>(
         statement(sql`select id from source_discovery_rule
         where org_id=${ctx.orgId} and enabled=1
@@ -195,13 +197,19 @@ export function createDiscoveryRuleRepository(
           'discovery_rule.run_finished',
         );
         await executor.batch([
+          ...jobLeaseGuard(ctx, lease),
+          ...assertCheck(
+            sql<SqlBool>`exists(select 1 from job where org_id=${ctx.orgId} and id=${lease.id} and type='core:discovery-rules:v1')`,
+          ),
           statement(sql`update source_discovery_rule set last_run_outcome='failed',failure_reason='credential_unavailable'
-            where org_id=${ctx.orgId} and id=${row.id}
+            where org_id=${ctx.orgId} and id=${row.id} and enabled=1
             and not (last_run_outcome is 'failed' and failure_reason is 'credential_unavailable')
             and not exists(select 1 from credential c where c.org_id=${ctx.orgId} and c.id=source_discovery_rule.credential_id and c.kind='github_app' and c.project_id is null)`),
           auditPendingStatement(ctx, event, { sql: 'changes() > 0', params: [] }),
         ]);
       }
+    },
+    async due(ctx, now) {
       return read(
         statement(sql`select * from source_discovery_rule dr where dr.org_id=${ctx.orgId} and dr.enabled=1
         and (dr.next_run_at is null or dr.next_run_at <= ${now})
@@ -265,6 +273,7 @@ export function createDiscoveryRuleRepository(
         input.audit,
         input.call,
         sql<SqlBool>`exists(select 1 from source_discovery_rule where org_id=${ctx.orgId} and name=${v.name} and id<>${input.id})`,
+        sql<SqlBool>`${Number(!v.enabled)} and exists(select 1 from source_discovery_rule where org_id=${ctx.orgId} and id=${input.id} and revision=${input.revision} and enabled=1)`,
       );
       if (result === 'conflict') {
         const [binding] = await executor.all<{ held: number }>(

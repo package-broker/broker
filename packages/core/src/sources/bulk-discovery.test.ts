@@ -1251,3 +1251,23 @@ it('retains completed ecosystem results if preparation consumes the admission re
   ).toMatchObject({ ok: true, value: { results: [prior], remainingRepositories: ['acme/one'] } });
   expect(plan).not.toHaveBeenCalled();
 });
+
+it.each(['dryRun', 'resolve', 'apply'] as const)(
+  'preserves audit capacity refusal through bulk discovery %s',
+  async (boundary) => {
+    const h = setup();
+    const error = new DbError('backlog_full', 'Audit backlog is full');
+    if (boundary === 'dryRun') {
+      h.discover.mockRejectedValueOnce(error);
+      await expect(
+        h.bulk.dryRun(ctx, admin, { credentialId: 'C', pattern: '*', cursor: null }),
+      ).rejects.toBe(error);
+    } else {
+      if (boundary === 'resolve') h.resolve.mockRejectedValueOnce(error);
+      else vi.mocked(h.service.create).mockRejectedValueOnce(error);
+      await expect(
+        h.bulk.apply(ctx, admin, fence, { credentialId: 'C', repositories: ['acme/one'] }, call),
+      ).rejects.toBe(error);
+    }
+  },
+);

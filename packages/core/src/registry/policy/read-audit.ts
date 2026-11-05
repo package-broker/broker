@@ -1,3 +1,4 @@
+import { DbError } from '../../db/errors.js';
 import { auditEvent, type AuditActorType, type AuditEvent } from '../../audit/actions.js';
 import type { OrgContext } from '../../db/port.js';
 import type { Clock } from '../../ids.js';
@@ -95,7 +96,8 @@ export function createDirectDenialAudit(deps: DirectDenialAuditDeps): DirectDeni
       }
       try {
         await deps.sink.record(deps.ctx, events);
-      } catch {
+      } catch (error) {
+        if (error instanceof DbError && error.kind === 'backlog_full') throw error;
         throw new RegistryPolicyUnavailableError();
       }
       recorded.add(key);

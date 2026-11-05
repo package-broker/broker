@@ -49,7 +49,7 @@ import {
   type RemoveExplicitResult,
 } from './visibility-subset.js';
 import { actorHolds } from './actor-authority.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditOperationStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
 import {
@@ -491,6 +491,7 @@ async function tombstoneCapture(
         eventCount: total,
       },
       when,
+      raw(sql`${when}`),
     );
   const common = {
     sourceId: target.source_id,
@@ -527,6 +528,7 @@ async function tombstoneCapture(
         events: events.slice(index * MAX_OPERATION_EVENTS, (index + 1) * MAX_OPERATION_EVENTS),
       },
       when,
+      raw(sql`${when}`),
     ),
   ).flat();
 }
@@ -682,7 +684,13 @@ export function createVisibilityStore(
         : []),
     ];
     const closing = [
-      auditPendingStatement(ctx, input.audit),
+      auditOperationStatement(
+        ctx,
+        input.audit,
+        raw(
+          sql`${Number(to === 'tombstoned')} and exists(select 1 from version where org_id=${ctx.orgId} and id=${versionId} and last_op_id=${plan.opId} and status='tombstoned')`,
+        ),
+      ),
       ...(input.idempotency === undefined
         ? []
         : [idempotencyInsertStatement(ctx, input.idempotency)]),

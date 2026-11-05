@@ -1,4 +1,5 @@
 import { createJobLoop } from './jobs/loop.js';
+import { auditTrail } from './audit-trail.test.support.js';
 import type { SourceProvider } from '@package-broker/core/sources/provider';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { gitTarball } from '@package-broker/core/ingest/vcs/git-tar';
@@ -285,7 +286,7 @@ describe('node registry wiring', () => {
   ): Promise<NodeBroker> {
     const byteStore = await openFilesystemByteStore({ root: join(directory, 'blobs') });
     broker = createNodeServerWithSeams(
-      extra.vcs ? [vcsPlugin] : [],
+      [...(extra.vcs ? [vcsPlugin] : []), auditTrail()],
       {
         executor: extra.executor ?? db.executor,
         ...(extra.closeDatabase === undefined ? {} : { closeDatabase: extra.closeDatabase }),

@@ -18,6 +18,7 @@ import {
   isPolicyPackageKey,
   isPolicyTimestamp,
 } from '../db/registry-policy.js';
+import { validDistTag } from '../registry/npm/dist-tags.js';
 import { redactValue } from './redact.js';
 
 export const AUDIT_ACTIONS = [
@@ -936,10 +937,10 @@ const NPM_AUDIT_ACTIONS = new Set<string>([
   'trusted_publisher.disable',
 ]);
 
-function cleanNpmValue(value: unknown, field: string): Cleaned {
+function cleanNpmValue(value: unknown, field: string, action: AuditAction): Cleaned {
   if (typeof value === 'string') {
     if (/\p{Cc}/u.test(value)) return { ok: false, reason: 'bad_value' };
-    const clean = cleanString(value, 256, field);
+    const clean = cleanString(value, field === 'package' ? MAX_KEY_LENGTH : 256, field);
     if (!clean.ok) return clean;
     if (clean.value !== value) return { ok: false, reason: 'bad_value' };
   }
@@ -950,6 +951,8 @@ function cleanNpmValue(value: unknown, field: string): Cleaned {
         valid =
           typeof value === 'string' &&
           (isUlid(value) ||
+            ((action === 'package.access_request' || action === 'package.access_decide') &&
+              isPolicyPackageKey('composer', value)) ||
             displayName(packageKey(value, { ecosystem: 'npm', legacyCase: true })) === value);
       } catch {
         valid = false;
@@ -968,7 +971,7 @@ function cleanNpmValue(value: unknown, field: string): Cleaned {
         );
       break;
     case 'tag':
-      valid = typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
+      valid = typeof value === 'string' && validDistTag(value);
       break;
     case 'authority':
       valid = oneOf(['project', 'organization'])(value);
@@ -1018,8 +1021,48 @@ function cleanNpmValue(value: unknown, field: string): Cleaned {
   if (!valid) return { ok: false, reason: 'bad_value' };
   // Names and versions still pass the credential and e-mail detector.
   return typeof value === 'string'
-    ? cleanString(value, 256, field)
+    ? cleanString(value, field === 'package' ? MAX_KEY_LENGTH : 256, field)
     : { ok: true, value: value as AuditValue };
+}
+
+function specializedPrivacyRefusal(
+  action: AuditAction,
+  field: string,
+  value: unknown,
+): AuditRefusal | null {
+  if (
+    (action.startsWith('notification.') ||
+      action.startsWith('policy.') ||
+      action.startsWith('registry_policy.') ||
+      NPM_AUDIT_ACTIONS.has(action)) &&
+    WORKLOAD_CLAIM_LIMITS[field] === undefined &&
+    !(action === 'package.publish' && field === 'integrity') &&
+    field !== 'reason_sha256' &&
+    field !== 'deprecated_sha256'
+  ) {
+    const strings = Array.isArray(value) ? value : [value];
+    for (const item of strings) {
+      if (typeof item !== 'string') continue;
+      const scanField =
+        field.endsWith('_id') || field === 'source'
+          ? 'id'
+          : field === 'versions'
+            ? 'version'
+            : field;
+      const scanned = cleanString(item, MAX_PAYLOAD_BYTES, scanField);
+      if (!scanned.ok) return scanned.reason;
+      if (scanned.value !== item) return 'bad_value';
+      if (field === 'package_key') {
+        try {
+          const decoded = cleanString(displayName(item), MAX_KEY_LENGTH, 'package');
+          if (!decoded.ok) return decoded.reason;
+        } catch {
+          return 'bad_value';
+        }
+      }
+    }
+  }
+  return null;
 }
 
 function cleanChanges(
@@ -1057,6 +1100,8 @@ function cleanChanges(
       if (action.startsWith('registry_policy.') || action.startsWith('policy.')) {
         const cleanedPolicy = cleanPolicyValue(field, value);
         if (!cleanedPolicy.ok) return cleanedPolicy;
+        const privacy = specializedPrivacyRefusal(action, field, value);
+        if (privacy !== null) return { ok: false, reason: privacy };
         cleanedEntry[key] = cleanedPolicy.value;
         continue;
       }
@@ -1094,9 +1139,11 @@ function cleanChanges(
                         : field === 'provider' && IDENTITY_ACTIONS.has(action)
                           ? cleanProviderId(entry[key])
                           : NPM_AUDIT_ACTIONS.has(action)
-                            ? cleanNpmValue(value, field)
+                            ? cleanNpmValue(value, field, action)
                             : cleanValue(entry[key], field);
       if (!cleaned.ok) return cleaned;
+      const privacy = specializedPrivacyRefusal(action, field, value);
+      if (privacy !== null) return { ok: false, reason: privacy };
       cleanedEntry[key] = cleaned.value;
     }
     if (Object.keys(cleanedEntry).length === 0) return { ok: false, reason: 'bad_value' };

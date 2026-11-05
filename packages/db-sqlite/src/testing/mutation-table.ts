@@ -1,3 +1,4 @@
+import { entries as auditCapacityStateEntries } from './mutation-table/audit-capacity-state.js';
 import { entries as auditEffectiveEntries } from './mutation-table/audit-effective.js';
 import { entries as auditCutoverEntries } from './mutation-table/audit-cutover.js';
 import { entries as auditStatusEntries } from './mutation-table/audit-status.js';
@@ -165,6 +166,7 @@ export * from './mutation-table/harness.js';
 export { builderAllowlist, exportedBuilders, builderNames } from './mutation-table/inventory.js';
 
 const registeredEntries: readonly MutationEntry[] = [
+  ...auditCapacityStateEntries,
   ...auditEffectiveEntries,
   ...auditCutoverEntries,
   ...auditNoneEntries,

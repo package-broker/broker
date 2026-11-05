@@ -62,7 +62,6 @@ describe('audit verification reader on node:sqlite', () => {
     const head = (org: typeof a) => createAuditJournalReader(executor, org).head();
     expect((await head(a))?.verification?.verifiedAt).toBe(now.toISOString());
     expect((await head(b)).verification).toBeNull();
-    const lastVerifiedAt = now.toISOString();
     now = new Date('2026-10-23T12:00:00.000Z');
     records.length = 0;
     await executor.batch([
@@ -75,7 +74,13 @@ describe('audit verification reader on node:sqlite', () => {
     expect(records).toEqual([
       { level: 'error', event: 'audit.chain_broken', seq: 501, reason: 'hash' },
     ]);
-    expect((await head(a))?.verification?.verifiedAt).toBe(lastVerifiedAt);
+    expect((await head(a)).verification).toBeNull();
+    expect(
+      await executor.all({
+        sql: 'SELECT audit_last_verified_at FROM organization WHERE id = ?',
+        params: [a.orgId],
+      }),
+    ).toEqual([{ audit_last_verified_at: null }]);
     records.length = 0;
     await job.handler({}, { ...ctx, org: b });
     expect(records).toContainEqual(expect.objectContaining({ event: 'audit.verified', rows: 503 }));
@@ -684,4 +689,41 @@ describe('audit verification reader on node:sqlite', () => {
       await expect(reader.page(ctx, cursor, 500)).rejects.toThrow(RangeError);
     }
   });
+});
+
+it('does not clear a verification after the chain incarnation changes', async () => {
+  const database = await openMigratedDatabase({ twoOrganizations: true });
+  const org = database.orgs!.a;
+  const reader = createAuditVerifyReader(database.executor);
+  try {
+    const snapshot = await reader.snapshot(org);
+    expect(
+      await reader.markVerified(
+        org,
+        new Date().toISOString(),
+        { fromSeq: 1, throughSeq: 0, bodies: 0, withheld: 0 },
+        snapshot,
+      ),
+    ).toBe(true);
+    await database.executor.batch([
+      {
+        sql: 'UPDATE audit_chain SET incarnation = incarnation + 1 WHERE org_id = ?',
+        params: [org.orgId],
+      },
+    ]);
+    expect(await reader.clearVerification(org, snapshot)).toBe(false);
+    expect(
+      (await createAuditJournalReader(database.executor, org).head()).verification,
+    ).not.toBeNull();
+    expect(
+      (
+        await database.executor.all<{ audit_last_verified_at: string | null }>({
+          sql: 'SELECT audit_last_verified_at FROM organization WHERE id = ?',
+          params: [org.orgId],
+        })
+      )[0]!.audit_last_verified_at,
+    ).not.toBeNull();
+  } finally {
+    await database.close();
+  }
 });

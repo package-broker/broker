@@ -1,5 +1,10 @@
 import type { OrgContext } from '../db/port.js';
-import { JobError, type JobDefinition, type CoreJobs as Jobs } from '../platform/jobs.js';
+import {
+  JobError,
+  type JobDefinition,
+  type JobContext,
+  type CoreJobs as Jobs,
+} from '../platform/jobs.js';
 
 export type AuditIntegrityReason = 'seq_gap' | 'head_mismatch' | 'boundary_mismatch';
 
@@ -27,6 +32,7 @@ export type SealOutcome = {
   | { readonly outcome: 'empty' }
   | { readonly outcome: 'contended' }
   | { readonly outcome: 'restore_pending' }
+  | { readonly outcome: 'recovering' }
 );
 
 export interface AuditSealPort {
@@ -41,6 +47,7 @@ type EmptyPayload = Record<string, never>;
 
 export function auditSealJob(
   port: AuditSealPort,
+  scopedPort?: (context: JobContext) => AuditSealPort,
 ): JobDefinition & Pick<JobDefinition<EmptyPayload>, 'validate'> {
   const contention = new Map<string, number>();
   return {
@@ -61,6 +68,7 @@ export function auditSealJob(
       return {};
     },
     async handler(_payload, ctx) {
+      const writer = scopedPort?.(ctx) ?? port;
       const reportIntegrity = (reasons: readonly AuditIntegrityReason[]): void => {
         for (const reason of reasons) {
           ctx.observability.log({ level: 'error', event: 'audit.chain_integrity', reason });
@@ -74,7 +82,7 @@ export function auditSealJob(
           try {
             ctx.observability.histogram(
               'pb.audit.pending_oldest_age',
-              await port.pendingOldestAgeSeconds(ctx.org),
+              await writer.pendingOldestAgeSeconds(ctx.org),
             );
           } catch {
             ctx.observability.counter('pb.audit.pending_age_error');
@@ -83,7 +91,7 @@ export function auditSealJob(
         for (let round = 0; round < MAX_ROUNDS && !ctx.signal.aborted; round += 1) {
           let result: SealOutcome;
           try {
-            result = await port.seal(ctx.org);
+            result = await writer.seal(ctx.org);
           } catch (error) {
             if (error instanceof AuditSealInterruptedError) reportIntegrity(error.integrity);
             throw error;
@@ -111,6 +119,7 @@ export function auditSealJob(
             break;
           }
           if (result.outcome === 'empty') break;
+          if (result.outcome === 'recovering') continue;
           sealed += result.sealed;
           rounds += 1;
         }

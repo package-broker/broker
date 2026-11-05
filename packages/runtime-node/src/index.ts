@@ -1,5 +1,8 @@
+import { createAuditHealthRepository } from '@package-broker/db-sqlite/repositories/audit-health';
+import { createAuditHealthService } from '@package-broker/core/audit/health';
+import { jobLeaseExecutor } from '@package-broker/db-sqlite/repositories/job-lease-executor';
 import { bindJobAdmission } from './job-admission.js';
-import { createNodeAudit } from './audit.js';
+import { createNodeAudit, auditExportSchedules } from './audit.js';
 import { createAuditStatusReader } from '@package-broker/db-sqlite/repositories/audit-status';
 import {
   AuditResolutionError,
@@ -1433,8 +1436,32 @@ export function createNodeServer(
                       routeTemplates: new Set<string>(),
                     }),
                   )),
-              registerAuditJob(auditSealJob(createAuditSealRepository(executor, auditCapacity))),
-              registerAuditJob(auditVerifyJob(createAuditVerifyReader(executor))),
+              registerAuditJob(
+                auditSealJob(createAuditSealRepository(executor, auditCapacity), (context) =>
+                  createAuditSealRepository(jobLeaseExecutor(executor, context), {
+                    ...auditCapacity,
+                    signal: context.signal,
+                  }),
+                ),
+              ),
+              registerAuditJob({
+                ...auditVerifyJob(createAuditVerifyReader(executor)),
+                async handler(payload, context) {
+                  const scoped = jobLeaseExecutor(executor, context);
+                  const job = auditVerifyJob(createAuditVerifyReader(scoped), {
+                    raise: async (org, code) => {
+                      const health = createAuditHealthService({
+                        port: createAuditHealthRepository(scoped),
+                        clock: systemClock,
+                        observability: context.observability,
+                      });
+                      await health.raise(org, code);
+                      await audit?.notifyAlert(code);
+                    },
+                  });
+                  await job.handler(job.validate(payload), context);
+                },
+              }),
               ...(registry?.module.coreJobs ?? []).map((job) => registerIngestJob(job.definition)),
               ...(registry?.module.packageSyncJob === undefined
                 ? []
@@ -1455,11 +1482,8 @@ export function createNodeServer(
         { name: 'audit-maintain', everySeconds: 60, resourceKey: 'audit-maintain' },
         { name: 'audit-health-observe', everySeconds: 60, resourceKey: 'audit-health-observe' },
         { name: 'audit-frontier', everySeconds: 86400, resourceKey: 'audit-frontier' },
-        ...registration.audit.sinks.map(({ definition }) => ({
-          name: `audit-export-${definition.id}`,
-          everySeconds: 60,
-          resourceKey: `audit-export:${definition.id}`,
-        })),
+        { name: 'audit-head', everySeconds: 86400, resourceKey: 'audit-head' },
+        ...(await auditExportSchedules(registration, options.audit, (name) => auditEnv[name])),
       ];
       registration = {
         ...registration,

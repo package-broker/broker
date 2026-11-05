@@ -123,7 +123,7 @@ export function auditStatusRoutes(deps?: {
             boundaryPrevHash: snapshot.boundaryPrevHash,
             pendingCount: snapshot.pendingCount,
             mode: effective.mode,
-            ...(snapshot.mode === effective.mode ? {} : { pendingMode: snapshot.mode }),
+            ...(snapshot.pendingMode === null ? {} : { pendingMode: snapshot.pendingMode }),
             restorePending: snapshot.restorePending,
             verification:
               snapshot.verification === null

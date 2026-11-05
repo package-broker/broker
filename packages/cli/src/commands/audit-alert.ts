@@ -28,7 +28,7 @@ const meanings: Readonly<Record<AuditAlertCode, string>> = {
   'audit.policy_change': 'The audit retention policy changed.',
   'audit.sink_inactive': 'An audit sink is inactive.',
   'audit.config_invalid': 'Audit configuration is invalid.',
-  'audit.mode_none': 'Audit recording is disabled.',
+  'audit.mode_none': 'No durable audit history is being kept; events are still staged and sealed.',
   'audit.chain_integrity': 'Audit chain integrity verification failed.',
   'audit.hold_failed': 'An audit retention hold failed.',
   'audit.prune_anchor': 'An audit pruning anchor could not be verified.',

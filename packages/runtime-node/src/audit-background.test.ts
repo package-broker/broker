@@ -205,7 +205,20 @@ describe('node audit background cutover recovery', () => {
       vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
       await expect(audit.effective(org)).rejects.toMatchObject({ code: 'audit_cutover_refused' });
       const job = audit.jobs.find((job) => job.name === 'audit-maintain')!;
-      await job.handler({}, { org } as JobContext);
+      const id = ulid();
+      await database.executor.batch([
+        {
+          sql: "INSERT INTO job (id, org_id, type, state, lease_owner, lease_until, fence) VALUES (?, ?, 'core:audit-maintain:v1', 'running', 'test', '2099-01-01T00:00:00.000Z', 1)",
+          params: [id, org.orgId],
+        },
+      ]);
+      await job.handler({}, {
+        org,
+        jobId: id,
+        signal: new AbortController().signal,
+        observability: noopObservability,
+        fences: jobFences({ id, owner: 'test', fence: 1 }),
+      } as JobContext);
       expect(
         await database.executor.all({
           sql: "SELECT kind, reason_code FROM audit_ledger WHERE org_id = ? AND kind = 'gap'",

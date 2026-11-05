@@ -1,3 +1,4 @@
+import { jobFences } from '@package-broker/core/platform/job-fences';
 import {
   DEFAULT_AUDIT_REJECTION_RETRIES,
   validateAuditSkipAfter,
@@ -259,12 +260,20 @@ describe('Node production audit budget', () => {
         const job = kernel.registration.jobs.find(
           (entry) => entry.qualifiedName === `core:${name}:v1`,
         )!;
+        const id = ulid();
+        await database.executor.batch([
+          {
+            sql: "INSERT INTO job (id, org_id, type, state, lease_owner, lease_until, fence) VALUES (?, ?, ?, 'running', 'test', '2099-01-01T00:00:00.000Z', 1)",
+            params: [id, org.orgId, `core:${name}:v1`],
+          },
+        ]);
         await job.definition.handler(
           {},
           {
-            ...kernel.jobScope(job, { jobId: 'budget', attempt: 1 }),
+            ...kernel.jobScope(job, { jobId: id, attempt: 1 }),
             org,
-            jobId: 'budget',
+            jobId: id,
+            fences: jobFences({ id, owner: 'test', fence: 1 }),
             idempotencyKey: name,
             attempt: 1,
             fence: 1,
@@ -318,7 +327,7 @@ describe('Node production audit budget', () => {
         sql: 'SELECT capacity_state, journal_bytes, boundary_seq FROM audit_chain WHERE org_id = ?',
         params: [org.orgId],
       });
-      expect(state!.capacity_state).toBe('ok');
+      expect(state!.capacity_state).toBe('warning');
       expect(state!.journal_bytes).toBeLessThanOrEqual(
         capacity.maxJournalBytes - Math.ceil(capacity.maxJournalBytes / 20),
       );

@@ -1,6 +1,9 @@
+import { createAuditHealthRepository } from '@package-broker/db-sqlite/repositories/audit-health';
+import { createAuditHealthService } from '@package-broker/core/audit/health';
+import { jobLeaseExecutor } from '@package-broker/db-sqlite/repositories/job-lease-executor';
 import { auditTelemetryActive } from '@package-broker/core/audit/destinations';
 import { bindJobAdmission } from './job-admission.js';
-import { createWorkerAudit } from './audit.js';
+import { createWorkerAudit, auditExportSchedules } from './audit.js';
 import { AuditSinkConfigError } from '@package-broker/core/audit/plugin-api';
 import {
   AuditEffectiveConfigError,
@@ -2052,11 +2055,33 @@ export function createWorker(
                   }),
                 ),
                 registerObservedJob(
-                  auditSealJob(createAuditSealRepository(executor as SqlExecutor, auditCapacity)),
+                  auditSealJob(
+                    createAuditSealRepository(executor as SqlExecutor, auditCapacity),
+                    (context) =>
+                      createAuditSealRepository(
+                        jobLeaseExecutor(executor as SqlExecutor, context),
+                        { ...auditCapacity, signal: context.signal },
+                      ),
+                  ),
                 ),
-                registerObservedJob(
-                  auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor)),
-                ),
+                registerObservedJob({
+                  ...auditVerifyJob(createAuditVerifyReader(executor as SqlExecutor)),
+                  async handler(payload, context) {
+                    const scoped = jobLeaseExecutor(executor as SqlExecutor, context);
+                    const job = auditVerifyJob(createAuditVerifyReader(scoped), {
+                      raise: async (org, code) => {
+                        const health = createAuditHealthService({
+                          port: createAuditHealthRepository(scoped),
+                          clock: systemClock,
+                          observability: context.observability,
+                        });
+                        await health.raise(org, code);
+                        await audit?.notifyAlert(code);
+                      },
+                    });
+                    await job.handler(job.validate(payload), context);
+                  },
+                }),
                 ...(db === undefined ? [] : importJobRegistrations(importJobs)),
                 ...(db === undefined
                   ? []
@@ -2169,10 +2194,10 @@ export function createWorker(
         { name: 'audit-maintain', everySeconds: 60, resourceKey: 'audit-maintain' },
         { name: 'audit-health-observe', everySeconds: 60, resourceKey: 'audit-health-observe' },
         { name: 'audit-frontier', everySeconds: 86400, resourceKey: 'audit-frontier' },
-        ...registration.audit.sinks.map(({ definition }) => ({
-          name: `audit-export-${definition.id}`,
-          everySeconds: 60,
-          resourceKey: `audit-export:${definition.id}`,
+        { name: 'audit-head', everySeconds: 86400, resourceKey: 'audit-head' },
+        ...(await auditExportSchedules(registration, options.audit, (name) => {
+          const value = read(env ?? {}, name);
+          return typeof value === 'string' ? value : undefined;
         })),
       ];
       registration = {

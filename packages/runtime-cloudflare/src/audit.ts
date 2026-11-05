@@ -1,3 +1,6 @@
+import { auditCapacityStateStatement } from '@package-broker/db-sqlite/repositories/audit-capacity-state';
+import { queueAuditHead } from '@package-broker/db-sqlite/repositories/audit-head';
+import { jobLeaseExecutor } from '@package-broker/db-sqlite/repositories/job-lease-executor';
 import { auditWarningEvent } from '@package-broker/core/audit/config';
 import {
   AuditEffectiveConfigError,
@@ -22,7 +25,7 @@ import { brokerAuditWarnings, type BrokerConfig } from '@package-broker/core/con
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
-import { JobError, type JobDefinition } from '@package-broker/core/platform/jobs';
+import { JobError, type JobDefinition, type JobContext } from '@package-broker/core/platform/jobs';
 import type { Observability } from '@package-broker/core/platform/observability';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import {
@@ -41,6 +44,7 @@ import { createAuditForkRepository } from '@package-broker/db-sqlite/repositorie
 const nativeFetch = globalThis.fetch;
 
 export async function createWorkerAudit(input: {
+  readonly jobContext?: JobContext;
   readonly config: BrokerConfig;
   readonly env: (name: string) => string | undefined;
   readonly executor: SqlExecutor;
@@ -72,13 +76,14 @@ export async function createWorkerAudit(input: {
       };
     }
   })();
-  for (const warning of brokerAuditWarnings(
-    { ...input.config, audit: { ...input.config.audit, policy: build.policy } },
-    input.config.platform,
-  )) {
-    const event = auditWarningEvent(warning.code);
-    observability.log({ level: 'warn', event, reason_code: event });
-  }
+  if (input.jobContext === undefined)
+    for (const warning of brokerAuditWarnings(
+      { ...input.config, audit: { ...input.config.audit, policy: build.policy } },
+      input.config.platform,
+    )) {
+      const event = auditWarningEvent(warning.code);
+      observability.log({ level: 'warn', event, reason_code: event });
+    }
   const capacity = input.maxJournalBytes === null ? {} : { maxJournalBytes: input.maxJournalBytes };
   const none = createAuditNoneRepository(executor, observability);
   const transitions = createAuditEffectiveRepository(executor);
@@ -298,7 +303,10 @@ export async function createWorkerAudit(input: {
         });
         return resolved;
       },
-      (error: unknown) => {
+      async (error: unknown) => {
+        if (error instanceof JobError) throw error;
+        if (error instanceof AuditResolutionError && !error.transient)
+          await raise(org, 'audit.config_invalid');
         throw error instanceof AuditResolutionError
           ? error
           : new AuditResolutionError('audit_unavailable');
@@ -376,6 +384,9 @@ export async function createWorkerAudit(input: {
       validate,
       async handler(_payload, context) {
         const trailActive = await backgroundTrailActive(context.org);
+        if (input.maxJournalBytes !== null)
+          await executor.batch([auditCapacityStateStatement(context.org, input.maxJournalBytes)]);
+        await health.read(context.org);
         await pruneAudit(prune, context.org, {
           generation,
           configuredSinkIds: input.registration().audit.sinks.map((sink) => sink.definition.id),
@@ -396,7 +407,30 @@ export async function createWorkerAudit(input: {
       schedule: { everySeconds: 60, resourceKey: 'audit-health-observe' },
       validate,
       async handler(_payload, context) {
+        if (input.maxJournalBytes !== null)
+          await executor.batch([auditCapacityStateStatement(context.org, input.maxJournalBytes)]);
+        const snapshot = await createAuditStatusReader(executor).read(context.org);
+        context.observability.histogram('pb.audit.journal_bytes', snapshot.capacity.journalBytes);
+        context.observability.histogram('pb.audit.journal_rows', snapshot.capacity.journalRows);
+        for (const sink of snapshot.sinks) {
+          context.observability.histogram(
+            'pb.audit.sink_backlog',
+            Math.max(0, snapshot.headSeq - sink.progressSeq),
+            { sink: sink.id },
+          );
+        }
         await health.read(context.org);
+      },
+    },
+    {
+      name: 'audit-head',
+      version: 1,
+      maxAttempts: 3,
+      schedule: { everySeconds: 86400, resourceKey: 'audit-head' },
+      validate,
+      async handler(_payload, context) {
+        await backgroundTrailActive(context.org);
+        await queueAuditHead(executor, context.org, generation, systemClock.now());
       },
     },
     {
@@ -455,7 +489,23 @@ export async function createWorkerAudit(input: {
       ...job,
       async handler(payload, context) {
         await backgroundTrailActive(context.org);
+        const before = await createAuditStatusReader(executor).read(context.org);
+        const started = Date.now();
         await job.handler(job.validate(payload), context);
+        const after = await createAuditStatusReader(executor).read(context.org);
+        const prior = before.sinks.find((sink) => sink.id === definition.id)?.progressSeq ?? 0;
+        const progress =
+          after.sinks.find((sink) => sink.id === definition.id)?.progressSeq ?? prior;
+        context.observability.histogram(
+          'pb.audit.sink_drain_rate',
+          (Math.max(0, progress - prior) * 1000) / Math.max(1, Date.now() - started),
+          { sink: definition.id },
+        );
+        context.observability.histogram(
+          'pb.audit.sink_backlog',
+          Math.max(0, after.headSeq - progress),
+          { sink: definition.id },
+        );
       },
     });
   }
@@ -479,7 +529,26 @@ export async function createWorkerAudit(input: {
       }
     },
     health,
-    jobs,
+    notifyAlert: sendAlert,
+    jobs:
+      input.jobContext === undefined
+        ? jobs.map((job) => ({
+            ...job,
+            async handler(payload: unknown, context: JobContext) {
+              const scoped = await createWorkerAudit({
+                ...input,
+                executor: jobLeaseExecutor(executor, context),
+                jobContext: context,
+              });
+              const handler = scoped.jobs.find((candidate) => candidate.name === job.name)!;
+              try {
+                await handler.handler(handler.validate(payload), context);
+              } finally {
+                cache.delete(context.org.orgId);
+              }
+            },
+          }))
+        : jobs,
     probe,
     raise,
     capacity,
@@ -494,4 +563,34 @@ export async function createWorkerAudit(input: {
       },
     },
   };
+}
+
+export async function auditExportSchedules(
+  registration: Registration,
+  audit: BrokerConfig['audit'],
+  env: (name: string) => string | undefined,
+) {
+  const resolved = await Promise.all(
+    registration.audit.sinks.map(async ({ definition }) => {
+      const destination = await resolveAuditDestination({
+        id: definition.id,
+        runtime: 'cloudflare',
+        ...(audit === undefined ? {} : { audit }),
+        destination: definition.destination,
+        activation: definition.activation,
+        env,
+        fetchImpl: globalThis.fetch,
+      });
+      return destination === null
+        ? []
+        : [
+            {
+              name: `audit-export-${definition.id}`,
+              everySeconds: 60,
+              resourceKey: `audit-export:${definition.id}`,
+            },
+          ];
+    }),
+  );
+  return resolved.flat();
 }

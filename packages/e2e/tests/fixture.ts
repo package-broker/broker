@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { seedAuditList as prepareAuditList } from '../dist/browser/audit-list-fixture.js';
 import type { Fixture } from '../dist/browser/fixtures.js';
@@ -263,32 +264,40 @@ export function seedLists(fixture: Fixture): void {
   });
 }
 
-export async function seedAuditList(page: Page): Promise<void> {
+export async function seedAuditList(page: Page, fixture: Fixture): Promise<void> {
   if (page.url() === 'about:blank') await go(page, 'projects');
-  await prepareAuditList((path, init) =>
-    page.evaluate(
-      async ({ path, init }) => {
-        const headers: Record<string, string> = {};
-        if (init) {
-          const csrf = document.cookie
-            .split('; ')
-            .find((cookie) => cookie.startsWith('__Host-pb_csrf='))
-            ?.split('=')[1];
-          if (!csrf) throw new Error('Audit fixture CSRF cookie missing');
-          headers['X-CSRF-Token'] = decodeURIComponent(csrf);
-          headers['Content-Type'] = 'application/json';
-          headers['Idempotency-Key'] = init.idempotencyKey;
-        }
-        const response = await fetch(path, {
-          method: init?.method ?? 'GET',
-          credentials: 'same-origin',
-          redirect: 'error',
-          headers,
-          ...(init ? { body: JSON.stringify(init.body) } : {}),
-        });
-        return { status: response.status, data: (await response.json()) as unknown };
-      },
-      { path, init },
-    ),
+  await prepareAuditList(
+    (path, init) =>
+      page.evaluate(
+        async ({ path, init }) => {
+          const headers: Record<string, string> = {};
+          if (init) {
+            const csrf = document.cookie
+              .split('; ')
+              .find((cookie) => cookie.startsWith('__Host-pb_csrf='))
+              ?.split('=')[1];
+            if (!csrf) throw new Error('Audit fixture CSRF cookie missing');
+            headers['X-CSRF-Token'] = decodeURIComponent(csrf);
+            headers['Content-Type'] = 'application/json';
+            headers['Idempotency-Key'] = init.idempotencyKey;
+          }
+          const response = await fetch(path, {
+            method: init?.method ?? 'GET',
+            credentials: 'same-origin',
+            redirect: 'error',
+            headers,
+            ...(init ? { body: JSON.stringify(init.body) } : {}),
+          });
+          return { status: response.status, data: (await response.json()) as unknown };
+        },
+        { path, init },
+      ),
+    async () => {
+      fixtureDatabase(fixture, (db, org) => {
+        db.prepare(
+          "INSERT INTO job (id, org_id, type, resource_key) VALUES (?, ?, 'core:audit-seal:v1', 'audit-seal')",
+        ).run(randomUUID(), org);
+      });
+    },
   );
 }

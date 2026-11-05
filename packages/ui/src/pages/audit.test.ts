@@ -296,7 +296,7 @@ describe('audit', () => {
     });
     for (const copy of [
       'Pending mode: Export only',
-      'until the transition completes',
+      'target of the pending transition',
       'Required audit policy',
       'Restore review is pending',
       'Audit delivery needs attention',

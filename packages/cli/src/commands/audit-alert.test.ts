@@ -68,6 +68,9 @@ it('lists every registered code with only fixed meanings and health state, witho
   expect(await command('list')).toBe(0);
   const output = JSON.parse(vi.mocked(console.log).mock.lastCall![0] as string);
   expect(output.result).toBe('applied');
+  expect(
+    output.alerts.find((row: { code: string }) => row.code === 'audit.mode_none').meaning,
+  ).toBe('No durable audit history is being kept; events are still staged and sealed.');
   expect(output.alerts.map((row: { code: string }) => row.code)).toEqual(AUDIT_ALERT_CODES);
   expect(output.alerts.find((row: { code: string }) => row.code === 'audit.capacity')).toEqual({
     code: 'audit.capacity',

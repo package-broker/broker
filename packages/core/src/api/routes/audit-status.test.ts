@@ -186,7 +186,7 @@ const snapshot = {
   pendingCount: 3,
   verification: { fromSeq: 9, throughSeq: 8, bodies: 0, withheld: 0, verifiedAt: 'now' },
   mode: 'export' as const,
-  pendingMode: 'none' as const,
+  pendingMode: 'none' as 'trail' | 'export' | 'none' | null,
   restorePending: false,
   capacity: { state: 'warning' as const, journalRows: 0, journalBytes: 0 },
   sinks: [
@@ -240,7 +240,7 @@ it.each([
         Object.entries(snapshot).filter(([key]) => !['endpoint', 'email'].includes(key)),
       ),
       mode: 'none',
-      pendingMode: 'export',
+      pendingMode: 'none',
       sinks: snapshot.sinks,
       policy: 'availability',
       policySource: 'build',
@@ -260,9 +260,9 @@ it('returns an unavailable status stub until wired', async () => {
   expect(f.statusRead).not.toHaveBeenCalled();
 });
 
-it('omits pendingMode when the stored and effective modes agree', async () => {
+it('omits pendingMode when no transition is stored', async () => {
   const f = await fixture();
-  f.statusRead.mockResolvedValue({ ...snapshot, mode: 'none' });
+  f.statusRead.mockResolvedValue({ ...snapshot, mode: 'none', pendingMode: null });
   const response = await f.request('session', '/_pb/audit/status');
   expect(response.status).toBe(200);
   const body = await response.json();
@@ -273,4 +273,12 @@ it('omits pendingMode when the stored and effective modes agree', async () => {
 it('declares an organization boundary for the status route', () => {
   const route = auditStatusRoutes().find((route) => route.path === '/_pb/audit/status');
   expect(route?.boundary).toBe('organization');
+});
+
+it('reports the transition target even when the stored and effective modes agree', async () => {
+  const f = await fixture();
+  f.statusRead.mockResolvedValue({ ...snapshot, mode: 'none', pendingMode: 'trail' });
+  const response = await f.request('session', '/_pb/audit/status');
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ mode: 'none', pendingMode: 'trail' });
 });

@@ -87,8 +87,29 @@ export function createAuditVerifyReader(executor: ScalarSqlExecutor): AuditVerif
       ]);
       return (result?.rows.length ?? 0) === 1;
     },
-    async clearVerification(ctx) {
-      await executor.batch(clearAuditVerificationStatements(ctx));
+    async clearVerification(ctx, snapshot) {
+      const statements = clearAuditVerificationStatements(ctx);
+      if (snapshot === undefined) {
+        await executor.batch(statements);
+        return;
+      }
+      const [cleared] = await executor.batch([
+        {
+          sql: `${statements[0]!.sql} AND chain_id = ? AND epoch = ? AND incarnation = ?
+            AND mode_generation = ? AND boundary_seq = ? AND boundary_prev_hash = ? RETURNING org_id`,
+          params: [
+            ...statements[0]!.params,
+            snapshot.chain_id,
+            snapshot.epoch,
+            snapshot.incarnation,
+            snapshot.mode_generation,
+            snapshot.boundary_seq,
+            snapshot.boundary_prev_hash,
+          ],
+        },
+        { sql: `${statements[1]!.sql} AND changes() = 1`, params: statements[1]!.params },
+      ]);
+      return cleared!.rows.length === 1;
     },
     async page(ctx, afterSeq, limit) {
       if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {

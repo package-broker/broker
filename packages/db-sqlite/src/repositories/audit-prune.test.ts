@@ -1315,8 +1315,20 @@ it('uses the resolved seal budget for retention capacity state and eviction thre
   );
   expect(updates).toHaveLength(2);
   expect(updates.map((statement) => statement.params)).toEqual([
-    [maxJournalBytes, maxJournalBytes - Math.ceil(maxJournalBytes / 20), org.orgId],
-    [maxJournalBytes, maxJournalBytes - Math.ceil(maxJournalBytes / 20), org.orgId],
+    [
+      maxJournalBytes,
+      maxJournalBytes - Math.ceil(maxJournalBytes / 20),
+      Math.ceil(maxJournalBytes * 0.8),
+      Math.floor(maxJournalBytes * 0.75),
+      org.orgId,
+    ],
+    [
+      maxJournalBytes,
+      maxJournalBytes - Math.ceil(maxJournalBytes / 20),
+      Math.ceil(maxJournalBytes * 0.8),
+      Math.floor(maxJournalBytes * 0.75),
+      org.orgId,
+    ],
   ]);
   expect((await chain()).capacity_state).toBe('ok');
 });

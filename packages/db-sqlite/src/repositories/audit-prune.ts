@@ -1,3 +1,4 @@
+import { auditCapacityStateStatement } from './audit-capacity-state.js';
 import { createAuditHealthService, raiseAuditAlert } from '@package-broker/core/audit/health';
 import { createAuditHealthRepository } from './audit-health.js';
 import {
@@ -406,14 +407,7 @@ export function createAuditPruneRepository(
       },
       ...clearAuditVerificationStatements(ctx),
     );
-    if (budget !== undefined)
-      statements.push({
-        sql: `UPDATE audit_chain SET capacity_state = CASE
-        WHEN journal_bytes >= ? THEN 'refusing'
-        WHEN journal_bytes <= ? THEN 'ok' ELSE capacity_state END
-        WHERE org_id = ? AND policy = 'required'`,
-        params: [budget, budget - Math.ceil(budget / 20), ctx.orgId],
-      });
+    if (budget !== undefined) statements.push(auditCapacityStateStatement(ctx, budget));
     try {
       const results = await executor.batch(statements);
       const deleted = results.at(deleteIndex)!.rows.length;

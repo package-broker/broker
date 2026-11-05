@@ -371,7 +371,7 @@ export function auditBackpressureSuite(open: () => Promise<MigratedDatabase>): v
             params: [],
           }),
         ).toEqual([
-          { org_id: ctx.orgId, capacity_state: policy === 'required' ? 'refusing' : 'ok' },
+          { org_id: ctx.orgId, capacity_state: policy === 'required' ? 'refusing' : 'warning' },
           { org_id: database.orgs!.b.orgId, capacity_state: 'ok' },
         ]);
       },

@@ -94,14 +94,21 @@ function setup(rows: readonly AuditRow[] = chain) {
     head_hash: rows.at(-1)?.hash ?? AUDIT_GENESIS_HASH,
   };
   const readSnapshot = vi.fn(async () => ({ ...snapshot }));
-  const job = auditVerifyJob({
-    page,
-    markVerified,
-    snapshot: readSnapshot,
-    clearVerification: vi.fn(),
-  });
+  const clearVerification = vi.fn<() => Promise<boolean | void>>(async () => {});
+  const raise = vi.fn(async () => {});
+  const job = auditVerifyJob(
+    {
+      page,
+      markVerified,
+      snapshot: readSnapshot,
+      clearVerification,
+    },
+    { raise },
+  );
   return {
     snapshot,
+    clearVerification,
+    raise,
     readSnapshot,
     context,
     records,
@@ -116,6 +123,8 @@ function setup(rows: readonly AuditRow[] = chain) {
 }
 
 function expectBroken(s: ReturnType<typeof setup>, seq: number, reason: string) {
+  expect(s.clearVerification).toHaveBeenCalledWith(org, s.snapshot);
+  expect(s.raise).toHaveBeenCalledWith(org, 'audit.chain_integrity');
   expect(s.markVerified).not.toHaveBeenCalled();
   expect(s.logs()).toHaveLength(1);
   expect(s.logs()[0]).toMatchObject({ level: 'error', event: 'audit.chain_broken', seq, reason });
@@ -752,4 +761,13 @@ describe('auditVerifyJob', () => {
       head_hash: AUDIT_GENESIS_HASH,
     });
   });
+});
+
+it('does not raise a stale integrity alert when the invalidation loses its snapshot fence', async () => {
+  const s = setup([{ ...chain[0]!, hash: 'f'.repeat(64) }]);
+  s.clearVerification.mockResolvedValueOnce(false);
+  await s.run();
+  expect(s.clearVerification).toHaveBeenCalledOnce();
+  expect(s.raise).not.toHaveBeenCalled();
+  expect(s.logs()).toEqual([expect.objectContaining({ event: 'audit.verify_partial' })]);
 });

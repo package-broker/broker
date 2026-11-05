@@ -1,3 +1,4 @@
+import { auditCapacityStateStatement } from './audit-capacity-state.js';
 import { ACCESS_MUTATION_GUARD_CONSTRAINT, DbError } from '@package-broker/core/db/errors';
 import { sql } from 'kysely';
 import { assertCheck } from '../kysely.js';
@@ -99,14 +100,18 @@ type SeqRange = { readonly from_seq: number; readonly to_seq: number };
 /** A capacity gap carries the hash of its last evicted row; a seq_gap has none. */
 type GapTop = { readonly top: number; readonly hash: string | null };
 
-const GAPS_SQL = `SELECT from_seq, to_seq FROM audit_ledger
-  WHERE org_id = ? AND chain_id = ? AND epoch = ? AND reason_code = 'seq_gap' AND sink_id IS NULL
-  AND kind = 'gap' AND superseded_by IS NULL AND from_seq <= ? AND to_seq >= ?
-  ORDER BY from_seq`;
-const HOLES_SQL = `SELECT previous_seq + 1 AS from_seq, seq - 1 AS to_seq FROM (
-    SELECT seq, lag(seq, 1, ?) OVER (ORDER BY seq) AS previous_seq
-    FROM audit_event WHERE org_id = ?
-  ) WHERE seq > previous_seq + 1`;
+const HOLES_SQL = `WITH covered AS (
+    SELECT seq AS lo, seq AS hi FROM audit_event WHERE org_id = ? AND seq BETWEEN ? AND ?
+    UNION ALL SELECT max(from_seq, ?), min(to_seq, ?) FROM audit_ledger
+      WHERE org_id = ? AND chain_id = ? AND epoch = ? AND reason_code = 'seq_gap'
+      AND sink_id IS NULL AND kind = 'gap' AND superseded_by IS NULL
+      AND from_seq <= ? AND to_seq >= ?
+    UNION ALL SELECT ?, ? UNION ALL SELECT ?, ?
+  ), frontiers AS (
+    SELECT lo, max(hi) OVER (ORDER BY lo, hi ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_seq
+    FROM covered
+  ) SELECT previous_seq + 1 AS from_seq, lo - 1 AS to_seq FROM frontiers
+    WHERE lo > previous_seq + 1 ORDER BY lo LIMIT ?`;
 const GAP_FENCE = ` AND NOT EXISTS (SELECT 1 FROM audit_ledger g JOIN json_each(?) ranges
   ON g.from_seq <= json_extract(ranges.value, '$[1]') AND g.to_seq >= json_extract(ranges.value, '$[0]')
   WHERE g.org_id = ? AND g.chain_id = ? AND g.epoch = ? AND g.kind = 'gap'
@@ -178,24 +183,35 @@ function readHead(executor: SqlExecutor, ctx: OrgContext): Promise<Head[]> {
   return executor.all<Head>({ sql: HEAD_SQL, params: Array(6).fill(ctx.orgId) });
 }
 
-function readGaps(
+interface GapCoverage {
+  total: number;
+  leading: number;
+  trailing: number;
+}
+async function readCoverage(
   executor: SqlExecutor,
   ctx: OrgContext,
   head: Head,
-  from: number,
-  to: number,
-): Promise<SeqRange[]> {
-  return executor.all<SeqRange>({
-    sql: GAPS_SQL,
-    params: [ctx.orgId, head.chain_id, head.epoch, to, from],
+): Promise<GapCoverage> {
+  const [row] = await executor.all<GapCoverage>({
+    sql: `SELECT coalesce(sum(max(0, min(to_seq, ?) - max(from_seq, ?) + 1)), 0) AS total,
+      coalesce(sum(max(0, min(to_seq, ?) - max(from_seq, ?) + 1)), 0) AS leading,
+      coalesce(sum(max(0, min(to_seq, ?) - max(from_seq, ?) + 1)), 0) AS trailing
+      FROM audit_ledger WHERE org_id = ? AND chain_id = ? AND epoch = ?
+      AND reason_code = 'seq_gap' AND sink_id IS NULL AND kind = 'gap' AND superseded_by IS NULL`,
+    params: [
+      head.head_seq,
+      head.boundary_seq,
+      (head.first_seq ?? head.boundary_seq) - 1,
+      head.boundary_seq,
+      head.head_seq,
+      (head.last_seq ?? head.head_seq) + 1,
+      ctx.orgId,
+      head.chain_id,
+      head.epoch,
+    ],
   });
-}
-
-function covered(gaps: readonly SeqRange[], from: number, to: number): number {
-  let total = 0;
-  for (const gap of gaps)
-    total += Math.max(0, Math.min(gap.to_seq, to) - Math.max(gap.from_seq, from) + 1);
-  return total;
+  return row ?? { total: 0, leading: 0, trailing: 0 };
 }
 
 /**
@@ -203,20 +219,20 @@ function covered(gaps: readonly SeqRange[], from: number, to: number): number {
  * endpoints match the stored hashes and the counters match. Interior rows deleted without the
  * row counter changing are the verifier's to find.
  */
-function consistent(head: Head, gaps: readonly SeqRange[]): boolean {
+function consistent(head: Head, gaps: GapCoverage): boolean {
   const { head_seq: top, boundary_seq: boundary } = head;
   if (boundary > top + 1) return false;
   if (boundary === top + 1 && head.boundary_prev_hash !== head.head_hash) return false;
-  const missing = covered(gaps, boundary, top);
+  const missing = gaps.total;
   if (head.last_seq === null || head.first_seq === null)
     return missing === top - boundary + 1 && head.journal_rows === 0 && head.journal_bytes === 0;
   return (
     head.first_seq >= boundary &&
     (head.first_seq > boundary || head.first_prev_hash === head.boundary_prev_hash) &&
-    covered(gaps, boundary, head.first_seq - 1) === head.first_seq - boundary &&
+    gaps.leading === head.first_seq - boundary &&
     head.last_seq <= top &&
     (head.last_seq < top || head.anchor_hash === head.head_hash) &&
-    covered(gaps, head.last_seq + 1, top) === top - head.last_seq &&
+    gaps.trailing === top - head.last_seq &&
     head.journal_rows === top - boundary + 1 - missing &&
     head.journal_bytes > 0
   );
@@ -271,20 +287,6 @@ function target(
     },
     reasons,
   };
-}
-
-function subtract(holes: readonly SeqRange[], gaps: readonly SeqRange[]): SeqRange[] {
-  const result: SeqRange[] = [];
-  for (const hole of holes) {
-    let from = hole.from_seq;
-    for (const gap of gaps) {
-      if (gap.to_seq < from || gap.from_seq > hole.to_seq) continue;
-      if (gap.from_seq > from) result.push({ from_seq: from, to_seq: gap.from_seq - 1 });
-      from = Math.max(from, gap.to_seq + 1);
-    }
-    if (from <= hole.to_seq) result.push({ from_seq: from, to_seq: hole.to_seq });
-  }
-  return result;
 }
 
 function ledgerEntry(
@@ -356,6 +358,7 @@ function insertStatement(row: AuditRow): Statement {
 
 export interface AuditSealOptions {
   readonly maxJournalBytes?: number;
+  readonly signal?: AbortSignal;
   /** Ledger id generator; ids must be ULIDs. */
   readonly ids?: () => string;
 }
@@ -373,24 +376,13 @@ export function createAuditSealRepository(
   const ids = options.ids ?? (() => ulid());
 
   async function submit(ctx: OrgContext, statements: readonly Statement[]): Promise<boolean> {
+    if (options.signal?.aborted) return false;
     try {
       await executor.batch([
         ...statements,
         ...(options.maxJournalBytes === undefined
           ? []
-          : [
-              {
-                sql: `UPDATE audit_chain SET capacity_state = CASE
-            WHEN journal_bytes >= ? THEN 'refusing'
-            WHEN journal_bytes <= ? THEN 'ok' ELSE capacity_state END
-            WHERE org_id = ? AND policy = 'required'`,
-                params: [
-                  options.maxJournalBytes,
-                  options.maxJournalBytes - Math.ceil(options.maxJournalBytes / 20),
-                  ctx.orgId,
-                ],
-              },
-            ]),
+          : [auditCapacityStateStatement(ctx, options.maxJournalBytes)]),
       ]);
       return true;
     } catch (error) {
@@ -421,26 +413,36 @@ export function createAuditSealRepository(
     head: Head,
     committed: AuditIntegrityReason[],
     top?: GapTop | null,
-  ): Promise<{ head: Head; repaired: boolean } | null> {
+  ): Promise<{ head: Head; repaired: boolean; continuation?: true } | null> {
     const [summary] = await executor.all<{ actual_rows: number; actual_bytes: number }>({
       sql: SUMMARY_SQL,
       params: [ctx.orgId],
     });
     if (summary === undefined) throw new Error('audit journal summary is missing');
     const { next, reasons } = target(head, top === undefined ? await gapTop(ctx, head) : top);
-    const holes: SeqRange[] =
-      head.last_seq === null
-        ? []
-        : await executor.all<SeqRange>({
-            sql: HOLES_SQL,
-            params: [next.boundary_seq - 1, ctx.orgId],
-          });
-    const tailFrom = head.last_seq === null ? next.boundary_seq : head.last_seq + 1;
-    if (tailFrom <= next.head_seq) holes.push({ from_seq: tailFrom, to_seq: next.head_seq });
-    const missing =
-      holes.length === 0
-        ? []
-        : subtract(holes, await readGaps(executor, ctx, head, next.boundary_seq, next.head_seq));
+    if (options.signal?.aborted) return { head, repaired: false, continuation: true };
+    const holes = await executor.all<SeqRange>({
+      sql: HOLES_SQL,
+      params: [
+        ctx.orgId,
+        next.boundary_seq,
+        next.head_seq,
+        next.boundary_seq,
+        next.head_seq,
+        ctx.orgId,
+        head.chain_id,
+        head.epoch,
+        next.head_seq,
+        next.boundary_seq,
+        next.boundary_seq - 1,
+        next.boundary_seq - 1,
+        next.head_seq + 1,
+        next.head_seq + 1,
+        GAPS_PER_BATCH + 1,
+      ],
+    });
+    const more = holes.length > GAPS_PER_BATCH;
+    const missing = holes.slice(0, GAPS_PER_BATCH);
     const state: ChainState = {
       ...next,
       journal_rows: summary.actual_rows,
@@ -460,6 +462,7 @@ export function createAuditSealRepository(
       anchor_hash: state.head_seq === head.last_seq ? head.last_hash : null,
     };
     for (let i = 0; i === 0 || i < missing.length; i += GAPS_PER_BATCH) {
+      if (options.signal?.aborted) return { head, repaired: false, continuation: true };
       const chunk = missing.slice(i, i + GAPS_PER_BATCH);
       const entries = [
         ...(i === 0 && reset
@@ -497,7 +500,7 @@ export function createAuditSealRepository(
         return null;
       if (i === 0) committed.push(...reasons);
     }
-    return { head: recovered, repaired: true };
+    return { head: recovered, repaired: true, ...(more ? { continuation: true } : {}) };
   }
 
   /**
@@ -544,6 +547,7 @@ export function createAuditSealRepository(
     limit: number,
     committed: AuditIntegrityReason[],
   ): Promise<SealOutcome> {
+    if (options.signal?.aborted) return { outcome: 'recovering' };
     const orgId = ctx.orgId;
     const [read] = await readHead(executor, ctx);
     if (read === undefined) throw new Error('audit chain is missing');
@@ -555,22 +559,14 @@ export function createAuditSealRepository(
       ...(committed.length > 0 ? { integrity: [...committed] } : {}),
     });
     if (
-      !consistent(head, []) &&
-      !consistent(
-        head,
-        await readGaps(
-          executor,
-          ctx,
-          head,
-          head.boundary_seq,
-          Math.max(head.head_seq, head.last_seq ?? 0),
-        ),
-      )
+      !consistent(head, { total: 0, leading: 0, trailing: 0 }) &&
+      !consistent(head, await readCoverage(executor, ctx, head))
     ) {
       const recovery = await recover(ctx, head, committed);
       if (recovery === null) return { outcome: 'contended', ...extra() };
       head = recovery.head;
       repaired = recovery.repaired;
+      if (recovery.continuation) return { outcome: 'recovering', ...extra() };
     }
 
     for (let attempt = 0; attempt < PENDING_ATTEMPTS; attempt += 1) {
@@ -625,6 +621,7 @@ export function createAuditSealRepository(
         if (recovery === null) return { outcome: 'contended', ...extra() };
         head = recovery.head;
         repaired ||= recovery.repaired;
+        if (recovery.continuation) return { outcome: 'recovering', ...extra() };
         continue;
       }
       const counted: Head | null = (await modifiedInPlace(ctx, pending))

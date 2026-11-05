@@ -212,6 +212,7 @@ describe.each([
         ['core:audit-maintain:v1', { everySeconds: 60, resourceKey: 'audit-maintain' }],
         ['core:audit-health-observe:v1', { everySeconds: 60, resourceKey: 'audit-health-observe' }],
         ['core:audit-frontier:v1', { everySeconds: 86400, resourceKey: 'audit-frontier' }],
+        ['core:audit-head:v1', { everySeconds: 86400, resourceKey: 'audit-head' }],
       ]);
       await worker.scheduled({}, env);
       await executor.batch([

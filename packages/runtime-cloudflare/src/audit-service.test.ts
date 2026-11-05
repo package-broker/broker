@@ -242,7 +242,15 @@ describe('Worker organization audit resolution', () => {
       all.mockClear();
       for (let i = 0; i < 5; i++) await audit.resolveRequest(org, get());
       expect(all).not.toHaveBeenCalled();
-      expect(log).toHaveBeenCalledTimes(1);
+      expect(
+        log.mock.calls.filter(([record]) => record.event === 'audit.effective_unavailable'),
+      ).toHaveLength(1);
+      expect(
+        log.mock.calls.filter(
+          ([record]) =>
+            record.event === 'audit.alert' && record.reason_code === 'audit.config_invalid',
+        ),
+      ).toHaveLength(1);
       await expect(
         audit.resolveRequest(
           org,
@@ -251,12 +259,28 @@ describe('Worker organization audit resolution', () => {
       ).rejects.toMatchObject({ code: 'none_not_accepted', transient: false });
       await audit.resolveRequest(foreign, get());
       expect(all).toHaveBeenCalled();
-      expect(log).toHaveBeenCalledTimes(2);
+      expect(
+        log.mock.calls.filter(([record]) => record.event === 'audit.effective_unavailable'),
+      ).toHaveLength(2);
+      expect(
+        log.mock.calls.filter(
+          ([record]) =>
+            record.event === 'audit.alert' && record.reason_code === 'audit.config_invalid',
+        ),
+      ).toHaveLength(2);
       all.mockClear();
       now += 30_001;
       await audit.resolveRequest(org, get());
       expect(all).toHaveBeenCalled();
-      expect(log).toHaveBeenCalledTimes(3);
+      expect(
+        log.mock.calls.filter(([record]) => record.event === 'audit.effective_unavailable'),
+      ).toHaveLength(3);
+      expect(
+        log.mock.calls.filter(
+          ([record]) =>
+            record.event === 'audit.alert' && record.reason_code === 'audit.config_invalid',
+        ),
+      ).toHaveLength(3);
     } finally {
       await database.close();
     }

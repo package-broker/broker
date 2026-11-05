@@ -925,3 +925,58 @@ it.each(['none_not_accepted', 'durable_path_required'] as const)(
     }
   },
 );
+
+const inactiveSinks: PluginDefinition = {
+  id: 'inactive-sinks',
+  package: '@test/inactive-sinks',
+  apiVersion: 4,
+  platforms: ['cloudflare'],
+  auditSinks: [
+    {
+      id: 'otlp',
+      kind: 'otlp',
+      activation: 'env',
+      custody: 'delivery',
+      sourceIp: 'omit',
+      destination: { protocol: 'otlp-http-json' },
+      create: () => {
+        throw new Error('Inactive sink created');
+      },
+    },
+    {
+      id: 'webhook',
+      kind: 'webhook',
+      activation: 'env',
+      custody: 'delivery',
+      sourceIp: 'omit',
+      destination: {
+        protocol: 'https-json',
+        urlEnv: 'PB_AUDIT_WEBHOOK_URL',
+        headersEnv: 'PB_AUDIT_WEBHOOK_HEADERS',
+      },
+      create: () => {
+        throw new Error('Inactive sink created');
+      },
+    },
+  ],
+};
+
+it('registers no export schedules for either unresolved prebuilt sink protocol', async () => {
+  const database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
+  const kernelSpy = vi.spyOn(kernelModule, 'createKernel');
+  const worker = createWorker([trail, inactiveSinks], { ...workerOptions(), audit: { capacity } });
+  try {
+    await worker.services(workerEnv(database.executor));
+    const kernel: Awaited<ReturnType<typeof kernelModule.createKernel>> =
+      await kernelSpy.mock.results.at(-1)!.value;
+    expect(
+      kernel.registration.jobs.filter((job) => job.qualifiedName.startsWith('core:audit-export-')),
+    ).toEqual([]);
+    expect(
+      kernel.registration.jobs.find((job) => job.qualifiedName === 'core:audit-head:v1')?.definition
+        .schedule,
+    ).toEqual({ everySeconds: 86400, resourceKey: 'audit-head' });
+  } finally {
+    await database.close();
+  }
+});

@@ -1,3 +1,4 @@
+import { raiseAuditAlert, type AuditHealthPort } from './health.js';
 import type { OrgContext } from '../db/port.js';
 import { requirePlatformPorts } from '../plugin.js';
 import { JobError, type JobDefinition, type Jobs } from '../platform/jobs.js';
@@ -33,7 +34,7 @@ export interface AuditVerifyReader {
     scope: AuditVerificationScope,
     snapshot: AuditVerifySnapshot,
   ): Promise<boolean>;
-  clearVerification(ctx: OrgContext): Promise<void>;
+  clearVerification(ctx: OrgContext, snapshot?: AuditVerifySnapshot): Promise<boolean | void>;
   page(ctx: OrgContext, afterSeq: number, limit: number): Promise<readonly AuditRow[]>;
 }
 
@@ -99,7 +100,10 @@ export async function requestVerification(jobs: Jobs, org: OrgContext, now: Date
   );
 }
 
-export function auditVerifyJob(reader: AuditVerifyReader): JobDefinition<VerifyPayload> {
+export function auditVerifyJob(
+  reader: AuditVerifyReader,
+  health?: Pick<AuditHealthPort, 'raise'>,
+): JobDefinition<VerifyPayload> {
   return {
     name: 'audit-verify',
     version: 1,
@@ -151,6 +155,11 @@ export function auditVerifyJob(reader: AuditVerifyReader): JobDefinition<VerifyP
       const current = await reader.snapshot(ctx.org);
       if (!validSnapshot(current)) throw new Error('audit verification snapshot invalid');
       if (current.stored_seq < current.boundary_seq - 1) {
+        if ((await reader.clearVerification(ctx.org, current)) === false) {
+          ctx.observability.log({ level: 'warn', event: 'audit.verify_partial', rows: 0 });
+          return;
+        }
+        await raiseAuditAlert(health, ctx.org, 'audit.chain_integrity');
         ctx.observability.log({
           level: 'error',
           event: 'audit.chain_integrity',
@@ -175,6 +184,8 @@ export function auditVerifyJob(reader: AuditVerifyReader): JobDefinition<VerifyP
         reason: ChainBreak['reason'] | 'org_mismatch',
       ): Promise<void> => {
         if (!sameRange(snapshot, await reader.snapshot(ctx.org))) return partial();
+        if ((await reader.clearVerification(ctx.org, snapshot)) === false) return partial();
+        await raiseAuditAlert(health, ctx.org, 'audit.chain_integrity');
         ctx.observability.log({ level: 'error', event: 'audit.chain_broken', seq, reason });
         ctx.observability.counter('pb.audit.chain_broken');
       };

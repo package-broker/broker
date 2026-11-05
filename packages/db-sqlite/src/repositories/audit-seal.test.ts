@@ -793,11 +793,13 @@ describe('createAuditSealRepository', () => {
           return executor.batch(statements);
         },
       };
+      await expect(createAuditSealRepository(recording).seal(a)).resolves.toMatchObject({
+        outcome: 'recovering',
+        integrity: ['seq_gap'],
+      });
       if (interrupt) {
         await expect(createAuditSealRepository(recording).seal(a)).rejects.toMatchObject({
-          name: 'AuditSealInterruptedError',
-          integrity: ['seq_gap'],
-          cause: expect.objectContaining({ kind: 'busy' }),
+          kind: 'busy',
         });
         expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(97);
         expect(await pendingIds(a.orgId)).toHaveLength(100);
@@ -845,10 +847,13 @@ describe('createAuditSealRepository', () => {
     await expect(
       createAuditSealRepository(recording, { maxJournalBytes: 1_000_000 }).seal(a),
     ).resolves.toMatchObject({
-      outcome: 'empty',
+      outcome: 'recovering',
       repaired: true,
       integrity: ['boundary_mismatch', 'seq_gap'],
     });
+    await expect(
+      createAuditSealRepository(recording, { maxJournalBytes: 1_000_000 }).seal(a),
+    ).resolves.toMatchObject({ outcome: 'empty', integrity: ['seq_gap'] });
     expect(sizes).toEqual([198, 5, 1]);
     const entries = await createAuditLedgerRepository(executor).page(a, null, 500);
     expect(entries.filter((entry) => entry.kind === 'gap')).toHaveLength(98);
@@ -881,10 +886,12 @@ describe('createAuditSealRepository', () => {
         return executor.batch(statements);
       },
     };
-    await expect(createAuditSealRepository(interrupted).seal(a)).rejects.toMatchObject({
-      name: 'AuditSealInterruptedError',
+    await expect(createAuditSealRepository(interrupted).seal(a)).resolves.toMatchObject({
+      outcome: 'recovering',
       integrity: ['boundary_mismatch', 'seq_gap'],
-      cause: expect.objectContaining({ kind: 'busy' }),
+    });
+    await expect(createAuditSealRepository(interrupted).seal(a)).rejects.toMatchObject({
+      kind: 'busy',
     });
     expect(batches).toEqual([197, 8]);
     const ledger = createAuditLedgerRepository(executor);
@@ -1157,10 +1164,11 @@ describe('createAuditSealRepository', () => {
     } as unknown as JobContext;
     await expect(
       auditSealJob(createAuditSealRepository(interrupted)).handler({}, ctx),
-    ).rejects.toMatchObject({ name: 'AuditSealInterruptedError' });
+    ).rejects.toMatchObject({ kind: 'busy' });
     expect(logs).toEqual([
       { level: 'error', event: 'audit.chain_integrity', reason: 'boundary_mismatch' },
       { level: 'error', event: 'audit.chain_integrity', reason: 'seq_gap' },
+      { level: 'warn', event: 'audit.seal_repaired' },
     ]);
     expect(counters.filter((name) => name === 'pb.audit.chain_integrity')).toHaveLength(2);
   });
@@ -1729,4 +1737,107 @@ describe('createAuditSealRepository', () => {
       kind: 'unique',
     });
   });
+});
+
+it('continues a fragmented journal with at most 97 new holes per call and no early sealing', async () => {
+  const { a, b } = orgs();
+  const repo = createAuditSealRepository(executor);
+  for (let n = 1; n <= 501; n += 100) {
+    await addPending(a.orgId, n, Math.min(100, 502 - n));
+    await repo.seal(a);
+  }
+  await executor.batch([
+    { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq % 2 = 0', params: [a.orgId] },
+    {
+      sql: 'UPDATE audit_chain SET journal_rows = (SELECT count(*) FROM audit_event WHERE org_id = ?) WHERE org_id = ?',
+      params: [a.orgId, a.orgId],
+    },
+  ]);
+  await addPending(a.orgId, 502, 1);
+  const holePages: number[] = [];
+  const bounded = createAuditSealRepository({
+    ...executor,
+    async all<R>(statement: Statement): Promise<R[]> {
+      const rows = await executor.all<R>(statement);
+      if (statement.sql.includes('AS from_seq') && statement.sql.includes('audit_event')) {
+        holePages.push(rows.length);
+        expect(rows.length).toBeLessThanOrEqual(98);
+      }
+      return rows;
+    },
+  });
+  const ledger = createAuditLedgerRepository(executor);
+  for (const expected of [97, 194]) {
+    await expect(bounded.seal(a)).resolves.toMatchObject({ outcome: 'recovering' });
+    expect(await ledger.effectiveGaps(a)).toHaveLength(expected);
+    expect(await pendingIds(a.orgId)).toHaveLength(1);
+    expect(await ledger.effectiveGaps(b)).toHaveLength(0);
+  }
+  await expect(bounded.seal(a)).resolves.toMatchObject({
+    outcome: 'sealed',
+    headSeq: 502,
+    sealed: 1,
+  });
+  expect(await ledger.effectiveGaps(a)).toHaveLength(250);
+  expect(holePages).toHaveLength(3);
+});
+
+it('honours cancellation after the recovery scan and resumes without losing gaps', async () => {
+  const { a } = orgs();
+  await addPending(a.orgId, 1, 5);
+  await createAuditSealRepository(executor).seal(a);
+  await executor.batch([
+    { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq = 2', params: [a.orgId] },
+    { sql: 'UPDATE audit_chain SET journal_rows = 4 WHERE org_id = ?', params: [a.orgId] },
+  ]);
+  const abort = new AbortController();
+  const interrupted: SqlExecutor = {
+    ...executor,
+    async all<R>(statement: Statement): Promise<R[]> {
+      const rows = await executor.all<R>(statement);
+      if (statement.sql.includes('actual_rows')) abort.abort();
+      return rows;
+    },
+  };
+  await expect(
+    createAuditSealRepository(interrupted, { signal: abort.signal }).seal(a),
+  ).resolves.toMatchObject({ outcome: 'recovering' });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(0);
+  await expect(createAuditSealRepository(executor).seal(a)).resolves.toMatchObject({
+    outcome: 'empty',
+    integrity: ['seq_gap'],
+  });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(1);
+});
+
+it('stops between recovery chunks when cancelled after the first commit', async () => {
+  const { a } = orgs();
+  const repo = createAuditSealRepository(executor);
+  for (let n = 1; n <= 201; n += 100) {
+    await addPending(a.orgId, n, Math.min(100, 202 - n));
+    await repo.seal(a);
+  }
+  await executor.batch([
+    { sql: 'DELETE FROM audit_event WHERE org_id = ? AND seq % 2 = 0', params: [a.orgId] },
+    { sql: 'UPDATE audit_chain SET journal_rows = 101 WHERE org_id = ?', params: [a.orgId] },
+  ]);
+  await addPending(a.orgId, 202, 1);
+  const abort = new AbortController();
+  const interrupted: SqlExecutor = {
+    ...executor,
+    async batch(statements) {
+      const result = await executor.batch(statements);
+      abort.abort();
+      return result;
+    },
+  };
+  await auditSealJob(createAuditSealRepository(interrupted, { signal: abort.signal })).handler({}, {
+    org: a,
+    signal: abort.signal,
+    observability: { log: () => {}, counter: () => {}, histogram: () => {} },
+  } as unknown as JobContext);
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(97);
+  expect(await pendingIds(a.orgId)).toHaveLength(1);
+  await expect(repo.seal(a)).resolves.toMatchObject({ outcome: 'sealed', sealed: 1, headSeq: 202 });
+  expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(100);
 });

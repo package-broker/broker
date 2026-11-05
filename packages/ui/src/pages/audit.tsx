@@ -420,8 +420,8 @@ export function AuditStatusView({
       ) : null}
       {status.pendingMode ? (
         <p>
-          Pending mode: {modeLabels[status.pendingMode]}. The effective mode stays in use until the
-          transition completes.
+          Pending mode: {modeLabels[status.pendingMode]}. This is the target of the pending
+          transition.
         </p>
       ) : null}
       <p>

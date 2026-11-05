@@ -1116,7 +1116,7 @@ test.describe('Node management UI', () => {
       }) => {
         if (route === 'audit') {
           test.setTimeout(90_000);
-          await seedAuditList(page);
+          await seedAuditList(page, broker);
         }
         if (route === 'tokens') {
           await issueToken(page, admin);

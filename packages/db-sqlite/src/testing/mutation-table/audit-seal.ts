@@ -565,14 +565,14 @@ export const entries: readonly MutationEntry[] = [
       ...ledgerEntries.flatMap((entry) => entry.predicates),
       {
         name: 'gap detection reads only the organization journal',
-        locate: /org_id = \?(?=\s+\) WHERE seq)/,
+        locate: /org_id = \?(?= AND seq BETWEEN)/,
         neutral: '(? is not null)',
         copies: 1,
         caseName: gapRecoveryScope.name,
       },
       {
         name: 'recorded gaps are read only from the organization ledger',
-        locate: /org_id = \?(?= AND chain_id = \? AND epoch = \? AND reason_code)/,
+        locate: /org_id = \?(?= AND chain_id = \? AND epoch = \?\s+AND reason_code)/,
         neutral: '(? is not null)',
         copies: 2,
         caseName: gapRecoveryScope.name,

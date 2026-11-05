@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.0.0-rc.6](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.5...cli-v2.0.0-rc.6) (2026-11-05)
+
+
+### Features
+
+* **core:** audit logging as plugins with a local trail, OTLP and webhook export ([#1050](https://github.com/package-broker/broker/issues/1050)) ([ef30526](https://github.com/package-broker/broker/commit/ef30526d460c978f58650dac2ab41b8d2145ee5d))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.6
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.6
+    * @package-broker/plugin-audit-trail bumped to 1.0.0
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.6
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.6
+    * @package-broker/runtime-node bumped to 2.0.0-rc.6
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.6
+
 ## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.4...cli-v2.0.0-rc.5) (2026-11-04)
 
 

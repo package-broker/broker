@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0-rc.6](https://github.com/package-broker/broker/compare/dist-v2.0.0-rc.5...dist-v2.0.0-rc.6) (2026-11-05)
+
+
+### Miscellaneous Chores
+
+* **dist:** Synchronize product versions
+
 ## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/dist-v2.0.0-rc.4...dist-v2.0.0-rc.5) (2026-11-04)
 
 

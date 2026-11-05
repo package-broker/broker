@@ -11,6 +11,7 @@ import {
   assertLayout,
   fixtureDatabase,
   seedLists,
+  seedAuditList,
   authCode,
   base32Decode,
   activeDialog,
@@ -29,7 +30,7 @@ const test = base.extend<{
     async ({}, use) => {
       const broker = await startNodeFixture();
       try {
-        await seedLists(broker);
+        seedLists(broker);
         await use(broker);
       } finally {
         await broker.stop();
@@ -1113,6 +1114,10 @@ test.describe('Node management UI', () => {
         admin,
         broker,
       }) => {
+        if (route === 'audit') {
+          test.setTimeout(90_000);
+          await seedAuditList(page);
+        }
         if (route === 'tokens') {
           await issueToken(page, admin);
           await go(page, 'projects');
@@ -1133,7 +1138,7 @@ test.describe('Node management UI', () => {
           sources: 'Browser fixture source',
           packages: '@browser-fixture/a-long-package-name-for-horizontal-overflow',
           tokens: 'Browser show once',
-          audit: 'project.create',
+          audit: 'Project create',
           import: 'Planned',
         }[route]!;
         await expect(

@@ -14,6 +14,7 @@ import {
   packageTarget,
   readSecret,
   seedLists,
+  seedAuditList,
 } from './fixture.js';
 
 const WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
@@ -26,7 +27,7 @@ const test = base.extend<{ broker: Fixture; admin: Admin; adminPage: Page }>({
     async ({}, use) => {
       const broker = await startNodeFixture();
       try {
-        await seedLists(broker);
+        seedLists(broker);
         await use(broker);
       } finally {
         await broker.stop();
@@ -152,6 +153,10 @@ test('sign-in and first-admin setup at every stage', async ({ page, broker }) =>
 for (const width of [1440, 390]) {
   for (const route of ['projects', 'access', 'sources', 'packages', 'tokens', 'audit', 'import']) {
     test(`${route} seeded admin page at ${width}px`, async ({ adminPage: page, admin }) => {
+      if (route === 'audit') {
+        test.setTimeout(90_000);
+        await seedAuditList(page);
+      }
       await page.setViewportSize({ width, height: 900 });
       if (route === 'tokens') {
         await confirmIdentity(page, admin);

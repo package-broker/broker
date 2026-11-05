@@ -1,29 +1,57 @@
-import { auditEvent } from '@package-broker/core/audit/actions';
-import { orgContext } from '@package-broker/core/db/port';
-import { ulid } from '@package-broker/core/ids';
-import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/audit-pending';
-import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
-import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
+import { randomUUID } from 'node:crypto';
 
-export async function seedAuditList(file: string, orgId: string, projectId: string): Promise<void> {
-  const database = openNodeSqliteExecutor(file);
+interface FixtureResponse {
+  status: number;
+  data: unknown;
+}
+export type AuditFixtureRequest = (
+  path: string,
+  init?: { method: 'POST'; body: { slug: string; name: string }; idempotencyKey: string },
+) => Promise<FixtureResponse>;
+
+function object(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export async function seedAuditList(request: AuditFixtureRequest): Promise<void> {
   try {
-    const org = orgContext(orgId);
-    const event = auditEvent({
-      id: ulid(),
-      now: new Date().toISOString(),
-      actor: { type: 'system', id: null },
-      action: 'project.create',
-      target: { type: 'project', id: projectId },
-      projectId,
-      context: { opId: ulid(), requestId: null, sourceIp: null, tokenSelector: null },
-      changes: { slug: { new: 'browser-fixture' } },
+    const slug = `browser-audit-${randomUUID()}`;
+    const created = await request('/_pb/projects', {
+      method: 'POST',
+      body: { slug, name: 'Browser audit fixture' },
+      idempotencyKey: randomUUID(),
     });
-    if (!event.ok) throw new Error('Invalid audit list fixture');
-    await database.executor.batch([auditPendingStatement(org, event.event)]);
-    const result = await createAuditSealRepository(database.executor).seal(org);
-    if (result.outcome !== 'sealed') throw new Error('Audit list fixture was not sealed');
-  } finally {
-    await database.close();
+    if (created.status !== 201 || !object(created.data) || typeof created.data.id !== 'string')
+      throw new Error();
+    const projectId = created.data.id;
+    const deadline = Date.now() + 75_000;
+    while (Date.now() < deadline) {
+      const status = await request('/_pb/audit/status');
+      if (status.status !== 200 || !object(status.data) || status.data.trailActive !== true)
+        throw new Error();
+      if (status.data.pendingCount === 0 && Number(status.data.headSeq) > 0) {
+        const list = await request(
+          `/_pb/audit?action=project.create&project=${encodeURIComponent(projectId)}`,
+        );
+        if (list.status !== 200 || !object(list.data) || !Array.isArray(list.data.items))
+          throw new Error();
+        if (
+          list.data.items.some(
+            (item: unknown) =>
+              object(item) &&
+              item.kind !== 'withheld' &&
+              item.action === 'project.create' &&
+              item.targetId === projectId &&
+              item.projectId === projectId,
+          )
+        )
+          return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  } catch {
+    // Transport errors can include cookies, credentials or response bodies.
+    throw new Error('Audit list fixture could not prepare a sealed project event');
   }
+  throw new Error('Audit list fixture timed out waiting for a sealed project event');
 }

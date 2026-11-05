@@ -445,3 +445,58 @@ it('keeps ambiguous hosted claims as a conflict for manifest updates', async () 
   expect(await json(response)).toMatchObject({ code: 'name_not_claimed' });
   expect(h.deps.deprecations.update).not.toHaveBeenCalled();
 });
+
+it.each(['publish', 'dist-tag', 'unpublish'] as const)(
+  'preserves backlog_full through npm %s',
+  async (operation) => {
+    const h = harness(MANAGE);
+    const error = new DbError('backlog_full', 'Audit backlog is full');
+    const call =
+      operation === 'dist-tag'
+        ? (h.deps.distTags.update.mockRejectedValueOnce(error),
+          createDistTagService(h.deps as never)(
+            h.context('PUT', '-/package/widget/dist-tags/_next', JSON.stringify('1.0.0')),
+            'widget',
+            '_next',
+          ))
+        : operation === 'unpublish'
+          ? (h.deps.unpublish.remove.mockRejectedValueOnce(error),
+            createUnpublishService(h.deps as never)(
+              h.context('DELETE', 'widget/-rev/3'),
+              'widget',
+              '3',
+            ))
+          : (h.deps.deprecations.update.mockRejectedValueOnce(error),
+            createPublishService(h.deps as never)(
+              h.context('PUT', 'widget', JSON.stringify(h.packument('retired'))),
+              'widget',
+            ));
+    await expect(call).rejects.toBe(error);
+  },
+);
+it.each(['_next', 'next!'])(
+  'sets and removes valid tag %s through audit construction',
+  async (tag) => {
+    const h = harness(MANAGE);
+    expect(
+      (
+        await createDistTagService(h.deps as never)(
+          h.context('PUT', '-/package/widget/dist-tags/' + tag, JSON.stringify('1.0.0')),
+          'widget',
+          tag,
+        )
+      ).status,
+    ).toBe(200);
+    h.snapshot.tags[tag] = '1.0.0';
+    expect(
+      (
+        await createDistTagService(h.deps as never)(
+          h.context('DELETE', '-/package/widget/dist-tags/' + tag),
+          'widget',
+          tag,
+        )
+      ).status,
+    ).toBe(200);
+    expect(h.deps.distTags.update).toHaveBeenCalledTimes(2);
+  },
+);

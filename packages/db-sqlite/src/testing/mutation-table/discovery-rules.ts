@@ -264,7 +264,7 @@ const registrations: readonly MutationEntry[] = [
     'discovery-rules',
     'createDiscoveryRuleRepository',
     {
-      name: 'due leaves foreign invalid bindings unchanged',
+      name: 'credential failure writes leave foreign invalid bindings unchanged',
       async run(context) {
         const { own, foreign } = orgOf(context);
         await seedDiscoveryRule(context.executor, foreign);
@@ -277,6 +277,11 @@ const registrations: readonly MutationEntry[] = [
           sql: "update credential set kind='github_token' where org_id=?",
           params: [foreign.orgId],
         });
+        await seedDiscoveryLease(context.executor, own);
+        await context.executor.all({
+          sql: "update job set type='core:discovery-rules:v1' where org_id=?",
+          params: [own.orgId],
+        });
         const counted = executing(context);
         const checked: SqlExecutor = {
           ...counted,
@@ -287,16 +292,29 @@ const registrations: readonly MutationEntry[] = [
             return rows;
           },
         };
-        await createDiscoveryRuleRepository(checked, []).due(own, new Date().toISOString());
+        await createDiscoveryRuleRepository(checked, []).failUnavailableCredentials(
+          own,
+          { id: 'DRJOB', owner: 'worker', fence: 3 },
+          new Date().toISOString(),
+        );
         expect(
           (await createDiscoveryRuleRepository(context.executor, []).get(foreign, RULE_ID))
             ?.outcome,
         ).toBeNull();
       },
     },
-    /(?<=where )org_id=\?/,
+    /org_id=\?(?= and (?:enabled=1|id=\? and enabled=1))/,
     [
-      { locate: /dr.org_id=\?/, reason: 'The due read scope is independently mutated above.' },
+      {
+        locate: /(?<=from job where )org_id=\?/,
+        reason:
+          'Scheduler type validation repeats the organization-bound jobLeaseGuard checked immediately before it.',
+      },
+      {
+        locate: /job\.org_id = \?/,
+        reason:
+          'The job lease guard is independently mutation tested; scheduler lease failure contracts cover stale and foreign leases.',
+      },
       {
         locate: /c.org_id=\?/,
         reason: 'Credential correlation follows the scoped rule and the credential composite FK.',

@@ -1,3 +1,4 @@
+import { matchesRef } from '@package-broker/core/registry/npm/oidc/publisher';
 import { auditEvent } from '@package-broker/core/audit/actions';
 import { isUlid } from '@package-broker/core/ids';
 import { sql } from 'kysely';
@@ -22,8 +23,19 @@ import {
   type ProtectedHolderProvider,
 } from '../kysely.js';
 import { actorHolds } from './actor-authority.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditPendingStatement, auditOperationStatement } from './audit-pending.js';
 import { disableTrustedPublisherStatements } from './workload-token.js';
+
+function restrictsRef(previous: string | null, next: string | null): boolean {
+  if (previous === null || previous === next) return true;
+  if (next === null) return false;
+  if (!/[?*]/.test(next)) return matchesRef(previous, next);
+  return (
+    previous.endsWith('*') &&
+    !/[?*]/.test(previous.slice(0, -1)) &&
+    next.startsWith(previous.slice(0, -1))
+  );
+}
 
 function read(ctx: OrgContext) {
   return db
@@ -336,7 +348,7 @@ export function createTrustedPublisherStore(
                   .where('id', '=', write.id),
               ),
           ),
-          auditPendingStatement(
+          auditOperationStatement(
             ctx,
             audited(
               write,
@@ -344,6 +356,22 @@ export function createTrustedPublisherStore(
               before,
               snapshot({ ...write.identity, ...input, refPattern: input.refPattern ?? null }),
             ),
+            {
+              sql: '?',
+              params: [
+                Number(
+                  before.packageName === input.packageName &&
+                    before.repositoryId === write.identity.repositoryId &&
+                    before.repositoryOwnerId === write.identity.repositoryOwnerId &&
+                    before.repository === input.repository &&
+                    before.workflow === input.workflow &&
+                    (before.environment === input.environment || before.environment === '') &&
+                    restrictsRef(before.refPattern, input.refPattern ?? null) &&
+                    (before.environment !== input.environment ||
+                      before.refPattern !== (input.refPattern ?? null)),
+                ),
+              ],
+            },
           ),
         ],
         c,

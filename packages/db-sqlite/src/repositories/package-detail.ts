@@ -86,25 +86,32 @@ export function createPackageDetailRepository(
           new_project_access_mode = ${input.newProjectAccessMode}, settings_revision = settings_revision + 1,
           modified_at = ${monotonicNow}
           where org_id = ${ctx.orgId} and id = ${input.packageId} and settings_revision = ${input.revision}`),
-          ...visibilityAuditStatements(ctx, {
-            ...input,
-            audit: validateAuditEvent({
-              ...input.audit,
-              payloadJson: JSON.stringify({
-                ...JSON.parse(validateAuditEvent(input.audit).payloadJson),
-                changes: {
-                  visible_to_new_projects: {
-                    old: pkg.visible_to_new_projects === 1,
-                    new: input.visibleToNewProjects,
+          ...visibilityAuditStatements(
+            ctx,
+            {
+              ...input,
+              audit: validateAuditEvent({
+                ...input.audit,
+                payloadJson: JSON.stringify({
+                  ...JSON.parse(validateAuditEvent(input.audit).payloadJson),
+                  changes: {
+                    visible_to_new_projects: {
+                      old: pkg.visible_to_new_projects === 1,
+                      new: input.visibleToNewProjects,
+                    },
+                    new_project_access_mode: {
+                      old: pkg.new_project_access_mode,
+                      new: input.newProjectAccessMode,
+                    },
                   },
-                  new_project_access_mode: {
-                    old: pkg.new_project_access_mode,
-                    new: input.newProjectAccessMode,
-                  },
-                },
+                }),
               }),
-            }),
-          }),
+            },
+            false,
+            statement(sql`${Number(pkg.visible_to_new_projects === 1 && !input.visibleToNewProjects)} and exists(
+            select 1 from package where org_id=${ctx.orgId} and id=${input.packageId}
+              and settings_revision=${input.revision + 1} and visible_to_new_projects=0)`),
+          ),
           ...rederiveStatements(ctx, { kind: 'package', packageId: input.packageId }),
         ],
         {

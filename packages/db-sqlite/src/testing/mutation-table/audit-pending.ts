@@ -1,8 +1,12 @@
 import { expect } from 'vitest';
-import { auditPendingStatement, auditReserveStatements } from '../../repositories/audit-pending.js';
+import {
+  auditPendingStatement,
+  auditReserveStatements,
+  auditOperationStatement,
+} from '../../repositories/audit-pending.js';
 import { orgOf, type ContractCase, type MutationEntry } from './harness.js';
 
-function contextOwnsRow(companion: boolean): ContractCase {
+function contextOwnsRow(companion: boolean | 'operation'): ContractCase {
   return {
     name: `pending audit ${companion ? 'reserve' : 'ordinary'} inserts use the context organization despite foreign event data`,
     async run(context) {
@@ -24,14 +28,19 @@ function contextOwnsRow(companion: boolean): ContractCase {
         projectId: foreign.orgId,
         payloadJson: JSON.stringify({ orgId: foreign.orgId }),
       } as const;
-      const statements = companion
-        ? auditReserveStatements(
-            own,
-            { ...event, id: '01K7R5V0000000000000000002', action: 'token.rotate' },
-            { ...event, action: 'token.issue' },
-            { sql: '0', params: [] },
-          )
-        : [auditPendingStatement(own, event)];
+      const statements =
+        companion === true
+          ? auditReserveStatements(
+              own,
+              { ...event, id: '01K7R5V0000000000000000002', action: 'token.rotate' },
+              { ...event, action: 'token.issue' },
+              { sql: '0', params: [] },
+            )
+          : [
+              companion === 'operation'
+                ? auditOperationStatement(own, event, { sql: '0', params: [] })
+                : auditPendingStatement(own, event),
+            ];
       await expect(context.executor.batch(statements.map(context.mutate))).resolves.toBeDefined();
       expect(
         await context.executor.all({
@@ -49,19 +58,26 @@ function contextOwnsRow(companion: boolean): ContractCase {
   };
 }
 
-export const entries: readonly MutationEntry[] = [false, true].map((companion) => {
-  const testCase = contextOwnsRow(companion);
-  return {
-    builder: companion ? 'auditReserveStatements' : 'auditPendingStatement',
-    file: 'repositories/audit-pending.ts',
-    cases: [testCase],
-    predicates: [
-      {
-        name: 'capacity checks only the context chain',
-        locate: /audit_chain\.org_id = input\.pending_org_id/,
-        neutral: '1 = 1',
-        caseName: testCase.name,
-      },
-    ],
-  };
-});
+export const entries: readonly MutationEntry[] = ([false, true, 'operation'] as const).map(
+  (companion) => {
+    const testCase = contextOwnsRow(companion);
+    return {
+      builder:
+        companion === 'operation'
+          ? 'auditOperationStatement'
+          : companion
+            ? 'auditReserveStatements'
+            : 'auditPendingStatement',
+      file: 'repositories/audit-pending.ts',
+      cases: [testCase],
+      predicates: [
+        {
+          name: 'capacity checks only the context chain',
+          locate: /audit_chain\.org_id = input\.pending_org_id/,
+          neutral: '1 = 1',
+          caseName: testCase.name,
+        },
+      ],
+    };
+  },
+);

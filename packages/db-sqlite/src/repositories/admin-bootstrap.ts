@@ -1,5 +1,5 @@
 import { auditEvent } from '@package-broker/core/audit/actions';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditOperationStatement } from './audit-pending.js';
 import { sql, type ExpressionBuilder, type SqlBool } from 'kysely';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
@@ -374,9 +374,13 @@ function publisherSeedAudit(
     },
   });
   if (!event.ok) throw new TypeError('invalid_role_audit');
-  return auditPendingStatement(
+  return auditOperationStatement(
     ctx,
     event.event,
+    {
+      sql: "exists(select 1 from role where org_id=? and key='organization_admin')",
+      params: [ctx.orgId],
+    },
     scalar({
       compile: () =>
         sql<boolean>`not exists(select 1 from role where org_id=${ctx.orgId} and key='organization_publisher') and exists(select 1 from role where org_id=${ctx.orgId} and key='organization_admin')`.compile(

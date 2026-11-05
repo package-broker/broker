@@ -49,7 +49,9 @@ export function discoveryRuleJobs(
       async handler(_payload, job) {
         const resolved = resolve();
         const deps = resolved.forInvocation?.() ?? resolved;
-        if (job.signal.aborted || jobLeaseOf(job) === null) throw new JobError('lease_lost');
+        const lease = jobLeaseOf(job);
+        if (job.signal.aborted || lease === null) throw new JobError('lease_lost');
+        await deps.rules.failUnavailableCredentials(job.org, lease, deps.clock.now().toISOString());
         for (const rule of await deps.rules.due(job.org, deps.clock.now().toISOString())) {
           await (deps.jobs ?? requirePlatformPorts(job.ports).jobs).enqueue(
             job.org,

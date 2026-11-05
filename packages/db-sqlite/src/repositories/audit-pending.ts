@@ -5,7 +5,6 @@ import { isUlid } from '@package-broker/core/ids';
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const RESERVE_ACTIONS = new Set([
   'setup.complete',
-  'role.create',
   'package.unpublish',
   'publish.reject',
   'publish.expire',
@@ -72,17 +71,34 @@ export function auditPendingStatement(
   return pendingStatement(ctx, event, when, false, patch);
 }
 
+/** Reserve proof is trusted repository SQL evaluated in the mutation batch. */
+export function auditOperationStatement(
+  ctx: OrgContext,
+  event: AuditEvent,
+  reserve: Statement,
+  when?: { sql: string; params: readonly SqlValue[] },
+  patch?: { readonly path: string; readonly value: Statement },
+): Statement {
+  return pendingStatement(ctx, event, when, false, patch, reserve);
+}
+
 function pendingStatement(
   ctx: OrgContext,
   event: AuditEvent,
   when: { sql: string; params: readonly SqlValue[] } | undefined,
   companion: boolean,
   patch?: { readonly path: string; readonly value: Statement },
+  reserve?: Statement,
 ): Statement {
   assertAuditPendingEvent(event);
   // Pre-plugin companion options never grant reserve access.
   if (patch !== undefined && !('value' in patch)) patch = undefined;
+  const reserved =
+    (event.action.startsWith('session.') && event.action !== 'session.login_failed') ||
+    RESERVE_ACTIONS.has(event.action);
+  if (reserved) reserve = undefined;
   const params: SqlValue[] = [
+    ...(reserve?.params ?? []),
     event.id,
     ctx.orgId,
     event.occurredAt,
@@ -99,9 +115,6 @@ function pendingStatement(
     ...(when?.params ?? []),
   ];
   if (params.length > 100) throw new TypeError('audit insert must bind at most 100 parameters');
-  const reserved =
-    (event.action.startsWith('session.') && event.action !== 'session.login_failed') ||
-    RESERVE_ACTIONS.has(event.action);
   // occurredAt is validated above; NULL is reserved for an atomic capacity refusal.
   const createdAt = reserved
     ? 'pending_created_at'
@@ -109,7 +122,7 @@ function pendingStatement(
         SELECT 1 FROM audit_chain
         WHERE audit_chain.org_id = input.pending_org_id
           AND policy = 'required' AND capacity_state = 'refusing'
-      )${companion ? ' AND changes() != 1' : ''} THEN NULL ELSE pending_created_at END`;
+      )${reserve === undefined ? '' : ` AND (${reserve.sql}) IS NOT 1`}${companion ? ' AND changes() != 1' : ''} THEN NULL ELSE pending_created_at END`;
 
   const payload = patch === undefined ? '?' : `json_set(?, ?, (${patch.value.sql}))`;
   return {

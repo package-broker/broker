@@ -45,6 +45,7 @@ function fixture() {
   const rules = {
     get: vi.fn(async () => rule),
     due: vi.fn(async () => [rule]),
+    failUnavailableCredentials: vi.fn(async () => {}),
     checkpoint,
   } as unknown as DiscoveryRuleRepository;
   const dryRun = vi.fn(async () => ({

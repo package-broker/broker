@@ -151,6 +151,10 @@ export function createUnpublishStore(
             ],
           },
           sql<boolean>`exists (select 1 from version where org_id=${ctx.orgId} and package_id=${snapshot.packageId} and last_op_id=${opId} and status='tombstoned')`,
+          {
+            sql: "exists(select 1 from audit_pending where org_id=? and id=? and action='package.unpublish')",
+            params: [ctx.orgId, input.event.id],
+          },
         );
         statements.push(...capture);
         captured = capture.length;

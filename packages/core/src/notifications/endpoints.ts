@@ -10,6 +10,7 @@ import {
   type NotificationSealedConfiguration,
   type NotificationWriteRepository,
 } from '../db/notifications.js';
+import { DbError } from '../db/errors.js';
 import type { OrgContext } from '../db/port.js';
 import {
   validateNotificationDestination,
@@ -109,6 +110,7 @@ function guard<T>(run: () => T): T {
 }
 
 function failure(error: unknown): never {
+  if (error instanceof DbError && error.kind === 'backlog_full') throw error;
   if (error instanceof NotificationError) throw error;
   if (error instanceof NotificationRepositoryError) {
     switch (error.code) {

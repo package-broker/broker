@@ -2,6 +2,7 @@ import type { ApplyOutcome } from '../sources/bulk-discovery.js';
 import type { AuditEvent } from '../audit/actions.js';
 import type { ApiCall } from '../api/idempotency.js';
 import type { DiscoveryRuleFence, MutationFence } from '../authz/fence.js';
+import type { JobGuard } from '../platform/job-repository.js';
 import type { OrgContext } from './port.js';
 
 export interface DiscoveryRuleOptions {
@@ -58,6 +59,7 @@ export interface DiscoveryRuleRepository {
   list(ctx: OrgContext, after: string | null, limit: number): Promise<readonly DiscoveryRule[]>;
   get(ctx: OrgContext, id: string): Promise<DiscoveryRule | null>;
   due(ctx: OrgContext, now: string): Promise<readonly DiscoveryRule[]>;
+  failUnavailableCredentials(ctx: OrgContext, lease: JobGuard, now: string): Promise<void>;
   create(
     ctx: OrgContext,
     fence: MutationFence,

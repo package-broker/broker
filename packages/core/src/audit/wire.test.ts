@@ -572,3 +572,24 @@ it('keeps system mode events with null correlation ids readable on the wire', ()
   expect(payloadMatches(system)).toBe(true);
   expect(payloadMatches({ ...system, actor_type: 'user', actor_id: ID })).toBe(false);
 });
+
+it.each([
+  ['notification.create', 'pattern', 'person@example.test'],
+  ['notification.update', 'pattern', `ghp_${'a'.repeat(36)}`],
+  ['registry_policy.create', 'package_key', `ghp_${'a'.repeat(36)}`],
+  ['registry_policy.create', 'package_key', `ghp_${'!a'.repeat(36)}`],
+  ['package.unpublish', 'versions', [`ghp_${'a'.repeat(36)}`]],
+  ['policy.read_denied', 'reasons', [`plugin:ghp_${'a'.repeat(36)}:blocked`]],
+])(
+  'withholds previously stored private %s %s values with their hashes',
+  async (action, field, value) => {
+    const stored = row(action as AuditAction);
+    stored.payload_json = JSON.stringify({
+      op_id: ID,
+      request_id: ID,
+      changes: { [field as string]: { new: value } },
+    });
+    expect(payloadMatches(stored)).toBe(false);
+    await withheld(stored);
+  },
+);

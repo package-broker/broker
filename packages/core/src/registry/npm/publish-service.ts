@@ -471,6 +471,7 @@ export function createPublishService(deps: PublishServiceDeps) {
       response.headers.set('x-request-id', ctx.requestId);
       return response;
     } catch (error) {
+      if (error instanceof DbError && error.kind === 'backlog_full') throw error;
       if (stagingFailure instanceof BlobTooLargeError || error instanceof BlobTooLargeError)
         return publishError(ctx, 413, 'tarball_too_large');
       if (
@@ -608,6 +609,7 @@ export function createDistTagService(deps: PublishServiceDeps) {
         event: event.event,
       });
     } catch (error) {
+      if (error instanceof DbError && error.kind === 'backlog_full') throw error;
       if (
         error instanceof DbError &&
         error.kind === 'unique' &&
@@ -785,6 +787,7 @@ export function createUnpublishService(deps: PublishServiceDeps) {
         event: event.event,
       });
     } catch (error) {
+      if (error instanceof DbError && error.kind === 'backlog_full') throw error;
       if (
         error instanceof DbError &&
         error.kind === 'unique' &&

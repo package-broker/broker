@@ -1,3 +1,4 @@
+import { DbError } from '../../db/errors.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { AuditEvent } from '../../audit/actions.js';
 import { orgContext } from '../../db/port.js';
@@ -153,4 +154,15 @@ describe('direct-denial audit writer', () => {
     }
     expect(target.record).not.toHaveBeenCalled();
   });
+});
+
+it('preserves audit backlog refusal for direct denial and retries the unrecorded denial', async () => {
+  const target = sink();
+  const error = new DbError('backlog_full', 'Audit backlog is full');
+  target.record.mockRejectedValueOnce(error);
+  const writer = audit(target.sink);
+  await expect(writer.record(denial([rule(1)]))).rejects.toBe(error);
+  await writer.record(denial([rule(1)]));
+  expect(target.record).toHaveBeenCalledTimes(2);
+  expect(target.events).toHaveLength(1);
 });

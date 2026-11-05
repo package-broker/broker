@@ -8,7 +8,7 @@ import {
 } from '../testing/migrated-database.js';
 import { openNodeSqliteExecutor } from '../testing/node-sqlite-executor.js';
 import { migrate } from '../migrations/runner.js';
-import { auditPendingStatement } from './audit-pending.js';
+import { auditPendingStatement, auditOperationStatement } from './audit-pending.js';
 
 const event: AuditEvent = {
   id: '01K7R5V0000000000000000001',
@@ -62,7 +62,7 @@ describe('auditPendingStatement', () => {
           params: [ctx.orgId, 'setup', 'Setup'],
         },
       ]);
-      const statement = auditPendingStatement(ctx, event);
+      const statement = auditPendingStatement(ctx, { ...event, action: 'role.create' });
       await expect(opened.executor.batch([statement])).rejects.toMatchObject({
         kind: 'unknown',
         constraint: undefined,
@@ -217,3 +217,26 @@ describe('auditPendingStatement', () => {
     ).toThrow(TypeError);
   });
 });
+
+it.each([null, 0, 1])(
+  'reserve evidence must be true, including nullable proof %s',
+  async (proof) => {
+    await database.executor.batch([
+      {
+        sql: "UPDATE audit_chain SET policy='required',capacity_state='refusing' WHERE org_id=?",
+        params: [ctx.orgId],
+      },
+    ]);
+    const write = database.executor.batch([
+      business(),
+      auditOperationStatement(ctx, event, { sql: '?', params: [proof] }),
+    ]);
+    if (proof === 1) {
+      await write;
+      expect(await rows()).toHaveLength(1);
+    } else {
+      await expect(write).rejects.toMatchObject({ kind: 'backlog_full' });
+      expect(await rows()).toEqual([]);
+    }
+  },
+);

@@ -115,7 +115,10 @@ describe('audit coverage inventory', () => {
           repository: name.slice(0, -3),
           stagingCalls: [
             ...readFileSync(new URL(name, repositories), 'utf8').matchAll(
-              new RegExp(`\\b${builder}\\s*\\(`, 'g'),
+              new RegExp(
+                `\\b${builder === 'auditPendingStatement' ? '(?:auditPendingStatement|auditOperationStatement)' : builder}\\s*\\(`,
+                'g',
+              ),
             ),
           ].length,
         }))
@@ -171,8 +174,8 @@ describe('audit coverage inventory', () => {
         return actions;
       });
       for (const action of entry.actions) expect(callerActions, entry.repository).toContain(action);
-      expect(read(`db-sqlite/src/repositories/${entry.repository}.ts`)).toContain(
-        entry.stagingBuilder ?? 'auditPendingStatement',
+      expect(read(`db-sqlite/src/repositories/${entry.repository}.ts`)).toMatch(
+        new RegExp(entry.stagingBuilder ?? '(?:auditPendingStatement|auditOperationStatement)'),
       );
       expect(entry.batchGuard.length).toBeGreaterThan(0);
       expect(entry.cardinality.length).toBeGreaterThan(0);

@@ -557,6 +557,7 @@ export async function confirmAuditRestore(
         if (!Number.isSafeInteger(custodyFromSeq) || Number(custodyFromSeq) < 1)
           throw new Error('Audit sink representation malformed');
         delete repr.registryMarkerBody;
+        delete repr.registryMarkerOccurrences;
         delete repr.registryMarkerOriginalAttempt;
         delete repr.registryMarkerOriginalErrorCode;
         dispositions.push(...discardedDispositions(snapshot, sink, repr, now));

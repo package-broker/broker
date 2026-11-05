@@ -83,12 +83,37 @@ it.each(['seal', 'verify'] as const)(
           params: [org.orgId],
         }),
       ).toEqual([{ count: 0 }]);
+      await executor.batch([
+        {
+          sql: "UPDATE job SET lease_until = '2099-01-01T00:00:00.000Z' WHERE org_id = ? AND id = ?",
+          params: [org.orgId, id],
+        },
+      ]);
+      await jobLeaseExecutor(executor, context).batch([
+        { sql: 'UPDATE audit_chain SET head_seq = 10 WHERE org_id = ?', params: [org.orgId] },
+      ]);
+      expect(
+        await executor.all({
+          sql: 'SELECT head_seq FROM audit_chain WHERE org_id = ?',
+          params: [org.orgId],
+        }),
+      ).toEqual([{ head_seq: 10 }]);
+      const foreignBefore = await executor.all({
+        sql: 'SELECT * FROM audit_chain WHERE org_id = ?',
+        params: [foreign.orgId],
+      });
       const foreignGuard = jobLeaseExecutor(executor, { ...context, org: foreign });
       await expect(
         foreignGuard.batch([
           { sql: 'UPDATE audit_chain SET head_seq = 10 WHERE org_id = ?', params: [foreign.orgId] },
         ]),
       ).rejects.toMatchObject({ code: 'lease_lost' });
+      expect(
+        await executor.all({
+          sql: 'SELECT * FROM audit_chain WHERE org_id = ?',
+          params: [foreign.orgId],
+        }),
+      ).toEqual(foreignBefore);
     } finally {
       await database.close();
     }

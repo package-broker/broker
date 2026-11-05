@@ -45,6 +45,10 @@ const nativeFetch = globalThis.fetch;
 
 export async function createWorkerAudit(input: {
   readonly jobContext?: JobContext;
+  readonly resolvedDestinations?: ReadonlyMap<
+    string,
+    Awaited<ReturnType<typeof resolveAuditDestination>>
+  >;
   readonly config: BrokerConfig;
   readonly env: (name: string) => string | undefined;
   readonly executor: SqlExecutor;
@@ -135,19 +139,26 @@ export async function createWorkerAudit(input: {
   const destinations = await Promise.all(
     input.registration().audit.sinks.map(async (owned) => {
       const definition = owned.definition;
-      const destination = await resolveAuditDestination({
-        id: definition.id,
-        runtime: 'cloudflare',
-        ...(input.config.audit === undefined ? {} : { audit: input.config.audit }),
-        destination: definition.destination,
-        activation: definition.activation,
-        env,
-        fetchImpl: (url, init) => nativeFetch(url, { ...init, redirect: 'manual' }),
-      });
+      const destination =
+        input.resolvedDestinations === undefined
+          ? await resolveAuditDestination({
+              id: definition.id,
+              runtime: 'cloudflare',
+              ...(input.config.audit === undefined ? {} : { audit: input.config.audit }),
+              destination: definition.destination,
+              activation: definition.activation,
+              env,
+              fetchImpl: (url, init) => nativeFetch(url, { ...init, redirect: 'manual' }),
+            })
+          : (input.resolvedDestinations.get(definition.id) ?? null);
       if (destination !== null && input.deploymentId === undefined)
         throw new KernelConfigError(['Audit sinks require a configured deployment id']);
       return { ...owned, destination };
     }),
+  );
+  // Fenced views share the running service's handlers and deployment configuration.
+  const resolvedDestinations = new Map(
+    destinations.map(({ definition, destination }) => [definition.id, destination]),
   );
   const instances = new Map<string, AuditSink>();
   const sinkInstance = (id: string): AuditSink => {
@@ -539,6 +550,7 @@ export async function createWorkerAudit(input: {
                 ...input,
                 executor: jobLeaseExecutor(executor, context),
                 jobContext: context,
+                resolvedDestinations,
               });
               const handler = scoped.jobs.find((candidate) => candidate.name === job.name)!;
               try {

@@ -5,7 +5,7 @@ import { auditPendingStatement } from '@package-broker/db-sqlite/repositories/au
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { afterEach, expect, it, vi } from 'vitest';
 import { collectRegistrations } from '@package-broker/core/kernel/registry';
-import type { AuditBatchV1, PluginDefinition } from '@package-broker/core/plugin';
+import type { AuditBatchV1, AuditDelivery, PluginDefinition } from '@package-broker/core/plugin';
 import { noopObservability } from '@package-broker/core/platform/observability';
 import { jobFences } from '@package-broker/core/platform/job-fences';
 import type { JobContext } from '@package-broker/core/platform/jobs';
@@ -35,7 +35,7 @@ async function fixture(
   } = {},
 ) {
   const database = await openMigratedDatabase({ twoOrganizations: true, d1PatternLimit: true });
-  const deliver = vi.fn(async (batch: AuditBatchV1) => ({
+  const deliver = vi.fn(async (batch: AuditBatchV1): Promise<AuditDelivery> => ({
     outcome: 'accepted' as const,
     chainId: batch.chainId,
     epoch: batch.epoch,
@@ -152,6 +152,110 @@ it('schedules no export for an unresolved destination in a default no-sink deplo
     await f.database.close();
   }
 });
+it('keeps an unresolved sink inactive when a fenced maintenance view sees a changed provider', async () => {
+  const options = { active: false };
+  const f = await fixture(options);
+  const { a, b } = f.database.orgs!;
+  try {
+    await f.audit.effective(a);
+    expect(f.audit.jobs.some((job) => job.name === 'audit-export-archive')).toBe(false);
+    options.active = true;
+    await f.run('audit-maintain');
+    expect((await f.audit.status.reader.read(a)).sinks).toEqual([
+      expect.objectContaining({ id: 'archive', state: 'inactive', activationSource: 'none' }),
+    ]);
+    expect((await f.audit.status.reader.read(b)).sinks).toEqual([]);
+    expect(f.audit.jobs.some((job) => job.name === 'audit-export-archive')).toBe(false);
+    expect(f.deliver).not.toHaveBeenCalled();
+  } finally {
+    await f.database.close();
+  }
+});
+it('keeps an installed export handler bound to the assembled destination during maintenance', async () => {
+  const options = { active: true };
+  const f = await fixture(options);
+  const org = f.database.orgs!.a;
+  try {
+    await f.audit.effective(org);
+    options.active = false;
+    await f.run('audit-maintain');
+    expect((await f.audit.status.reader.read(org)).sinks).toEqual([
+      expect.objectContaining({ id: 'archive', state: 'active', activationSource: 'ARCHIVE_URL' }),
+    ]);
+    await f.run('audit-head');
+    await f.run('audit-export-archive');
+    expect(f.deliver).toHaveBeenCalledOnce();
+  } finally {
+    await f.database.close();
+  }
+});
+it.each(['accepted', 'rejected', 'uncertain', 'legacy'] as const)(
+  'preserves the next daily head after a frozen cross-day retry: %s',
+  async (outcome) => {
+    const f = await fixture({ active: true });
+    const { a, b } = f.database.orgs!;
+    let now = new Date('2026-11-05T12:00:00.000Z');
+    vi.spyOn(systemClock, 'now').mockImplementation(() => now);
+    try {
+      await f.audit.effective(a);
+      await f.audit.effective(b);
+      await f.run('audit-head');
+      if (outcome === 'legacy') {
+        await f.database.executor.batch([
+          {
+            sql: "UPDATE audit_sink SET inflight_repr = json_remove(inflight_repr, '$.registryMarkers[0].queueId') WHERE org_id = ?",
+            params: [a.orgId],
+          },
+        ]);
+      }
+      f.deliver.mockResolvedValueOnce({ outcome: 'retry', code: 'network' });
+      await f.run('audit-export-archive');
+      const frozen = f.deliver.mock.calls[0]![0];
+      if (outcome === 'legacy') {
+        await f.database.executor.batch([
+          {
+            sql: "UPDATE audit_sink SET inflight_repr = json_remove(inflight_repr, '$.registryMarkerOccurrences') WHERE org_id = ?",
+            params: [a.orgId],
+          },
+        ]);
+      }
+      now = new Date('2026-11-06T12:00:00.000Z');
+      await f.run('audit-head');
+      await f.run('audit-head');
+      const [queued] = await f.database.executor.all<{ repr: string }>({
+        sql: 'SELECT inflight_repr AS repr FROM audit_sink WHERE org_id = ?',
+        params: [a.orgId],
+      });
+      const markers = JSON.parse(queued!.repr).registryMarkers;
+      expect(markers).toHaveLength(2);
+      expect(markers[0].markerId).toBe(markers[1].markerId);
+      if (outcome === 'rejected') f.deliver.mockResolvedValueOnce({ outcome, code: 'refused' });
+      if (outcome === 'uncertain')
+        f.deliver.mockResolvedValueOnce({ outcome, code: 'partial_rejected', rejectedCount: 1 });
+      await f.run('audit-export-archive');
+      expect(f.deliver.mock.calls[1]![0]).toEqual(frozen);
+      expect(f.deliver).toHaveBeenCalledTimes(3);
+      if (outcome !== 'legacy') expect(markers[0].queueId).not.toBe(markers[1].queueId);
+      const nextDay = f.deliver.mock.calls[2]![0];
+      expect(nextDay.frozenAt).toBe(now.getTime());
+      expect(nextDay.records).toEqual(frozen.records);
+      expect(nextDay.records[0]).not.toHaveProperty('queueId');
+      expect((await f.audit.status.reader.read(a)).sinks[0]).toMatchObject({
+        progressSeq: 0,
+        custodySeq: 0,
+      });
+      expect((await f.audit.status.reader.read(b)).sinks[0]).toMatchObject({
+        progressSeq: 0,
+        custodySeq: 0,
+      });
+      await f.run('audit-head');
+      await f.run('audit-export-archive');
+      expect(f.deliver).toHaveBeenCalledTimes(3);
+    } finally {
+      await f.database.close();
+    }
+  },
+);
 it('persists configuration refusal and sends the fixed alert webhook code', async () => {
   const f = await fixture({ alert: true, accepted: true });
   const { a, b } = f.database.orgs!;

@@ -5,6 +5,7 @@ import { auditCustodySeq, auditRetryDelayMs, auditDurableCoverage } from './expo
 import type { AuditExportOptions, AuditExportPort, AuditExportSnapshot } from './export.js';
 import type { AuditLedgerEntry } from './ledger.js';
 import type { AuditBatchV1, AuditDelivery } from './plugin-api.js';
+import { remainingAuditQueuedMarkers, type QueuedAuditMarker } from './export-queue.js';
 import { auditWireMarker } from './wire.js';
 
 function entry(
@@ -84,13 +85,13 @@ export async function resolveAuditRejection(
     if (queued) {
       delete rest.registryMarkers;
       delete rest.registryMarkerBody;
+      delete rest.registryMarkerOccurrences;
       delete rest.registryMarkerOriginalAttempt;
       delete rest.registryMarkerOriginalErrorCode;
-      const delivered = new Set(
-        batch.records.filter((record) => 'markerId' in record).map((record) => record.markerId),
-      );
-      const remaining = ((repr.registryMarkers ?? []) as AuditBatchV1['records']).filter(
-        (record) => !('markerId' in record) || !delivered.has(record.markerId),
+      const remaining = remainingAuditQueuedMarkers(
+        (repr.registryMarkers ?? []) as readonly QueuedAuditMarker[],
+        batch,
+        repr.registryMarkerOccurrences,
       );
       if (remaining.length > 0) rest.registryMarkers = remaining;
     } else {

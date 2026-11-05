@@ -592,6 +592,7 @@ describe('restore replay invariants', () => {
                 custodyFromSeq: 1,
                 registryMarkers: queued,
                 registryMarkerBody: '{"epoch":1}',
+                registryMarkerOccurrences: ['frozen-occurrence'],
                 registryMarkerOriginalAttempt: 7,
                 registryMarkerOriginalErrorCode: 'timeout',
               }),

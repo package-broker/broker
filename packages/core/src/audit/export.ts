@@ -12,10 +12,16 @@ import {
   validateAuditSkipAfter,
 } from './export-state.js';
 export { auditCustodySeq, auditRetryDelayMs, auditDurableCoverage } from './export-state.js';
+import {
+  auditQueuedMarkerRecords,
+  auditQueuedMarkerOccurrences,
+  remainingAuditQueuedMarkers,
+  type QueuedAuditMarker,
+} from './export-queue.js';
 import { resolveAuditRejection, withheldAuditEntries } from './export-rejections.js';
 import type { AuditLedgerEntry } from './ledger.js';
 import type { AuditRow } from './chain.js';
-import type { AuditBatchV1, AuditDelivery, AuditMarkerV1, AuditSink } from './plugin-api.js';
+import type { AuditBatchV1, AuditDelivery, AuditSink } from './plugin-api.js';
 import type { AuditSinkState } from './sinks/registry.js';
 import { AUDIT_SANITIZER_VERSION, auditWireRecord } from './wire.js';
 
@@ -134,7 +140,7 @@ interface Representation {
   readonly registryMarkerBody?: string;
   readonly registryMarkerOriginalAttempt?: number;
   readonly registryMarkerOriginalErrorCode?: string | null;
-  readonly registryMarkers?: readonly AuditMarkerV1[];
+  readonly registryMarkers?: readonly QueuedAuditMarker[];
   readonly [key: string]: unknown;
 }
 
@@ -402,12 +408,15 @@ export async function exportAuditBatch(
         chainId: snapshot.chainId,
         epoch: snapshot.epoch,
         orgId: org.orgId,
-        records: queued,
+        records: auditQueuedMarkerRecords(queued),
         throughSeq: sink.progressSeq,
         throughHash: sink.progressHash,
       });
     repr = {
       ...repr,
+      ...(repr.registryMarkerBody === undefined
+        ? { registryMarkerOccurrences: auditQueuedMarkerOccurrences(queued) }
+        : {}),
       registryMarkerBody: body,
       registryMarkerOriginalAttempt: repr.registryMarkerOriginalAttempt ?? sink.attempt,
       registryMarkerOriginalErrorCode:
@@ -632,13 +641,11 @@ export async function exportAuditBatch(
     const rest = { ...repr };
     delete rest.registryMarkers;
     delete rest.registryMarkerBody;
+    delete rest.registryMarkerOccurrences;
     delete rest.registryMarkerOriginalAttempt;
     delete rest.registryMarkerOriginalErrorCode;
     if (markersOnly) {
-      const delivered = new Set(
-        batch.records.filter((record) => 'markerId' in record).map((record) => record.markerId),
-      );
-      const remaining = queued!.filter((marker) => !delivered.has(marker.markerId));
+      const remaining = remainingAuditQueuedMarkers(queued!, batch, repr.registryMarkerOccurrences);
       if (remaining.length > 0) rest.registryMarkers = remaining;
     }
     const tails = !markersOnly

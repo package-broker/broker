@@ -1,4 +1,5 @@
 import type { OrgContext, SqlExecutor } from '@package-broker/core/db/port';
+import { ulid } from '@package-broker/core/ids';
 import { auditWireMarker } from '@package-broker/core/audit/wire';
 
 /** Queue the daily checkpoint through the exporter's persisted, non-advancing marker path. */
@@ -45,7 +46,7 @@ export async function queueAuditHead(
         AND NOT EXISTS (SELECT 1 FROM audit_sink s WHERE s.org_id = ? AND s.generation > ?)`,
       params: [
         day,
-        JSON.stringify(marker),
+        JSON.stringify({ ...marker, queueId: ulid(now.getTime()) }),
         org.orgId,
         generation,
         day,

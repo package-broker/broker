@@ -41,6 +41,10 @@ import { createAuditGuardedFetch } from './sources/guarded-fetch.js';
 
 export async function createNodeAudit(input: {
   readonly jobContext?: JobContext;
+  readonly resolvedDestinations?: ReadonlyMap<
+    string,
+    Awaited<ReturnType<typeof resolveAuditDestination>>
+  >;
   readonly config: BrokerConfig;
   readonly env: (name: string) => string | undefined;
   readonly executor: SqlExecutor;
@@ -151,22 +155,29 @@ export async function createNodeAudit(input: {
       const definition = owned.definition;
       const allowPrivate =
         input.config.audit?.egress?.allowPrivate?.includes(definition.id) ?? false;
-      const destination = await resolveAuditDestination({
-        id: definition.id,
-        runtime: 'docker',
-        ...(input.config.audit === undefined ? {} : { audit: input.config.audit }),
-        destination: definition.destination,
-        activation: definition.activation,
-        env,
-        fetchImpl: createAuditGuardedFetch(
-          createOutboundPolicy({ runtime: 'node', allowPrivateHosts: [], selfOrigins: [] }),
-          { allowPrivate },
-        ),
-      });
+      const destination =
+        input.resolvedDestinations === undefined
+          ? await resolveAuditDestination({
+              id: definition.id,
+              runtime: 'docker',
+              ...(input.config.audit === undefined ? {} : { audit: input.config.audit }),
+              destination: definition.destination,
+              activation: definition.activation,
+              env,
+              fetchImpl: createAuditGuardedFetch(
+                createOutboundPolicy({ runtime: 'node', allowPrivateHosts: [], selfOrigins: [] }),
+                { allowPrivate },
+              ),
+            })
+          : (input.resolvedDestinations.get(definition.id) ?? null);
       if (destination !== null && input.deploymentId === undefined)
         throw new KernelConfigError(['Audit sinks require a configured deployment id']);
       return { ...owned, destination };
     }),
+  );
+  // Fenced views share the running service's handlers and deployment configuration.
+  const resolvedDestinations = new Map(
+    destinations.map(({ definition, destination }) => [definition.id, destination]),
   );
   const instances = new Map<string, AuditSink>();
   const sinkInstance = (id: string): AuditSink => {
@@ -558,6 +569,7 @@ export async function createNodeAudit(input: {
                 ...input,
                 executor: jobLeaseExecutor(executor, context),
                 jobContext: context,
+                resolvedDestinations,
               });
               const handler = scoped.jobs.find((candidate) => candidate.name === job.name)!;
               try {

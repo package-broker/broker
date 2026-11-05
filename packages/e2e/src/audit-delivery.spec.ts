@@ -25,6 +25,7 @@ interface Sink extends Record<string, unknown> {
   custody_seq: number;
   inflight_body: string | null;
   next_attempt_at: string | null;
+  last_error_code: string | null;
   receiver_fingerprint: string;
 }
 
@@ -60,7 +61,7 @@ export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioR
     const infrastructure = await deliveryInfrastructure(local, orgId);
     const sink = async (id = 'webhook') => {
       const [row] = await local.read<Sink>(
-        'SELECT state, progress_seq, custody_seq, inflight_body, next_attempt_at, receiver_fingerprint FROM audit_sink WHERE org_id = ? AND sink_id = ?',
+        'SELECT state, progress_seq, custody_seq, inflight_body, next_attempt_at, last_error_code, receiver_fingerprint FROM audit_sink WHERE org_id = ? AND sink_id = ?',
         [orgId, id],
       );
       assert(row, 'MissingDeliverySink');
@@ -228,6 +229,7 @@ export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioR
 
     stage = 'otlp-partial-success-warning';
     await drain('otlp', await head());
+    assert.equal((await sink('otlp')).last_error_code, null, 'UnexpectedPriorOtlpWarning');
     remote.mode('otlp', 'warning');
     const warningFrom = Number((await sink('otlp')).progress_seq) + 1;
     const warningLogs = local.logs().length;
@@ -243,11 +245,20 @@ export async function auditDeliveryScenario(runtime: Runtime): Promise<ScenarioR
       'WarningCreatedLossDisposition',
     );
 
-    await until(
-      async () => local.logs().slice(warningLogs).includes('audit.delivery_partial_success'),
-      'partial-success-warning-log',
-      10000,
-    );
+    if (runtime === 'cloudflare') {
+      const warning = await sink('otlp');
+      assert.equal(warning.last_error_code, 'partial_success', 'WarningAckNotRecorded');
+      assert.equal(warning.state, 'active', 'WarningBlockedSink');
+      assert.equal(Number(warning.custody_seq), 0, 'WarningGrantedCustody');
+      assert.equal(warning.inflight_body, null, 'WarningKeptInflightBatch');
+      assert.equal(warning.next_attempt_at, null, 'WarningScheduledRetry');
+    } else {
+      await until(
+        async () => local.logs().slice(warningLogs).includes('audit.delivery_partial_success'),
+        'partial-success-warning-log',
+        10000,
+      );
+    }
 
     stage = 'otlp-partial-rejection';
     remote.mode('otlp', 'partial');

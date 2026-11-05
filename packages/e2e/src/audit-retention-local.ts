@@ -24,7 +24,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   assertBuiltModules,
   assertWorkerBundle,
-  captureWorkerLogs,
   fixtureDestination,
   infrastructureOperations,
   injectSourcePollClock,
@@ -139,8 +138,6 @@ export async function startRetentionLocal(
     await cp(output, copy, { recursive: true });
     const script = join(copy, entry);
     await writeFile(script, retentionBundle(injectSourcePollClock(await readFile(script, 'utf8'))));
-    if (runtime === 'cloudflare')
-      await writeFile(script, captureWorkerLogs(await readFile(script, 'utf8')));
     if (options.patchBundle)
       await writeFile(script, options.patchBundle(await readFile(script, 'utf8')));
     if (options.removeWebhook) {

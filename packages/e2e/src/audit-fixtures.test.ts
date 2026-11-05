@@ -7,7 +7,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { retentionBundle } from './audit-retention-fixture.js';
 import { deliveryBuild, deliveryEntry } from './audit-delivery-fixture.js';
 import { assertWireIdentity, decodeOtlp } from './audit-wire-fixture.js';
-import { captureWorkerLogs } from './local.js';
 import {
   postponeRequiredSchedules,
   requiredBundle,
@@ -76,9 +75,8 @@ function bundleTransport(bundle: string): ResolveDestination {
 }
 
 describe('audit bundle fixtures', () => {
-  it('captures real Workers warning objects as JSON while preserving log projection', async () => {
+  it('emits real Workers warning objects through console.error while preserving log projection', async () => {
     const original = await source('cloudflare');
-    const patched = captureWorkerLogs(original);
     const execute = (bundle: string) => {
       const declaration = (name: string) => {
         const start = bundle.indexOf(`function ${name}(`);
@@ -93,8 +91,8 @@ describe('audit bundle fixtures', () => {
       ]
         .flatMap((pattern) => [...bundle.matchAll(new RegExp(pattern, 'g'))].map((m) => m[0]))
         .join('\n');
-      const logs: string[] = [];
-      const errors: string[] = [];
+      const logs: unknown[] = [];
+      const errors: unknown[] = [];
       const create = runInNewContext(
         prelude +
           declaration('projectLogFields') +
@@ -103,8 +101,8 @@ describe('audit bundle fixtures', () => {
         {
           TextEncoder,
           console: {
-            log: (v: unknown) => logs.push(String(v)),
-            error: (v: unknown) => errors.push(String(v)),
+            log: (v: unknown) => logs.push(v),
+            error: (v: unknown) => errors.push(v),
           },
         },
       );
@@ -122,21 +120,17 @@ describe('audit bundle fixtures', () => {
       });
       return { logs, errors };
     };
-    expect(execute(original).errors).toEqual(['[object Object]']);
-    const { logs, errors } = execute(patched);
+    const { logs, errors } = execute(original);
     expect(logs).toEqual([]);
     expect(errors).toHaveLength(1);
-    expect(JSON.parse(errors[0]!)).toEqual({
+    expect(errors[0]).toEqual({
       level: 'warn',
       event: 'audit.delivery_partial_success',
       reason_code: 'audit.partial_success',
       sink_id: 'otlp',
     });
-    expect(errors[0]).not.toContain('private@example.test');
-    expect(errors[0]).not.toContain('receiver-canary');
-    expect(() => captureWorkerLogs(patched)).toThrow('WorkerLogCaptureTargetMissing');
-    expect(() => captureWorkerLogs('')).toThrow('WorkerLogCaptureTargetMissing');
-    expect(() => captureWorkerLogs(original + original)).toThrow('WorkerLogCaptureTargetMissing');
+    expect(JSON.stringify(errors)).not.toContain('private@example.test');
+    expect(JSON.stringify(errors)).not.toContain('receiver-canary');
   });
 
   it.each(['node', 'cloudflare'] as const)(

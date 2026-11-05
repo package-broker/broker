@@ -73,20 +73,6 @@ export function assertWorkerBundle(bundle: string): void {
   );
 }
 
-export function captureWorkerLogs(bundle: string): string {
-  // Keep projected log fields visible when workerd renders console objects as strings.
-  const target = /const out = (\w+)\.console \?\? console;/g;
-  assert.equal([...bundle.matchAll(target)].length, 1, 'WorkerLogCaptureTargetMissing');
-  return bundle.replace(
-    target,
-    `const fixtureConsole = $1.console ?? console;
-  const out = {
-    log: value => fixtureConsole.log(JSON.stringify(value)),
-    error: value => fixtureConsole.error(JSON.stringify(value))
-  };`,
-  );
-}
-
 export function removeWebhookRegistration(bundle: string): string {
   const pattern =
     /coreRoutes: Object\.freeze\(\[createWebhookIntake\(\{ \.\.\.deps\.webhook, jobs(?:: \w+)? \}\)\]\)/g;
@@ -599,8 +585,6 @@ export async function startLocal(
     await cp(output, copy, { recursive: true });
     const script = join(copy, entry);
     await writeFile(script, injectSourcePollClock(await readFile(script, 'utf8')));
-    if (runtime === 'cloudflare')
-      await writeFile(script, captureWorkerLogs(await readFile(script, 'utf8')));
     if (options.patchBundle)
       await writeFile(script, options.patchBundle(await readFile(script, 'utf8')));
     if (options.removeWebhook) {

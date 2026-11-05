@@ -166,6 +166,14 @@ export async function fixtureRace(executor, orgId, foreignId, flags) {
     ${control}
     for (const id of ['webhook', 'otlp'])
       auditExportJob(createAuditExportRepository(executor), options(id));
+    // Background jobs recreate these repositories with a lease-scoped executor.
+    // The request controls must retain the original, unscoped registrations.
+    const expired = jobLeaseExecutor(executor, {
+      org, signal: new AbortController().signal,
+      fences: jobFences({ id: ulid(), owner: ulid(), fence: 1 })
+    });
+    for (const id of ['webhook', 'otlp'])
+      auditExportJob(createAuditExportRepository(expired), options(id));
   }
   registerControl();
   return { receipts, request: async (requestedOrg = orgId) => handler({

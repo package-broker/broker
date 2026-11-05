@@ -85,6 +85,20 @@ describe('auditSealJob', () => {
     expect(ctx.observability.counter).toHaveBeenCalledWith('audit_seal_rounds_total', undefined, 2);
   });
 
+  it('continues through recovery pages to sealing and empty without counting pages as sealed rounds', async () => {
+    const seal = vi
+      .fn()
+      .mockResolvedValueOnce({ outcome: 'recovering' })
+      .mockResolvedValueOnce({ outcome: 'recovering' })
+      .mockResolvedValueOnce(sealed)
+      .mockResolvedValue({ outcome: 'empty' });
+    const ctx = context();
+    await auditSealJob({ pendingOldestAgeSeconds: async () => 0, seal }).handler({}, ctx);
+    expect(seal.mock.calls).toEqual([[ctx.org], [ctx.org], [ctx.org], [ctx.org]]);
+    expect(ctx.observability.counter).toHaveBeenCalledWith('audit_sealed_total', undefined, 4);
+    expect(ctx.observability.counter).toHaveBeenCalledWith('audit_seal_rounds_total', undefined, 1);
+  });
+
   it('reports pending age through the real observability port without row data', async () => {
     const records: ObsRecord[] = [];
     const ctx = context();

@@ -17,6 +17,12 @@ const receiverOrigin = 'https://93.184.216.34';
 const credential = 'audit-required-fixture';
 const budget = 64 * 1024 * 1024;
 
+export function pinRequiredCapacity(run: (sql: string) => void): void {
+  run(
+    `UPDATE audit_chain SET capacity_state = 'refusing', journal_bytes = ${budget} WHERE org_id = ?`,
+  );
+}
+
 function replaceOnce(bundle: string, target: string, value: string): string {
   assert.equal(bundle.split(target).length, 2, 'RequiredFixturePatchTargetChanged');
   return bundle.replace(target, () => value);
@@ -345,7 +351,7 @@ export async function requiredFixture(runtime: Runtime, noPath: boolean | 'none'
             rows.every((row) => row.next_run_at === '2099-01-01T00:00:00.000Z'),
           'RequiredSchedulesNotPostponed',
         );
-        run("UPDATE audit_chain SET capacity_state = 'refusing' WHERE org_id = ?");
+        pinRequiredCapacity(run);
       },
       noDurablePath: () =>
         run(

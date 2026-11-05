@@ -397,7 +397,15 @@ describe('audit seal on Miniflare D1', () => {
         return executor.batch(statements);
       },
     };
-    expect(await createAuditSealRepository(recording).seal(a)).toMatchObject({
+    const paged = createAuditSealRepository(recording);
+    expect(await paged.seal(a)).toMatchObject({
+      outcome: 'recovering',
+      repaired: true,
+      integrity: ['seq_gap'],
+    });
+    expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(97);
+    expect(await pendingIds(executor, a.orgId)).toHaveLength(100);
+    expect(await paged.seal(a)).toMatchObject({
       outcome: 'sealed',
       sealed: 100,
       headSeq: 301,
@@ -407,6 +415,7 @@ describe('audit seal on Miniflare D1', () => {
       Math.max(...batches.flatMap((batch) => batch.map((statement) => statement.params.length))),
     ).toBe(29);
     expect(await createAuditLedgerRepository(executor).effectiveGaps(a)).toHaveLength(100);
+    expect(await pendingIds(executor, a.orgId)).toEqual([]);
   }, 60_000);
 
   it.each(['first', 'last', 'all'] as const)(
@@ -480,22 +489,45 @@ describe('audit seal on Miniflare D1', () => {
         return executor.batch(statements);
       },
     };
-    await expect(createAuditSealRepository(interrupted).seal(a)).rejects.toMatchObject({
-      name: 'AuditSealInterruptedError',
+    const paged = createAuditSealRepository(interrupted);
+    await expect(paged.seal(a)).resolves.toMatchObject({
+      outcome: 'recovering',
       integrity: ['boundary_mismatch', 'seq_gap'],
-      cause: expect.objectContaining({ message: 'recovery interrupted' }),
     });
+    await expect(paged.seal(a)).rejects.toThrow('recovery interrupted');
     expect(batches).toEqual([197, 8]);
+    const ledger = createAuditLedgerRepository(executor);
+    const first = await ledger.page(a, null, 500);
+    expect(first.filter((entry) => entry.kind === 'chain_reset')).toEqual([
+      expect.objectContaining({ reasonCode: 'tamper_detected', fromSeq: 1, toSeq: 201 }),
+    ]);
+    expect(first.filter((entry) => entry.kind === 'gap')).toHaveLength(97);
+    expect(
+      await executor.all({
+        sql: 'SELECT head_seq, boundary_seq, boundary_prev_hash, boundary_reason FROM audit_chain WHERE org_id = ?',
+        params: [a.orgId],
+      }),
+    ).toEqual([
+      {
+        head_seq: 201,
+        boundary_seq: 1,
+        boundary_prev_hash: AUDIT_GENESIS_HASH,
+        boundary_reason: 'chain_reset',
+      },
+    ]);
     expect(await repo.seal(a)).toEqual({
       outcome: 'empty',
       repaired: true,
       integrity: ['seq_gap'],
     });
-    const ledger = createAuditLedgerRepository(executor);
     expect(
       (await ledger.page(a, null, 500)).filter((entry) => entry.kind === 'chain_reset'),
     ).toHaveLength(1);
     expect(await ledger.effectiveGaps(a)).toHaveLength(100);
+    expect((await ledger.effectiveGaps(a)).reduce((total, entry) => total + entry.count, 0)).toBe(
+      100,
+    );
+    expect(await repo.seal(a)).toEqual({ outcome: 'empty' });
   }, 60_000);
 
   it('a second pass after a recorded hole does no journal scan and reports no repair', async () => {

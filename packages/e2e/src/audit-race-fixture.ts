@@ -9,13 +9,16 @@ export function auditRaceBundle(bundle: string, route: string, body: string): st
     bundle = bundle.replace(matches[0]![0], injected(matches[0]!));
   };
   assert(!bundle.includes('let fixtureAuditExecutor;'), 'AuditRaceAlreadyPatched');
+  // Job handlers recreate these with lease-scoped executors; controls need the boot ports.
   capture(
     /function createAuditExportRepository\((\w+)\) \{/,
-    (m) => `${m[0]}\n  if (${m[1]}.driver !== 'none') fixtureAuditExecutor = ${m[1]};`,
+    (m) =>
+      `${m[0]}\n  if (${m[1]}.driver !== 'none' && !fixtureAuditExecutor) fixtureAuditExecutor = ${m[1]};`,
   );
   capture(
     /function auditExportJob\((\w+), (\w+)\) \{/,
-    (m) => `${m[0]}\n  fixtureAuditExports.set(${m[2]}.id, { port: ${m[1]}, options: ${m[2]} });`,
+    (m) =>
+      `${m[0]}\n  if (!fixtureAuditExports.has(${m[2]}.id)) fixtureAuditExports.set(${m[2]}.id, { port: ${m[1]}, options: ${m[2]} });`,
   );
   const ready = '  app.get("/health/ready", async (c) => {';
   assert.equal(bundle.split(ready).length, 2, 'AuditRaceRoutePatchTargetMissing');

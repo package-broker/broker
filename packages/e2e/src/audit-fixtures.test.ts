@@ -9,6 +9,7 @@ import { deliveryBuild, deliveryEntry } from './audit-delivery-fixture.js';
 import { assertWireIdentity, decodeOtlp } from './audit-wire-fixture.js';
 import {
   postponeRequiredSchedules,
+  pinRequiredCapacity,
   requiredBundle,
   requiredControlEvents,
 } from './audit-required-fixture.js';
@@ -75,6 +76,40 @@ function bundleTransport(bundle: string): ResolveDestination {
 }
 
 describe('audit bundle fixtures', () => {
+  it.each(['node', 'cloudflare'] as const)(
+    '%s keeps the required capacity fixture refusing after production health refresh',
+    async (runtime) => {
+      const bundle = await source(runtime);
+      const start = bundle.indexOf('function auditCapacityStateStatement(');
+      assert(start >= 0, 'CapacityRefreshFunctionMissing');
+      const refresh = runInNewContext(
+        bundle.slice(start, bundle.indexOf('\n}', start) + 2) + ';auditCapacityStateStatement',
+      ) as (org: { orgId: string }, budget: number) => { sql: string; params: (string | number)[] };
+      const db = new DatabaseSync(':memory:');
+      try {
+        db.exec(`CREATE TABLE audit_chain (
+          org_id TEXT, policy TEXT, capacity_state TEXT, journal_bytes INTEGER
+        ); INSERT INTO audit_chain VALUES
+          ('target', 'required', 'ok', 0), ('foreign', 'required', 'ok', 0);`);
+        pinRequiredCapacity((sql) => {
+          db.prepare(sql).run('target');
+        });
+        for (const orgId of ['target', 'foreign']) {
+          const statement = refresh({ orgId }, 64 * 1024 * 1024);
+          db.prepare(statement.sql).run(...statement.params);
+        }
+        expect(
+          db.prepare('SELECT org_id, capacity_state FROM audit_chain ORDER BY org_id').all(),
+        ).toEqual([
+          { org_id: 'foreign', capacity_state: 'ok' },
+          { org_id: 'target', capacity_state: 'refusing' },
+        ]);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
   it('emits real Workers warning objects through console.error while preserving log projection', async () => {
     const original = await source('cloudflare');
     const execute = (bundle: string) => {

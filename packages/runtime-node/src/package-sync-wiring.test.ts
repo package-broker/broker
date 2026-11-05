@@ -60,6 +60,7 @@ const AUDIT = [
   'core:audit-maintain:v1',
   'core:audit-health-observe:v1',
   'core:audit-frontier:v1',
+  'core:audit-head:v1',
 ];
 const AUTH_JOBS = [
   'core:import-verify:v1',

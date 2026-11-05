@@ -238,9 +238,8 @@ async function checkAuditJobs(database) {
     assert.deepEqual(
       schedules().map((row) => [row.name, row.every_seconds]),
       [
-        ['core:audit-export-otlp:v1', 60],
-        ['core:audit-export-webhook:v1', 60],
         ['core:audit-frontier:v1', 86400],
+        ['core:audit-head:v1', 86400],
         ['core:audit-health-observe:v1', 60],
         ['core:audit-maintain:v1', 60],
         ['core:audit-seal:v1', 60],
@@ -434,6 +433,14 @@ async function startBundle(source, extraEnv = {}) {
     PB_PUBLIC_URL: `http://127.0.0.1:${port}`,
     PB_BLOB_ROOT: join(copy, 'data', 'blobs'),
     DEPLOYMENT_ID: 'smoke',
+    PB_AUDIT_OTLP_ENDPOINT: '',
+    PB_AUDIT_OTLP_HEADERS: '',
+    PB_AUDIT_WEBHOOK_URL: '',
+    PB_AUDIT_WEBHOOK_HEADERS: '',
+    OTEL_EXPORTER_OTLP_ENDPOINT: '',
+    OTEL_EXPORTER_OTLP_HEADERS: '',
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: '',
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS: '',
     ...extraEnv,
   };
   delete env['NODE_PATH'];
@@ -845,6 +852,39 @@ async function run() {
   child.kill('SIGTERM');
   const code = await waitExit(child, EXIT_TIMEOUT_MS);
   if (code !== 0) throw new Error(`the server exited with code ${code} after SIGTERM, expected 0`);
+  step = 'checking audit schedules with destinations';
+  const active = await startBundle(SOURCE, {
+    PB_AUDIT_OTLP_ENDPOINT: 'https://audit.example.test/v1/logs',
+    PB_AUDIT_OTLP_HEADERS: 'Authorization=smoke',
+    PB_AUDIT_WEBHOOK_URL: 'https://audit.example.test/archive',
+    PB_AUDIT_WEBHOOK_HEADERS: 'Authorization=smoke',
+  });
+  try {
+    await mintSession(active.base, active.env.PB_SQLITE_PATH);
+    const db = new DatabaseSync(active.env.PB_SQLITE_PATH);
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+      const orgId = db.prepare('SELECT id FROM organization WHERE slug = ?').get('smoke').id;
+      const schedules = () =>
+        db
+          .prepare(
+            "SELECT name, every_seconds FROM job_schedule WHERE org_id = ? AND enabled = 1 AND name LIKE 'core:audit-export-%' ORDER BY name",
+          )
+          .all(orgId);
+      await waitForAudit(() => schedules().length === 2, 'export schedules with destinations');
+      assert.deepEqual(
+        schedules().map((row) => [row.name, row.every_seconds]),
+        [
+          ['core:audit-export-otlp:v1', 60],
+          ['core:audit-export-webhook:v1', 60],
+        ],
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    await stopChild();
+  }
   step = 'checking audit modes';
   if (PREBUILT) {
     const disabled = await startBundle(SOURCE, {

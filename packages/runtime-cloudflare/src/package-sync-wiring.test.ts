@@ -503,6 +503,7 @@ const BASE_JOBS = [
   'core:retention-scan:v1',
   'core:blob-purge:v1',
   'core:audit-frontier:v1',
+  'core:audit-head:v1',
   'core:audit-health-observe:v1',
   'core:audit-maintain:v1',
   'core:package-access-expire:v1',

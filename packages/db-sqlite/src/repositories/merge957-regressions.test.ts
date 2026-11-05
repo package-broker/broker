@@ -26,6 +26,8 @@ import { createDiscoveryRuleRepository } from './discovery-rules.js';
 import { createTrustedPublisherStore } from './trusted-publishers.js';
 import { createPackageDetailRepository } from './package-detail.js';
 import { createRoleRepository } from './role.js';
+import { createOidcRepository } from './oidc.js';
+import { matchesRef } from '@package-broker/core/registry/npm/oidc/publisher';
 
 let database: MigratedDatabase;
 let f: Awaited<ReturnType<typeof accessFixture>>;
@@ -193,17 +195,51 @@ it('refuses custom role creation while bootstrap alone may reserve role.create',
   expect(await auditRows()).toEqual([]);
 });
 
+const publisherClaims = [
+  { environment: '', ref: 'refs/heads/main' },
+  { environment: '', ref: 'refs/tags/v1' },
+  { environment: 'prod', ref: 'refs/heads/main' },
+  { environment: 'prod', ref: 'refs/tags/v1' },
+  { environment: 'PrOd', ref: 'refs/tags/v2' },
+  { environment: 'prod', ref: 'refs/tags/release' },
+  { environment: 'prod', ref: 'refs/heads/v1' },
+  { environment: 'staging', ref: 'refs/tags/v1' },
+  { environment: 'Ä', ref: 'refs/tags/v1' },
+  { environment: 'ä', ref: 'refs/tags/v1' },
+];
 it.each([
-  ['', 'prod', null, null, true],
-  ['prod', '', null, null, false],
-  ['prod', 'prod', null, 'refs/tags/*', true],
-  ['prod', 'prod', 'refs/tags/*', 'refs/tags/v*', true],
-  ['prod', 'prod', 'refs/tags/v*', 'refs/tags/*', false],
-  ['prod', 'prod', 'refs/*/v?', 'refs/tags/v1', true],
-  ['prod', 'prod', null, null, false],
+  ['', 'prod', null, null, false, [0, 1], [2, 3, 4, 5, 6]],
+  ['prod', '', null, null, false, [2, 3, 4, 5, 6], [0, 1]],
+  ['', 'prod', null, 'refs/tags/*', false, [0, 1], [3, 4, 5]],
+  ['prod', 'staging', null, 'refs/tags/*', false, [2, 3, 4, 5, 6], [7]],
+  ['prod', 'prod', null, 'refs/tags/*', true, [2, 3, 4, 5, 6], [3, 4, 5]],
+  ['prod', 'prod', 'refs/tags/*', 'refs/tags/v*', true, [3, 4, 5], [3, 4]],
+  ['prod', 'prod', 'refs/tags/v*', 'refs/tags/*', false, [3, 4], [3, 4, 5]],
+  ['prod', 'prod', 'refs/*/v?', 'refs/tags/v1', true, [3, 4, 6], [3]],
+  ['prod', 'prod', 'refs/tags/*', 'refs/tags/v?', true, [3, 4, 5], [3, 4]],
+  ['prod', 'prod', null, 'refs/tags/v1', true, [2, 3, 4, 5, 6], [3]],
+  ['prod', 'prod', 'refs/tags/*', null, false, [3, 4, 5], [2, 3, 4, 5, 6]],
+  ['prod', 'prod', null, null, false, [2, 3, 4, 5, 6], [2, 3, 4, 5, 6]],
+  ['prod', 'PrOd', null, null, false, [2, 3, 4, 5, 6], [2, 3, 4, 5, 6]],
+  ['PrOd', 'prod', null, 'refs/tags/*', true, [2, 3, 4, 5, 6], [3, 4, 5]],
+  ['prod', 'PrOd', null, 'refs/tags/*', true, [2, 3, 4, 5, 6], [3, 4, 5]],
+  ['', '', null, 'refs/tags/*', true, [0, 1], [1]],
+  ['Ä', 'ä', null, 'refs/tags/*', false, [8], [9]],
+  ['prod', 'prod', 'refs/tags/*', 'refs/tags/**', false, [3, 4, 5], [3, 4, 5]],
+  ['prod', 'prod', null, '*', false, [2, 3, 4, 5, 6], [2, 3, 4, 5, 6]],
+  ['prod', 'prod', '*', null, false, [2, 3, 4, 5, 6], [2, 3, 4, 5, 6]],
+  ['prod', 'prod', 'refs/tags/**', 'refs/tags/v*', true, [3, 4, 5], [3, 4]],
 ] as const)(
   'trusted publisher restrictions %s -> %s, %s -> %s reserve=%s',
-  async (beforeEnvironment, afterEnvironment, beforeRef, afterRef, restrictive) => {
+  async (
+    beforeEnvironment,
+    afterEnvironment,
+    beforeRef,
+    afterRef,
+    restrictive,
+    beforeMatches,
+    afterMatches,
+  ) => {
     await f.seed(
       "UPDATE role_permission SET permission='org:packages:publish' WHERE role_id='R-decider'",
     );
@@ -231,28 +267,59 @@ it.each([
       identity: { repository: 'owner/repo', repositoryId: '123', repositoryOwnerId: '456' },
     };
     const row = await store.create(f.org, f.decideFence, write);
+    await f.seed(
+      'UPDATE trusted_publisher SET environment=? WHERE org_id=? AND id=?',
+      beforeEnvironment,
+      f.org.orgId,
+      row.id,
+    );
+    const oidc = createOidcRepository(database.executor);
+    const assertClaims = async (expected: readonly number[]) => {
+      const matched = [];
+      for (const [index, claim] of publisherClaims.entries()) {
+        const bindings = await oidc.find(f.org, {
+          packageName: 'widget',
+          repositoryId: '123',
+          repositoryOwnerId: '456',
+          workflow: 'publish.yml',
+          environment: claim.environment,
+        });
+        if (
+          bindings.some(
+            (binding) => binding.id === row.id && matchesRef(binding.refPattern, claim.ref),
+          )
+        )
+          matched.push(index);
+      }
+      expect(matched).toEqual(expected);
+    };
+    await assertClaims(beforeMatches);
     await refuse();
-    const call = store.update(f.org, f.decideFence, {
-      ...write,
-      expectedRevision: 1,
-      event: f.event('package.access_request'),
-      input: { ...write.input, environment: afterEnvironment, refPattern: afterRef ?? undefined },
-    });
+    const update = () =>
+      store.update(f.org, f.decideFence, {
+        ...write,
+        expectedRevision: 1,
+        event: f.event('package.access_request'),
+        input: { ...write.input, environment: afterEnvironment, refPattern: afterRef ?? undefined },
+      });
     if (!restrictive) {
-      await expect(call).rejects.toMatchObject({ kind: 'backlog_full' });
+      await expect(update()).rejects.toMatchObject({ kind: 'backlog_full' });
       expect(await store.get(f.org, row.id)).toMatchObject({
         environment: beforeEnvironment,
         refPattern: beforeRef,
+        revision: 1,
       });
       expect(await auditRows()).toHaveLength(1);
-    } else {
-      expect(await call).toMatchObject({
-        environment: afterEnvironment,
-        refPattern: afterRef,
-        revision: 2,
-      });
-      expect(await auditRows()).toHaveLength(2);
+      await assertClaims(beforeMatches);
+      await f.seed("UPDATE audit_chain SET capacity_state='ok' WHERE org_id=?", f.org.orgId);
     }
+    expect(await update()).toMatchObject({
+      environment: afterEnvironment.replace(/[A-Z]/g, (ch) => ch.toLowerCase()),
+      refPattern: afterRef,
+      revision: 2,
+    });
+    expect(await auditRows()).toHaveLength(2);
+    await assertClaims(afterMatches);
   },
 );
 

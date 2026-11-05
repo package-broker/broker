@@ -27,8 +27,11 @@ import { auditPendingStatement, auditOperationStatement } from './audit-pending.
 import { disableTrustedPublisherStatements } from './workload-token.js';
 
 function restrictsRef(previous: string | null, next: string | null): boolean {
-  if (previous === null || previous === next) return true;
-  if (next === null) return false;
+  previous = previous?.replace(/\*+/g, '*') ?? '*';
+  next = next?.replace(/\*+/g, '*') ?? '*';
+  if (previous === next) return false;
+  if (previous === '*') return true;
+  if (next === '*') return false;
   if (!/[?*]/.test(next)) return matchesRef(previous, next);
   return (
     previous.endsWith('*') &&
@@ -365,10 +368,9 @@ export function createTrustedPublisherStore(
                     before.repositoryOwnerId === write.identity.repositoryOwnerId &&
                     before.repository === input.repository &&
                     before.workflow === input.workflow &&
-                    (before.environment === input.environment || before.environment === '') &&
-                    restrictsRef(before.refPattern, input.refPattern ?? null) &&
-                    (before.environment !== input.environment ||
-                      before.refPattern !== (input.refPattern ?? null)),
+                    before.environment.replace(/[A-Z]/g, (ch) => ch.toLowerCase()) ===
+                      input.environment.replace(/[A-Z]/g, (ch) => ch.toLowerCase()) &&
+                    restrictsRef(before.refPattern, input.refPattern ?? null),
                 ),
               ],
             },

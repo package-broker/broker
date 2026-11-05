@@ -282,6 +282,7 @@ async function command(args: string[], env: NodeJS.ProcessEnv): Promise<void> {
     cwd: repository,
     env,
     stdio: 'ignore',
+    timeout: 30_000,
   });
   const [code] = await once(child, 'exit');
   assert.equal(code, 0, `LocalCommandFailed:${args.slice(0, 2).join(':')}`);
@@ -325,7 +326,87 @@ const auditColumns = [
   'payload_json',
 ] as const;
 const alterableAuditFields = ['action', 'payload_json', 'target_id', 'created_at'] as const;
-const enqueueableJobs = ['core:audit-seal:v1', 'core:audit-verify:v1'] as const;
+const enqueueableJobs = [
+  'core:audit-seal:v1',
+  'core:audit-verify:v1',
+  'core:audit-maintain:v1',
+  'core:audit-frontier:v1',
+  'core:audit-export-webhook:v1',
+  'core:audit-export-otlp:v1',
+] as const;
+
+export interface DatabaseSnapshotStatement {
+  sql: string;
+  params: (string | number | null | { hex: string })[];
+}
+
+/* eslint-disable no-restricted-syntax -- Full deployment snapshots are test infrastructure; the launcher pins the sole organization. */
+export function snapshotLocalDatabase(database: string): DatabaseSnapshotStatement[] {
+  const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
+  const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
+  try {
+    db.exec('BEGIN');
+    const schema = db
+      .prepare(
+        "SELECT name, type, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY rowid",
+      )
+      .all() as { name: string; type: string; sql: string }[];
+    const statements: DatabaseSnapshotStatement[] = [
+      { sql: 'PRAGMA defer_foreign_keys = ON', params: [] },
+      ...schema
+        .filter((row) => row.type === 'table' || row.type === 'index')
+        .map(({ sql }) => ({ sql, params: [] })),
+    ];
+    for (const table of schema.filter((row) => row.type === 'table')) {
+      const columns = db.prepare(`PRAGMA table_info(${quote(table.name)})`).all() as {
+        name: string;
+      }[];
+      for (const row of db.prepare(`SELECT * FROM ${quote(table.name)}`).all()) {
+        statements.push({
+          sql: `INSERT INTO ${quote(table.name)} (${columns.map(({ name }) => quote(name)).join(',')}) VALUES (${columns.map(() => '?').join(',')})`,
+          params: columns.map(({ name }) => {
+            const value = row[name];
+            if (value instanceof Uint8Array) return { hex: Buffer.from(value).toString('hex') };
+            assert(
+              value === null || typeof value === 'string' || typeof value === 'number',
+              'UnsupportedSnapshotValue',
+            );
+            return value;
+          }),
+        });
+      }
+    }
+    statements.push(
+      ...schema
+        .filter((row) => row.type === 'trigger' || row.type === 'view')
+        .map(({ sql }) => ({ sql, params: [] })),
+    );
+    return statements;
+  } finally {
+    db.close();
+  }
+}
+
+function loadLocalSnapshot(
+  database: string,
+  statements: readonly DatabaseSnapshotStatement[],
+): void {
+  const db = new DatabaseSync(database, { timeout: 5000 });
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    for (const { sql, params } of statements)
+      db.prepare(sql).run(
+        ...params.map((value) =>
+          value !== null && typeof value === 'object' ? Buffer.from(value.hex, 'hex') : value,
+        ),
+      );
+    assert(db.prepare('PRAGMA foreign_key_check').all().length === 0, 'SnapshotForeignKeyFailure');
+    db.exec('COMMIT');
+  } finally {
+    db.close();
+  }
+}
+/* eslint-enable no-restricted-syntax */
 
 /* eslint-disable no-restricted-syntax -- Fixed statements; the pinned organization id is bound by the harness, never by callers. */
 export function infrastructureOperations(db: SqlPort, orgId: string) {
@@ -389,7 +470,20 @@ export function infrastructureOperations(db: SqlPort, orgId: string) {
       async enqueue(type: (typeof enqueueableJobs)[number]) {
         assert(enqueueableJobs.includes(type), 'JobTypeNotEnqueueable');
         const id = '01' + randomBytes(12).toString('hex').toUpperCase();
-        await db.run('INSERT INTO job (id, org_id, type) VALUES (?, ?, ?)', [id, orgId, type]);
+        const exportResource =
+          type === 'core:audit-export-webhook:v1'
+            ? 'audit-export:webhook'
+            : type === 'core:audit-export-otlp:v1'
+              ? 'audit-export:otlp'
+              : null;
+        if (exportResource !== null)
+          await db.run('INSERT INTO job (id, org_id, type, resource_key) VALUES (?, ?, ?, ?)', [
+            id,
+            orgId,
+            type,
+            exportResource,
+          ]);
+        else await db.run('INSERT INTO job (id, org_id, type) VALUES (?, ?, ?)', [id, orgId, type]);
         return id;
       },
     },
@@ -415,6 +509,8 @@ export interface LocalBroker {
   tick(): Promise<void>;
   storageKeys(): Promise<string[]>;
   filesystemEntries(): Promise<string[]>;
+  databaseSnapshot(): Promise<DatabaseSnapshotStatement[]>;
+  confirmAuditRestore(actorId: string, generation: number, from: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -422,6 +518,8 @@ export async function startLocal(
   runtime: Runtime,
   fixtureOrigin: string,
   options: {
+    bundleDirectory?: string;
+    onOrganization?: (orgId: string) => void;
     removeWebhook?: boolean;
     reader?: boolean;
     nodeTransport?: string;
@@ -429,6 +527,8 @@ export async function startLocal(
     patchBundle?: (bundle: string) => string;
     publicUrl?: string;
     nodeEnv?: Record<string, string>;
+    auditEnv?: Record<string, string>;
+    databaseSnapshot?: { statements: readonly DatabaseSnapshotStatement[]; tooling: boolean };
   } = {},
 ): Promise<LocalBroker> {
   fixtureDestination(upstreamOrigins[0], fixtureOrigin);
@@ -437,7 +537,7 @@ export async function startLocal(
   assert(!options.publicUrl || runtime === 'node', 'PublicUrlIsNodeOnly');
   const port = await reserveLoopbackPort();
   const origin = `http://127.0.0.1:${port}`;
-  const output = join(repository, '.pb', runtime);
+  const output = options.bundleDirectory ?? join(repository, '.pb', runtime);
   const entry = runtime === 'node' ? 'server.js' : 'worker.js';
   try {
     await readFile(join(output, entry));
@@ -497,6 +597,7 @@ export async function startLocal(
       PB_BLOB_ROOT: join(directory, 'blobs'),
       PORT: String(port),
       DEPLOYMENT_ID: 'local-release',
+      ...options.auditEnv,
     };
     let database = join(directory, 'db.sqlite');
     let worker:
@@ -570,6 +671,7 @@ export async function startLocal(
             PB_MASTER_KEY: masterKey,
             PB_PUBLIC_URL: origin,
             DEPLOYMENT_ID: 'local-release',
+            ...options.auditEnv,
           },
           handleStructuredLogs: (entry: { message: string }) => record(entry.message),
           outboundService: async (request: Request) => {
@@ -613,22 +715,46 @@ export async function startLocal(
       assert.equal(sqliteFiles.length, 1, 'D1DatabaseFileMissing');
       database = sqliteFiles[0]!;
     }
-    await command(['migrate', '--sqlite', database, '--out', copy], env);
-    await command(['bootstrap', '--sqlite', database, '--slug', 'acme', '--name', 'Acme'], env);
     const tokenFile = join(directory, 'setup-token');
-    await command(
-      [
-        'admin',
-        'bootstrap',
-        '--email',
-        'admin@example.test',
-        '--sqlite',
-        database,
-        '--token-file',
-        tokenFile,
-      ],
-      env,
-    );
+    if (options.databaseSnapshot) {
+      let statements = options.databaseSnapshot.statements;
+      if (options.databaseSnapshot.tooling) {
+        const snapshotFile = join(directory, 'restore.json');
+        const restoredFile = join(directory, 'restored.sqlite');
+        await writeFile(snapshotFile, JSON.stringify(statements), { mode: 0o600 });
+        await command(
+          [
+            'sqlite',
+            'restore',
+            '--sqlite',
+            restoredFile,
+            '--snapshot',
+            snapshotFile,
+            '--out',
+            copy,
+          ],
+          env,
+        );
+        statements = snapshotLocalDatabase(restoredFile);
+      }
+      loadLocalSnapshot(database, statements);
+    } else {
+      await command(['migrate', '--sqlite', database, '--out', copy], env);
+      await command(['bootstrap', '--sqlite', database, '--slug', 'acme', '--name', 'Acme'], env);
+      await command(
+        [
+          'admin',
+          'bootstrap',
+          '--email',
+          'admin@example.test',
+          '--sqlite',
+          database,
+          '--token-file',
+          tokenFile,
+        ],
+        env,
+      );
+    }
     const organizations = (() => {
       const db = new DatabaseSync(database, { readOnly: true, timeout: 5000 });
       try {
@@ -640,8 +766,9 @@ export async function startLocal(
     })();
     assert.equal(organizations.length, 1, 'SingleOrganizationExpected');
     const pinnedOrgId = organizations[0]!.id;
+    options.onOrganization?.(pinnedOrgId);
     const readerTokenFile = join(directory, 'reader-setup-token');
-    if (options.reader)
+    if (options.reader && !options.databaseSnapshot)
       await command(
         [
           'admin',
@@ -728,18 +855,13 @@ syncBuiltinESMExports();
         await exited;
       });
     }
-    try {
-      await until(async () => {
-        try {
-          return (await fetch(`${origin}/health/ready`, { signal: AbortSignal.timeout(1000) })).ok;
-        } catch {
-          return false;
-        }
-      }, 'readiness');
-    } catch (error) {
-      console.error(`broker output before readiness failure:\n${logs.slice(-4000)}`);
-      throw error;
-    }
+    await until(async () => {
+      try {
+        return (await fetch(`${origin}/health/ready`, { signal: AbortSignal.timeout(1000) })).ok;
+      } catch {
+        return false;
+      }
+    }, 'readiness');
     const read = async <T extends Record<string, unknown>>(
       sql: string,
       params: (string | number)[] = [],
@@ -806,8 +928,8 @@ syncBuiltinESMExports();
     return {
       origin,
       publicOrigin: new URL(options.publicUrl ?? origin).origin,
-      setupToken: (await readFile(tokenFile, 'utf8')).trim(),
-      ...(options.reader
+      setupToken: options.databaseSnapshot ? '' : (await readFile(tokenFile, 'utf8')).trim(),
+      ...(options.reader && !options.databaseSnapshot
         ? { readerSetupToken: (await readFile(readerTokenFile, 'utf8')).trim() }
         : {}),
       logs: () => logs,
@@ -934,6 +1056,29 @@ syncBuiltinESMExports();
           const bundle = await readFile(script, 'utf8');
           assertWorkerBundle(bundle);
         }
+      },
+      async databaseSnapshot() {
+        return snapshotLocalDatabase(database);
+      },
+      async confirmAuditRestore(actorId, generation, from) {
+        await command(
+          [
+            'audit',
+            'sink',
+            'confirm-restore',
+            '--sqlite',
+            database,
+            '--actor-type',
+            'user',
+            '--actor-id',
+            actorId,
+            '--generation',
+            String(generation),
+            `--from`,
+            String(from),
+          ],
+          env,
+        );
       },
       close,
     };

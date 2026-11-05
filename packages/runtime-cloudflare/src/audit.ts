@@ -175,7 +175,9 @@ export async function createWorkerAudit(input: {
   };
   const reconciliations = new Map<string, Promise<'applied' | 'stale' | 'contended'>>();
   const reconcile = (org: OrgContext) => {
-    let work = reconciliations.get(org.orgId);
+    let work = (import.meta as ImportMeta & { pbAuditFixture?: boolean }).pbAuditFixture
+      ? undefined
+      : reconciliations.get(org.orgId);
     if (work === undefined) {
       work = reconcileAuditSinks(sinks, org, generation, configured, systemClock.now());
       reconciliations.set(org.orgId, work);

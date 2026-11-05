@@ -8,13 +8,16 @@ function passing(layer: Layer): CertificationResult[] {
 
 describe('section 4 capability catalogue', () => {
   it('contains all 68 design table rows once, preserving their groups and order', () => {
-    expect(capabilities).toHaveLength(68);
-    expect(new Set(capabilities.map(({ id }) => id)).size).toBe(68);
+    const designRows = capabilities.filter(
+      (entry) => entry.group !== 'Audit' || entry.id === 'audit-integrity',
+    );
+    expect(designRows).toHaveLength(68);
+    expect(new Set(designRows.map(({ id }) => id)).size).toBe(68);
     expect(
       Object.fromEntries(
-        [...new Set(capabilities.map(({ group }) => group))].map((group) => [
+        [...new Set(designRows.map(({ group }) => group))].map((group) => [
           group,
-          capabilities.filter((entry) => entry.group === group).length,
+          designRows.filter((entry) => entry.group === group).length,
         ]),
       ),
     ).toEqual({
@@ -54,6 +57,24 @@ describe('section 4 capability catalogue', () => {
         expect(entry.deferral?.backlogId).toMatch(/^PB-\d+$/);
         expect(entry.deferral?.reason).toBeTruthy();
       }
+    }
+  });
+
+  it('adds all five audit extensions as required runtime gates without replacing design rows', () => {
+    expect(capabilities).toHaveLength(73);
+    expect(new Set(capabilities.map(({ id }) => id)).size).toBe(73);
+    const audit = capabilities.filter((entry) => entry.group === 'Audit');
+    expect(audit.map(({ id }) => id)).toEqual([
+      'audit-delivery',
+      'audit-integrity',
+      'audit-retention',
+      'audit-restore-tooling',
+      'audit-restore-frontier',
+      'audit-required',
+    ]);
+    for (const entry of audit.filter(({ id }) => id !== 'audit-integrity')) {
+      expect(entry.gate).toEqual({ M: ['L'] });
+      expect(requiredScenarioIds('L')).toContain(entry.id);
     }
   });
 

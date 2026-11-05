@@ -240,6 +240,10 @@ for (const target of ['cloudflare', 'node']) {
     }
     for (const file of bundleFiles) {
       const code = await readText(file);
+      if (/__pbAuditFixture|pbAuditFixture|FixtureAckCrash/.test(code)) {
+        failed = true;
+        console.error(`${label}/${target}: audit fixture hook in production bundle ${file}`);
+      }
       if (UI_RUNTIME_DENY.test(code) || code.includes(process.cwd())) {
         failed = true;
         console.error(`${label}/${target}: provider, resolver or build-machine path in ${file}`);

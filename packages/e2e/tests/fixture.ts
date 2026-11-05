@@ -264,6 +264,7 @@ export function seedLists(fixture: Fixture): void {
 }
 
 export async function seedAuditList(page: Page): Promise<void> {
+  if (page.url() === 'about:blank') await go(page, 'projects');
   await prepareAuditList((path, init) =>
     page.evaluate(
       async ({ path, init }) => {

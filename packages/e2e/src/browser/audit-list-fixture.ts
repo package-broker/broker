@@ -15,7 +15,7 @@ function object(value: unknown): value is Record<string, unknown> {
 
 export async function seedAuditList(request: AuditFixtureRequest): Promise<void> {
   try {
-    const slug = `browser-audit-${randomUUID()}`;
+    const slug = `browser-audit-${Date.now().toString(36)}`;
     const created = await request('/_pb/projects', {
       method: 'POST',
       body: { slug, name: 'Browser audit fixture' },

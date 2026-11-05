@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { auditRaceBundle, overlapRace, staleSealRace } from './audit-race-fixture.js';
+import { retentionBundle } from './audit-retention-fixture.js';
 import { assertWorkerBundle, repository } from './local.js';
 
 type Row = Record<string, unknown>;
@@ -31,7 +32,13 @@ interface RaceFixture {
 // entry. Migrations and organization bootstrap run through the public CLI.
 async function fixture(
   body = overlapRace,
-  flags: { bypassLease?: boolean; frozenRetry?: boolean; nonDurable?: boolean } = {},
+  flags: {
+    bypassLease?: boolean;
+    frozenRetry?: boolean;
+    nonDurable?: boolean;
+    stealQueued?: boolean;
+    bypassSealLease?: boolean;
+  } = {},
 ) {
   const directory = await mkdtemp(join(repository, '.pb/audit-race-test-'));
   const database = join(directory, 'db.sqlite');
@@ -59,6 +66,7 @@ async function fixture(
     const foreignId = orgs[1]!.id;
     const run = (sql: string, params: Statement['params'] = []) =>
       connection.prepare(sql).run(...params);
+    let interceptedJobs = 0;
     const executor: Executor = {
       driver: 'node-sqlite',
       async all({ sql, params }) {
@@ -74,6 +82,18 @@ async function fixture(
             return { rows: [], changes: Number(statement.run(...params).changes) };
           });
           connection.exec('COMMIT');
+          // Force the runtime runner to win any insert/claim gap, without timers or sockets.
+          if (
+            flags.stealQueued &&
+            statements.some(({ sql }) => sql.startsWith('INSERT INTO job '))
+          ) {
+            interceptedJobs++;
+            connection
+              .prepare(
+                "UPDATE job SET state = 'running', lease_owner = 'runtime-runner', lease_until = '2099-01-01T00:00:00.000Z', fence = fence + 1 WHERE org_id = ? AND state = 'queued'",
+              )
+              .run(orgId);
+          }
           return results;
         } catch (error) {
           connection.exec('ROLLBACK');
@@ -91,13 +111,21 @@ app.get("/health/live", () => {});
       '/fixture',
       body,
     );
-    const bundle = await readFile(join(output, 'worker.js'), 'utf8');
-    assertWorkerBundle(bundle);
+    const original = await readFile(join(output, 'worker.js'), 'utf8');
+    assertWorkerBundle(original);
+    const bundle = retentionBundle(original);
     const script = join(directory, 'race.mjs');
     await writeFile(
       script,
       bundle.replace(/^\/\/# sourceMappingURL=.*$/m, '') +
         `
+export async function fixtureQueuedClaim(executor, orgId) {
+  const id = ulid();
+  await executor.batch([{ sql: "INSERT INTO job (id, org_id, type, resource_key) VALUES (?, ?, 'core:audit-export-webhook:v1', 'audit-export:webhook')", params: [id, orgId] }]);
+  return createJobRepository(executor).claim(orgContext(orgId), ulid(), {
+    id, types: ['core:audit-export-webhook:v1'], leaseSeconds: 60, maxRunning: 100
+  });
+}
 export async function fixtureRace(executor, orgId, foreignId, flags) {
   const rawExecutor = executor;
   executor = { ...rawExecutor,
@@ -108,6 +136,7 @@ export async function fixtureRace(executor, orgId, foreignId, flags) {
       try { return await rawExecutor.batch(statements); } catch (error) { throw classifySqliteError(error); }
     }
   };
+  if (flags.bypassSealLease) jobLeaseExecutor = executor => executor;
   const org = orgContext(orgId);
   const run = (sql, params) => executor.batch([{ sql, params }]);
   for (const id of [orgId, foreignId]) {
@@ -143,6 +172,13 @@ export async function fixtureRace(executor, orgId, foreignId, flags) {
     await run('DELETE FROM job WHERE org_id = ? AND id = ?', [orgId, lease.id]);
     await run("UPDATE audit_chain SET mode = 'trail', pending_mode = 'export', cutover_seq = 1 WHERE org_id = ?", [orgId]);
   }
+  const schedules = createJobScheduleRepository(executor);
+  const definitions = ['seal', 'verify', 'maintain', 'head', 'health-observe', 'frontier', 'export-webhook']
+    .map(kind => ({ name: 'core:audit-' + kind + ':v1', everySeconds: 60 }));
+  await schedules.sync(org, definitions);
+  await schedules.sync(org, definitions);
+  const scheduled = await schedules.tick(org);
+  if (scheduled.length) throw new Error('FixtureAuditScheduleFired');
   const originalExport = createAuditExportRepository;
   const realExport = executor => {
     const port = originalExport(executor);
@@ -184,6 +220,7 @@ export async function fixtureRace(executor, orgId, foreignId, flags) {
 `,
     );
     const runtime = (await import(/* @vite-ignore */ pathToFileURL(script).href)) as {
+      fixtureQueuedClaim(executor: Executor, orgId: string): Promise<unknown>;
       fixtureRace(
         executor: Executor,
         orgId: string,
@@ -194,6 +231,8 @@ export async function fixtureRace(executor, orgId, foreignId, flags) {
     const race = await runtime.fixtureRace(executor, orgId, foreignId, flags);
     return {
       ...race,
+      interceptedJobs: () => interceptedJobs,
+      queuedClaim: () => runtime.fixtureQueuedClaim(executor, orgId),
       db: connection,
       orgId,
       foreignId,
@@ -211,6 +250,19 @@ export async function fixtureRace(executor, orgId, foreignId, flags) {
 }
 
 describe('live-request audit race controls in the built runtime', () => {
+  it('reproduces runner takeover in the former queued insert/claim gap', async () => {
+    const f = await fixture(staleSealRace, { stealQueued: true });
+    try {
+      expect(await f.queuedClaim()).toBeNull();
+      expect(f.interceptedJobs()).toBe(1);
+      expect(
+        f.db.prepare('SELECT state, lease_owner FROM job WHERE org_id = ?').all(f.orgId),
+      ).toEqual([{ state: 'running', lease_owner: 'runtime-runner' }]);
+    } finally {
+      await f.close();
+    }
+  });
+
   it('distinguishes cancellation from a real stale save with unchanged sink CAS state', async () => {
     const f = await fixture();
     try {
@@ -270,10 +322,14 @@ describe('live-request audit race controls in the built runtime', () => {
     }
   });
 
-  it.each([false, true])(
-    'executes the stale batch after durable delivery through the winning seal and prune (frozen retry: %s)',
-    async (frozenRetry) => {
-      const f = await fixture(staleSealRace, { frozenRetry });
+  it.each([
+    { frozenRetry: false, recovery: false },
+    { frozenRetry: true, recovery: false },
+    { frozenRetry: false, recovery: true },
+  ])(
+    'executes the stale batch after durable delivery through the winning seal and prune ($frozenRetry frozen retry, $recovery recovery)',
+    async ({ frozenRetry, recovery }) => {
+      const f = await fixture(staleSealRace, { frozenRetry, stealQueued: true });
       try {
         f.run("UPDATE audit_sink SET state = 'inactive' WHERE org_id = ? AND sink_id = 'otlp'", [
           f.orgId,
@@ -283,11 +339,18 @@ describe('live-request audit race controls in the built runtime', () => {
           VALUES (?, ?, '2026-10-30T00:00:00.000Z', 'system', 'project.create', 'project', '01J00000000000000000000P0P', json_object('op_id', NULL, 'request_id', NULL))`,
           ['01' + randomBytes(12).toString('hex').toUpperCase(), f.orgId],
         );
+        if (recovery)
+          f.run('UPDATE audit_chain SET journal_rows = journal_rows + 1 WHERE org_id = ?', [
+            f.orgId,
+          ]);
         const result = await f.request();
         expect(result.status).toBe(200);
         expect(result.body).toMatchObject({
           outcome: 'contended',
+          repaired: recovery,
           attempted: 1,
+          leaseAttempted: 1,
+          leaseRefused: true,
           winner: 'sealed',
           delivered: 'accepted',
           deliveries: frozenRetry ? 2 : 1,
@@ -295,11 +358,26 @@ describe('live-request audit race controls in the built runtime', () => {
           prune: 'pruned',
           pruned: { head_seq: 2, boundary_seq: 3, mode: 'export', pending_mode: null },
         });
+        expect(f.interceptedJobs()).toBeGreaterThan(0);
+        expect(f.db.prepare('SELECT id FROM job WHERE org_id = ?').all(f.orgId)).toEqual([]);
+        expect(
+          f.db.prepare('SELECT next_run_at FROM job_schedule WHERE org_id = ?').all(f.orgId),
+        ).toEqual(Array.from({ length: 7 }, () => ({ next_run_at: '2099-01-01T00:00:00.000Z' })));
         if (frozenRetry) expect(f.receipts.map((batch) => batch['throughSeq'])).toEqual([1, 2]);
         expect(
           f.receipts.flatMap((batch) => (batch['records'] as Row[]).map((row) => row['kind'])),
         ).toEqual(['event', 'event']);
         expect(result.body['afterStale']).toEqual(result.body['pruned']);
+        expect(f.db.prepare('SELECT id FROM audit_pending WHERE org_id = ?').all(f.orgId)).toEqual(
+          [],
+        );
+        expect(
+          f.db
+            .prepare(
+              "SELECT id FROM audit_ledger WHERE org_id = ? AND kind IN ('gap', 'chain_reset')",
+            )
+            .all(f.orgId),
+        ).toEqual([]);
         expect(f.db.prepare('SELECT seq FROM audit_event WHERE org_id = ?').all(f.orgId)).toEqual(
           [],
         );
@@ -311,6 +389,30 @@ describe('live-request audit race controls in the built runtime', () => {
       }
     },
   );
+
+  it('exposes a removed seal lease guard even when the independent CAS still refuses', async () => {
+    const f = await fixture(staleSealRace, { bypassSealLease: true });
+    try {
+      f.run("UPDATE audit_sink SET state = 'inactive' WHERE org_id = ? AND sink_id = 'otlp'", [
+        f.orgId,
+      ]);
+      f.run(
+        `INSERT INTO audit_pending (id, org_id, created_at, actor_type, action, target_type, target_id, payload_json)
+        VALUES (?, ?, '2026-10-30T00:00:00.000Z', 'system', 'project.create', 'project', '01J00000000000000000000P0P', '{}')`,
+        ['01' + randomBytes(12).toString('hex').toUpperCase(), f.orgId],
+      );
+      const result = await f.request();
+      expect(result.body).toMatchObject({
+        outcome: 'contended',
+        attempted: 1,
+        leaseAttempted: 1,
+        leaseRefused: false,
+      });
+      expect(result.body['afterStale']).toEqual(result.body['pruned']);
+    } finally {
+      await f.close();
+    }
+  });
 
   it('refuses to prune when accepted delivery provides no durable custody', async () => {
     const f = await fixture(staleSealRace, { nonDurable: true });

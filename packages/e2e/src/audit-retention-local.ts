@@ -34,7 +34,11 @@ import {
   until,
   upstreamOrigins,
 } from './local.js';
-import { retentionBundle, type StaleSealOutcome } from './audit-retention-fixture.js';
+import {
+  prepareRetentionRace,
+  retentionBundle,
+  type StaleSealOutcome,
+} from './audit-retention-fixture.js';
 import { auditHash, type AuditRecord } from './audit.spec.js';
 import type { LocalBroker, Runtime, SqlPort } from './local.js';
 const masterKey = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
@@ -479,25 +483,18 @@ syncBuiltinESMExports();
       secrets: () => [masterKey, 'admin@example.test'],
       read,
       async prepareAuditRace() {
-        const tick = async () => {
-          if (worker)
-            await (
-              await worker.getWorker()
-            ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
-        };
-        await tick();
-        await sqlPort.run(
-          "UPDATE job_schedule SET next_run_at = '2099-01-01T00:00:00.000Z' WHERE org_id = ?",
-          [pinnedOrgId],
+        await prepareRetentionRace(
+          {
+            read,
+            tick: async () => {
+              if (worker)
+                await (
+                  await worker.getWorker()
+                ).scheduled({ scheduledTime: Date.now(), cron: '* * * * *' });
+            },
+          },
+          pinnedOrgId,
         );
-        await until(async () => {
-          await tick();
-          const [row] = await read<{ count: number }>(
-            "SELECT count(*) AS count FROM job WHERE org_id = ? AND type LIKE 'core:audit-%' AND state IN ('queued', 'running')",
-            [pinnedOrgId],
-          );
-          return row?.count === 0;
-        }, 'retention-race-jobs-drained');
       },
       async staleSeal() {
         const response = await fetch(origin + '/__fixture/stale-seal', {

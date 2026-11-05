@@ -4,7 +4,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
-import { retentionBundle } from './audit-retention-fixture.js';
+import { prepareRetentionRace, retentionBundle } from './audit-retention-fixture.js';
 import { deliveryBuild, deliveryEntry } from './audit-delivery-fixture.js';
 import { assertWireIdentity, decodeOtlp } from './audit-wire-fixture.js';
 import {
@@ -377,6 +377,66 @@ describe('required schedule initialization', () => {
       await expect(
         postponeRequiredSchedules({ ...broker, tick: async () => {} }, 'missing', () => {}, false),
       ).rejects.toThrow('RequiredSchedulesNotPostponed');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('retention race readiness', () => {
+  it('waits for every postponed schedule and the exact drained state, ignoring foreign jobs', async () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      db.exec(`CREATE TABLE job_schedule (org_id TEXT, name TEXT, next_run_at TEXT);
+        CREATE TABLE job (org_id TEXT, type TEXT, state TEXT);
+        INSERT INTO job VALUES ('expected', 'core:audit-verify:v1', 'succeeded'),
+          ('foreign', 'core:audit-seal:v1', 'running');`);
+      let ticks = 0;
+      const names = [
+        'seal',
+        'verify',
+        'maintain',
+        'head',
+        'health-observe',
+        'frontier',
+        'export-webhook',
+      ];
+      const broker = {
+        async tick() {
+          ticks++;
+          if (ticks === 1 || ticks === 2) {
+            for (const kind of ticks === 1 ? names.slice(0, 2) : names.slice(2))
+              db.prepare('INSERT INTO job_schedule VALUES (?, ?, ?)').run(
+                'expected',
+                `core:audit-${kind}:v1`,
+                '2099-01-01T00:00:00.000Z',
+              );
+          }
+          if (ticks === 2)
+            db.prepare("UPDATE job SET state = 'running' WHERE org_id = ?").run('expected');
+          if (ticks === 3)
+            db.prepare("UPDATE job SET state = 'succeeded' WHERE org_id = ?").run('expected');
+        },
+        async read<T extends Record<string, unknown>>(
+          sql: string,
+          params: (string | number)[] = [],
+        ) {
+          return db.prepare(sql).all(...params) as T[];
+        },
+      };
+      await prepareRetentionRace(broker, 'expected');
+      expect(ticks).toBe(3);
+      expect(db.prepare('SELECT state FROM job WHERE org_id = ?').get('foreign')).toEqual({
+        state: 'running',
+      });
+      db.prepare('UPDATE job_schedule SET next_run_at = ? WHERE org_id = ? AND name = ?').run(
+        '2000-01-01T00:00:00.000Z',
+        'expected',
+        'core:audit-head:v1',
+      );
+      await expect(prepareRetentionRace(broker, 'expected')).rejects.toThrow(
+        'RetentionSchedulesNotPostponed',
+      );
     } finally {
       db.close();
     }

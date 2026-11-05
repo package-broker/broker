@@ -174,6 +174,7 @@ https.request = (options) => {
 };`,
     });
     const local = broker;
+    await local.prepareAuditRace();
     const admin = await session(local);
     const { id: orgId } = (await requireStatus(
       await admin.request('/_pb/organization', undefined, 'GET'),
@@ -305,6 +306,8 @@ https.request = (options) => {
     );
     assert.equal(race.attempted, 1, 'StaleSealerDidNotAttemptBatch');
     assert.equal(race.outcome, 'contended', 'StaleSealerWasNotRefused');
+    assert.equal(race.leaseAttempted, 1, 'StaleLeaseSealerDidNotAttemptBatch');
+    assert.equal(race.leaseRefused, true, 'StaleLeaseSealerWasNotRefused');
     assert.deepEqual(race.afterStale, pruned, 'StaleSealerMovedChain');
     assert.equal((await chain()).head_seq, pruned.head_seq, 'StaleSealerMovedHead');
     await project('retention-after-prune');
